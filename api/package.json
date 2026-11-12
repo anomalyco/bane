@@ -11,6 +11,7 @@
     "check": "tsc --noEmit && tsc --ignoreConfig --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --lib ES2023,DOM,DOM.Iterable --types node,@cloudflare/workers-types scripts/e2e.ts",
     "e2e": "node --import tsx scripts/e2e.ts",
     "test": "node --env-file-if-exists=.env --import tsx --test api.acceptance.test.ts",
+    "tear:ci": "cargo run --release --locked --manifest-path tear/Cargo.toml -- ci",
     "openapi": "tsx src/export-openapi.ts",
     "sdk": "bun run openapi && openapi-ts && tsc -p ../sdk/tsconfig.json",
     "docs:check": "bun run sdk && node scripts/check-doc-examples.mjs && tsx scripts/check-agent-docs.ts",

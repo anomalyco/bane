@@ -133,6 +133,10 @@ pub struct Req {
     pub status: Option<i64>,
     pub code: Option<String>,
     pub outcome: Option<Outcome>,
+    /// The request's identity hash, fixed when it authenticates (its authority at that moment).
+    pub hash: Option<String>,
+    /// For MCP requests: the expiry of the access token the request carries (fixed at its start).
+    pub access: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,7 +502,7 @@ impl Model {
             "create" | "lost" => {
                 let mut req = Req {
                     what: w[1].into(), cred: w[2].into(), key: w[3].into(), body: w.get(4).copied().unwrap_or("b1").into(),
-                    lost: w[0] == "lost", at: "start".into(), status: None, code: None, outcome: None,
+                    lost: w[0] == "lost", at: "start".into(), status: None, code: None, outcome: None, hash: None, access: None,
                 };
                 loop {
                     if let Some(done) = self.advance(&mut req) {
@@ -512,7 +516,7 @@ impl Model {
                     "begin" => {
                         let mut req = Req {
                             what: w[2].into(), cred: w[3].into(), key: w[4].into(), body: w[5].into(), lost: w.get(6) == Some(&"lost"),
-                            at: "start".into(), status: None, code: None, outcome: None,
+                            at: "start".into(), status: None, code: None, outcome: None, hash: None, access: None,
                         };
                         match self.advance(&mut req) {
                             Some(done) => with_at(done),
@@ -610,7 +614,7 @@ impl Model {
                 let g = self.grants.get_mut(c).unwrap();
                 let status = if g.revoked { 404 } else { 200 };
                 g.revoked = true;
-                if c == "grant" {
+                if c == "grant" && status == 200 {
                     for d in ["token", "token3", "gkey", "gikey"] {
                         if let Some(x) = self.creds.get_mut(d) {
                             x.revoked = true;
@@ -659,9 +663,10 @@ impl Model {
     }
     fn hash(&self, r: &Req) -> String {
         let body = if r.what == "list" { r.body.as_str() } else { "fixed" };
-        // The request's authority is part of its identity: a grant's receiving consent is. A
-        // provisioning key's own creations are not.
-        let authority = if r.cred == "grant" && self.receiving { "receiving" } else { "-" };
+        // The request's authority is part of its identity: a grant's receiving consent is (agent
+        // tokens and grant-created keys inherit it). A provisioning key's own creations are not.
+        let derived = matches!(r.cred.as_str(), "grant" | "token" | "token3" | "gkey");
+        let authority = if derived && self.receiving { "receiving" } else { "-" };
         format!("{body}|{authority}")
     }
     fn mcp(r: &Req) -> bool {
@@ -701,7 +706,7 @@ impl Model {
     /// a request linearizes at its start.
     fn auth_ok(&self, r: &Req) -> bool {
         if Self::mcp(r) {
-            return self.access_ok("grant");
+            return self.grant_live("grant") && self.t < r.access.unwrap_or(self.grants["grant"].at);
         }
         match r.cred.as_str() {
             "token" | "token3" => self.creds.get(&r.cred).is_some_and(|x| !x.revoked) && self.grant_live("grant"),
@@ -720,6 +725,9 @@ impl Model {
                     let r = r.clone();
                     return Some(self.done(&r, Some(401), Some("AUTH_INVALID"), false));
                 }
+                if mcp {
+                    r.access = Some(self.grants["grant"].at);
+                }
                 r.at = "auth".into();
                 None
             }
@@ -734,6 +742,7 @@ impl Model {
                 if !Self::key_valid(&r.key) || (mcp && r.body == "bad") {
                     return Some(if mcp { self.done(&r0, None, Some("INVALID_ARGUMENTS"), false) } else { self.done(&r0, Some(422), Some("INVALID_IDEMPOTENCY_KEY"), false) });
                 }
+                r.hash = Some(self.hash(r));
                 r.at = "claim".into();
                 None
             }
@@ -743,7 +752,7 @@ impl Model {
                     r.at = "lookup".into();
                     return None;
                 }
-                self.res.insert(id, Res { hash: self.hash(r), outcome: Outcome::Pending, created: self.t });
+                self.res.insert(id, Res { hash: r.hash.clone().unwrap(), outcome: Outcome::Pending, created: self.t });
                 let (fail, handler) = match (r.what.as_str(), r.cred.as_str(), r.body.as_str()) {
                     ("list", _, "bad") => (Some((422, "VALIDATION_FAILED")), false),
                     ("apikey", "token", _) => (Some((403, "CREDENTIAL_DELEGATION_FORBIDDEN")), false),
@@ -799,7 +808,7 @@ impl Model {
             "lookup" => {
                 let id = Self::identity(r);
                 let r0 = r.clone();
-                let hash = self.hash(r);
+                let hash = r.hash.clone().unwrap();
                 let conflict = |m: &mut Self, code: &str| Some(m.done(&r0, Some(409), Some(code), false));
                 match self.res.get(&id).cloned() {
                     // The winner failed and released between our claim and lookup: retry.
@@ -828,8 +837,8 @@ impl Model {
         let replay = observed["same"] == json!(true);
         let done = matches!(w[0], "create" | "lost") || (matches!(w[0], "A" | "B") && at == "done");
         let req = match w[0] {
-            "create" | "lost" => Some(Req { what: w[1].into(), cred: w[2].into(), key: w[3].into(), body: w.get(4).copied().unwrap_or("b1").into(), lost: w[0] == "lost", at: "start".into(), status: None, code: None, outcome: None }),
-            "A" | "B" if w[1] == "begin" => Some(Req { what: w[2].into(), cred: w[3].into(), key: w[4].into(), body: w[5].into(), lost: w.get(6) == Some(&"lost"), at: "start".into(), status: None, code: None, outcome: None }),
+            "create" | "lost" => Some(Req { what: w[1].into(), cred: w[2].into(), key: w[3].into(), body: w.get(4).copied().unwrap_or("b1").into(), lost: w[0] == "lost", at: "start".into(), status: None, code: None, outcome: None, hash: None, access: None }),
+            "A" | "B" if w[1] == "begin" => Some(Req { what: w[2].into(), cred: w[3].into(), key: w[4].into(), body: w[5].into(), lost: w.get(6) == Some(&"lost"), at: "start".into(), status: None, code: None, outcome: None, hash: None, access: None }),
             "A" | "B" => self.slots.get(w[0]).cloned(),
             _ => None,
         };
@@ -878,7 +887,7 @@ impl Model {
                 match (w[1], r.at.as_str()) {
                     ("step", "lookup") => match self.res.get(&id) {
                         None => t.push("C3"),
-                        Some(x) if x.hash != self.hash(r) => t.push(if other { "C4" } else { "I2" }),
+                        Some(x) if Some(&x.hash) != r.hash.as_ref() => t.push(if other { "C4" } else { "I2" }),
                         Some(x) if x.outcome == Outcome::Pending && other => t.push("C1"),
                         Some(x) if x.outcome == Outcome::Stored => t.push("C2"),
                         _ => {}

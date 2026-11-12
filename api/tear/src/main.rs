@@ -2,7 +2,7 @@
 //!
 //! From `api/`, with `DATABASE_URL` pointing at an isolated, migrated, loopback PostgreSQL:
 //!
-//!   cargo run --release --manifest-path tear/Cargo.toml -- ci            # CI budget, < 60 s
+//!   cargo run --release --manifest-path tear/Cargo.toml -- ci [--seed S] [-j 4] [--budget 45]  # < 60 s
 //!   cargo run --release --manifest-path tear/Cargo.toml -- random 2000 30 [--seed S] [-j 8]
 //!   cargo run --release --manifest-path tear/Cargo.toml -- edges 3 [MAX_STATES] [-j 8]
 //!   cargo run --release --manifest-path tear/Cargo.toml -- trace "mint key" "create list key k1 b1" ...
@@ -26,6 +26,29 @@ use std::{
 };
 
 const PROPERTY: &str = "bane.access.idempotency-and-revocation";
+
+/// The shortest witness of every bug this model found, replayed by `ci` as regressions, then a
+/// few traces for checklist items the CI-sized graphs do not reach.
+const WITNESSES: &[&[&str]] = &[
+    // A lost commit acknowledgement let the retry create twice (c8fee43).
+    &["mint key", "lost list key k1 b1", "create list key k1 b1"],
+    &["mint grant", "lost list grant k1 b1", "create list grant k1 b1"],
+    // A provisioning inbox key's retry of its own create was a conflict (177ce7c).
+    &["mint key", "mint ikey", "create inbox ikey k1", "create inbox ikey k1"],
+    // A duplicate whose lookup followed the holder's release got a non-retryable conflict (8f9ecc7).
+    &["mint key", "A begin list key k1 b1", "A step", "B begin list key k1 bad", "B step", "B step", "A step", "B step", "A step"],
+    // A grant-derived key create racing the revoke answered 500 (d956bc8).
+    &["mint grant", "A begin apikey grant k1 fixed", "A step", "A step", "revoke grant", "A step", "A step"],
+    // Listings offered what REST refuses (54d74e1).
+    &["mint grant2", "probe grant2 code", "probe grant2 plain"],
+    &["promote member", "mint grant2", "probe grant2 code"],
+    &["mint grant", "probe grant code", "probe grant plain"],
+    // Checklist items the bounded graphs do not reach: C1 (8 steps), R6, R7, I7.
+    &["mint key", "A begin list key k1 b1", "A step", "A step", "B begin list key k1 b1", "B step", "B step", "B step"],
+    &["mint key", "mint box", "delete box", "probe bkey rest", "probe bkey mcp"],
+    &["mint key", "mint ikey", "revoke key", "probe ikey rest", "probe ikey mcp"],
+    &["mint grant", "create list grant k1 b1", "receiving grant", "create list grant k1 b1"],
+];
 
 fn model(v: &Value) -> R<Model> {
     serde_json::from_value(v.clone()).map_err(|e| Error::new(e.to_string()))
@@ -225,7 +248,9 @@ struct Outcome {
     traces: u64,
 }
 
-fn run_parallel(traces: Vec<Vec<String>>, jobs: usize, budget: Option<Duration>) -> R<Outcome> {
+/// Run traces on `jobs` workers. The first `required` traces always run; the budget only stops
+/// starting the rest.
+fn run_parallel(traces: Vec<Vec<String>>, jobs: usize, budget: Option<Duration>, required: usize) -> R<Outcome> {
     let start = Instant::now();
     let queue = Arc::new(Mutex::new(traces.into_iter().enumerate().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>()));
     let results = Arc::new(Mutex::new(Outcome { matched: 0, steps: 0, errors: vec![], groups: BTreeMap::new(), coverage: BTreeMap::new(), traces: 0 }));
@@ -236,10 +261,10 @@ fn run_parallel(traces: Vec<Vec<String>>, jobs: usize, budget: Option<Duration>)
         handles.push(thread::spawn(move || -> R<()> {
             let mut check = Check::new();
             loop {
-                if budget.is_some_and(|b| start.elapsed() >= b) {
+                let Some((index, trace)) = queue.lock().unwrap().pop() else { return Ok(()) };
+                if index >= required && budget.is_some_and(|b| start.elapsed() >= b) {
                     return Ok(());
                 }
-                let Some((_, trace)) = queue.lock().unwrap().pop() else { return Ok(()) };
                 let run = conformance::dispatch("runTrace", &json!({"actions": trace}), &mut check)?;
                 let mut r = results.lock().unwrap();
                 r.traces += 1;
@@ -334,7 +359,7 @@ fn flag(args: &[String], name: &str) -> Option<u64> {
 
 fn main() -> R<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let jobs = flag(&args, "-j").unwrap_or(4) as usize;
+    let jobs = flag(&args, "-j").map_or_else(|| thread::available_parallelism().map_or(4, |n| n.get().min(8)), |j| j as usize);
     let budget = flag(&args, "--budget").map(Duration::from_secs);
     let seed = flag(&args, "--seed").unwrap_or(0);
     let flagged: Vec<usize> = ["-j", "--budget", "--seed", "--alphabet"].iter().filter_map(|f| args.iter().position(|a| a == f)).flat_map(|i| [i, i + 1]).collect();
@@ -358,23 +383,24 @@ fn main() -> R<()> {
                 _ => Alphabet::Core,
             };
             let (info, traces) = edge_traces(alphabet, depth, max)?;
-            let mut r = report(&format!("edge coverage, depth {depth}"), run_parallel(traces, jobs, budget)?, start, true)?;
+            let mut r = report(&format!("edge coverage, depth {depth}"), run_parallel(traces, jobs, budget, 0)?, start, true)?;
             r["model"] = info;
             r
         }
         Some("ci") => {
-            // CI: every edge of the core graph at depth 3, of the slot race at depth 7 and of the
-            // in-flight revocation at depth 6, then seeded random walks until the budget (45 s).
-            let mut traces = vec![];
+            // CI: every bug witness, every edge of the core graph at depth 3, of the two-slot race
+            // at depth 7 and of the in-flight revocation at depth 8, then seeded random walks over
+            // the full alphabet until the budget (default 45 s) runs out.
+            let mut traces: Vec<Vec<String>> = WITNESSES.iter().map(|w| w.iter().map(|a| a.to_string()).collect()).collect();
             let mut models = vec![];
-            for (alphabet, depth) in [(Alphabet::Core, 3), (Alphabet::Race, 7), (Alphabet::Revoke, 6)] {
+            for (alphabet, depth) in [(Alphabet::Core, 3), (Alphabet::Race, 7), (Alphabet::Revoke, 8)] {
                 let (info, t) = edge_traces(alphabet, depth, 200_000)?;
                 models.push(info);
                 traces.extend(t);
             }
             let edges = traces.len();
             traces.extend((0..20_000).map(|i| walk(seed.wrapping_add(i), 24)));
-            let mut r = report("ci: edges (core 3, race 7, revoke 6) + random walks", run_parallel(traces, jobs, Some(budget.unwrap_or(Duration::from_secs(45))))?, start, true)?;
+            let mut r = report("ci: witnesses + edges (core 3, race 7, revoke 8) + random walks", run_parallel(traces, jobs, Some(budget.unwrap_or(Duration::from_secs(45))), edges)?, start, true)?;
             r["model"] = json!(models);
             r["edgeTraces"] = json!(edges);
             r
@@ -382,7 +408,7 @@ fn main() -> R<()> {
         _ => {
             let (n, len) = (nums.first().copied().unwrap_or(500), nums.get(1).copied().unwrap_or(30));
             let traces = (0..n).map(|i| walk(seed.wrapping_add(i), len as usize)).collect();
-            report(&format!("random walks {n} x {len}, seed {seed}"), run_parallel(traces, jobs, budget)?, start, true)?
+            report(&format!("random walks {n} x {len}, seed {seed}"), run_parallel(traces, jobs, budget, 0)?, start, true)?
         }
     };
     println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
