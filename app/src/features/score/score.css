@@ -15,6 +15,9 @@
   position: relative; isolation: isolate; display: block; overflow: hidden; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); color: var(--color-text); text-decoration: none; font-variant-numeric: tabular-nums;
 }
 .gauge-card > :not(.gauge-grain, .gauge-ruler) { position: relative; z-index: 1; }
+/* Every score view is a button that opens the explainer. */
+button.gauge-card { width: 100%; border: 0; font: inherit; text-align: left; cursor: pointer; }
+button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .gauge-grain { position: absolute; inset: 0; background: var(--color-text); -webkit-mask: var(--grain) 0 0 / 140px 140px; mask: var(--grain) 0 0 / 140px 140px; opacity: .05; pointer-events: none; }
 :root[data-theme='dark'] .gauge-grain { opacity: .07; }
 .gauge-ruler { position: absolute; inset: auto 0 0; height: 8px; background: var(--color-border-strong); -webkit-mask: var(--ruler) 0 100% / 24px 8px repeat-x; mask: var(--ruler) 0 100% / 24px 8px repeat-x; opacity: .7; pointer-events: none; }
@@ -38,7 +41,7 @@
 /* Compact: the sidebar card, full sidebar width and 56px tall. */
 .gauge-card--compact { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .gauge-card--compact:active { transform: scale(.98); }
-@media (hover: hover) and (pointer: fine) { a.gauge-card--compact:hover { background: var(--color-layer-1); } }
+@media (hover: hover) and (pointer: fine) { .gauge-card--compact:hover, .score-card:hover { background: var(--color-layer-1); } }
 .gauge-card--compact .gauge-ruler { height: 5px; opacity: .5; }
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
 .gauge-card--compact:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
@@ -50,11 +53,15 @@
 .gauge-readout b { display: inline-block; min-width: 1.5em; font-size: 21px; line-height: 24px; font-weight: 600; letter-spacing: -.03em; }
 .gauge-readout b:has(+ small) { min-width: 0; }
 .gauge-readout small { margin-left: -7px; color: var(--color-muted); font-size: 11px; line-height: 1; }
+.gauge-readout small.gauge-readout__pending { margin-left: -2px; white-space: nowrap; }
 .gauge-readout .gauge-grade { font-size: 13px; letter-spacing: .04em; }
 
 /* Overview's score card: the eyebrow, one line with the number, grade and band strip, then the outlook. 96px tall. */
 .score-report { display: flex; flex-direction: column; gap: var(--space-12); scroll-margin-top: var(--space-24); }
-.score-card { --grain-size: 96px; display: flex; flex-direction: column; justify-content: space-between; height: 96px; padding: 10px 12px 10px; }
+.score-card { --grain-size: 96px; display: flex; flex-direction: column; justify-content: space-between; height: 96px; padding: 10px 12px 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
+.score-card:active { transform: scale(.99); }
+.gauge-head__aside { display: inline-flex; align-items: center; gap: 4px; }
+.score-card__more { display: inline-flex; align-items: center; gap: 4px; }
 .score-card .gauge-grain { -webkit-mask-size: var(--grain-size) var(--grain-size); mask-size: var(--grain-size) var(--grain-size); }
 .gauge-head { display: flex; justify-content: space-between; }
 .score-card__main { display: flex; align-items: center; gap: var(--space-16); height: 32px; }
@@ -88,8 +95,11 @@
 .score-history > span { flex: 1; height: 100%; border-radius: 1px; background: var(--color-layer-3); transform-origin: bottom; transition: transform 240ms var(--ease-out-strong); }
 .score-history > span[data-last] { background: var(--color-contrast); }
 .score-factors { margin: 0; padding: 0; list-style: none; }
-.score-factors > li { display: grid; grid-template-columns: minmax(0, 1fr) 64px 48px; align-items: center; gap: var(--space-12); height: 24px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-xs); }
-.score-factors > li > :last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.score-factors > li { height: 24px; border-top: 1px solid var(--color-border-muted); }
+.score-factors > li > button { display: grid; grid-template-columns: minmax(0, 1fr) 64px 48px; align-items: center; gap: var(--space-12); width: 100%; height: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
+.score-factors > li > button > :last-child { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.score-factors > li > button:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; border-radius: 2px; }
+@media (hover: hover) and (pointer: fine) { .score-factors > li > button:hover > :first-child { text-decoration: underline; text-underline-offset: 3px; } }
 .score-bar { position: relative; display: block; height: 3px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
 .score-bar > i { position: absolute; inset: 0 auto 0 0; width: var(--share, 0%); border-radius: inherit; background: var(--color-contrast); opacity: .78; }
 .score-bar[data-low] > i { background: var(--color-danger-marker); opacity: 1; }
@@ -112,6 +122,29 @@
 @media (max-width: 640px) {
   .score-breakdown, .score-breakdown--loading { height: 122px; }
   .score-factors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-24); }
-  .score-factors > li { grid-template-columns: minmax(0, 1fr) auto; }
-  .score-factors > li > .score-bar { display: none; }
+  .score-factors > li > button { grid-template-columns: minmax(0, 1fr) auto; }
+  .score-factors > li > button > .score-bar { display: none; }
 }
+
+/* The explainer: the status, what counts, how it is graded and the six parts. */
+.score-about { width: min(600px, calc(100vw - 32px)); }
+.score-about .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-16); }
+/* The body scrolls; its blocks keep their full height instead of shrinking into each other. */
+.score-about .ui-dialog__body > * { flex-shrink: 0; }
+.score-about__status { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: var(--space-12); row-gap: var(--space-8); min-height: 56px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: inset 0 0 0 1px var(--color-border); font-variant-numeric: tabular-nums; }
+.score-about__status > b { min-width: 2ch; font-size: 30px; line-height: 32px; font-weight: 600; letter-spacing: -.04em; text-align: center; }
+.score-about__status-text { display: flex; flex-direction: column; gap: 2px; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.score-about__status-text .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.score-about__grade { color: var(--grade-fill, inherit); font-family: var(--font-mono); }
+.score-about__progress { grid-column: 1 / -1; position: relative; display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--color-layer-2); }
+.score-about__progress > i { position: absolute; inset: 0 auto 0 0; width: var(--share); border-radius: inherit; background: var(--color-contrast); }
+.score-about__section { display: flex; flex-direction: column; gap: var(--space-4); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.score-about__section h3 { font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
+.score-about__section code { font-size: .92em; }
+.score-about__factors { margin: 0; padding: 0; list-style: none; }
+.score-about__factors > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-12); padding: var(--space-8) var(--space-8); margin: 0 calc(-1 * var(--space-8)); border-top: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
+.score-about__factors > li[data-focus] { background: var(--color-layer-2); }
+.score-about__factors > li > p { grid-column: 1 / -1; font-size: var(--text-xs); line-height: var(--leading-xs); }
+.score-about__factor-name { display: flex; align-items: baseline; gap: var(--space-8); font-weight: var(--font-weight-bold); }
+.score-about__factor-name .muted { font-weight: normal; font-size: var(--text-xs); }
+.score-about__factor-now { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
