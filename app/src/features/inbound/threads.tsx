@@ -10,7 +10,7 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, cleanName, full, idempotencyFor, nameOf, when } from './shared'
+import { addressName, cleanName, full, idempotencyFor, nameOf, Sender, when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
@@ -25,13 +25,16 @@ function AddressLabels({ ids, addresses }: { ids: string[]; addresses: Addresses
   return <>{ids.slice(0, 3).map(id => <span key={id} className="mailbox-address-label"><PrivateAddress value={addressName(addresses, id)} /></span>)}{ids.length > 3 && <span className="mailbox-address-label">+{ids.length - 3}</span>}</>
 }
 
-function ThreadRow({ thread, addresses, showAddresses, selected, onSelect }: { thread: InboundThread; addresses: Addresses; showAddresses: boolean; selected: boolean; onSelect: () => void }) {
+// Each row reads like a mail client: who wrote last, then the subject, then the start of the message.
+function ThreadRow({ thread, addresses, own, showAddresses, selected, onSelect }: { thread: InboundThread; addresses: Addresses; own: Set<string>; showAddresses: boolean; selected: boolean; onSelect: () => void }) {
+  const from = thread.from
   return <li><button type="button" className="mailbox-thread-row" data-selected={selected || undefined} onClick={onSelect} aria-current={selected || undefined}>
     <span className="mailbox-thread-row__top">
-      <span className="inbound-thread-row__subject">{thread.subject || '(no subject)'}</span>
+      <span className="mailbox-thread-row__people">{!from ? <span className="muted">—</span> : own.has(from.address.toLowerCase()) ? 'You' : <Sender value={from} />}</span>
       {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
-      <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt}>{when(thread.lastMessageAt)}</time>
+      <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt} title={`${date(thread.lastMessageAt)} ${time(thread.lastMessageAt)} UTC`}>{when(thread.lastMessageAt)}</time>
     </span>
+    <span className="inbound-thread-row__subject">{thread.subject || '(no subject)'}</span>
     <span className="mailbox-thread-row__snippet">{thread.snippet}</span>
     {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
   </button></li>
@@ -130,7 +133,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
   }, [focusMessage, messages])
   const isExpanded = (message: InboundMessage) => expanded[message.id] ?? (message.id === lastId || messages.length <= 3 || message.read === false)
   const toggle = (message: InboundMessage) => setExpanded(current => ({ ...current, [message.id]: !isExpanded(message) }))
-  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }))
+  const update = useApiMutation((api, patch: Omit<InboundThreadPatch, 'addressId'>) => api.inbound.updateThread(thread.id, { addressId: stateAddress, ...patch }), undefined, false, true, [thread.id, stateAddress])
   const act = (patch: Omit<InboundThreadPatch, 'addressId'>) => { update.mutateAsync(patch).catch(() => undefined) }
   async function loadOlder() {
     if (!olderCursor) return
@@ -190,7 +193,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const [chosen, setChosen] = useState('')
   const [automated, setAutomated] = useState<string | null>(null)
   const key = useRef({ key: '', body: '' })
-  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued')
+  const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.reply>[1], 'idempotencyKey'>) => api.inbound.reply(thread.id, { ...input, idempotencyKey: idempotencyFor(key.current, { threadId: thread.id, ...input }) }), 'Reply queued', false, true, thread.id)
   useEffect(() => { setText(''); setReplyAll(false); send.reset(); key.current = { key: '', body: '' } }, [thread.id]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setChosen('') }, [target.id])
   // A message linked to several addresses needs an explicit sender; the API refuses to guess (ADDRESS_REQUIRED).
@@ -296,6 +299,7 @@ export function InboundPage() {
   const missing = !!addressId && !!addressList.data && !addressList.data.some(address => address.id === addressId)
   const linked = useApiQuery(['inbound-address', addressId ?? null, missing], (api, signal) => addressId && missing ? api.inbound.address(addressId, signal) : Promise.resolve(null))
   const addresses = useMemo<Addresses>(() => new Map([...(addressList.data ?? []), ...(linked.data ? [linked.data] : [])].map(address => [address.id, address])), [addressList.data, linked.data])
+  const own = useMemo(() => ownAddresses(addresses), [addresses])
   const q = search.trim()
   const threads = useApiDef(queries.inboundThreads(addressId, view, q, pagination.cursor), { interval: 30_000, keepPrevious: true })
   const thread = useApiQuery(['inbound-thread', threadId, addressId ?? null], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null))
@@ -314,9 +318,9 @@ export function InboundPage() {
         <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
         <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
         {addressList.error && <Alert tone="warning">Addresses could not be loaded, so they show as IDs.</Alert>}
-        {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
+        {threads.error ? <ErrorState error={threads.error} onRetry={() => void threads.refetch()} /> : threads.isPending ? <div className="mailbox-thread-skeleton">{[0, 1, 2, 3].map(index => <div key={index}><SkeletonText width="40%" /><SkeletonText width="60%" /><SkeletonText width="85%" /></div>)}</div>
           : threads.data.length ? <>
-            <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
+            <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} own={own} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
           </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/receiving">Create an address</Link> : undefined} />}
       </aside>

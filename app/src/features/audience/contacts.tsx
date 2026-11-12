@@ -85,7 +85,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   const lists = useAudienceLists()
   const initialConsent = (): ConsentInput => ({ status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false, evidence: '' })
   const [consentInput, setConsentInput] = useState<ConsentInput>(initialConsent)
-  const status = useApiMutation((api, input: ConsentInput) => api.consent(contact.id, { ...input, evidence: input.evidence?.trim() || undefined }), 'Consent recorded')
+  const status = useApiMutation((api, input: ConsentInput) => api.consent(contact.id, { ...input, evidence: input.evidence?.trim() || undefined }), 'Consent recorded', false, true, contact.id)
   // Matching emails waits for the first page of consent history, so the history's height is known before anything sits below it.
   const history = useApiQuery(['consent-history', contact.id, undefined], api => api.consentHistory(contact.id))
   useApiQuery(['emails', 'contact-activity', { search: contact.email, page: 1, pageSize: 5, regionId }], (api, signal) => api.emails.list({ search: contact.email, page: 1, pageSize: 5, regionId }, signal))

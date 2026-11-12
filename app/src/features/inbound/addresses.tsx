@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, ControlSkeleton, Dialog, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, Dialog, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, useToast } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { date, number } from '../../lib/format'
@@ -18,6 +18,7 @@ import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { useSingleFlight } from '../../lib/single-flight'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -48,19 +49,25 @@ export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boo
     if (Object.keys(next).length) return
     try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/receiving/addresses/${row.id}`) } catch { /* Shown in the form. */ }
   }
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="Create address" footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New address" description="An address that receives mail on your domain. Its mail lands in the Inbox, where you, the API and agents can read it." footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
     <form id="inbound-create-address" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Address" htmlFor="inbound-address" error={errors.address || fieldError(create.error, 'address')} hint={receiving.length ? receiving.length > 1 ? `Receiving domains: ${receiving.map(domain => domain.name).join(', ')}` : undefined : 'Enable receiving on a domain first.'}>
         <Input id="inbound-address" type="email" value={address} onChange={event => setAddress(event.target.value)} disabled={create.isPending} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
       </Field>
       <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
-      <Field label="Lifetime" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')} hint={lifetime ? 'After expiry it stops receiving and sending. History stays readable until you delete it.' : 'Permanent addresses also claim earlier unrouted mail.'}>
-        <Select id="inbound-address-lifetime" value={lifetime} onValueChange={value => { setLifetime(value); if (value) setPublicAddress('') }} disabled={create.isPending} options={lifetimes} />
-      </Field>
-      <Field label="Public sender" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can have a public sender.' : 'The default From: the same name on a parent domain verified for sending, such as support@example.com.'}>
-        <Input id="inbound-address-public" type="email" value={publicAddress} onChange={event => setPublicAddress(event.target.value)} disabled={create.isPending || !!lifetime} placeholder={address.includes('@') ? `${address.split('@')[0]}@${address.split('@')[1]!.split('.').slice(1).join('.') || 'example.com'}` : 'support@example.com'} autoComplete="off" />
-      </Field>
+      {/* Optional, and most people never need them: folded away, with what each does when opened. */}
+      <details className="inbound-advanced" open={!!lifetime || !!publicAddress || !!errors.publicAddress || undefined}>
+        <summary>Advanced <span className="muted">· lifetime and reply-as address, optional</span></summary>
+        <div className="stack inbound-advanced__body">
+          <Field label="Lifetime" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')} hint={lifetime ? 'After it expires it stops receiving and sending. Its mail stays readable until you delete it.' : 'Permanent: it receives until you delete it, and also picks up mail that reached this address before it existed.'}>
+            <Select id="inbound-address-lifetime" value={lifetime} onValueChange={value => { setLifetime(value); if (value) setPublicAddress('') }} disabled={create.isPending} options={lifetimes} />
+          </Field>
+          <Field label="Reply as" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can reply as another address.' : 'Replies go out from this address instead: the same name on a parent domain you send from. For example, mail received at support@reply.acme.com is answered from support@acme.com.'}>
+            <Input id="inbound-address-public" type="email" value={publicAddress} onChange={event => setPublicAddress(event.target.value)} disabled={create.isPending || !!lifetime} placeholder={address.includes('@') ? `${address.split('@')[0]}@${address.split('@')[1]!.split('.').slice(1).join('.') || 'example.com'}` : `support@${receiving[0] ? receiving[0].name.split('.').slice(receiving[0].name.split('.').length > 2 ? 1 : 0).join('.') : 'example.com'}`} autoComplete="off" />
+          </Field>
+        </div>
+      </details>
     </form>
   </Dialog>
 }
@@ -80,14 +87,15 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const [ritual, setRitual] = useState('')
   const [busy, setBusy] = useState(false)
   const [routing, setRouting] = useState(false)
-  async function attach(change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) {
+  // Single flight: attaching reads the saved version and writes against it, so a second click would conflict with the first.
+  const attach = useSingleFlight('rituals.attachments', async (change: (list: RitualConfig['config']['attachments']) => RitualConfig['config']['attachments'], done: string) => {
     setBusy(true)
     try {
       const current = await request<RitualConfig>('/v1/rituals')
       await request('/v1/rituals/attachments', { method: 'PUT', body: { attachments: change(current.config.attachments) }, ifMatch: current.version })
       toast(done, 'success'); setRitual(''); await overview.refetch()
     } catch (e) { toast(errorText(e), 'error') } finally { setBusy(false) }
-  }
+  }, address.id)
   const attached = entry?.rituals ?? []
   const available = (overview.data?.rituals ?? []).filter(r => !attached.includes(r.key))
   const elsewhere = (entry?.to ?? []).filter(t => !(t.type === 'inbox' && t.id === address.id))
@@ -117,10 +125,10 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
     <section className="addr-step" id="goes-to">
       <h2>{steps.goesTo.title}</h2><p>{steps.goesTo.line}</p>
       {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span><span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span></li>)}</ul>}
-      {entry && !elsewhere.length && <p className="addr-step__empty">{steps.goesTo.empty}. Add an endpoint to also send it to a webhook.</p>}
+      {entry && !elsewhere.length && <p className="addr-step__empty">{steps.goesTo.empty}. Add a route to also send it to a webhook.</p>}
       {entry?.toTruncated && <p className="addr-step__empty">{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook gets' : 'webhooks get'} this address’s mail. <Link to={`/receiving/webhooks?address=${encodeURIComponent(address.id)}`}>See every webhook</Link></p>}
       {entry?.route && <p className="addr-step__empty">A route sends this address’s mail{entry.route.to === 'drop' ? ' nowhere: it’s dropped' : entry.route.to.includes(address.id) ? '' : ' elsewhere instead of its inbox'}.</p>}
-      <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>{entry?.route ? 'Edit route' : 'Add an endpoint'}</Button><span className="muted">Slack, Discord and forwards are sent by a ritual.</span></div>
+      <div className="addr-step__actions"><Button size="sm" onClick={() => setRouting(true)}>{entry?.route ? 'Edit route' : 'Add a route'}</Button><span className="muted">A route also sends its mail to other inboxes or webhooks. Slack, Discord and forwards are sent by a <Link to="/receiving/rituals?new=1">ritual</Link>.</span></div>
     </section>
     {routing && <RouteEditor match={address.address} route={entry?.route} to={[address.id]} onClose={() => { setRouting(false); void overview.refetch() }} />}
   </div>
@@ -129,7 +137,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
 /** Wildcard patterns that also deliver here, such as reply+*@acme.com. */
 function PatternsField({ address, inputRef }: { address: InboundAddress; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const [draft, setDraft] = useState('')
-  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Patterns saved')
+  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Patterns saved', false, true, address.id)
   const rules = save.data?.rules ?? address.rules
   const domain = address.address.split('@')[1]
   async function add() {
@@ -160,8 +168,8 @@ export function InboundAddressDetailPage() {
   const navigate = useNavigate()
   const { canAdminister } = useWorkspaceAccess()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
-  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved')
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted')
+  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, true, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, true, id)
   const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const patternInput = useRef<HTMLInputElement>(null)
@@ -188,12 +196,13 @@ export function InboundAddressDetailPage() {
   }
   const focus = (target: () => HTMLElement | null) => { const el = target(); el?.scrollIntoView({ block: 'center' }); el?.focus() }
   return <div className="stack inbound-stack">
-    {/* The actions hold their place while the address loads: on a phone they take a row of their own. */}
+    {/* The actions hold their place while the address loads, as the same buttons disabled (their labels give their exact
+        widths): on a phone they take a row of their own. */}
     <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current ? <>
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/trace?to=${encodeURIComponent(current.address)}`}>Trace</Link>}
       <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>
       {canAdminister && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
-    </> : <span className="cluster" aria-hidden="true">{canAdminister && <ControlSkeleton width="calc(5ch + 28px)" />}<ControlSkeleton width="calc(13ch + 28px)" />{canAdminister && <ControlSkeleton width="calc(6ch + 28px)" />}</span>} />
+    </> : <>{canAdminister && <Button disabled>Trace</Button>}<Button disabled>Open in Inbox</Button>{canAdminister && <Button variant="danger" disabled>Delete</Button>}</>} />
     {!ready ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : current && <div className="stack inbound-stack addr-page">
       <dl className="settings-facts">
         <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
