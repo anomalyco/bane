@@ -910,9 +910,10 @@ async function run() {
     await step('Regional metrics, sender score and plan usage for this run window', async () => {
       const sender = await api('getSenderScore', {});
       check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
-      // Plan & usage: pricing is information only, this run's sends are in the month, and the daily limit names its steps.
+      // Plan & usage: pricing is information only, this run's sends are in the month, a manage key sees the received count
+      // (members and read-only keys get null), and the daily limit names its steps.
       const usage = await api('getUsage', {});
-      check(usage.billing.enabled === false && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      check(usage.billing.enabled === false && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
       check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
     });

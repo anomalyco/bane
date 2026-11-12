@@ -7826,6 +7826,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: false }, { currency: 'USD', perThousand: 0.2, freeSent: 3000, freeReceived: 3000 }, false]);
       assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100, 1000, 10000]]);
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
+      // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
+      // see it. Members and read-only keys get null; otherwise polling it around a probe tells which addresses take mail.
+      const probeThread = unique('usage-thread-');
+      await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [probeThread, wid]);
+      await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, "to", envelope_to, spam, received_at)
+        VALUES ($1, $2, 'inbound', $3, $4, 'Probe', 'probe@example.org', '[{"name":null,"address":"guess@limits.example"}]', '["guess@limits.example"]', true, now())`, [unique('usage-probe-'), wid, probeThread, REGION]);
+      const usageReader = ok(await local('POST', '/v1/api-keys', { name: 'Usage reader', permissions: ['read'] }), 201).secret;
+      assert.deepEqual([ok(await request('GET', '/v1/usage', key)).month.received, ok(await request('GET', '/v1/usage', usageReader)).month.received], [1, null]);
+      const ownerUsage = ok(await local('GET', '/v1/usage'));
+      const { rows: [{ role: usageRole }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
+      await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
+      const memberUsage = ok(await local('GET', '/v1/usage'));
+      await db.query('UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId, usageRole]);
+      // The dashboard cache keeps the two views apart: the member's read isn't served the owner's count.
+      assert.deepEqual([ownerUsage.month.received, memberUsage.month.received, memberUsage.month.sent], [1, null, ownerUsage.month.sent]);
       error(await send(simulator),429,'SEND_LIMIT_REACHED');
       await limits('11001','10001');
       // An operator's custom limit is on no step.

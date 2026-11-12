@@ -2230,7 +2230,7 @@ export const getSenderScore = <ThrowOnError extends boolean = false>(options?: O
 /**
  * Plan, pricing and sending limits
  *
- * Hosted only. Pricing (information only: billing is not on yet), this month's sent and received counts against the free allowance, and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace sends or records an email event, or for up to 60 seconds.
+ * Hosted only. Pricing (information only: billing is not on yet), this month's sent and received counts against the free allowance (received only for credentials that may read all received mail), and the rolling daily sending limit with the steps it grows through. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace sends or records an email event, or for up to 60 seconds.
  */
 export const getUsage = <ThrowOnError extends boolean = false>(options?: Options<GetUsageData, ThrowOnError>): RequestResult<GetUsageResponses, GetUsageErrors, ThrowOnError> => (options?.client ?? client).get<GetUsageResponses, GetUsageErrors, ThrowOnError>({
     security: [

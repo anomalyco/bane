@@ -1618,9 +1618,9 @@ export type Usage = {
          */
         sent: number;
         /**
-         * Messages received this month on any address, routed or not.
+         * Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can't open.
          */
-        received: number;
+        received: number | null;
     };
     /**
      * Null until the workspace connects hosted sending.
