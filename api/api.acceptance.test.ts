@@ -8305,7 +8305,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('MX: when SES stops answering, the dispatcher holds queued mail instead of failing all of it as acceptance_unknown', async t => {
+  // Both are ambiguous: the calls in flight stay acceptance_unknown with their own code, and nothing else is spent.
+  for (const [answer,code,fail] of [
+    ['stops answering','SES_ACCEPTANCE_UNKNOWN',()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNREFUSED'}});}],
+    ['answers without a MessageId','SES_MESSAGE_ID_MISSING',()=>({})],
+  ] as const) test(`MX: when SES ${answer}, the dispatcher holds queued mail instead of failing all of it as acceptance_unknown`, async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js');
       const wid=runtime.config.workspaceId, account='111122223333', domain='outage.example';
@@ -8314,29 +8318,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[domain,wid]);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1',[wid]);
-      let down=true,calls=0;const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      let down=true,calls=0;const tags=new Map<string,number>(),{ SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
       t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
-        calls++; if (down) throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ECONNREFUSED'}}); return {MessageId:unique('fake-ses')};
+        const email=cmd.input.EmailTags.find((tag:{Name:string})=>tag.Name==='bane_email_id').Value;tags.set(email,(tags.get(email)??0)+1);
+        calls++; return down ? fail() : {MessageId:unique('fake-ses')};
       });
       ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:50},(_,i)=>mail({from:`no-reply@${domain}`,to:`user${i}@example.net`,subject:'Verify your email'}))}),202);
       const statuses=async()=>Object.fromEntries((await db.query(`SELECT status,count(*)::int n FROM sending_emails WHERE workspace_id=$1 GROUP BY 1`,[wid])).rows.map(r=>[r.status,r.n]));
-      const gate=initialGate();
+      const gate=initialGate(),due=()=>db.query(`UPDATE sending_emails SET scheduled_at=now() WHERE workspace_id=$1 AND status='queued'`,[wid]);
       const report=await runDispatcher(runtime,{region:REGION,accountId:account,gate});
       // Ambiguous calls are never replayed, so the ones in flight stay unknown; the shard stops, and what it had
       // already claimed goes back to the queue until SES answers.
-      const lost=calls;
-      assert.ok(lost>=1 && lost<=6,`only the calls in flight reach SES (${lost})`);
-      assert.deepEqual(await statuses(),{acceptance_unknown:lost,queued:50-lost});
+      const wave=calls;
+      assert.ok(wave>=1 && wave<=6,`only the calls in flight reach SES (${wave})`);
+      assert.deepEqual(await statuses(),{acceptance_unknown:wave,queued:50-wave});
       assert.ok(report.paceRetryAt!>Date.now()+10000,'the shard waits before probing again');
       const held=(await db.query(`SELECT count(*)::int n,bool_and(scheduled_at>now()+interval '10 seconds') later FROM sending_emails WHERE workspace_id=$1 AND error_code='SES_UNAVAILABLE'`,[wid])).rows[0];
       assert.ok(held.n>0 && held.later,'claimed mail is requeued after the outage window');
+      assert.deepEqual((await db.query(`SELECT DISTINCT data->>'code' code FROM sending_email_events WHERE workspace_id=$1 AND data->>'status'='acceptance_unknown'`,[wid])).rows,[{code}]);
+      // Still down when the window ends: exactly one probe, and the next window doubles.
+      gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();await due();
+      const probe=await runDispatcher(runtime,{region:REGION,accountId:account,gate});
+      assert.equal(calls,wave+1,'one probe while SES is still down');
+      assert.equal(gate.outageStreak,2);
+      assert.ok(probe.paceRetryAt!>Date.now()+25000,'the second window is twice as long');
+      const lost=calls;
       // SES answers again once the window has passed: the held mail is sent and the probe ends the outage.
-      down=false; gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();
-      await db.query(`UPDATE sending_emails SET scheduled_at=now() WHERE workspace_id=$1 AND status='queued'`,[wid]);
+      down=false; gate.outageUntil=gate.brakeUntil=gate.nextAllowedAt=Date.now();await due();
       for (let i=0;i<5 && (await statuses()).queued;i++) await runDispatcher(runtime,{region:REGION,accountId:account,gate});
       assert.deepEqual(await statuses(),{acceptance_unknown:lost,accepted:50-lost});
       assert.equal(gate.outageStreak,undefined);
+      assert.ok([...tags.values()].every(n=>n===1) && tags.size===50,'every email reached SES at most once');
     });
   });
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {

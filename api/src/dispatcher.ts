@@ -53,7 +53,7 @@ export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, se
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/2))) : 24;
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
-// SES did not answer (transport error, timeout or 5xx): an ambiguous call is never replayed, so stop starting new
+// SES gave no usable answer (transport error, timeout, 5xx, or no MessageId): an ambiguous call is never replayed, so stop starting new
 // calls instead of turning every queued email into acceptance_unknown. Doubles while SES stays silent.
 const OUTAGE_MS = 15000, OUTAGE_MAX_MS = 300000;
 // Far below interrupted-attempt recovery (3 min) and the queue lease (2 min). Ordinary groups
@@ -824,8 +824,9 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         if (outcome.type === 'provider_throttled') brake(gate);
         if (outcome.type === 'accepted') delete gate.outageStreak;
-        // Calls already in flight when SES went quiet share one window; only a failed probe after it doubles the next.
-        if (outcome.type === 'acceptance_unknown' && outcome.data.code === 'SES_ACCEPTANCE_UNKNOWN' && (gate.outageUntil ?? 0) <= Date.now()) {
+        // Every ambiguous answer (no response, 5xx, or success without a MessageId) opens it; the specific code stays in the
+        // event data. Calls already in flight when SES went quiet share one window; only a failed probe doubles the next.
+        if (outcome.type === 'acceptance_unknown' && (gate.outageUntil ?? 0) <= Date.now()) {
           gate.outageUntil = Date.now() + Math.min(OUTAGE_MAX_MS, OUTAGE_MS * 2 ** (gate.outageStreak ?? 0));
           gate.outageStreak = (gate.outageStreak ?? 0) + 1;
           gate.brakeUntil = gate.nextAllowedAt = Math.max(gate.nextAllowedAt, gate.outageUntil);
