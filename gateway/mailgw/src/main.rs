@@ -241,10 +241,7 @@ impl Gateway {
                         let store = backend.as_mut().context("missing upload owner")?;
                         let permit = admission::Reservation::take(
                             self.uploads.clone(),
-                            Some((
-                                store.credential_share.uploads.clone(),
-                                store.inbox_share.uploads.clone(),
-                            )),
+                            Some(store.lanes.pools(|s| &s.uploads)),
                             1,
                         )
                         .await;
@@ -298,12 +295,7 @@ impl Gateway {
                         .iter()
                         .any(|v| verb.eq_ignore_ascii_case(v))
                 {
-                    let shares = backend.as_ref().map(|s| {
-                        (
-                            s.credential_share.responses.clone(),
-                            s.inbox_share.responses.clone(),
-                        )
-                    });
+                    let shares = backend.as_ref().map(|s| s.lanes.pools(|s| &s.responses));
                     let Some(permit) =
                         admission::Reservation::take(self.responses.clone(), shares, 1).await
                     else {
@@ -359,9 +351,7 @@ impl Gateway {
                 };
                 if matches!(&core,Core::Smtp(s) if s.receiving_data()) {
                     if data_permit.is_none() {
-                        let shares = backend
-                            .as_ref()
-                            .map(|s| (s.credential_share.data.clone(), s.inbox_share.data.clone()));
+                        let shares = backend.as_ref().map(|s| s.lanes.pools(|s| &s.data));
                         let Some(permit) =
                             admission::Reservation::take(self.smtp_data.clone(), shares, 1).await
                         else {

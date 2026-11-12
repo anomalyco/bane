@@ -34,6 +34,7 @@ pub struct Principal {
     started: Option<Instant>,
     pub kid: String,
     pub inbox: String,
+    workspace: String,
     addresses: Vec<String>,
     folders: Vec<FolderMeta>,
 }
@@ -56,12 +57,11 @@ struct Snapshot {
 }
 type WakeCache = HashMap<(String, Option<String>, u64), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
 struct Gate {
-    inbox_share: Arc<crate::admission::Shares>,
-    credential_share: Arc<crate::admission::Shares>,
+    lanes: crate::admission::Lanes,
     bytes: Arc<Mutex<crate::admission::Bucket>>,
     calls: crate::admission::Bucket,
     inbox: String,
-    reads: Arc<tokio::sync::Semaphore>,
+    workspace: String,
     last: Instant,
 }
 #[derive(Default)]
@@ -91,7 +91,7 @@ pub struct Api {
     revoked: Mutex<Revocations>,
     gates: Mutex<HashMap<String, Gate>>,
     views: Arc<tokio::sync::Semaphore>,
-    heavy: tokio::sync::Semaphore,
+    heavy: Arc<tokio::sync::Semaphore>,
     pub online: std::sync::atomic::AtomicBool,
     wakes: Mutex<WakeCache>,
     client: reqwest::Client,
@@ -114,7 +114,7 @@ impl Api {
             online: false.into(),
             gates: Mutex::default(),
             views: Arc::new(tokio::sync::Semaphore::new(192 * 1024)),
-            heavy: tokio::sync::Semaphore::new(4),
+            heavy: Arc::new(tokio::sync::Semaphore::new(4)),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
@@ -140,24 +140,24 @@ impl Api {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 } else {
-                    inbox_work = Some(g.reads.clone());
+                    inbox_work = Some(g.lanes.pools(|s| &s.reads));
                     break;
                 }
             }
         }
         let _work = if matches!(
             p["op"].as_str(),
-            Some("snapshot" | "body" | "subject" | "submit")
+            Some("snapshot" | "body" | "projections" | "subject" | "submit")
         ) {
-            let inbox = inbox_work.ok_or(403u16)?;
-            Some(tokio::runtime::Handle::current().block_on(async {
-                tokio::time::timeout(Duration::from_secs(2), async {
-                    let local = inbox.acquire_owned().await.map_err(|_| 503u16)?;
-                    Ok::<_, u16>((local, self.heavy.acquire().await.map_err(|_| 503u16)?))
-                })
-                .await
-                .map_err(|_| 429u16)?
-            })?)
+            Some(
+                tokio::runtime::Handle::current()
+                    .block_on(crate::admission::Reservation::take(
+                        self.heavy.clone(),
+                        Some(inbox_work.ok_or(403u16)?),
+                        1,
+                    ))
+                    .ok_or(429u16)?,
+            )
         } else {
             None
         };
@@ -329,8 +329,7 @@ pub struct Store {
     page: std::cell::RefCell<PreviewPage>,
     headers: std::cell::RefCell<BTreeMap<u32, Arc<[u8]>>>,
     bytes: std::cell::RefCell<Option<crate::admission::Reservation>>,
-    pub credential_share: Arc<crate::admission::Shares>,
-    pub inbox_share: Arc<crate::admission::Shares>,
+    pub lanes: crate::admission::Lanes,
     pub upload: Option<crate::upload::Upload>,
     pub upload_rate: Arc<Mutex<crate::admission::Bucket>>,
     api: Arc<Api>,
@@ -351,31 +350,33 @@ impl Store {
     }
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
-        let (credential_share, inbox_share, upload_rate) = {
+        let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
             gates.retain(|_, v| {
-                Arc::strong_count(&v.credential_share) > 1
-                    || v.last.elapsed() < Duration::from_secs(60)
+                Arc::strong_count(&v.lanes.0[0]) > 1 || v.last.elapsed() < Duration::from_secs(60)
             });
             ensure!(
                 gates.len() < 8192 || gates.contains_key(&p.kid),
                 "credential admission full"
             );
-            let reads = gates
+            let workspace_share = gates
                 .values()
-                .find(|g| g.inbox == p.inbox)
-                .map(|g| g.reads.clone())
-                .unwrap_or_else(|| Arc::new(tokio::sync::Semaphore::new(2)));
+                .find(|g| g.workspace == p.workspace)
+                .map(|g| g.lanes.0[2].clone())
+                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(4, 2, 4, 144)));
             let inbox_share = gates
                 .values()
                 .find(|g| g.inbox == p.inbox)
-                .map(|g| g.inbox_share.clone())
+                .map(|g| g.lanes.0[1].clone())
                 .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(2, 2, 2, 80)));
             let g = gates.entry(p.kid.clone()).or_insert_with(|| Gate {
-                inbox_share,
-                credential_share: Arc::new(crate::admission::Shares::new(1, 1, 1, 64)),
+                lanes: crate::admission::Lanes([
+                    Arc::new(crate::admission::Shares::new(1, 1, 1, 64)),
+                    inbox_share,
+                    workspace_share,
+                ]),
                 inbox: p.inbox.clone(),
-                reads,
+                workspace: p.workspace.clone(),
                 last: Instant::now(),
                 bytes: Arc::new(Mutex::new(crate::admission::Bucket::new(
                     tokio::time::Instant::now(),
@@ -385,11 +386,7 @@ impl Store {
                 calls: crate::admission::Bucket::new(tokio::time::Instant::now(), 200, 50),
             });
             g.last = Instant::now();
-            (
-                g.credential_share.clone(),
-                g.inbox_share.clone(),
-                g.bytes.clone(),
-            )
+            (g.lanes.clone(), g.bytes.clone())
         };
         let mut s = Self {
             page_wait: Default::default(),
@@ -398,8 +395,7 @@ impl Store {
             bytes: Default::default(),
             upload: None,
             headers: Default::default(),
-            credential_share,
-            inbox_share,
+            lanes,
             upload_rate,
             principal: p,
             folders: BTreeMap::new(),
@@ -450,10 +446,7 @@ impl Store {
             let extra = tokio::runtime::Handle::current()
                 .block_on(crate::admission::Reservation::take(
                     self.api.views.clone(),
-                    Some((
-                        self.credential_share.views.clone(),
-                        self.inbox_share.views.clone(),
-                    )),
+                    Some(self.lanes.pools(|s| &s.views)),
                     (target - held) as u32,
                 ))
                 .ok_or(store::Error::Limit)?;
@@ -930,6 +923,60 @@ pub async fn listen(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    #[tokio::test]
+    async fn workspace_capacity_is_shared_across_inboxes_and_waiters_are_fifo() {
+        use crate::admission::{Reservation, Shares};
+        use futures_util::FutureExt;
+        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
+        let store = |kid: &str, w: &str| {
+            Store::new(
+                api.clone(),
+                Principal {
+                    workspace: w.into(),
+                    inbox: kid.into(),
+                    kid: kid.into(),
+                    addresses: vec![],
+                    folders: vec![],
+                    started: None,
+                },
+            )
+            .unwrap()
+        };
+        let a = store("a", "w");
+        let b = store("b", "w");
+        let c = store("c", "other");
+        type Resource = fn(&Shares) -> &Arc<tokio::sync::Semaphore>;
+        for (resource, global) in [
+            ((|s| &s.responses) as Resource, 6),
+            (|s| &s.data, 4),
+            (|s| &s.uploads, 8),
+            (|s| &s.views, 192 * 1024),
+            (|s| &s.reads, 4),
+        ] {
+            let lanes = a.lanes.pools(resource);
+            let share = lanes[2].available_permits();
+            assert!(share < global);
+            let held = lanes[2]
+                .clone()
+                .acquire_many_owned(share as u32)
+                .await
+                .unwrap();
+            let pool = Arc::new(tokio::sync::Semaphore::new(global - share));
+            let take =
+                |s: &Store| Reservation::take(pool.clone(), Some(s.lanes.pools(resource)), 1);
+            let mut first = Box::pin(take(&b));
+            let mut second = Box::pin(take(&a));
+            assert!(first.as_mut().now_or_never().is_none());
+            assert!(second.as_mut().now_or_never().is_none());
+            assert!(take(&c).await.is_some());
+            let mut held = held;
+            drop(held.split(1));
+            let head = first.await.unwrap();
+            assert!(second.as_mut().now_or_never().is_none());
+            drop(head);
+            assert!(second.await.is_some());
+        }
+    }
     #[test]
     fn revoke_fences_only_the_inflight_login_for_that_inbox() {
         let t = Instant::now();

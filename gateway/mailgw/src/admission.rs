@@ -8,6 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 pub struct Shares {
+    pub reads: Arc<Semaphore>,
     pub responses: Arc<Semaphore>,
     pub data: Arc<Semaphore>,
     pub uploads: Arc<Semaphore>,
@@ -16,6 +17,7 @@ pub struct Shares {
 impl Shares {
     pub fn new(responses: usize, data: usize, uploads: usize, view_mib: usize) -> Self {
         Self {
+            reads: Arc::new(Semaphore::new(2)),
             responses: Arc::new(Semaphore::new(responses)),
             data: Arc::new(Semaphore::new(data)),
             uploads: Arc::new(Semaphore::new(uploads)),
@@ -24,17 +26,24 @@ impl Shares {
     }
 }
 pub struct Reservation(Vec<OwnedSemaphorePermit>);
+#[derive(Clone)]
+pub struct Lanes(pub [Arc<Shares>; 3]); // credential, inbox, workspace
+impl Lanes {
+    pub fn pools(&self, f: fn(&Shares) -> &Arc<Semaphore>) -> [Arc<Semaphore>; 3] {
+        self.0.each_ref().map(|s| f(s).clone())
+    }
+}
 impl Reservation {
     /// FIFO within each share; a busy credential waits without holding an inbox or global permit.
     pub async fn take(
         global: Arc<Semaphore>,
-        shares: Option<(Arc<Semaphore>, Arc<Semaphore>)>,
+        shares: Option<[Arc<Semaphore>; 3]>,
         n: u32,
     ) -> Option<Self> {
         tokio::time::timeout(Duration::from_secs(2), async move {
-            let mut permits = Vec::with_capacity(3);
-            if let Some((credential, inbox)) = shares {
-                for pool in [credential, inbox] {
+            let mut permits = Vec::with_capacity(4);
+            if let Some(lanes) = shares {
+                for pool in lanes {
                     permits.push(pool.acquire_many_owned(n).await.ok()?);
                 }
             }
@@ -273,16 +282,25 @@ mod tests {
         let global = Arc::new(Semaphore::new(2));
         let inbox = Arc::new(Semaphore::new(1));
         let one = Arc::new(Semaphore::new(1));
-        let held = Reservation::take(global.clone(), Some((one.clone(), inbox.clone())), 1)
-            .await
-            .unwrap();
+        let workspace = Arc::new(Semaphore::new(1));
+        let held = Reservation::take(
+            global.clone(),
+            Some([one.clone(), inbox.clone(), workspace.clone()]),
+            1,
+        )
+        .await
+        .unwrap();
         let sibling = Arc::new(Semaphore::new(1));
-        let mut waiting = Box::pin(Reservation::take(global.clone(), Some((sibling, inbox)), 1));
+        let mut waiting = Box::pin(Reservation::take(
+            global.clone(),
+            Some([sibling, inbox, workspace]),
+            1,
+        ));
         assert!(waiting.as_mut().now_or_never().is_none());
         assert_eq!(global.available_permits(), 1);
         let other = Reservation::take(
             global.clone(),
-            Some((Arc::new(Semaphore::new(1)), Arc::new(Semaphore::new(1)))),
+            Some(std::array::from_fn(|_| Arc::new(Semaphore::new(1)))),
             1,
         )
         .await
