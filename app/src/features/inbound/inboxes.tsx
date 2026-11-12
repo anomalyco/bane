@@ -10,7 +10,8 @@ import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, Mailbo
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
-import { nameOf, when, Sender } from './shared'
+import { when, Sender } from './shared'
+import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -129,7 +130,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
-        <div className="mailbox-message__from"><span>{nameOf(m.from)}</span><span className="muted"><PrivateAddress value={m.from.address} /></span></div>
+        <div className="mailbox-message__from"><span><Sender value={m.from} /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
         <span className="muted">{date(m.receivedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>

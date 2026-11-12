@@ -19,6 +19,7 @@ import { ritualTemplates } from '../../../../api/src/ritual-schema'
 import { concepts, guides } from './concepts'
 import { useOverview } from './overview'
 import { ConceptLine } from './parts'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
@@ -262,17 +263,17 @@ export function RitualsPage() {
   const bindingColumns: Column<Binding & { i: number }>[] = [
     { key: 'order', label: '#', width: 48, card: 'hide', render: b => b.i + 1 },
     { key: 'ritual', label: 'Ritual', card: 'line', render: b => <code>{b.ritual}</code>, cardRender: b => <><code>{b.ritual}</code> · runs {b.i + 1}{b.i === 0 ? 'st' : b.i === 1 ? 'nd' : 'rd'}{b.continue ? ', then the next one' : ''}</> },
-    { key: 'target', label: 'Runs on mail to', card: 'title', render: b => targetName(b.target) },
+    { key: 'target', label: 'Runs on mail to', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
     { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label="Run the next one too" /> },
-    { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual} on ${targetName(b.target)}`} title={`${b.ritual} on ${targetName(b.target)}`} items={[
+    { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual}`} title={<>{b.ritual} on <PrivateAddress value={targetName(b.target)} /></>} items={[
       { label: b.continue ? 'Stop the next one after it acts' : 'Run the next one too', disabled: binding, onSelect: () => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: !b.continue } : x), b.continue ? `${b.ritual} now stops the next ritual` : `${b.ritual} now lets the next ritual run`) },
       ...(b.i ? [{ label: 'Move up', disabled: binding, onSelect: () => move(b.i, -1) }] : []),
       ...(b.i < bindings.length - 1 ? [{ label: 'Move down', disabled: binding, onSelect: () => move(b.i, 1) }] : []),
-      { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual} from ${targetName(b.target)}`) },
+      { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`) },
     ]} />, render: b => <span className="ritual-row-actions">
       <IconButton label="Move up" disabled={!b.i || binding} onClick={() => move(b.i, -1)}>↑</IconButton>
       <IconButton label="Move down" disabled={b.i === bindings.length - 1 || binding} onClick={() => move(b.i, 1)}>↓</IconButton>
-      <IconButton label={`Detach ${b.ritual} from ${targetName(b.target)}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual} from ${targetName(b.target)}`)}>×</IconButton>
+      <IconButton label={`Detach ${b.ritual}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`)}>×</IconButton>
     </span> },
   ]
   const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)

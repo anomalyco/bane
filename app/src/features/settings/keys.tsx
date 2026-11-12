@@ -12,7 +12,7 @@ import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, accessLabel, domainScope, permissionList, type Purpose } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
-import { AddressList } from '../../components/PrivateAddress'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton } from '../docs/connect-agent'
 import { guides } from '../inbound/concepts'
 import { Link } from 'react-router'
@@ -105,7 +105,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id}
           empty={<EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with a Revoke button." />} columns={[
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
-            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
+            ? <TwoLines first={row.item.name || 'MCP client'} second={<PrivateAddress value={row.item.userEmail} />} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
             cardRender: row => row.kind === 'mcp' ? row.item.name || 'MCP client' : row.item.purpose },
           { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'
@@ -132,6 +132,6 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   </div>
 }
 
-function TwoLines({ first, second }: { first: ReactNode; second: string }) {
-  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={second}>{second}</span></div>
+function TwoLines({ first, second }: { first: ReactNode; second: ReactNode }) {
+  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={typeof second === 'string' ? second : undefined}>{second}</span></div>
 }

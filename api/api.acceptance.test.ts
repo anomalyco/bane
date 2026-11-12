@@ -12248,7 +12248,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // (app/src/lib/private-address.ts) picks our receiving address or envelope recipient, never the header To, as the
       // address to trace; every mailbox address it shows is masked, ours included.
       await t.test('inbound received To: real log rows trace as our own address, never the header To; every mailbox address is masked', async () => {
-        const { receivedTo, ownRecipient, maskedParts } = await import('../app/src/lib/private-address.js');
+        const { receivedTo, ownRecipient, maskedParts, addressText, textWidth, nameParts, PRIVATE_TITLE } = await import('../app/src/lib/private-address.js');
         const stored = await route('mask-store@receive.example', []);
         const mail = async (mid: string, to: string) => {
           raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nTo: Someone Else <someone@elsewhere.example>\r\nSubject: Masking ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
@@ -12269,6 +12269,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           // Ours and theirs alike: mailbox addresses and address patterns are masked; domains and *@domain stay readable.
           assert.deepEqual([box.address, 'someone@elsewhere.example', 'sales-*@receive.example'].map(value => maskedParts(value)?.shown), [box.address.slice(0, 2), 'so', 'sa']);
           assert.deepEqual(['receive.example', '@receive.example', '*@receive.example', ''].map(maskedParts), [null, null, null, null]);
+          // The same rule renders what an endpoint delivers to, what a ritual runs on, the Inbox's address labels and the
+          // user a connected app signed in as: a forward's address and that user's are masked; a write-only URL hint and
+          // an address ID (shown until its address loads) are not.
+          assert.deepEqual(['founders@partner.example', 'operator@example.com', '••••/crm', 'Slack incoming webhook ••••0001', box.id].map(value => maskedParts(value)?.shown ?? null), ['fo', 'op', null, null, null]);
+          // Masked means absent. Until it is revealed the page holds an address's first two characters and nothing else of
+          // it, in its text or in the hint that says how to read it; revealed, it holds the address as one run of text.
+          for (const value of [box.address, 'someone@elsewhere.example', 'sales-*@receive.example', 'a\u{1F600}b@receive.example']) {
+            const { shown, hidden } = maskedParts(value)!;
+            assert.deepEqual([[...shown].length, shown + hidden, addressText(value, false), addressText(value, true)], [2, value, shown, value], value);
+            assert.ok(!addressText(value, false).includes(hidden) && !PRIVATE_TITLE.includes(hidden) && !PRIVATE_TITLE.includes('@'), value);
+            // The width it reserves is the sum of its characters' advances, so the box is as wide masked as revealed.
+            const advance = (character: string) => 'il.'.includes(character) ? 3.25 : '@mw'.includes(character) ? 11.5 : 7;
+            assert.equal(textWidth(shown, advance) + textWidth(hidden, advance), textWidth(value, advance), value);
+          }
+          assert.equal(textWidth('a\u{1F600}b', () => 1), 3, 'One advance per character, not per UTF-16 unit.');
+          for (const label of ['receive.example', '@receive.example', '*@receive.example']) assert.equal(addressText(label, false), label);
+          // A sender-chosen display name: an address written inside it is a piece of its own, masked like any other, and
+          // a name that only repeats the sender's address is no name at all (the masked address stands alone).
+          assert.deepEqual(nameParts('Margaret Ode', 'margaret@example.com'), [{ text: 'Margaret Ode', address: false }]);
+          for (const name of ['margaret@example.com', ' "Margaret@Example.com" ', '<margaret@example.com>', 'margaret@example.com\u200b', null, undefined, '', ' \u202e '])
+            assert.equal(nameParts(name, 'margaret@example.com'), null, String(name));
+          assert.deepEqual(nameParts('Margaret (margaret@example.com)', 'margaret@example.com'), [{ text: 'Margaret (', address: false }, { text: 'margaret@example.com', address: true }, { text: ')', address: false }]);
+          assert.deepEqual(nameParts('ceo@bank.example via Ops', 'other@elsewhere.example'), [{ text: 'ceo@bank.example', address: true }, { text: ' via Ops', address: false }]);
+          for (const name of ['Sales @ Acme', 'Maria @Acme', 'Team@Acme', '*@receive.example']) assert.deepEqual(nameParts(name, 'other@elsewhere.example'), [{ text: name, address: false }], name);
         } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
       });
       // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at

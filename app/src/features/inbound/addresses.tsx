@@ -99,7 +99,7 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
   const attached = entry?.rituals ?? []
   const available = (overview.data?.rituals ?? []).filter(r => !attached.includes(r.key))
   const elsewhere = (entry?.to ?? []).filter(t => !(t.type === 'inbox' && t.id === address.id))
-  return <div className="addr-path" aria-label={`How mail to ${address.address} is handled`}>
+  return <div className="addr-path" aria-label="How mail to this address is handled">
     <section className="addr-step" id="route">
       <h2>{steps.route.title}</h2><p>{steps.route.line}</p>
       <ul>
@@ -147,8 +147,8 @@ function PatternsField({ address, inputRef }: { address: InboundAddress; inputRe
   }
   return <div className="ui-field addr-patterns">
     <label className="ui-field__label" htmlFor="address-pattern">Patterns</label>
-    {rules.length > 0 && <ul>{rules.map(r => <li key={r}><Match value={r} /><IconButton size="sm" label={`Remove ${r}`} disabled={save.isPending} onClick={() => void save.mutateAsync(rules.filter(x => x !== r)).catch(() => undefined)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>}
-    <div className="addr-patterns__add"><Input ref={inputRef} id="address-pattern" value={draft} disabled={save.isPending || !!address.expiresAt} placeholder={`${address.address.split('@')[0]}+*@${domain}`} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void add() } }} autoComplete="off" spellCheck={false} />
+    {rules.length > 0 && <ul>{rules.map(r => <li key={r}><Match value={r} /><IconButton size="sm" label="Remove pattern" disabled={save.isPending} onClick={() => void save.mutateAsync(rules.filter(x => x !== r)).catch(() => undefined)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>}
+    <div className="addr-patterns__add"><Input ref={inputRef} id="address-pattern" value={draft} disabled={save.isPending || !!address.expiresAt} placeholder={`name+*@${domain}`} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void add() } }} autoComplete="off" spellCheck={false} />
       <Button disabled={!draft.trim() || save.isPending} loading={save.isPending} onClick={() => void add()}>Add</Button></div>
     <div className={`ui-field__hint${save.error ? ' ui-field__error' : ''}`} role={save.error ? 'alert' : undefined}>{save.error ? errorText(save.error) : address.expiresAt ? 'Temporary addresses cannot have patterns.' : `A pattern catches many addresses with *. ${kinds.pattern.example}.`}</div>
   </div>
@@ -199,7 +199,7 @@ export function InboundAddressDetailPage() {
     {/* The actions hold their place while the address loads, as the same buttons disabled (their labels give their exact
         widths): on a phone they take a row of their own. */}
     <PageHeader title={current ? <PrivateAddress value={current.address} /> : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current ? <>
-      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/trace?to=${encodeURIComponent(current.address)}`}>Trace</Link>}
+      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace" state={{ to: current.address }}>Trace</Link>}
       <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>
       {canAdminister && <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>}
     </> : <>{canAdminister && <Button disabled>Trace</Button>}<Button disabled>Open in Inbox</Button>{canAdminister && <Button variant="danger" disabled>Delete</Button>}</>} />
