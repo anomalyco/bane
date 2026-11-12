@@ -13,6 +13,8 @@ pub struct Shares {
     pub data: Arc<Semaphore>,
     pub uploads: Arc<Semaphore>,
     pub views: Arc<Semaphore>,
+    /// Open sessions, on the lanes that share them: a workspace and its sponsoring account.
+    pub sessions: Option<Arc<Semaphore>>,
 }
 impl Shares {
     pub fn new(responses: usize, data: usize, uploads: usize, view_mib: usize) -> Self {
@@ -22,7 +24,12 @@ impl Shares {
             data: Arc::new(Semaphore::new(data)),
             uploads: Arc::new(Semaphore::new(uploads)),
             views: Arc::new(Semaphore::new(view_mib * 1024)),
+            sessions: None,
         }
+    }
+    pub fn with_sessions(mut self, open: usize) -> Self {
+        self.sessions = Some(Arc::new(Semaphore::new(open)));
+        self
     }
 }
 pub struct Reservation(Vec<OwnedSemaphorePermit>);
@@ -31,6 +38,15 @@ pub struct Lanes(pub [Arc<Shares>; 4]); // credential, inbox, workspace, account
 impl Lanes {
     pub fn pools(&self, f: fn(&Shares) -> &Arc<Semaphore>) -> [Arc<Semaphore>; 4] {
         self.0.each_ref().map(|s| f(s).clone())
+    }
+    /// A place in every lane that shares open sessions, held until the session ends.
+    /// A full lane refuses at once and keeps nothing: a session is not a queue.
+    pub fn session(&self) -> Option<Vec<OwnedSemaphorePermit>> {
+        self.0
+            .iter()
+            .filter_map(|s| s.sessions.clone())
+            .map(|s| s.try_acquire_owned().ok())
+            .collect()
     }
 }
 impl Reservation {
