@@ -8,7 +8,8 @@
 .rcv-match { display: inline-flex; min-width: 0; max-width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); letter-spacing: -.01em; }
 .rcv-match__local { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rcv-match__host { flex: none; color: var(--color-faint); }
-.rcv-wild { padding: 0 1px; color: var(--color-accent); font-family: var(--font-body); font-weight: var(--font-weight-bold); }
+/* Its own font must not make its line taller than the lines without one. */
+.rcv-wild { padding: 0 1px; color: var(--color-accent); font-family: var(--font-body); font-weight: var(--font-weight-bold); line-height: 0; }
 .rcv-targets { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-12); min-width: 0; }
 .rcv-target { display: inline-flex; align-items: center; gap: var(--space-6); white-space: nowrap; }
 .rcv-target[data-muted] { color: var(--color-muted); }

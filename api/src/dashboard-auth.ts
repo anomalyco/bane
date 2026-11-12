@@ -2,7 +2,7 @@ import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
 import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
 import {accountBrowserRoute,accountSessionActor,accountSessionUser} from './account-login.js';
-import {Workspace,WorkspaceRole,memberships} from './workspaces.js';
+import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
 
 export async function reserveSignIn(runtime:Runtime,headers:Headers) {
@@ -26,11 +26,11 @@ export const getDashboardActor = accountSessionActor;
 export function registerDashboardAuth(app: App) {
   app.on(['GET','POST','OPTIONS'],'/api/auth/*',accountBrowserRoute);
   app.openapi(createRoute({method:'get',path:'/v1/me',operationId:'getCurrentIdentity',tags:['Auth'],security,
-    responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),role:WorkspaceRole.nullable(),multiTenant:z.boolean(),simulated:z.boolean(),email:z.string().nullable(),name:z.string().nullable(),permissions:z.array(z.enum(['read','send','manage'])),domains:z.array(z.string()),origin:z.string().url(),host:z.string(),connection:ConnectionSummary.nullable().openapi({description:'The current workspace\'s hosted sending connection; null when self-hosted.'}),workspaces:z.array(Workspace).nullable().openapi({description:'A hosted dashboard session\'s workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted.'})})),...errors}}),async c=>{
+    responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),role:WorkspaceRole.nullable(),multiTenant:z.boolean(),simulated:z.boolean(),email:z.string().nullable(),name:z.string().nullable(),permissions:z.array(z.enum(['read','send','manage'])),domains:z.array(z.string()),origin:z.string().url(),host:z.string(),connection:ConnectionSummary.nullable().openapi({description:'The current workspace\'s hosted sending connection; null when self-hosted.'}),workspaces:z.array(Workspace).nullable().openapi({description:'A hosted dashboard session\'s workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted.'}),operator:z.enum(['operator','operator:read']).nullable().optional().openapi({description:'Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.'})})),...errors}}),async c=>{
     const identity=c.get('actor'), userId=identity.keyId.startsWith('user_')?identity.keyId.slice(5):null;
     const origin=new URL(c.env.config.publicUrl).origin, hosted=c.env.config.multiTenant;
     const connection=hosted?await connectionSummary(c.env,identity.workspaceId):null;
-    const workspaces=hosted && identity.credential==='dashboard' && userId?await memberships(c.env.db,userId):null;
-    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,connection,workspaces},200);
+    const session=hosted && identity.credential==='dashboard' && userId?await sessionMemberships(c.env.db,userId):null;
+    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,connection,workspaces:session?.workspaces??null,operator:session?.operator??null},200);
   });
 }

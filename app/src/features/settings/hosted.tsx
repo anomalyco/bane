@@ -15,17 +15,19 @@ import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
 import { PlanUsage } from './usage'
 import { WebhooksSection } from './webhooks'
+import { ActivitySection } from './activity'
+import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'usage' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'usage', label: 'Plan & usage' }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -52,6 +54,7 @@ export function HostedSettings() {
           {section === 'members' && <Team />}
           {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
           {section === 'webhooks' && <WebhooksSection note={false} />}
+          {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
         </>}
@@ -130,17 +133,20 @@ function AccountRows() {
   const access = useWorkspaceAccess()
   const apps = useApiDef(queries.mcpConnections())
   const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'MCP connection revoked')
+  const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Name" hint="From your Google account">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
+    <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
     {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={app.name||app.clientId} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
       :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
     {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
     <MutationError error={revoke.error}/>
     {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
+    {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
 // Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools

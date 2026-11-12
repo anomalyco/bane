@@ -429,11 +429,22 @@ impl Gateway {
                 }
                 if r.action == Action::Failure {
                     failures += 1;
+                    let protocol = match port.protocol {
+                        Protocol::Imap => "imap",
+                        Protocol::Smtp => "smtp",
+                    };
                     if identity.as_ref().is_some_and(|i| {
                         i.unavailable
                             .swap(false, std::sync::atomic::Ordering::Relaxed)
                     }) {
                         failures -= 1;
+                        tracing::error!(
+                            service = "gateway",
+                            event = "auth",
+                            code = "GATEWAY_AUTH_UNAVAILABLE",
+                            protocol,
+                            "authentication service unavailable"
+                        );
                         if matches!(port.protocol, Protocol::Imap) {
                             let tag = r
                                 .bytes
@@ -448,7 +459,14 @@ impl Gateway {
                             r = Reply::one("454 4.7.0 Authentication service unavailable");
                         }
                     } else {
-                        tracing::info!(reason = "credentials_denied", "login refused");
+                        tracing::info!(
+                            service = "gateway",
+                            event = "auth",
+                            code = "GATEWAY_AUTH_FAILED",
+                            protocol,
+                            reason = "credentials_denied",
+                            "login refused"
+                        );
                     }
                     tokio::time::sleep_until(
                         auth_deadline.min(Instant::now() + Duration::from_secs(1)),
@@ -524,7 +542,13 @@ fn tls_materials(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One JSON object per line, like the API's logs (api/src/core.ts): CloudWatch Logs Insights reads the fields and
+    // the nightly report (api/scripts/nightly-report.ts) counts `code` per day. Never log addresses or credentials.
     tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();

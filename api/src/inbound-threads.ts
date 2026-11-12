@@ -10,6 +10,7 @@ import { ApiError, errors, json, lazyModule, page, response, security, type Acto
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
+import { boundedHtmlFragment } from './bounded-html.js';
 import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
 import { SuppressionReason } from './core.js';
@@ -209,21 +210,23 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
-    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
+    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),htmlTooComplex:z.boolean().describe('With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.'),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
+    // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
+    const body=(html:string|null)=>q.includeHtml==='true'&&html?{html,htmlTooComplex:!boundedHtmlFragment(html,'document')}:{html:null,htmlTooComplex:false};
     if (q.includeDelivery==='true') {
       const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
       const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
       const {rawUrl,rawExpiresAt,urls}=await deliveryLinks(c.env,row,files);
-      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,html:q.includeHtml==='true'?row.html:null,
+      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,...body(row.html),
         rawExpiresAt,attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
     const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
-    return c.json({...messageView(row,row.addressIds,row.isRead),html:q.includeHtml==='true'?row.html:null,attachments},200);
+    return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),attachments},200);
   });
   // Persistent API-key URLs in webhook payloads; presign only after workspace-level authorization.
   app.get('/v1/inbound/messages/:messageId/parts/:part',async c=>{

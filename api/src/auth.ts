@@ -5,6 +5,7 @@ import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, json, 
 import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
+import { auditContext, auditInsert, recordAudit } from './audit.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
@@ -152,7 +153,11 @@ export function registerAuth(app: App) {
     const tokenId = id('agt');
     const { createAgentToken } = await wrapModuleLoad(() => import('./agent-token.js'));
     const token = await createAgentToken(c.env.config, { id: tokenId, grant: identity.keyId, permissions: input.permissions, domains: input.domains, expiresAt });
-    await c.env.db.insert(agentTokens).values({ id: tokenId, workspaceId: identity.workspaceId, grantId: identity.keyId, permissions: input.permissions, domains: input.domains, purpose: input.purpose, expiresAt });
+    // The token and its audit row in one statement.
+    await c.env.db.execute(sql`WITH t AS (INSERT INTO agent_tokens(id, workspace_id, grant_id, permissions, domains, purpose, expires_at)
+      VALUES (${tokenId}, ${identity.workspaceId}, ${identity.keyId}, ${JSON.stringify(input.permissions)}::jsonb, ${JSON.stringify(input.domains)}::jsonb, ${input.purpose}, ${expiresAt}::timestamptz) RETURNING id)
+      ${auditInsert(auditContext(c), { action: 'agent_token.create', workspaceId: identity.workspaceId, target: { type: 'agent_token', id: tokenId },
+        after: { permissions: input.permissions, domains: input.domains, purpose: input.purpose, expiresAt } }, { from: sql`t` })}`);
     return c.json({ id: tokenId, token, expiresAt, permissions: input.permissions, domains: input.domains, purpose: input.purpose }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/agent-tokens', operationId: 'listAgentTokens', tags: ['Auth'], security, request: { query: PageQuery.extend({ includeInactive: z.enum(['true', 'false']).default('false') }) }, responses: { 200: response(page(AgentTokenRecord)), ...errors } }), async c => {
@@ -163,7 +168,9 @@ export function registerAuth(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens/{id}/revoke', operationId: 'revokeAgentToken', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = manageKeys(c), tokenId = c.req.valid('param').id;
-    const [row] = await c.env.db.update(agentTokens).set({ revokedAt: new Date().toISOString() }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.id, tokenId), isNull(agentTokens.revokedAt))).returning({ id: agentTokens.id });
+    const { rows: [row] } = await c.env.db.execute<{ id: string }>(sql`WITH t AS (UPDATE agent_tokens SET revoked_at = now() WHERE workspace_id = ${identity.workspaceId} AND id = ${tokenId} AND revoked_at IS NULL
+        RETURNING id, purpose), a AS (${auditInsert(auditContext(c), { action: 'agent_token.revoke', workspaceId: identity.workspaceId, target: { type: 'agent_token', id: sql`t.id` },
+        before: sql`jsonb_build_object('purpose', left(t.purpose, 200))` }, { from: sql`t` })}) SELECT id FROM t`);
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Agent token was not found or is already revoked.');
     return c.json({ id: row.id, revoked: true as const }, 200);
   });
@@ -174,6 +181,8 @@ export function registerAuth(app: App) {
       const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
       // A key created by an MCP agent lives only as long as the approval that created it.
       if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
+      await recordAudit(tx, c, { action: 'api_key.create', workspaceId: auth.workspaceId, target: { type: 'api_key', id: rows[0]!.id },
+        after: { name: input.name, permissions: input.permissions, domains: input.domains, prefix: rows[0]!.prefix.slice(0, 9), mcpGrant: auth.grantId ?? undefined } });
       return rows;
     });
     return c.json({ ...keyView(key!), secret }, 201);
@@ -185,7 +194,11 @@ export function registerAuth(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const auth = manageKeys(c); const keyId = c.req.valid('param').id;
-    const [key] = await c.env.db.update(apiKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, auth.workspaceId))).returning({ id: apiKeys.id });
+    // A repeated revoke keeps the first revocation time and writes no second audit row.
+    const { rows: [key] } = await c.env.db.execute<{ id: string }>(sql`WITH k AS (UPDATE api_keys SET revoked_at = coalesce(revoked_at, now()) WHERE id = ${keyId} AND workspace_id = ${auth.workspaceId}
+        RETURNING id, name, left(prefix, 9) AS prefix, revoked_at = now() AS fresh),
+      a AS (${auditInsert(auditContext(c), { action: 'api_key.revoke', workspaceId: auth.workspaceId, target: { type: 'api_key', id: sql`k.id` },
+        before: sql`jsonb_build_object('name', k.name, 'prefix', k.prefix)` }, { from: sql`k`, where: sql`k.fresh` })}) SELECT id FROM k`);
     if (!key) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
     return c.json({ id: key.id, revoked: true as const }, 200);
   });

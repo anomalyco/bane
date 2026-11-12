@@ -1,5 +1,5 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
@@ -13,6 +13,7 @@ import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
+import { useGuardedMutation } from '../lib/single-flight'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
@@ -86,7 +87,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       }
     },
   })
-  const join = useMutation({
+  const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       await switchWorkspace(workspaceId)
@@ -256,11 +257,16 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, sig
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+/** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
+ *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  return useMutation({
+  // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
+  // (lib/single-flight.ts). The operation is the write's source, the same in every render.
+  return useGuardedMutation({
+    operation: write.toString(), target,
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {

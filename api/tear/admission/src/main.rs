@@ -96,8 +96,8 @@
 //!   an operator change racing an admission applies to the one after it, and an override leaves
 //!   the sponsor's shared usage. s.pending-cap: pending_cap_override reached exactly and by one.
 //!   s.exempt: an exempt workspace has no recipient cap and leaves the sponsor.
-//! - [x] s.tier: probation (first week), second-week and mature caps from clean history and age
-//!   (`history`, `week`); s.tier-resume: a resume starts a new health epoch and drops the tier.
+//! - [x] s.tier: the first-week cap holds whatever the history or age (the sender score sets limits now)
+//!   (`history`, `week`); s.tier-resume: a resume keeps the history, so the tier stays.
 //! - [x] s.me: GET /v1/me shows the cap and usage admission charges against.
 //! - [x] s.one-statement: every admission, refusal and replay is one database round trip
 //!   (checked on every step, `statements` in each result).
@@ -474,8 +474,8 @@ const BOUNDARIES: &[(&str, usize, &[&str])] = &[
             "send 1 3 t",
         ],
     ),
-    // Warm-up tiers: probation, second week (100 clean, 7 days) and mature (1,000, 14 days); a
-    // resume starts a new health epoch.
+    // History and age no longer raise the cap (the sender score does, through sender_standing); a
+    // resume keeps the sender's history.
     (
         "send",
         0,

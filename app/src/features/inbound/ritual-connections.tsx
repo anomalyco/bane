@@ -9,6 +9,7 @@ import { queries } from '../../data/queries'
 import { idempotencyFor } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
+import { useSingleFlight } from '../../lib/single-flight'
 
 type EndpointType = 'slack' | 'discord' | 'webhook' | 'forward'
 type EndpointStatus = 'ready' | 'pending' | 'expired' | 'declined' | 'paused'
@@ -49,14 +50,18 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
     : type === 'slack' && !/^https:\/\/hooks\.slack\.com\//i.test(value) ? 'Use the incoming webhook URL from Slack: it starts with https://hooks.slack.com/.'
     : type === 'discord' && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(value) ? 'Use the webhook URL from Discord: it starts with https://discord.com/api/webhooks/.' : ''
   const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rituals call it by this name.' : ''
-  async function submit(event: FormEvent) {
-    event.preventDefault(); setTried(true)
-    if (!nameValid || !value || targetError) return
+  // Single flight: a second Create before the first answers would post the endpoint again.
+  const send = useSingleFlight('endpoints.create', async () => {
     setBusy(true); setError('')
     const body = { type, name: name.trim(), ...(type === 'forward' ? { address: target.trim(), ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: target.trim() }) }
     try { onCreated(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })) }
     catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
+  })
+  function submit(event: FormEvent) {
+    event.preventDefault(); setTried(true)
+    if (!nameValid || !value || targetError) return
+    void send()
   }
   return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title="New endpoint"
     footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="endpoint-create" loading={busy}>Create</Button></>}>

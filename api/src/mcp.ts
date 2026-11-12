@@ -265,14 +265,22 @@ export function registerMcp(app: App): void {
   app.all('/mcp', async c => {
     const origin = c.req.header('origin');
     const canonicalOrigin = new URL(c.env.config.publicUrl).origin;
-    if (origin !== undefined && origin !== canonicalOrigin) return rpcError(403, -32000, 'Origin is not allowed.');
+    if (origin !== undefined && origin !== canonicalOrigin) { c.set('failure', { code: 'ORIGIN_NOT_ALLOWED' }); return rpcError(403, -32000, 'Origin is not allowed.'); }
     const preflight = c.req.method === 'OPTIONS';
+    let authenticated = false;
     const handler=async(actor:Actor|MailboxAccess)=>{
+      // MCP authenticates here, not in the /v1 middleware: tell the request line who called, never the token.
+      authenticated = true;
+      c.set('principal', { type: token ? 'inboxKey' : 'mcp', workspace: actor.workspaceId });
       catalog ??= buildMcpCatalog(app);
       return serve(app, c.req.raw, c.env, actor, catalog);
     };
     const token=c.req.header('authorization')?.match(/^Bearer (bane_mbx_[0-9a-f]{64})$/i)?.[1];
     const response=preflight?new Response(null,{status:204}):token?await handler(await (await import('./mailbox.js')).authorizeInboxKey(c,token)):await withMcpAuthorization(c.env,c.req.raw,handler);
+    // Authorization and the protocol SDK answer with their own responses, which never reach onError: name the failure
+    // from the status and the stage it came from. Never from the body.
+    if (response.status >= 400 && !c.get('failure')) c.set('failure', { code: authenticated ? `MCP_HTTP_${response.status}`
+      : response.status === 401 ? 'MCP_AUTH_REQUIRED' : response.status === 429 ? 'RATE_LIMITED' : response.status === 503 ? 'AUTH_UNAVAILABLE' : `MCP_AUTH_HTTP_${response.status}` });
     // Hono's prepared headers do not survive every native Response returned by
     // auth/SDK handlers. Decorate that response directly, preserving challenges.
     const headers = new Headers(response.headers);

@@ -3,6 +3,7 @@ import { and, asc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, errors, id, json, response, security, type Actor, type App, type Database, type DbExecutor } from './core.js';
 import { compileRule } from './audience.js';
+import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import { audiencePlans, consentAudit, contacts, listMembers, lists, segments, type AudienceOperation } from './db/audience.js';
 import { enqueue } from './jobs.js';
 
@@ -144,7 +145,7 @@ async function planAudience(db: DbExecutor, identity: Actor, statement: string) 
   return { id: planId, operation: operation.kind, matched: rows.length, sample: sample(rows), warnings, requiresResubscribeConfirmation, expiresAt };
 }
 const chunks = <T,>(values: T[], size: number) => Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
-async function applyPlan(db: Database, identity: Actor, planId: string, confirmResubscribe: boolean, evidence?: string) {
+async function applyPlan(db: Database, identity: Actor, planId: string, confirmResubscribe: boolean, audit: AuditContext, evidence?: string) {
   return db.transaction(async tx => {
     const [plan] = await tx.select().from(audiencePlans).where(and(scoped(audiencePlans, identity), eq(audiencePlans.id, planId), eq(audiencePlans.actorKeyId, identity.keyId))).limit(1).for('update');
     if (!plan) throw new ApiError(404, 'NOT_FOUND', 'Audience operation plan was not found.');
@@ -173,7 +174,10 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
         for (const batch of chunks(operation.targetIds, 5000)) if (batch.length) await tx.delete(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, batch)));
       }
     }
-    await tx.update(audiencePlans).set({ appliedAt }).where(and(scoped(audiencePlans, identity), eq(audiencePlans.id, plan.id)));
+    // The plan's own write carries its audit row: counts and field names, never a contact's address.
+    const after = operation.kind === 'update_contacts' ? { fields: Object.keys(operation.set), properties: Object.keys(operation.set.properties ?? {}), consent: operation.set.consent ?? null } : { listId: operation.listId };
+    await tx.execute(sql`WITH applied AS (UPDATE audience_operation_plans SET applied_at=${appliedAt}::timestamptz WHERE workspace_id=${identity.workspaceId} AND id=${plan.id} RETURNING id),
+      audit AS (${auditInsert(audit, { action: 'audience.bulk_apply', workspaceId: identity.workspaceId, target: { type: 'audience_plan', id: plan.id }, after: { operation: operation.kind, matched: plan.matched, ...after }, details: { resubscribeConfirmed: confirmResubscribe || undefined } }, { from: sql`applied` })}) SELECT 1`);
     return { id: plan.id, operation: operation.kind, affected: plan.matched, appliedAt };
   });
 }
@@ -181,5 +185,5 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
 export function registerAudienceQuery(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/query', operationId: 'queryAudience', tags: ['Audience'], security, description: 'Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema.', request: { body: json(z.object({ statement: Statement }).strict()) }, responses: { 200: response(QueryResult), ...errors } }), async c => c.json(QueryResult.parse(await queryAudience(c.env.db, actor(c), c.req.valid('json').statement)), 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/plan', operationId: 'planAudienceMutation', tags: ['Audience'], security, description: 'Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships.', request: { body: json(z.object({ statement: Statement }).strict()) }, responses: { 201: response(PlanResult), ...errors } }), async c => c.json(PlanResult.parse(await planAudience(c.env.db, actor(c, 'manage'), c.req.valid('json').statement)), 201));
-  app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/apply', operationId: 'applyAudiencePlan', tags: ['Audience'], security, description: 'Apply an immutable AudienceQL plan once. Prior opt-outs require confirmResubscribe.', request: { body: json(z.object({ planId: z.string().regex(/^aqp_[0-9a-f]{32}$/), confirmResubscribe: z.boolean().default(false), evidence: z.string().trim().min(1).max(2000).optional().describe('For a consent change: how these people agreed, for example "Opted in at checkout". Stored with each consent record.') }).strict()) }, responses: { 200: response(ApplyResult), ...errors } }), async c => { const input = c.req.valid('json'); return c.json(ApplyResult.parse(await applyPlan(c.env.db, actor(c, 'manage'), input.planId, input.confirmResubscribe, input.evidence)), 200); });
+  app.openapi(createRoute({ method: 'post', path: '/v1/audience-query/apply', operationId: 'applyAudiencePlan', tags: ['Audience'], security, description: 'Apply an immutable AudienceQL plan once. Prior opt-outs require confirmResubscribe.', request: { body: json(z.object({ planId: z.string().regex(/^aqp_[0-9a-f]{32}$/), confirmResubscribe: z.boolean().default(false), evidence: z.string().trim().min(1).max(2000).optional().describe('For a consent change: how these people agreed, for example "Opted in at checkout". Stored with each consent record.') }).strict()) }, responses: { 200: response(ApplyResult), ...errors } }), async c => { const input = c.req.valid('json'); return c.json(ApplyResult.parse(await applyPlan(c.env.db, actor(c, 'manage'), input.planId, input.confirmResubscribe, auditContext(c), input.evidence)), 200); });
 }

@@ -39,6 +39,24 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a { transition: color var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }
+/* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (three on a phone or
+   tablet), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
+.page-surface > .standing-banner { animation: none; }
+.standing-banner { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-12); margin-bottom: var(--page-gap); padding: var(--space-8) var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.standing-banner__icon { flex: none; align-self: flex-start; margin-top: 2px; color: var(--tone-ink); }
+.standing-banner__text { flex: 1; min-width: 0; }
+.standing-banner__text > p { height: var(--leading-sm); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.standing-banner__what { display: flex; align-items: center; font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; }
+.standing-banner__what:not(:has(.ui-skeleton-block)) { display: block; }
+.standing-banner__did { color: var(--color-muted); }
+.standing-banner__fix { flex: none; }
+.app-shell--compact .standing-banner { flex-wrap: wrap; align-items: flex-start; }
+.app-shell--compact .standing-banner__text { flex-basis: calc(100% - 28px); }
+.app-shell--compact .standing-banner__text > p { white-space: normal; text-overflow: clip; }
+.app-shell--compact .standing-banner__text > .standing-banner__did { height: auto; }
+.app-shell--compact .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(3 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.app-shell--compact .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
+.app-shell--compact .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }
 .boot-loader { display: grid; place-items: center; height: 100dvh; background: var(--color-deep); color: var(--color-muted); }
@@ -102,12 +120,17 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .logs-table .ui-table td:last-child svg { display: block; }
 .logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: var(--color-hover); }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
-/* Every mailbox address (PrivateAddress): blurred after two characters until hovered or its row or link is focused.
-   Only a filter changes, so blurred and revealed are the same width. */
+/* Every mailbox address (PrivateAddress): its first two characters, then a blurred run where the rest will be. The rest
+   is not in the page until the address is hovered or focused; the run is drawn from filler, never from the address.
+   The box is given the whole address's width up front (kerning and ligatures off, so the width is the sum of its
+   characters') and keeps it once the text arrives, so revealing moves nothing. */
 .private-address { display: inline-flex; max-width: 100%; white-space: nowrap; }
-.private-address__rest { filter: blur(4px); transition: filter var(--motion-duration); }
-.private-address:hover .private-address__rest, :is(a, button, [tabindex], .ui-table__clickable):focus-visible .private-address__rest, :is(.ui-table__linked, .ui-card):has(.ui-row-link:focus-visible) .private-address__rest { filter: blur(0); }
-@media (hover: none) { .private-address:hover .private-address__rest { filter: blur(4px); } }
+.private-address__value { display: flex; flex: none; font-kerning: none; font-variant-ligatures: none; }
+.private-address[data-revealed] > .private-address__value { display: block; }
+/* A filtered box paints above a card's link, which covers the card: let a press through to it. */
+.private-address__rest { flex: 1 1 0; min-width: 0; filter: blur(.31em); pointer-events: none; }
+.private-address__rest::before { content: 'mnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetax'; display: block; overflow: hidden; }
+.private-address[tabindex] { border-radius: 2px; cursor: default; }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
 .log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }
@@ -175,7 +198,10 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 /* Phones and portrait tablets (AppShell, below 900 px): a top bar with the workspace and theme, the page, and a bottom
    tab bar. The document scrolls, not the page card, so the browser's own bars collapse and a tap on the status bar
    scrolls to the top. Safe-area insets keep everything clear of notches and the home indicator. */
-.app-shell--compact { --mobile-bar-height: 56px; --tab-bar-height: 56px; --bleed: 16px; --toast-offset: calc(var(--tab-bar-height)); display: block; height: auto; min-height: 100dvh; overflow: visible; padding-bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
+.app-shell--compact { --mobile-bar-height: 56px; --tab-bar-height: 56px; --bleed: 16px; display: block; height: auto; min-height: 100dvh; overflow: visible; padding-bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
+/* Notices rise above the tab bar. The toast stack renders outside the shell (ToastProvider wraps the router), so the
+   offset is set on it here rather than inherited from .app-shell--compact. */
+body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar { display: flex; align-items: center; gap: var(--space-8); height: calc(var(--mobile-bar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(var(--space-8), env(safe-area-inset-right)) 0 max(var(--space-16), env(safe-area-inset-left)); background: var(--color-deep); }
 .mobile-bar .wordmark { position: static; flex: none; height: 44px; margin-right: auto; }
 .mobile-bar__context { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
@@ -183,7 +209,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .mobile-bar__context .demo-indicator { padding: 0; }
 .mobile-bar .theme-toggle { position: static; flex: none; width: 44px; height: 44px; }
 .app-shell--compact .page-surface { --page-pad: max(var(--space-16), env(safe-area-inset-left), env(safe-area-inset-right)); height: auto; min-height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); margin: 0; padding: var(--space-20) var(--page-pad) var(--space-32); overflow-x: clip; overflow-y: visible; border-radius: 0; box-shadow: 0 -.5px 0 var(--color-border-muted); scrollbar-gutter: auto; overscroll-behavior: auto; }
-.tab-bar { position: fixed; inset: auto 0 0; z-index: 30; display: grid; grid-template-columns: repeat(5, minmax(0, 128px)); justify-content: center; height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: color-mix(in srgb, var(--color-deep) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.tab-bar { position: fixed; inset: auto 0 0; z-index: 30; display: grid; grid-template-columns: repeat(5, minmax(0, 128px)); justify-content: center; height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: color-mix(in srgb, var(--color-deep) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border); backdrop-filter: blur(12px); }
 .tab-bar__item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: var(--color-muted); font-size: 11px; line-height: 14px; text-decoration: none; -webkit-tap-highlight-color: transparent; transition: color var(--motion-duration); }
 .tab-bar__icon { position: relative; display: grid; place-items: center; width: 52px; height: 28px; transition: transform 160ms var(--ease-out-strong); }
 .tab-bar__icon::before { content: ''; position: absolute; inset: 0; border-radius: 14px; background: var(--color-layer-2); opacity: 0; transform: scaleX(.6); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); }
@@ -211,7 +237,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
   .ui-page-header { gap: var(--space-12); margin-bottom: var(--space-16); }
   .ui-page-header > .cluster:first-child { flex-wrap: nowrap; min-width: 0; max-width: 100%; }
   .ui-page-header h1 { min-width: 0; font-size: 20px; line-height: 28px; overflow-wrap: anywhere; }
-  .ui-page-header h1 .private-address, dd .private-address, .email-metadata .private-address { display: inline; white-space: normal; }
+  /* Here the box never runs past its line: masked, the run is cut there; revealed, a longer address wraps inside it. */
+  :is(.ui-page-header h1, dd, .email-metadata) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  :is(.ui-page-header h1, dd, .email-metadata) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
   .ui-page-header > .cluster:last-child { flex-wrap: wrap; }
   .data-toolbar > .cluster { width: 100%; }
   .data-toolbar .ui-select-trigger { flex: 1 1 0; width: auto; min-width: 0; max-width: none; }
@@ -224,5 +252,11 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .mobile-bar__context > :is(.ui-select-trigger, select) { box-shadow: none; background-color: transparent; font-weight: var(--font-weight-bold); field-sizing: content; }
 .mobile-bar__context > :is(.ui-select-trigger, select):focus-visible { box-shadow: none; outline: 2px solid var(--color-focus); }
 /* A form's own Save and Cancel stay in reach above the tab bar while its fields scroll. */
-.app-shell--compact .form-actions { position: sticky; bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); z-index: 2; flex-wrap: nowrap; margin-inline: calc(-1 * var(--bleed)); padding: var(--space-12) var(--bleed); background: color-mix(in srgb, var(--color-surface) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border-muted); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.app-shell--compact .form-actions { position: sticky; bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); z-index: 2; flex-wrap: nowrap; margin-inline: calc(-1 * var(--bleed)); padding: var(--space-12) var(--bleed); background: color-mix(in srgb, var(--color-surface) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border-muted); backdrop-filter: blur(12px); }
 @media (max-width: 640px) { .app-shell--compact .form-actions > .ui-button { flex: 1 1 0; } }
+/* Contact support (components/ContactSupport.tsx): the share choice with its note under it, and the reference to copy. */
+.contact-support__share { display: flex; flex-direction: column; gap: var(--space-4); }
+.contact-support__share > .ui-field__hint { padding-inline-start: calc(var(--space-16) + var(--space-8)); margin: 0; }
+.contact-support__reference { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
+.contact-support__reference code { overflow-wrap: anywhere; }
+.contact-support__link { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; }

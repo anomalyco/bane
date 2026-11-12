@@ -2,6 +2,7 @@ import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
 import {ApiError,digest,errors,id,json,randomSecret,response,security,type App} from './core.js';
 import {ritualAdmin,ownReceiving} from './rituals.js';
+import {recordAudit} from './audit.js';
 import {mailboxKeys} from './db/mailbox.js';
 import {mcpClientConfig,mcpClientNames,mcpClients,mcpServerUrl} from './mcp-clients.js';
 // One connection: an inbox-only key inside a ready client config, or the same config for OAuth, where the person who
@@ -19,6 +20,7 @@ export function registerInboxConnection(app:App){
     const what=found.rows.length===1?found.rows[0]!.label:`${found.rows.length} inboxes`;
     await tx.insert(mailboxKeys).values({id:kid,workspaceId:w,name:`${what} · ${mcpClientNames[q.client]}`.slice(0,100),hash:await digest(key),prefix:key.slice(0,14),expiresAt:found.rows[0]!.expires,mailboxIds:ids,permissions:q.reply?['read','send']:['read']});
     await ownReceiving(tx,c,'key',kid);
+    await recordAudit(tx,c,{action:'inbox_connection.create',workspaceId:w,target:{type:'inbox_key',id:kid},after:{client:q.client,auth:q.auth,inboxIds:ids,permissions:q.reply?['read','send']:['read']}});
    }
   });
   const config=mcpClientConfig(q.client,url,key?{bearer:key}:{});

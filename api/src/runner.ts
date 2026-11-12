@@ -7,9 +7,11 @@ import { jobConcurrency } from './jobs.js';
 import { hourlyUpkeep } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
+import { standingTick } from './standing.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
-import { ApiError, log } from './core.js';
+import { ApiError, log, logError, setLogContext } from './core.js';
+setLogContext({ service: 'runner', deploy: process.env.DEPLOY_SHA });
 try {
   const { runtime, close } = nodeRuntime(process.env);
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
@@ -48,7 +50,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = publicStatsTick(runtime).finally(() => { publicStats = undefined; });
+          publicStats = publicStatsTick(runtime).then(() => standingTick(runtime)).finally(() => { publicStats = undefined; });
         }
         // In the background, like shared setup: retention can take minutes, and a step that keeps failing used to throw
         // here before drain() on every pass, so no job ran and no mail was dispatched until it succeeded.
@@ -65,12 +67,12 @@ try {
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
-        log('error', { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED', message: error instanceof ApiError ? error.message : 'Job polling failed. Check database connectivity and migrations.' });
+        logError(error, { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED' }); // Job polling failed: check database connectivity and migrations.
         await setTimeout(5000);
       }
     }
   } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await hourly; await listener?.end(); await close(); }
 } catch (error) {
-  log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;
 }

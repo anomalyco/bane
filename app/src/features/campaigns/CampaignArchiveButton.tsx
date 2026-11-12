@@ -7,7 +7,7 @@ export function CampaignArchiveButton({ campaign, compact = false, onSuccess }: 
   const archived = Boolean(campaign.archivedAt)
   const active = !archived && campaignActive(campaign)
   const toast = useToast()
-  const mutation = useApiMutation((api, value: boolean) => api.campaigns.setArchived({ id: campaign.id, archived: value }), archived ? 'Campaign restored' : 'Campaign archived')
+  const mutation = useApiMutation((api, value: boolean) => api.campaigns.setArchived({ id: campaign.id, archived: value }), archived ? 'Campaign restored' : 'Campaign archived', false, true, campaign.id)
   const label = archived ? 'Restore campaign' : 'Archive campaign'
   // Say why the button is unavailable and what to do instead.
   const title = active ? (['preparing', 'scheduled'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) === 0 ? 'Unschedule it before archiving: open it and choose Unschedule' : 'Cancel it or let it finish before archiving') : label

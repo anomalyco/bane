@@ -10,7 +10,8 @@ import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, Mailbo
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
-import { nameOf, when, Sender } from './shared'
+import { when, Sender } from './shared'
+import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -129,7 +130,7 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
   return <Dialog open onOpenChange={open => { if (!open) onClose() }} title={m ? m.subject || '(no subject)' : <SkeletonText width={240} />} footer={<Button onClick={onClose}>Close</Button>}>
     {message.error ? <ErrorState error={message.error} onRetry={() => void message.refetch()} /> : !m ? <SkeletonText width={320} /> : <div className="stack">
       <div className="settings-cell-stack">
-        <div className="mailbox-message__from"><span>{nameOf(m.from)}</span><span className="muted"><PrivateAddress value={m.from.address} /></span></div>
+        <div className="mailbox-message__from"><span><Sender value={m.from} /></span>{nameParts(m.from.name, m.from.address) && <span className="muted"><PrivateAddress value={m.from.address} /></span>}</div>
         <span className="muted">{date(m.receivedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
       </div>
       <div className="cluster" aria-label="Sender checks">{m.simulated ? <StatusBadge status="Simulated: no sender checks" tone="info" /> : <>{verdict('SPF', m.auth.spf)}{verdict('DKIM', m.auth.dkim)}{verdict('DMARC', m.auth.dmarc)}</>}</div>
@@ -159,7 +160,7 @@ function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: bo
   const [extend, setExtend] = useState('')
   const limit = Date.parse(inbox.createdAt) + 30 * 86_400_000
   const until = extend === '' ? null : new Date(extend === 'max' ? limit : Math.min(limit, Math.max(Date.now(), Date.parse(inbox.expiresAt)) + Number(extend) * 1000))
-  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated')
+  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated', false, true, inbox.id)
   useEffect(() => { if (open) { save.reset(); setName(inbox.name ?? ''); setExtend('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const canExtend = inbox.status === 'active' && Date.parse(inbox.expiresAt) < limit - 60_000
   async function submit(event: FormEvent) {
@@ -190,7 +191,7 @@ function InboxDetail({ id }: { id: string }) {
   const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
   const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
   const keys = useApiQuery(['agent-inbox-keys', id], async (api, signal) => (await api.mailboxes.keys(false, signal)).filter(key => key.addressIds?.length === 1 && key.addressIds[0] === id), { enabled: canAdminister })
-  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted')
+  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, true, id)
   const revoke = useApiMutation((api, keyId: string) => api.mailboxes.revokeKey(keyId), 'Inbox key revoked')
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
