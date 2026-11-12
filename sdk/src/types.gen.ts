@@ -793,6 +793,10 @@ export type CampaignDelivery = {
         message: string;
     } | null;
     /**
+     * After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled.
+     */
+    deliveredOnly: boolean;
+    /**
      * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
      */
     waiting: {

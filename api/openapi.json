@@ -3154,6 +3154,10 @@
               "message"
             ]
           },
+          "deliveredOnly": {
+            "type": "boolean",
+            "description": "After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled."
+          },
           "waiting": {
             "type": [
               "object",
@@ -3189,6 +3193,7 @@
           "pacing",
           "pausedAt",
           "pauseReason",
+          "deliveredOnly",
           "waiting"
         ],
         "description": "The current launch: null until the campaign is sent or scheduled, and cleared by a new revision."

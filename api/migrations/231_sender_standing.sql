@@ -73,7 +73,9 @@ ALTER TABLE workspaces ADD COLUMN send_cap_override_expires_at timestamptz;
 
 -- Campaign list probes: the first min(500, 10%) recipients (at least 100) go out, then release waits for their
 -- feedback. A probe with too many bounces or complaints quarantines the campaign (paused, LIST_QUALITY).
-ALTER TABLE sending_campaigns ADD COLUMN probe_wait_until timestamptz, ADD COLUMN probe_cleared_at timestamptz, ADD COLUMN quarantines smallint NOT NULL DEFAULT 0;
+-- After an owner resumes a failed probe, the rest goes only to contacts the workspace delivered to before (delivered_only).
+ALTER TABLE sending_campaigns ADD COLUMN probe_wait_until timestamptz, ADD COLUMN probe_cleared_at timestamptz, ADD COLUMN quarantines smallint NOT NULL DEFAULT 0,
+  ADD COLUMN delivered_only boolean NOT NULL DEFAULT false;
 ALTER TABLE sending_campaigns DROP CONSTRAINT sending_campaigns_waiting_reason_check,
   ADD CHECK (waiting_reason IN ('pacing_window','ses_daily_quota','hosted_daily_quota','list_probe'));
 

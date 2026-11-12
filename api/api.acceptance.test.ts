@@ -9367,10 +9367,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const [event] = (await db.query(`SELECT kind,details FROM standing_events WHERE workspace_id=$1 AND kind='quarantine'`, [wid])).rows;
       assert.deepEqual([event.details.campaignId, event.details.code], [c.id, 'LIST_QUALITY']);
       assert.deepEqual((await db.query(`SELECT type FROM jobs WHERE workspace_id=$1 AND type IN ('standing.notify','operation.publish') ORDER BY type`, [wid])).rows.map(r => r.type), ['operation.publish', 'standing.notify']);
-      // The owner resumes once; the rest is released.
+      // Review of #115: the owner's one resume used to release the remaining 50 never-mailed contacts unchanged. Now the
+      // rest goes only to contacts this workspace delivered to before (10 of them, from earlier receipts).
+      const known = (await db.query(`SELECT recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1) AND ordinal>100 ORDER BY ordinal DESC LIMIT 10`, [c.id])).rows.map(r => r.email).reverse();
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        SELECT 'email_prior_'||n,$1,$2,'fixture',$3,jsonb_build_array(upper(e)),'[]','[]','Receipt','{}',false,'delivered','prior-'||n,now()-interval '20 days' FROM unnest($4::text[]) WITH ORDINALITY x(e,n)`, [wid, REGION, from, known]);
       ok(await local('POST', `${path}/resume`, {}));
+      assert.equal((await view()).delivery.deliveredOnly, true);
       await run('campaign.run');
-      assert.equal((await view()).delivery.expanded, 150);
+      const released = await view();
+      assert.deepEqual([released.delivery.expanded, released.delivery.canceled], [150, 40]);
+      assert.deepEqual((await db.query(`SELECT to_addresses->>0 AS email FROM sending_emails WHERE campaign_id=$1 AND review_ordinal>100 ORDER BY review_ordinal`, [c.id])).rows.map(r => r.email), known);
       // A second list-quality quarantine needs an operator.
       await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE_HIGH","message":"x"}',quarantines=2 WHERE id=$1`, [c.id]);
       error(await local('POST', `${path}/resume`, {}), 409, 'QUARANTINE_REVIEW_REQUIRED');
