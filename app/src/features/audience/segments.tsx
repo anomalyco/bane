@@ -3,11 +3,15 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { Plus, X } from 'lucide-react'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
 import type { SegmentInput, SegmentRule } from '../../data/types'
-import { SearchField, Alert, Button, ControlSkeleton, DataTable, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select } from '../../components/ui'
+import { SearchField, Button, ControlSkeleton, DataTable, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select } from '../../components/ui'
 import { AudienceRouteSkeleton, AudienceSummarySkeleton, segmentColumns } from './skeletons'
-import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions, ruleSummary, useAudienceLists } from './shared'
+import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions, useAudienceLists } from './shared'
 import { useAdaptivePageSize } from '../../lib/pagination'
 import { AudienceHeader } from './header'
+import { LiveSegmentRoute, LiveSegmentsPage, SegmentsEmpty } from './segments-live'
+
+// Demo mode keeps the earlier segment model (status, country, list and last-opened rules) that its sample data and
+// campaign audiences use; live mode edits the API's public rule in segments-live.tsx.
 
 function DemoSegmentsPage() {
   const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
@@ -18,7 +22,7 @@ function DemoSegmentsPage() {
   const params = { search, page, pageSize: adaptivePageSize }
   const query = useApiQuery(['segments', params], (api, signal) => api.segments.list(params, signal))
   return <div className="audience-page"><AudienceHeader actions={<Button variant="primary" onClick={() => navigate('/audience/segments/new')}>Create segment</Button>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} columns={[{ ...segmentColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/audience/segments/${row.id}`}>{row.name}</Link> }, { ...segmentColumns[1], render: row => `${row.rules.length} · match ${row.match}` }, { ...segmentColumns[2], render: row => number(row.matched) }, { ...segmentColumns[3], render: row => number(row.eligible) }, { ...segmentColumns[4], render: row => date(row.updatedAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={adaptivePageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ ...segmentColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/audience/segments/${row.id}`}>{row.name}</Link> }, { ...segmentColumns[1], render: row => `${row.rules.length} · match ${row.match}` }, { ...segmentColumns[2], render: row => number(row.matched) }, { ...segmentColumns[3], render: row => number(row.eligible) }, { ...segmentColumns[4], render: row => date(row.updatedAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={adaptivePageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
   </div>
 }
 function DemoSegmentEditorPage() {
@@ -70,40 +74,7 @@ export function SegmentsPage() {
   const api = useApi()
   return api.mode === 'demo' ? <DemoSegmentsPage /> : <LiveSegmentsPage />
 }
-function LiveSegmentsPage() {
-  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
-  const [page, setPage] = useState(1)
-  const [search, setSearch] = useState('')
-  useEffect(() => setPage(1), [adaptivePageSize])
-  const query = useApiQuery(['segments', {page, search, pageSize: adaptivePageSize}], (api, signal) => api.segments.list({page, search, pageSize: adaptivePageSize}, signal))
-  return <div className="audience-page"><AudienceHeader actions={<Link className="ui-button ui-button--primary" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => {setSearch(event.target.value); setPage(1)}} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} columns={[{key: 'name', label: 'Name', render: row => <Link to={`/audience/segments/${row.id}`}>{row.name}</Link>}, {key: 'rule', label: 'Rule', width: '50%', render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> }}, {key: 'updatedAt', label: 'Updated', render: row => date(row.updatedAt)}]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
-}
 export function SegmentEditorPage() {
-  const api = useApi(), {id} = useParams()
-  return api.mode === 'demo' ? <DemoSegmentEditorPage /> : <LiveSegmentRoute key={id ?? 'new'} id={id} />
-}
-function LiveSegmentRoute({id}: {id?: string}) {
-  const query = useApiQuery(['segments', id ?? 'new'], (api, signal) => id ? api.segments.get(id, signal) : Promise.resolve(null))
-  return query.isPending ? <AudienceRouteSkeleton kind="segment" /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <LiveSegmentEditor initial={query.data ? {id: query.data.id, name: query.data.name, match: query.data.match, rules: [], rule: query.data.rule} : {name: '', match: 'all', rules: [], rule: {field: 'country', operator: 'eq', value: 'US'}}} />
-}
-function validRule(value: unknown, depth = 0): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const r = value as Record<string, unknown>
-  if (r.operator === 'and' || r.operator === 'or') return depth < 3 && Object.keys(r).every(k => ['operator', 'rules'].includes(k)) && Array.isArray(r.rules) && r.rules.length > 0 && r.rules.length <= 10 && r.rules.every(child => validRule(child, depth + 1))
-  if (['email', 'firstName', 'plan', 'country'].includes(String(r.field))) return Object.keys(r).every(k => ['field', 'operator', 'value'].includes(k)) && ['eq', 'neq', 'contains'].includes(String(r.operator)) && typeof r.value === 'string' && r.value.length <= 200
-  return Object.keys(r).every(k => ['field', 'operator', 'days'].includes(k)) && ['lastOpenAt', 'lastClickAt'].includes(String(r.field)) && ['within', 'inactive'].includes(String(r.operator)) && Number.isInteger(r.days) && Number(r.days) >= 1 && Number(r.days) <= 730
-}
-function LiveSegmentEditor({initial}: {initial: SegmentInput}) {
-  const [name, setName] = useState(initial.name), [text, setText] = useState(JSON.stringify(initial.rule, null, 2)), [error, setError] = useState('')
-  const [savedId, setSavedId] = useState(initial.id)
-  const navigate = useNavigate()
-  const save = useApiMutation((api, input: SegmentInput) => api.segments.save(input), 'Segment saved')
-  const preview = useApiMutation((api, input: SegmentInput) => api.segments.preview(input))
-  async function submit(showPreview: boolean) {
-    setError(''); preview.reset()
-    try { const rule: unknown = JSON.parse(text); if (!name.trim() || !validRule(rule)) throw new Error('Enter a name and a valid public segment rule.'); const segment = await save.mutateAsync({id: savedId, name: name.trim(), rule: rule as Record<string, unknown>, match: 'all', rules: []}); setSavedId(segment.id); if (showPreview) await preview.mutateAsync({...segment, id: segment.id}); else navigate(`/audience/segments/${segment.id}`, {replace: true}) }
-    catch (cause) {setError(cause instanceof Error ? cause.message : 'Cannot save segment.')}
-  }
-  const busy = save.isPending || preview.isPending
-  return <div className="audience-page"><PageHeader title={savedId ? 'Edit segment' : 'Create segment'} backTo="/audience/segments" actions={<Button variant="primary" loading={busy} onClick={() => submit(false)}>Save segment</Button>} /><div className="stack audience-editor"><Field label="Segment name" htmlFor="segment-name"><Input id="segment-name" value={name} onChange={event => {setName(event.target.value); preview.reset()}} /></Field><section className="section stack"><SectionHeader title="Conditions" /><Field label="Public rule JSON" htmlFor="segment-rule" hint="Supports nested and/or groups; email, firstName, plan, country; lastOpenAt and lastClickAt."><textarea id="segment-rule" className="ui-input" rows={18} spellCheck={false} value={text} onChange={event => {setText(event.target.value); preview.reset()}} /></Field>{error && <Alert tone="danger">{error}</Alert>}<Button loading={busy} onClick={() => submit(true)}>Save and preview</Button></section>{preview.data && <section className="section"><SectionHeader title="Audience preview" /><div className="audience-summary cluster"><span>{number(preview.data.matched)} matched</span><span>{number(preview.data.eligible)} eligible</span><span className="muted">{number(preview.data.suppressed)} suppressed</span><span className="muted">{number(preview.data.unsubscribed)} not subscribed</span></div></section>}</div></div>
+  const api = useApi()
+  return api.mode === 'demo' ? <DemoSegmentEditorPage /> : <LiveSegmentRoute />
 }

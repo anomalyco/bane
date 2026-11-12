@@ -5,30 +5,37 @@ import {
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
+// A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
 export const campaignColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div> },
-  { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} /> },
-  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} /> },
-  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} /> },
-  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" /> },
-  { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span /> },
+  { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div>, card: 'title' },
+  { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'subject', label: 'Subject', card: 'line', table: false },
+  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} />, card: 'line' },
+  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} />, card: 'inline' },
+  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" />, card: 'inline' },
+  { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
+// A template's card: its name and status, its subject or purpose, when it changed, and Use template.
 export const templateColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton },
-  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} /> },
-  { key: 'updated', label: 'Updated · UTC', width: 190, skeleton: <SkeletonText width="90%" /> },
-  { key: 'action', label: '', width: 150, align: 'right', skeleton: <span /> },
+  { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton, card: 'title' },
+  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'about', label: 'About', card: 'line', table: false },
+  { key: 'updated', label: 'Updated · UTC', width: 190, skeleton: <SkeletonText width="90%" />, card: 'inline' },
+  { key: 'action', label: '', width: 150, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
 export function CampaignAudienceSkeleton() {
   return <LoadingRegion label="Loading audience" className="campaign-audience-review-skeleton">
     <div><SkeletonText width={70} /><p className="muted">eligible recipients</p></div>
+    <p className="campaign-audience-source"><SkeletonText width={120} /></p>
     <div className="campaign-audience-summary">
       <div className="campaign-summary-line"><span>Matched contacts</span><SkeletonText width={45} /></div>
       <div className="campaign-summary-line muted"><span>Suppressed</span><SkeletonText width={35} /></div>
-      <div className="campaign-summary-line muted"><span>Not subscribed (including unknown)</span><SkeletonText width={35} /></div>
+      <div className="campaign-summary-line muted"><span>Not subscribed</span><SkeletonText width={35} /></div>
     </div>
+    <p className="muted campaign-audience-note">Eligible means subscribed and not suppressed. Consent is checked again as each email sends.</p>
+    <Button disabled>Refresh count</Button>
   </LoadingRegion>
 }
 
@@ -40,8 +47,9 @@ export function CampaignEditorSkeleton() {
   return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
     <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
       <div className="campaign-compose-metadata" aria-hidden="true">
-        {['Name', 'From', 'To'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
-        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text</Button></div>
+        {['Name', 'From', 'Reply to', 'To', 'Segment'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+        <div className="campaign-compose-row campaign-audience-line"><span /><span className="campaign-audience-line__text"><SkeletonText width="60%" /></span></div>
+        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Inbox preview</Button></div>
       </div>
       <ComposerSkeleton />
     </div></div>
@@ -58,18 +66,19 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </>
   }
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
-    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span><Button variant="ghost" disabled>Preview</Button><Button variant="secondary" disabled>Archive</Button><Button variant="primary" disabled>Publish</Button></>} />
+    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>} />
     <LoadingRegion label="Loading template editor" className="campaign-compose-workspace">
       <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+        <p className="template-compose-intro">A reusable starting point for campaigns. Write example content here; add personalization such as {'{{name}}'} in each campaign.</p>
         <div className="campaign-compose-metadata" aria-hidden="true">
-          {['Name', 'Purpose', 'Subject', 'Preview', 'From', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+          {['Name', 'Purpose', 'Subject', 'Inbox preview', 'From name', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
         </div>
         <ComposerSkeleton />
       </div></div>
     </LoadingRegion>
   </div>
   if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions"><Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
+    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
     <CampaignEditorSkeleton />
   </div>
   return <div className="stack campaign-review">
