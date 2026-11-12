@@ -60,6 +60,41 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
+  const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
+  const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
+  const block=workflow.match(/python3 - <<'PY'\n([\s\S]*?)\n          PY/);
+  assert.ok(block,'The release archive reader must be exercised from the workflow.');
+  const reader=block[1]!.replace(/^          /gm,''),root=mkdtempSync(join(tmpdir(),'bane-release-'));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const version='0.4.2',name=`banemx-sdk-${version}.tgz`,bytes='synthetic package bytes';
+  for(const [label,entries,accept] of [
+    ['package',[[name,bytes,0]],true],
+    ['nested',[[`nested/${name}`,bytes,0]],false],
+    ['parent',[[`nested/../../${name}`,bytes,0]],false],
+    ['extra',[[name,bytes,0],['extra.txt',bytes,0]],false],
+    ['duplicate',[[name,bytes,0],[name,bytes,0]],false],
+    ['link',[[name,'../other',0o120777]],false],
+    ['large',[[name,'large',0]],false],
+    ['compression',[[name,bytes,0]],false],
+  ] as const){
+    const dir=join(root,label);mkdirSync(dir);
+    execFileSync('python3',['-c',`import sys,json,zipfile,warnings
+warnings.simplefilter('ignore',UserWarning)
+with zipfile.ZipFile(sys.argv[1],'w',compression=zipfile.ZIP_DEFLATED) as archive:
+    for name,data,mode in json.loads(sys.argv[2]):
+        entry=zipfile.ZipInfo(name)
+        entry.compress_type=zipfile.ZIP_BZIP2 if sys.argv[3]=='compression' else zipfile.ZIP_DEFLATED
+        if mode: entry.external_attr=mode<<16
+        archive.writestr(entry,'x'*(16*1024*1024+1) if data=='large' else data)
+`,join(dir,'sdk-artifact.zip'),JSON.stringify(entries),label],{timeout:5000});
+    const result=spawnSync('python3',['-c',reader],{env:{...process.env,RUNNER_TEMP:dir,VERSION:version},encoding:'utf8',timeout:5000});
+    assert.equal(result.status===0,accept,`${label}: ${result.stderr}`);
+    assert.equal(existsSync(join(root,name)),false,label);
+    if(accept)assert.equal(readFileSync(join(dir,'package','sdk.tgz'),'utf8'),bytes);
+    else assert.equal(existsSync(join(dir,'package','sdk.tgz')),false,label);
+  }
+});
 test('mail gateway: private admission binds the credential lane and append metadata',async()=>{
   const {gatewayLane}=await import('./src/protocol-admission.js');
   const key=randomUUID(),ts='1800000000',path='/internal/v1/mail';
@@ -4117,6 +4152,39 @@ describe('Dashboard API capabilities', () => {
       assert.equal(full.url, `${PUBLIC_ORIGIN}/campaigns/${campaign.id}/${state === 'failed' ? 'edit' : 'review'}`);
     }
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
+  });
+
+  test('block HTML: campaign and template validation bound parsing before changing drafts',async t=>{
+    const key=await keyFixture(t,{permissions:['send']});
+    const manager=await keyFixture(t,{permissions:['manage']});
+    const {validateBlockHtml,renderBlockHtml,renderBlockText,BlockContentError}=await import('./src/campaign-blocks.js');
+    const inputs=[
+      '<div>'.repeat(40_000),
+      '<p>'+'<code>'.repeat(3_000)+'text'+'</code>'.repeat(3_000)+'</p>',
+      '<p '+Array.from({length:300},(_,i)=>`a${i}="x"`).join(' ')+'>text</p>',
+      '<p>text</p>'.repeat(20_001),
+    ];
+    for(const html of inputs){
+      for(const [method,path,apiKey,body,code] of [
+        ['POST','/v1/campaigns',key.secret,{name:'Complex content',html},'CAMPAIGN_CONTENT_INVALID'],
+        ['PATCH','/v1/templates/tpl_fixture',manager.secret,{revision:1,draft:{name:'Complex content',html}},'TEMPLATE_CONTENT_INVALID'],
+      ] as const){
+        const start=performance.now();
+        error(await http(method,path,apiKey,body,{},20_000),422,code);
+        const ms=performance.now()-start;t.diagnostic(`${path}: ${Buffer.byteLength(html)} bytes rejected in ${Math.round(ms)} ms`);
+        assert.ok(ms<2000,'Block content validation must finish before its two-second request budget.');
+      }
+      for(const render of [validateBlockHtml,renderBlockHtml,renderBlockText])assert.throws(()=>render(html),BlockContentError);
+    }
+    for(const href of ['#','&#35;',' # ']){
+      const html=`<p><a href="${href}">Link</a></p>`;
+      assert.doesNotThrow(()=>validateBlockHtml(html));
+      assert.throws(()=>validateBlockHtml(html,{complete:true}),/placeholder/);
+    }
+    const html='<h1>Example</h1><p>Some <strong>formatted</strong> text.</p>';
+    assert.doesNotThrow(()=>validateBlockHtml(html,{complete:true}));
+    assert.ok(renderBlockHtml(html).includes('<strong>formatted</strong>'));
+    assert.equal(renderBlockText(html),'Example\n\nSome formatted text.');
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
@@ -8261,10 +8329,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
       const allowance=hostedAllowance(runtime.config,wid,1);
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
+      // Production plans read the (workspace_id,hour) key. On a tiny analyzed table the planner may
+      // seq-scan instead and count other suites' committed rows, so pin the plan to the index path.
+      await db.query('SET LOCAL enable_seqscan=off; SET LOCAL enable_bitmapscan=off');
       const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT * FROM hosted_allowance_read(${wid},1,0,100,1000,10000,10)`)).rows[0]['QUERY PLAN'] as Json[];
+      await db.query('RESET enable_seqscan; RESET enable_bitmapscan');
       const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
       assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
-      assert.equal(all.find(n=>n['Relation Name']==='hosted_usage_hourly')?.['Actual Rows'],24);
+      const usage=all.filter(n=>n['Relation Name']==='hosted_usage_hourly');
+      assert.equal(usage.length,1); assert.match(usage[0]['Index Cond']??'',/workspace_id = /);
+      assert.equal(usage[0]['Actual Rows']*usage[0]['Actual Loops'],24);
       assert.ok(plan[0]['Execution Time']<100,`Allowance took ${plan[0]['Execution Time']}ms for ${total} messages.`);
       t.diagnostic(`Allowance on ${total} envelopes: 24 hourly rows, ${plan[0]['Execution Time']} ms.`);
       await db.query(`UPDATE sending_emails SET status='rejected' WHERE id=$1`,[wid+'1']);
