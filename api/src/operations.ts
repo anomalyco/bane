@@ -1493,6 +1493,15 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   const group: { index: number; input: RoutineIngress }[] = [];
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
+    // An SES tenant status change from EventBridge, published to the pool's own feedback topic (src/standing.ts).
+    // A database failure propagates, so the queue redelivers it.
+    const standing = runtime.config.multiTenant && !simulatedTopic(item.topicArn) && item.message?.source === 'aws.ses' ? await import('./standing.js') : null;
+    const tenantEvent = standing?.tenantStatusEvent(item.message);
+    if (standing && tenantEvent) {
+      if (tenantEvent.account !== item.topicArn.split(':')[4]) { outcomes[index] = { ok: false, error: 'SES_ACCOUNT_MISMATCH' }; continue; }
+      await standing.ingestTenantStatus(runtime, tenantEvent);
+      outcomes[index] = { ok: true }; continue;
+    }
     try {
       if (simulatedTopic(item.topicArn)) assertSimulatedFeedback(runtime, item);
       else verifySesAccount(runtime, item.message, item.topicArn);

@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { IdentityFacts, ReceivingState, SendingState } from '../states.js';
 import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-export const eventTypes = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed'] as const;
+export const eventTypes = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed'] as const;
 export type EventType = typeof eventTypes[number];
 export interface PublishedEvent { id: string; type: EventType; createdAt: string; workspaceId: string; region: string | null; data: { emailId?: string; [key: string]: unknown }; }
 const scope = () => ({ workspaceId: text('workspace_id').notNull() });

@@ -74,6 +74,12 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 const maxOwnedWorkspaces = 10;
 
 /** Every workspace the user belongs to, with their role, by name: one statement. Read by GET /v1/me and the deprecated GET /v1/workspaces. */
+/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Bane operator role (if any). */
+export async function sessionMemberships(db: DbExecutor, userId: string) {
+  const { rows } = await db.execute<{ id: string; name: string; slug: string; role: string; operator: 'operator' | 'operator:read' | null }>(sql`SELECT w.id,w.name,w.slug,m.role,
+    (SELECT role FROM platform_operators WHERE user_id=${userId}) AS operator FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId} ORDER BY w.name,w.id`);
+  return { workspaces: rows.map(({ operator: _, ...row }) => Workspace.parse(row)), operator: rows[0]?.operator ?? null };
+}
 export async function memberships(db: DbExecutor, userId: string) {
   const rows = await db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, userId)).orderBy(workspaces.name, workspaces.id);
   return rows.map(row => Workspace.parse(row));

@@ -122,6 +122,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |
 | `getMetrics` | `usage` · `metrics` · sending |
 | `getSenderScore` | `usage` · `senderScore` · sending |
+| `releaseSenderStanding` | Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore. |
 | `listRegions` | `regions` · `list` · admin |
 | `configureRegion` | `regions` · `configure` · admin |
 | `discoverRegion` | `regions` · `discover` · admin |
