@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Config } from './core.js';
 
 // Simulator feedback is not reputation evidence. Admission and dispatch,
@@ -32,5 +32,10 @@ export function assertHostedAllowance(allowance: HostedAllowance | null, incomin
   }
 }
 
+/**
+ * The stream a marketing hold stops, as an expression over a sending_emails row: marketing mail and every campaign
+ * row. Admission, campaign release and dispatch (owner selection and the final election) use the same rule.
+ */
+export const heldStream = (e: SQL) => sql`(${e}.snapshot->>'kind'<>'transactional' OR ${e}.campaign_id IS NOT NULL)`;
 /** A marketing hold (bounces only): marketing is refused while transactional mail keeps flowing. */
 export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', `${reason ?? 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.'} Remove the addresses that bounced; Bane reviews the hold.`);

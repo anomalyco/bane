@@ -8278,6 +8278,32 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(aws.get('us-west-2'), 'DISABLED');
     });
   });
+  test('MX review round 2: a marketing hold keeps already-queued marketing queued at dispatch while transactional mail sends', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js'), { pauseHostedSending } = await import('./src/states.js'), { sql } = await import('drizzle-orm');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const f = await hostedHoldFixture(runtime, db);
+      await db.query('UPDATE workspaces SET send_cap_override=100000 WHERE id=$1', [f.wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('held-reader',$1,'reader@example.net','subscribed')`, [f.wid]);
+      const ses = t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => cmd instanceof GetAccountCommand ? { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 100000, SentLast24Hours: 0 } } : { MessageId: randomUUID() });
+      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: `A ${kind} message`, text: 'Fixture', kind });
+      const marketing = ok(await send('marketing'), 202).id, transactional = ok(await send('transactional'), 202).id;
+      // The hourly check holds marketing after both were admitted.
+      await runtime.db.execute(pauseHostedSending(sql`SELECT id,workspace_id,resumed_at,'Synthetic bounce hold'::text AS reason,'marketing'::text AS scope,0 AS sends,0 AS bounces,0 AS complaints,0 AS rejected,0 AS screened FROM provider_connections WHERE id=${f.wid}`));
+      error(await send('marketing'), 409, 'MARKETING_HELD');
+      const status = async () => Object.fromEntries((await db.query('SELECT id,status FROM sending_emails WHERE id=ANY($1)', [[marketing, transactional]])).rows.map(r => [r.id === marketing ? 'marketing' : 'transactional', r.status]));
+      const drain = () => runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 });
+      assert.equal((await drain()).sent, 1);
+      await db.query('UPDATE sending_emails SET lease_until=NULL WHERE id=$1', [marketing]); // As after a lease expires.
+      assert.equal((await drain()).sent, 0);
+      assert.deepEqual(await status(), { marketing: 'queued', transactional: 'accepted' }, 'It used to send the queued marketing.');
+      // The final election rechecks the hold too: a lease taken before the hold cannot send.
+      assert.equal(ses.mock.calls.filter(c => !(c.arguments[0] instanceof GetAccountCommand)).length, 1);
+      await f.resume(100);
+      assert.equal((await drain()).sent, 1);
+      assert.equal((await status()).marketing, 'accepted');
+    });
+  });
   test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking or forgiving history', async t => {
     await simulatedSesFixture(t, async ({ db, runtime, local }) => {
       const f = await hostedHoldFixture(runtime, db, { createdDaysAgo: 15 });
