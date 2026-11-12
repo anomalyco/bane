@@ -97,8 +97,10 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
   const working = pending || busy;
-  // A second confirm while the first is in flight is dropped (lib/single-flight.ts); the first one closes the dialog.
-  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
+  // One confirm at a time: a second press before the first answers (busy disables the button a render later) is ignored,
+  // and a write the mutation guard drops (lib/single-flight.ts) isn't shown as an error; the first one closes the dialog.
+  const confirming = useRef(false);
+  async function confirm() { if (confirming.current) return; confirming.current = true; setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { confirming.current = false; setBusy(false); } }
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
 }
 export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };

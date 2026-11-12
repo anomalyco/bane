@@ -9,6 +9,7 @@ import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
 import './developer.css'
+import { useSingleFlight } from '../../lib/single-flight'
 
 /** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. */
 export const mcpAccess = [
@@ -70,7 +71,8 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const active = (inboxes.data ?? []).filter(box => box.status === 'active')
   const chosen = inbox || active[0]?.id || ''
   const label = (box: Inbox) => box.name ? `${box.name} · ${box.address}` : box.address
-  async function create() {
+  // Single flight: each call makes a new idempotency key, so a second click before the first answers would make a second key.
+  const create = useSingleFlight(async () => {
     if (!chosen) return
     setBusy(true); setError('')
     try {
@@ -80,7 +82,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
       setResult({ ...made, key: bearer, client })
     } catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
-  }
+  })
   const selected = mcpAccess.find(option => option.value === access)!
   // The API names the key after the inbox (its name, or else its address) and the client it was made for.
   const box = active.find(item => item.id === chosen)

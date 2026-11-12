@@ -15,6 +15,7 @@ import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skeletons'
 import { CampaignsHeader } from './header'
 import './campaigns.css'
+import { useSingleFlight } from '../../lib/single-flight'
 
 const errorMessage = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 // Templates hold concrete example content; personalization belongs to the campaign made from them.
@@ -151,16 +152,17 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     } catch (cause) { fail(errorMessage(cause)); return null }
     finally { savingRef.current = false; setSaving(false) }
   }
-  async function publish() {
+  // Publish and Archive run one at a time per action: a second press before the first answers would send the same revision again.
+  const publish = useSingleFlight(async () => {
     const current = dirty || error ? await save() : template
     if (!current) return
     try { const updated = await api.templates.publish(current.id, current.revision); setTemplate(updated); remember(updated); await refreshLists(); toast('Template published. Use it to start a campaign.', 'success') }
     catch (cause) { toast(errorMessage(cause), 'error') }
-  }
-  async function archive() {
+  })
+  const archive = useSingleFlight(async () => {
     try { const updated = await api.templates.archive(template.id, !archived); setTemplate(updated); remember(updated); await refreshLists(); toast(archived ? 'Template restored' : 'Template archived', 'success') }
     catch (cause) { toast(errorMessage(cause), 'error') }
-  }
+  })
   const published = template.publishedRevision !== null && !archived
   const upToDate = template.publishedRevision === template.revision && !dirty
   return <div className="campaign-compose-page template-compose-page">
