@@ -7,13 +7,29 @@ const ports = [993, 143, 465, 587];
 const healthPort = 8080;
 const cidr = "10.68.0.0/16";
 
-export function mailGateway(stage: "dev" | "production", account: string, cloudflareAccountId: string,
+type Stage = { account: string; cloudflareAccountId: string; origin: string };
+
+/** The stage's own API origin. The gateway binary falls back to production, so never leave it unset. */
+function apiOrigin(stage: "dev" | "production", origin: string) {
+  const url = URL.canParse(origin) ? new URL(origin) : undefined;
+  if (!url || url.protocol !== "https:" || url.origin !== origin || (stage === "production") !== (url.hostname === "bane.mx")) {
+    throw new Error(`The ${stage} stack needs its own https API origin for MAILGW_API_URL (got ${JSON.stringify(origin)})`);
+  }
+  return url;
+}
+
+export function mailGateway(stage: "dev" | "production", { account, cloudflareAccountId, origin }: Stage,
   config: pulumi.Config, ohio: aws.Provider, iam: aws.Provider, cloudflare: cf.Provider, tags: Record<string, string>) {
+  const api = apiOrigin(stage, origin);
   const opts = { provider: ohio, protect: true };
   const iamOpts = { provider: iam, protect: true };
   const named = (suffix: string) => ({ ...tags, Name: `${name}-${suffix}` });
   const desired = config.getNumber("mailGatewayDesired") ?? 0;
   if (!Number.isSafeInteger(desired) || desired < 0) throw new Error("bane:mailGatewayDesired must be a nonnegative integer");
+  // The deploy reads the same committed flag: true binds the Worker's MAILGW_API_TOKEN (and fails
+  // without it), false removes it. Tasks only run against a Worker that can authenticate them.
+  const enabled = config.getBoolean("mailGatewayEnabled") ?? false;
+  if (desired > 0 && !enabled) throw new Error("Set bane:mailGatewayEnabled to true before scaling bane:mailGatewayDesired above 0");
   const image = config.get("mailGatewayImage");
   const repoUrl = `${account}.dkr.ecr.us-east-2.amazonaws.com/${name}`;
   if ((desired > 0 && !image) || (image !== undefined &&
@@ -85,6 +101,10 @@ export function mailGateway(stage: "dev" | "production", account: string, cloudf
     skipDestroy: true, taskRoleArn: task.arn, executionRoleArn: execution.arn, tags,
     containerDefinitions: pulumi.jsonStringify([{ name, essential: true, image: image ?? pulumi.interpolate`${repo.repositoryUrl}:unpublished`,
       ulimits: [{ name: "nofile", softLimit: 8192, hardLimit: 8192 }], portMappings: targetPorts.map(containerPort => ({ containerPort, protocol: "tcp" })), stopTimeout: 120, secrets,
+      environment: [{ name: "MAILGW_API_URL", value: api.origin }],
+      // The image runs as distroless nonroot. Unlike Docker, Fargate keeps the kernel's 1024
+      // floor for unprivileged binds, so 143/465/587/993 would fail with EACCES without this.
+      systemControls: [{ namespace: "net.ipv4.ip_unprivileged_port_start", value: `${Math.min(...ports)}` }],
       logConfiguration: { logDriver: "awslogs", options: { "awslogs-group": log.name, "awslogs-region": "us-east-2", "awslogs-stream-prefix": "gateway" } },
     }]),
   }, { provider: ohio });
@@ -106,7 +126,7 @@ export function mailGateway(stage: "dev" | "production", account: string, cloudf
     statistic: "Sum", threshold: 10, dimensions: { LoadBalancer: lb.arnSuffix } }, opts);
 
   if (config.getBoolean("mailGatewayDns") ?? false) {
-    const zone = stage === "dev" ? "dev.bane.mx" : "bane.mx";
+    const zone = api.hostname; // dev.bane.mx or bane.mx: each stage owns its own zone.
     const zoneId = cf.getZoneOutput({ filter: { name: zone, account: { id: cloudflareAccountId } } }, { provider: cloudflare }).id;
     for (const host of ["imap", "smtp"]) new cf.DnsRecord(`${name}-${host}`, { zoneId, name: `${host}.${zone}`,
       type: "CNAME", content: lb.dnsName, proxied: false, ttl: 300 }, { provider: cloudflare, protect: true, dependsOn: [service] });
