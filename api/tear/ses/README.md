@@ -7,6 +7,7 @@ A [tear](https://github.com/anomalyco/tear) model of SES feedback on Hosted Bane
 - `src/model.rs` is the reference model: committed state, two job workers paused at the recovery handler's statement gates, and two consumer transactions that can be held open.
 - `src/main.rs` holds the action list, the edge-case checklist and its coverage, the properties, the bug witnesses and the run modes.
 - `host.ts` drives the real code with Bun: the SNS route (`POST /v1/events/ses`, signed with a pinned self-signed certificate, no queue binding), the feedback-queue consumer (`ingestFeedbackBatch`), the `operation.ses` recovery job handler and the dispatcher's result statement (`recordEmailEvent`). It reads stats through `GET /v1/campaigns/{id}/stats` and `GET /v1/sender-score`. The network is disabled.
+- `old …` actions run the same code as a Worker deployed before migration 153: the host swaps in the old rank table while the statement is built, which is the only difference between the versions' status writes. `repair` runs migration 154's `repair_feedback_status` on the workspace.
 
 ## Properties
 
@@ -52,7 +53,7 @@ cd api/tear/ses && cargo run --release -- ci
 `ci` does three things:
 
 - It replays the bug witnesses and boundary traces.
-- It covers every transition of the core alphabet to depth 3: 3,602 traces and 10,347 steps.
+- It covers every transition of the core alphabet to depth 3: 4,344 traces and 12,483 steps.
 - It runs 240 random walks of 30 steps.
 
 It runs four host processes (`-j 4`), prints a JSON report with checklist coverage, and exits 1 on any mismatch, error or disabled witness. Each mismatch is printed as a reduced trace.
@@ -61,9 +62,9 @@ It runs four host processes (`-j 4`), prints a JSON report with checklist covera
 
 | Command | Steps | Time (6 hosts, M-series Mac) |
 |---|---:|---:|
-| `cargo run --release -- edges 4 -j 6` | 87,691 (22,938 edges) | about 100 s |
+| `cargo run --release -- edges 4 -j 6` | 106,487 (27,845 edges) | about 125 s |
 | `cargo run --release -- random 3000 40 -j 6 --seed $(date +%s)` | 120,000 | about 2 min |
-| `cargo run --release -- edges 5 -j 8` | 588,576 (123,115 edges) | about 10 min (estimated from the rate above, not yet run) |
+| `cargo run --release -- edges 5 -j 8` | 717,592 (150,066 edges) | about 12 min (estimated from the rate above, not yet run) |
 
 - `space N` prints the core graph's size per depth without touching the database.
 - `trace ACTION…` replays one trace, for example `trace "h b1" "accept e1" "J b1" "J go" "J crash" "q b1"`.
@@ -75,11 +76,13 @@ For a nightly run, rotate `--seed` by date. Host logs go to `target/host-N.log` 
 | Bug | Shortest witness | Fix |
 |---|---|---|
 | A recovery job stored a bounce or complaint, then died before suppressing. The queue's redelivery marked the receipt processed without suppressing, and the job's retry returned, so the recipient was never suppressed. | 6 steps: `h b1`, `accept e1`, `J b1`, `J go`, `J crash`, `q b1` | `85f1765`: effects follow the receipt the consumer processes, not a newly inserted event |
-| A validation-suppressed recipient tied with or outranked SES outcomes for the rest of the email. On a multi-recipient email, a delivered email became `suppressed`, and a hard bounce became `suppressed` or not depending on arrival order. The email then dropped out of accepted volume. | 3 steps: `accept e2`, `q v2`, `h d2` | `82fcc96`: `suppressed` ranks below `delivered`; the validation error code follows the status |
+| A validation-suppressed recipient tied with or outranked SES outcomes for the rest of the email. On a multi-recipient email, a delivered email became `suppressed`, and a hard bounce became `suppressed` or not depending on arrival order. The email then dropped out of accepted volume. | 3 steps: `accept e2`, `q v2`, `h d2` | `82fcc96`: `suppressed` ranks below `delivered` |
+| During a deploy, a Worker still on the old rank table could permanently restore `suppressed` over a delivery or hard bounce the new version had committed, or skip a delivery after a validation suppression (review of #56). | 3 steps: `accept e2`, `q d2`, `old q v2`; `accept e2`, `q v2`, `old q d2` | Migration 153: a `BEFORE UPDATE` guard and a delivery trigger enforce the ranking and the validation error code for every version; migration 154 repairs older rows from stored events |
 
 ## Modelling notes
 
 - SES Send is not subscribed by any Bane configuration set (`FEEDBACK_EVENTS`), so it is not modelled. Only the simulator emits it, and `sent` still ties with `delayed`.
 - A consumer statement that waits on another consumer's row lock keeps its statement snapshot for non-locking reads (READ COMMITTED). So an open does not engage a contact that the first statement created in the meantime. That is the outcome of the serial order "open, then the contact is created", which the contract allows. The model encodes this, and the CI regressions pin it.
 - While a consumer transaction is open, only statements that wait on its email row lock may run. Two waiters at once are disabled, because PostgreSQL does not order which one wins. Statements that would only contend on the shared hourly counters (hosted usage and health) are disabled for the same reason.
-- During a deploy, an old Worker still uses the previous rank table. Until it drains, a validation bounce it processes can still mark a delivered multi-recipient email suppressed, as before the fix.
+- Migration 153 makes the database authoritative for the feedback ranking and for `EMAIL_VALIDATION_SUPPRESSED` (kept only while the status is suppressed, never over an earlier error code), so no deploy fence is needed. Without its triggers, the `old …` witnesses mismatch in 3 steps (checked by dropping them on the tear database).
+- Not modelled: an old consumer without `85f1765`. It can lose a suppression only if a recovery job crashes between its event write and its suppression inside the deploy window, which no database guard repairs.

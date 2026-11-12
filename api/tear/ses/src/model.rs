@@ -398,9 +398,19 @@ pub enum Act {
     Crash(u8),
     Hold(u8, u8),
     Commit(u8, bool),
+    /// The action on a Worker deployed before migration 153 (the old rank table). The database
+    /// enforces the current ranking for every version, so its outcome is the current one.
+    Old(Box<Act>),
+    /// Migration 154's repair over this workspace: a no-op on every state the model reaches.
+    Repair,
 }
 
 pub fn parse(s: &str) -> Option<Act> {
+    if let Some(rest) = s.strip_prefix("old ") {
+        let a = parse(rest)?;
+        return matches!(a, Act::Queue(_) | Act::Http(_) | Act::Claim(_, _))
+            .then(|| Act::Old(Box::new(a)));
+    }
     let w: Vec<&str> = s.split(' ').collect();
     let email = |x: &str| EMAILS.iter().position(|e| *e == x).map(|i| i as u8);
     let worker = WORKERS.iter().position(|x| *x == w[0]).map(|i| i as u8);
@@ -431,6 +441,7 @@ pub fn parse(s: &str) -> Option<Act> {
         ("accept", 2) => Act::Accept(email(w[1])?),
         ("lost", 2) => Act::Lost(email(w[1])?),
         ("expire", 1) => Act::Expire,
+        ("repair", 1) => Act::Repair,
         ("pause", 1) => Act::Pause(true),
         ("resume", 1) => Act::Pause(false),
         _ => return None,
@@ -448,6 +459,15 @@ pub fn alphabet(core: bool) -> Vec<String> {
     for m in &msgs {
         out.push(format!("q {m}"));
         out.push(format!("h {m}"));
+        // Mixed versions: the statements whose ranking changed in migration 153.
+        if !core || ["d1", "v1", "d2", "b2", "v2"].contains(m) {
+            out.push(format!("old q {m}"));
+            out.push(format!("old J {m}"));
+        }
+        if !core {
+            out.push(format!("old h {m}"));
+            out.push(format!("old K {m}"));
+        }
         for w in WORKERS.iter().take(if core { 1 } else { 2 }) {
             out.push(format!("{w} {m}"));
         }
@@ -471,6 +491,7 @@ pub fn alphabet(core: bool) -> Vec<String> {
         out.push(format!("lost {e}"));
     }
     out.push("expire".into());
+    out.push("repair".into());
     for w in WORKERS.iter().take(if core { 1 } else { 2 }) {
         out.push(format!("{w} go"));
         out.push(format!("{w} crash"));
@@ -802,6 +823,9 @@ impl Model {
                 }
             }
             Act::Commit(k, _) => self.held[k as usize].as_ref().is_some_and(|h| !h.blocked),
+            Act::Old(ref a) => self.enabled(a),
+            // It locks candidate rows across the workspace.
+            Act::Repair => !busy && !self.blocked_any(),
         }
     }
 
@@ -851,6 +875,8 @@ impl Model {
     pub fn step(&mut self, a: Act) -> (Value, Value) {
         let mut woke = serde_json::Map::new();
         let r = match a {
+            Act::Old(a) => return self.step(*a),
+            Act::Repair => json!("ok"),
             Act::Queue(i) => {
                 self.note(i);
                 json!(self.db.batch(&[i]))

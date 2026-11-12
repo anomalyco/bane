@@ -28,6 +28,8 @@
 //! - `J m`, `K m`: a job worker claims the recovery job of `m` and runs the handler to its first gate;
 //!   `J go` runs to the next gate (event write, suppression transaction, receipt mark, settlement);
 //!   `J crash` kills the worker at its gate; `expire` expires every running lease.
+//! - `old q m`, `old h m`, `old J m`: the same on a Worker deployed before migration 153 (the old rank
+//!   table); `repair` runs migration 154's repair (`repair_feedback_status`) on the workspace.
 //! - `Q m`, `P m`: a consumer batch statement held open until `Q commit` / `Q abort`.
 //! - `pause`, `resume`: the second webhook endpoint (bounces and complaints only).
 //!
@@ -95,6 +97,15 @@
 //! ## Old and new Worker overlap (deploys)
 //! - [x] `both-ingress`: one notification through the SNS route without a queue (an old Worker or a
 //!   deploy without the FEEDBACK_QUEUE binding) and through the queue consumer.
+//! - [x] `old-worker`, `old-validation-over-outcome`, `old-delivery-over-validation`: the consumer, the
+//!   SNS route or a job worker on a Worker deployed before migration 153, which embeds the old rank
+//!   table (suppressed tied with bounced and outranked delivered), interleaved with the current one
+//!   (`q d2`, `old q v2`; `q v2`, `old q d2`). The database triggers of migration 153 must keep the
+//!   current ranking and error code whichever version writes.
+//! - [x] `repair`: migration 154's repair over the workspace changes nothing on a correct state.
+//! - [ ] The old consumer without 85f1765 (effects only for events it inserted): not modelled; it can
+//!   lose a suppression only if a recovery job crashes between its event write and its suppression
+//!   inside the deploy window, which no database guard repairs.
 //!
 //! ## Partial failures of external calls
 //! - [x] `late-acceptance`: feedback before the dispatcher stored the provider id (SendEmail answer
@@ -153,6 +164,30 @@ const REGRESSIONS: &[&[&str]] = &[
         "J go",
         "J go",
         "J go",
+    ],
+    // Mixed versions (review of #56): a Worker with the pre-153 rank table restored 'suppressed' over
+    // a delivery or hard bounce the new version committed, or skipped a delivery after a validation
+    // suppression; migration 153 holds the current ranking for every version.
+    &["accept e2", "q d2", "old q v2"],
+    &["accept e2", "q v2", "old q d2"],
+    &[
+        "accept e2",
+        "h b2",
+        "J b2",
+        "J go",
+        "J go",
+        "J go",
+        "old q v2",
+    ],
+    &[
+        "accept e2",
+        "q d2",
+        "h v2",
+        "old J v2",
+        "J go",
+        "J go",
+        "J go",
+        "repair",
     ],
     // Boundary: an acceptance_unknown email keeps its error code under a validation suppression.
     &["lost e1", "q v1"],
@@ -244,6 +279,9 @@ fn splitmix(x: &mut u64) -> u64 {
 /// Relative weight of an action in random walks: keep feedback, job steps and commits frequent,
 /// signature failures and endpoint pauses rare.
 fn weight(label: &str) -> u64 {
+    if let Some(rest) = label.strip_prefix("old ") {
+        return weight(rest).div_ceil(2);
+    }
     let words: Vec<&str> = label.split(' ').collect();
     let conn = WORKERS.contains(&words[0]) || HELD.contains(&words[0]);
     match (conn, words[0], words.get(1).copied().unwrap_or_default()) {
@@ -259,6 +297,7 @@ fn weight(label: &str) -> u64 {
         (_, "accept", _) => 20,
         (_, "lost", _) => 4,
         (_, "expire", _) => 4,
+        (_, "repair", _) => 2,
         _ => 1,
     }
 }
@@ -346,6 +385,32 @@ fn focus(step: &Value, path: &str) -> Value {
 /// Checklist keys one step reaches, from the model state before and after it (the model's state is
 /// the product's wherever the trace matched).
 fn reached(before: &Model, a: &Act, r: &Value, woke: &Value, after: &Model) -> Vec<&'static str> {
+    if let Act::Old(inner) = a {
+        let mut out = reached(before, inner, r, woke, after);
+        out.push("old-worker");
+        if let Act::Queue(i) | Act::Http(i) | Act::Claim(_, i) = **inner {
+            let m = &MSGS[i as usize];
+            let st = before.db.emails.get(m.email as usize).map(|e| e.status);
+            // The two places the old rank table disagrees with the current one.
+            if m.kind == model::Kind::Validation
+                && st.is_some_and(|s| {
+                    matches!(
+                        s,
+                        model::St::Delivered
+                            | model::St::Bounced
+                            | model::St::Rejected
+                            | model::St::Rendering
+                    )
+                })
+            {
+                out.push("old-validation-over-outcome");
+            }
+            if m.kind == model::Kind::Delivery && st == Some(model::St::Suppressed) {
+                out.push("old-delivery-over-validation");
+            }
+        }
+        return out;
+    }
     let mut out = vec![];
     let db = &before.db;
     let running = |i: u8| before.workers.iter().flatten().any(|w| w.msg == i);
@@ -464,6 +529,7 @@ fn reached(before: &Model, a: &Act, r: &Value, woke: &Value, after: &Model) -> V
             }
         }
         Act::Commit(_, false) => out.push("consumer-abort"),
+        Act::Repair => out.push("repair"),
         _ => {}
     }
     if after.view()["score"]

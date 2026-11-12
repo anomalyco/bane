@@ -6,7 +6,8 @@
 // Paths: `q`/`qq` are the feedback-queue consumer (ingestFeedbackBatch), `h` the SNS route without a
 // queue (POST /v1/events/ses, recovery jobs), `J`/`K` two job workers running operation.ses, paused
 // at statement gates so a step can land between the handler's statements or crash there. `Q` holds a
-// consumer batch statement open until `Q commit` or `Q abort`.
+// consumer batch statement open until `Q commit` or `Q abort`. `old …` runs an action as a Worker
+// deployed before migration 153 (its rank table); `repair` runs migration 154's repair.
 //
 // It runs only on a dedicated, migrated database its creator marked disposable (../disposable.ts,
 // the rule every tear host shares): TEAR_DATABASE_URL must be a plain loopback URL, and the marker
@@ -84,7 +85,7 @@ type Raw = (text: string, values?: unknown[]) => Promise<pg.QueryResult>;
 type Conn = { name: string; client: pg.Client; db: Db; pid: number; raw: Raw;
   open: boolean; pending?: Promise<void>; settled?: { ok: boolean; value: unknown };
   // Job workers only: the gate the handler waits at and the claimed job.
-  paused?: Paused; notify?: (v: string) => void; gating?: boolean; job?: Json; crashed?: boolean; label?: string; blocked?: boolean };
+  paused?: Paused; notify?: (v: string) => void; gating?: boolean; job?: Json; crashed?: boolean; label?: string; blocked?: boolean; old?: boolean };
 // Handler statements a worker pauses before: the dispatcher-style event write, the suppression
 // transaction and the receipt's processed mark. Claim and settlement are the host's own.
 const GATES: [string, RegExp][] = [['record', /WITH mail AS MATERIALIZED/], ['suppress', /^\s*begin\b/i], ['mark', /update "operation_sns_receipts"/i]];
@@ -171,7 +172,7 @@ async function abortAll() {
     }
     if (c.pending) await c.pending;
     if (c.open) await c.raw('ROLLBACK');
-    Object.assign(c, { open: false, pending: undefined, settled: undefined, job: undefined, label: undefined, blocked: false });
+    Object.assign(c, { open: false, pending: undefined, settled: undefined, job: undefined, label: undefined, blocked: false, old: false });
   }
 }
 async function reset() {
@@ -321,7 +322,23 @@ async function wake() {
   return woke;
 }
 
+// The rank table a Worker deployed before migration 153 embeds (974e0c9). Old and new statements
+// differ only in this table; the database enforces the rest. Statements read it when they are built.
+const OLD_RANK = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
+const NEW_RANK = { ...sending.rank };
+async function ranked<T>(old: boolean, fn: () => Promise<T>): Promise<T> {
+  if (!old) return fn();
+  Object.assign(sending.rank, OLD_RANK);
+  try { return await fn(); } finally { Object.assign(sending.rank, NEW_RANK); }
+}
+
 async function act(action: string) {
+  const old = action.startsWith('old ');
+  const result = await ranked(old, () => step(old ? action.slice(4) : action, old));
+  const safety: string[] = [];
+  return { ...result, view: await view(safety), safety };
+}
+async function step(action: string, old: boolean) {
   const words = action.split(' ');
   const c = conns[words[0]!];
   let r: unknown, woke: Record<string, unknown> = {};
@@ -342,13 +359,14 @@ async function act(action: string) {
       conns[c.name] = await connect(c.name);
       r = 'ok';
     } else {
-      const v = verb === 'go' ? await stepWorker(c) : await runJob(c, verb);
+      // A worker keeps the version it claimed the job with.
+      if (verb !== 'go') c.old = old;
+      const v = verb === 'go' ? await ranked(!!c.old, () => stepWorker(c)) : await runJob(c, verb);
       if (v === 'blocked') c.blocked = true;
       r = finishWorker(c, v);
     }
   } else r = await autoAct(words);
-  const safety: string[] = [];
-  return { r, woke, view: await view(safety), safety };
+  return { r, woke };
 }
 
 async function autoAct(words: string[]): Promise<unknown> {
@@ -366,6 +384,7 @@ async function autoAct(words: string[]): Promise<unknown> {
     case 'accept': return dispatched(db, a, false);
     case 'lost': return dispatched(db, a, true);
     case 'expire': await auto.raw("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE workspace_id=$1 AND status='running'", [ws]); return 'ok';
+    case 'repair': { let cursor: string | null = ''; while (cursor !== null) cursor = (await auto.raw('SELECT repair_feedback_status($1,$2) AS c', [cursor, ws])).rows[0].c; return 'ok'; }
     case 'pause': case 'resume': await auto.raw('UPDATE operation_webhooks SET paused=$2 WHERE id=$1', [ids.w2, verb === 'pause']); return 'ok';
   }
   throw new Error(`unknown action ${words.join(' ')}`);
