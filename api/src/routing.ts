@@ -584,10 +584,12 @@ export function registerRouting(app: App) {
     async (c) => {
       const w = workspace(c),
         q = c.req.valid('query');
+      // The cursor is a version number; anything else (1.5, 1e10) reached an integer comparison as a 500.
+      if (q.cursor !== undefined && !/^\d{1,9}$/.test(q.cursor)) throw fail(422, 'INVALID_CURSOR', 'Use the nextCursor a previous page returned.', 'cursor');
       const rows = (
         await c.env.db.execute<z.infer<typeof RoutingVersion>>(
           sql`SELECT version,created_at::text AS "createdAt",jsonb_build_object('type',actor_type,'id',actor_id) AS actor,cardinality(changed_ids) AS changes,note FROM mail_routing_versions
-            WHERE workspace_id=${w} AND created_at>=now()-interval '1 year' ${q.cursor ? sql`AND version<${Number(q.cursor) || 0}` : sql``} ORDER BY version DESC LIMIT ${q.limit + 1}`,
+            WHERE workspace_id=${w} AND created_at>=now()-interval '1 year' ${q.cursor ? sql`AND version<${Number(q.cursor)}` : sql``} ORDER BY version DESC LIMIT ${q.limit + 1}`,
         )
       ).rows;
       return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? String(rows[q.limit - 1]!.version) : null }, 200);
