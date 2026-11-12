@@ -60,7 +60,11 @@ function idempotentCreates(paths: RegExp[]) {
     const text = await c.req.text();
     let parsed: unknown = text;
     try { parsed = text ? JSON.parse(text) : null; } catch { /* hash the raw body */ }
-    const requestHash = await digest(canonical([parsed,principal.permissions,c.get('actor')?.domains??c.get('mailboxAccess')?.mailboxIds,'receivingConsent' in principal?principal.receivingConsent??false:false]));
+    // The request's authority is part of its identity: permissions, sender domains or an inbox
+    // key's configured scope (not the inboxes a provisioning key has since created, or its own
+    // retry would conflict), and receiving consent.
+    const inbox = c.get('mailboxAccess'), scope = inbox && (inbox.scopeIds === undefined ? inbox.mailboxIds : inbox.scopeIds);
+    const requestHash = await digest(canonical([parsed,principal.permissions,c.get('actor')?.domains??scope,'receivingConsent' in principal?principal.receivingConsent??false:false]));
     const identity = { workspaceId: principal.workspaceId, actorKeyId: c.get('actor')?.tokenId??principal.keyId, path: c.req.path, requestKey: key };
     const where = and(eq(sendingIdempotency.workspaceId, identity.workspaceId), eq(sendingIdempotency.actorKeyId, identity.actorKeyId), eq(sendingIdempotency.path, identity.path), eq(sendingIdempotency.requestKey, identity.requestKey));
     const db=c.env.db;

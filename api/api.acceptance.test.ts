@@ -8866,7 +8866,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,jobs,local,fetch:rawFetch})=>{
+    await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
       const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
@@ -9347,6 +9347,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(await count(),1);
         assert.match(error(await post('lost-ack-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN').message,/may have committed/);
         assert.equal(await count(),1);
+      });
+      // tear witness: mint key, mint ikey, create inbox ikey k1, create inbox ikey k1 answered 409 IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a provisioning inbox key replays its own inbox create',async()=>{
+        const key=ok(await local('POST','/v1/inbound/keys',{name:'tear provisioning',permissions:['read','create'],addressIds:[]}),201);secrets.add(key.secret);
+        const create=()=>request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'tear provisioned'},{'idempotency-key':'provision-1'});
+        const first=ok(await create(),201),again=await create();
+        // Its visible inbox set now includes the new inbox; the retry is still the same request.
+        assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
+        error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
+        ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),
