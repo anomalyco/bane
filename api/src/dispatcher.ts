@@ -745,7 +745,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { attachmentBytes:number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { attachmentBytes:number; advanced: number; bytesReleased?:Promise<void>; notifyBytes?:()=>void; deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; record: (outcomes: Outcome[]) => Promise<void>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -849,6 +849,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   // The fused singleton claim already decided there is nothing to send. Leave the stale
   // sample and its one provisional batch available for a subsequent deliverable message.
   const status = ready[0]!.claimStatus;
+  if (status) lane.advanced++; // The fused lease already ran the claim.
   if (status && status !== 'attempting') {
     if(status==='queued') deferBurst(lane.deferred,ready[0]!.mail.workspaceId,ready[0]!.mail.snapshot.kind);
     counters.skipped++;
@@ -936,9 +937,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
         if (!(gate.screenRetryAt && gate.screenRetryAt>Date.now())) {
           gate.screenRetryAt=Date.now()+30_000; log('warn',{code:error.code,region:options.region,retryAt:gate.screenRetryAt});
         }
-        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); return;
+        counters.paceRetryAt=gate.screenRetryAt; counters.deferred++; screenDeferred.push(item.mail); lane.advanced++; return;
       }
-      counters.skipped++; await rejectPreflight(item.owner.runtime, item.mail, error);
+      counters.skipped++; lane.advanced++; await rejectPreflight(item.owner.runtime, item.mail, error);
     }
   };
   const streamPage=async(items:typeof ready,coalesce=false)=>{
@@ -1077,6 +1078,7 @@ async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[])
       }
       return checkMcp ? base.db.transaction(tx => claim(group, tx)) : claim(group, base.db);
     });
+    lane.advanced += group.length;
     if (webhooks) pendingRecords.push(wakeWebhooks(base,webhooks));
     for(const item of group) if(statuses.get(item.mail.id)==='queued') deferBurst(lane.deferred,item.mail.workspaceId,item.snapshot.kind);
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
@@ -1142,14 +1144,17 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
   const runClients = new Map<string, SESv2Client>();
-  const lane: Lane = { attachmentBytes:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
+  const lane: Lane = { attachmentBytes:0,advanced:0,deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
   // The owner cursor rotates where each lease starts, so every owner gets a turn, but a lease
   // never wraps past the last owner. One that started after the cursor and reached the end
   // empty-handed has not looked at the owners before it: with exactly a lease's worth of owners
   // (or a cursor left by the previous run) the run used to stop and report idle with mail due.
-  // Look there at once, unless a whole pass since the last wrap leased nothing (the remaining
-  // mail is leased elsewhere or not yet due), so a run still ends.
-  let progressed = true;
+  // Look there at once, but only if the pass since the last wrap advanced durable work (a claim,
+  // a preflight rejection or deferral). Leasing alone is not progress: rows the local allowance
+  // cannot afford are released unchanged, and leasing them again would spin until the run's
+  // budget. Without progress the run ends; its quotaRetryAt holds it until the sample changes.
+  // The first pass of a run may wrap once, for a cursor the previous run left behind.
+  let passStart = -1;
   const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
@@ -1163,10 +1168,9 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
     const leaseOnce = () => phase('lease', () => leaseDue(runtime, transport, options.region, lane.options.batchSize, gate,lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
     const fromCursor = gate.ownerCursor !== undefined;
+    if (!fromCursor) passStart = lane.advanced;
     let rows = await leaseOnce();
-    if (fromCursor && !rows.length && gate.ownerCursor === undefined && progressed) { progressed = false; rows = await leaseOnce(); }
-    else if (!fromCursor) progressed = false;
-    if (rows.length) progressed = true;
+    if (fromCursor && !rows.length && gate.ownerCursor === undefined && (passStart < 0 || lane.advanced > passStart)) { passStart = lane.advanced; rows = await leaseOnce(); }
     return rows;
   };
   let blocked = false;
