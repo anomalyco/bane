@@ -9849,6 +9849,35 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const route=await send!.then(r=>r,(e:Json)=>String(e?.cause?.code??e?.code??e));
     assert.deepEqual(route,{region,binding:{domain:w,connection:w,generation:1,account:'111122223333',topic:null}});
   });
+  // Deadlock guard (docs/ci.md). The test above pins one interleaving. This one runs the pair behind every dev 40P01 so
+  // far, POST /v1/domains re-adding a domain while sends from it are admitted, concurrently and ungated, many times, so
+  // a new lock-order inversion between them fails here, not on dev. Add a pair here once its own fix lands; CI also
+  // fails the job on any deadlock Postgres counts during the suite (.github/scripts/acceptance.sh).
+  test('lock order: concurrent domain re-adds and sends from that domain never deadlock',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const g=await fixtureDatabase(t),w=unique('ldead'),host=w+'.invalid',region='us-east-2';
+    const readds=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:4,statement_timeout:10_000});cleanup(t,()=>readds.end());
+    cleanup(t,async()=>{for(const q of ['DELETE FROM workspaces WHERE id=$1','DELETE FROM operation_domains WHERE workspace_id=$1','DELETE FROM ses_installation_settings WHERE workspace_id=$1'])await g.query(q,[w]);});
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    const actor={workspaceId:w,permissions:[],domains:[],keyId:'fixture-key'} as import('./src/core.js').Actor;
+    const errors=new Map<string,number>(),note=(e:Json)=>{const code=String(e?.cause?.code??e?.code??e?.message??e);errors.set(code,(errors.get(code)??0)+1);};
+    const started=Date.now();
+    for(let round=0;round<60;round++){
+      const work=[
+        ...Array.from({length:4},()=>readds.query('SELECT id FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')]).then(r=>assert.equal(r.rows[0].id,w,'A re-add returns the existing domain.'))),
+        ...Array.from({length:6},(_,i)=>runtime.db.transaction(tx=>sendingRegion(runtime,tx,actor,`reply@${host}`,undefined,i%2===1))),
+      ];
+      for(const r of await Promise.allSettled(work))if(r.status==='rejected')note(r.reason);
+    }
+    t.diagnostic(`60 rounds of 4 re-adds and 6 sends in ${Date.now()-started} ms.`);
+    assert.deepEqual(Object.fromEntries(errors),{},'Every concurrent re-add and send completes. 40P01 is a lock-order inversion between them.');
+  });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
   // in the database, but the old invocation keeps running and still issues that write.
