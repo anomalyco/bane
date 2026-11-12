@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
-import { campaignActive, pauseHostedSending, queueTenantStatus } from './states.js';
+import { campaignActive, pauseHostedSending, queueTenantStatus, tenantStatusDrift } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
@@ -48,15 +48,18 @@ async function reconcilePages(runtime: Runtime, deadline: number) {
 // Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
 const RETENTION_BUDGET_MS = 4 * 60_000;
 
-// Account pause lines. Each needs a count and a rate together, so a handful of events never pauses a small sender
-// (one complaint used to pause a 300-a-day sender). Bounces and complaints are over the accepted volume of the last
-// 48 hours; content-screen rejections are over the mail the screen saw (accepted or rejected) in the last 24 hours.
+// Account holds. Each line needs a count and a rate together, so a handful of events never holds a small sender (one
+// complaint used to pause a 300-a-day sender). Bounces and complaints are over the accepted volume of the last 48 hours;
+// content-screen rejections are over the mail the screen actually judged in the last 24 hours, counted when it judged
+// it (src/dispatcher.ts). The strongest signal wins: complaints or the screen pause all mail; bounces alone hold
+// marketing and keep transactional mail flowing.
 export const HOSTED_PAUSE = { bounces: 10, bounceRate: 0.03, complaints: 2, complaintRate: 0.0005, rejections: 25, rejectionRate: 0.1 };
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
   await runtime.db.execute(sql`SELECT refresh_hosted_minute_tiers()`);
   const p = HOSTED_PAUSE;
-  const result = await runtime.db.execute<{ workspace_id: string; pause_reason: string; sends: number; bounces: number; complaints: number; rejected: number; screened: number }>(pauseHostedSending(sql`WITH counts AS (
+  const complained = sql`complaints>=${p.complaints} AND complaints>sends*${p.complaintRate}::numeric`, rejected = sql`rejected>=${p.rejections} AND rejected>=screened*${p.rejectionRate}::numeric`;
+  const result = await runtime.db.execute<{ workspace_id: string; pause_reason: string; scope: 'all' | 'marketing'; sends: number; bounces: number; complaints: number; rejected: number; screened: number }>(pauseHostedSending(sql`WITH counts AS (
     SELECT pc.id,pc.workspace_id,pc.resumed_at,sum(h.accepted) AS sends,
       sum(h.bounces) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS bounces,
       sum(h.complaints) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS complaints
@@ -64,23 +67,23 @@ export async function checkHostedHealth(runtime: Runtime) {
     WHERE pc.kind='shared' AND pc.paused_at IS NULL AND h.hour BETWEEN date_trunc('hour',now(),'UTC')-interval '47 hours' AND date_trunc('hour',now(),'UTC')
     GROUP BY pc.id,pc.workspace_id,pc.resumed_at
   ), screen AS (
-    -- Only workspaces that admitted mail in the last day; the screen runs before SES, so a rejection has no feedback event.
-    SELECT pc.id,pc.workspace_id,pc.resumed_at,s.screened,s.rejected FROM provider_connections pc CROSS JOIN LATERAL (
-      SELECT count(*) FILTER (WHERE e.error_code='CONTENT_REJECTED_SPAM' OR (e.status<>'suppressed' AND (e.provider_id IS NOT NULL OR e.status IN ('accepted','sent','delivered','bounced','complained','delayed'))))::int AS screened,
-        count(*) FILTER (WHERE e.error_code='CONTENT_REJECTED_SPAM')::int AS rejected
-      FROM sending_emails e WHERE e.workspace_id=pc.workspace_id AND NOT e.simulated AND e.created_at>=now()-interval '24 hours' AND e.created_at>coalesce(pc.resumed_at,'-infinity')) s
-    WHERE pc.kind='shared' AND pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_usage_hourly u WHERE u.workspace_id=pc.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours')
+    SELECT pc.id,pc.workspace_id,pc.resumed_at,sum(s.screened) AS screened,sum(s.rejected) AS rejected
+    FROM provider_connections pc JOIN hosted_screen_hourly s ON s.workspace_id=pc.workspace_id AND s.epoch=coalesce(pc.resumed_at,'-infinity')
+    WHERE pc.kind='shared' AND pc.paused_at IS NULL AND s.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours'
+    GROUP BY pc.id,pc.workspace_id,pc.resumed_at
   ), totals AS (
     SELECT coalesce(c.id,s.id) AS id,coalesce(c.workspace_id,s.workspace_id) AS workspace_id,coalesce(c.resumed_at,s.resumed_at) AS resumed_at,
       coalesce(c.sends,0) AS sends,coalesce(c.bounces,0) AS bounces,coalesce(c.complaints,0) AS complaints,coalesce(s.screened,0) AS screened,coalesce(s.rejected,0) AS rejected
-    FROM counts c FULL JOIN screen s ON s.id=c.id)
-  SELECT *,CASE WHEN bounces>=${p.bounces} AND bounces>sends*${p.bounceRate}::numeric THEN 'Hosted sending paused: high hard-bounce volume in the last 24 hours.'
-    WHEN complaints>=${p.complaints} AND complaints>sends*${p.complaintRate}::numeric THEN 'Hosted sending paused: high spam-complaint volume in the last 24 hours.'
-    WHEN rejected>=${p.rejections} AND rejected>=screened*${p.rejectionRate}::numeric THEN 'Hosted sending paused: the content screen rejected a high share of mail in the last 24 hours.' END AS reason FROM totals`));
-  for (const row of result.rows) log('warn', { code: 'HOSTED_SENDING_AUTO_PAUSED', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints), rejected: Number(row.rejected), screened: Number(row.screened) });
-  // A pause or resume whose SES tenant status call has not succeeded yet (or failed until its last retry) is queued again.
-  await runtime.db.execute(queueTenantStatus(sql`SELECT workspace_id FROM provider_connections WHERE kind='shared'
-    AND ((paused_at IS NOT NULL AND tenant_status_applied IS DISTINCT FROM 'DISABLED') OR (paused_at IS NULL AND tenant_status_applied='DISABLED'))`));
+    FROM counts c FULL JOIN screen s ON s.id=c.id
+  ), judged AS (
+    SELECT *,${complained} AS complained,${rejected} AS spam,bounces>=${p.bounces} AND bounces>sends*${p.bounceRate}::numeric AS bounced FROM totals)
+  SELECT *,CASE WHEN complained OR spam THEN 'all' WHEN bounced THEN 'marketing' END AS scope,
+    CASE WHEN complained THEN 'Hosted sending paused: high spam-complaint volume in the last 24 hours.'
+      WHEN spam THEN 'Hosted sending paused: the content screen rejected a high share of mail in the last 24 hours.'
+      WHEN bounced THEN 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.' END AS reason FROM judged`));
+  for (const row of result.rows) log('warn', { code: row.scope === 'all' ? 'HOSTED_SENDING_AUTO_PAUSED' : 'HOSTED_MARKETING_AUTO_HELD', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints), rejected: Number(row.rejected), screened: Number(row.screened) });
+  // The reconcile: any workspace whose SES tenants differ from what Bane wants is queued again.
+  await runtime.db.execute(queueTenantStatus(tenantStatusDrift()));
 }
 
 /** Independent bounded slice, before other hourly drains. A poison batch must not
@@ -153,9 +156,9 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
   if (runtime.config.multiTenant) {
-    for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits'])
+    for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits','hosted_screen_hourly'])
       // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
-      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
+      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' || table==='hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
   }
   // Do not cascade-delete a consent/token committed as we pick candidates: lock the parent first,
   // then check its indexed references again in a fresh statement while FK inserts are fenced.

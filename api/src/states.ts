@@ -227,28 +227,64 @@ export const setTenantState = (id: string, to: TenantState, account?: string) =>
   ${account ? sql`AND (aws_account_id IS NULL OR aws_account_id=${account})` : sql``}`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
 
-// This is a sending hold, not a provisioning failure: claims and inbound routing keep working.
-// `unhealthy` supplies the shared connection id, workspace, counts, and reason from the hourly snapshot.
-// The same statement queues the SES tenant status job, which disables the workspace's tenants as a backstop.
-export const pauseHostedSending = (unhealthy: SQL) => sql`WITH paused AS (UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason
-  FROM (${unhealthy}) h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND pc.resumed_at IS NOT DISTINCT FROM h.resumed_at AND h.reason IS NOT NULL
-  RETURNING pc.workspace_id,pc.pause_reason,h.sends,h.bounces,h.complaints,h.rejected,h.screened), queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
-  SELECT * FROM paused`;
+// Two reputation holds, neither a provisioning failure (claims and inbound routing keep working). `unhealthy` supplies
+// the shared connection id, its evidence epoch, counts, a reason and a scope from the hourly snapshot:
+// - scope 'all' pauses every stream (complaints, the spam screen). It bumps the tenant generation and queues the SES
+//   tenant job, which disables the workspace's tenants as a backstop.
+// - scope 'marketing' (bounces only) holds marketing: admission refuses it with 409 MARKETING_HELD and campaigns pause,
+//   while transactional mail keeps flowing. The SES tenants are left enabled.
+export const pauseHostedSending = (unhealthy: SQL) => sql`WITH h AS MATERIALIZED (${unhealthy}), paused AS (
+    UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason,resume_pending_at=NULL,tenant_generation=pc.tenant_generation+1
+    FROM h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND pc.resumed_at IS NOT DISTINCT FROM h.resumed_at AND h.reason IS NOT NULL AND h.scope='all'
+    RETURNING pc.workspace_id,pc.pause_reason,'all'::text AS scope,h.sends,h.bounces,h.complaints,h.rejected,h.screened
+  ), held AS (
+    UPDATE provider_connections pc SET marketing_held_at=clock_timestamp(),marketing_hold_reason=h.reason
+    FROM h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND pc.marketing_held_at IS NULL AND pc.resumed_at IS NOT DISTINCT FROM h.resumed_at AND h.reason IS NOT NULL AND h.scope='marketing'
+    RETURNING pc.workspace_id,pc.marketing_hold_reason AS pause_reason,'marketing'::text AS scope,h.sends,h.bounces,h.complaints,h.rejected,h.screened
+  ), queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
+  SELECT * FROM paused UNION ALL SELECT * FROM held`;
 /** Queues the job that sets the workspace's SES tenants to match its pause (retry-safe by id; the job reads the current state). */
 export const queueTenantStatus = (workspaces: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'hosted.tenantStatus:'||workspace_id,'hosted.tenantStatus',workspace_id,'{}'::jsonb FROM (${workspaces}) w
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
-export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null };
-/** An operator resume. It keeps the sender's history (only the reviewed bounces and complaints before it are forgiven),
- *  restores `percent` of the limit for 48 hours, re-enables the SES tenants and writes the audit row, in one statement. */
-export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null }: HostedResume) => sql`WITH previous AS (
-    SELECT id,paused_at,pause_reason FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' AND paused_at IS NOT NULL FOR UPDATE
-  ), resumed AS (UPDATE provider_connections pc SET paused_at=NULL,pause_reason=NULL,resumed_at=clock_timestamp(),
-    restore_until=${percent < 100 ? sql`clock_timestamp()+interval '48 hours'` : sql`NULL`},restore_percent=${percent < 100 ? percent : null}::smallint
-    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,pc.restore_until),
+/** What Bane wants the SES tenants to be: disabled while paused (and not resuming), enabled otherwise. */
+export const desiredTenantStatus = (pc: SQL = sql`pc`) => sql`CASE WHEN ${pc}.paused_at IS NOT NULL AND ${pc}.resume_pending_at IS NULL THEN 'DISABLED' ELSE 'ENABLED' END`;
+/**
+ * Workspaces whose tenants differ from what Bane wants: a pause not yet applied to every ready regional tenant at the
+ * current generation, a disabled tenant on a workspace that is not paused, or an unfinished resume. The periodic
+ * reconcile queues these, so any interleaving of transitions and job runs converges.
+ */
+export const tenantStatusDrift = () => sql`SELECT pc.workspace_id FROM provider_connections pc WHERE pc.kind='shared' AND (pc.resume_pending_at IS NOT NULL
+  OR (pc.paused_at IS NOT NULL AND EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=pc.id AND r.tenant_state='ready'
+    AND NOT EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.region=r.region AND t.applied='DISABLED' AND t.generation=pc.tenant_generation)))
+  OR (pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')))`;
+export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: { firstWeek: number; secondWeek: number; mature: number } };
+/**
+ * An operator resume, in one statement with its audit row. It lifts a pause or a marketing hold and starts a new
+ * evidence epoch for the pause check; the limit's history is kept whole. With percent < 100 the limit is
+ * min(current limit, percent of the limit before the resume) for 48 hours, an absolute cap that a second resume cannot
+ * raise. A pause whose SES tenants were disabled stays held (pause_reason says it is resuming) until the tenant job
+ * has enabled them again; otherwise sending restarts at once.
+ */
+export const resumeHostedSending = (wid: string, { reason, percent = 50, via = 'script', operator = null, caps }: HostedResume) => sql`WITH previous AS MATERIALIZED (
+    SELECT pc.id,pc.paused_at,pc.pause_reason,pc.marketing_held_at,pc.marketing_hold_reason,CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS active_cap,
+      hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}) AS base,
+      pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')
+        OR EXISTS (SELECT FROM jobs j WHERE j.id='hosted.tenantStatus:'||pc.workspace_id AND j.status='running')) AS enable_first
+    FROM provider_connections pc WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NOT NULL OR pc.marketing_held_at IS NOT NULL) FOR UPDATE
+  ), resumed AS (UPDATE provider_connections pc SET
+      paused_at=CASE WHEN p.enable_first THEN pc.paused_at END,
+      pause_reason=CASE WHEN p.enable_first THEN 'Hosted sending is resuming after a review: it restarts once the SES tenants are enabled again.' END,
+      resume_pending_at=CASE WHEN p.enable_first THEN clock_timestamp() END,
+      marketing_held_at=NULL,marketing_hold_reason=NULL,resumed_at=clock_timestamp(),
+      tenant_generation=pc.tenant_generation+CASE WHEN p.paused_at IS NOT NULL THEN 1 ELSE 0 END,
+      restore_cap=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN least(p.active_cap,greatest(1,p.base*${percent}/100)) END` : sql`NULL`},
+      restore_until=${percent < 100 ? sql`CASE WHEN p.base IS NOT NULL THEN clock_timestamp()+interval '48 hours' END` : sql`NULL`}
+    FROM previous p WHERE pc.id=p.id RETURNING pc.workspace_id,p.pause_reason,p.marketing_hold_reason,p.paused_at IS NOT NULL AS was_paused,p.base,pc.restore_cap,pc.restore_until,pc.resume_pending_at),
   audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'resume-hosted-sending',
-    jsonb_build_object('reason',${reason}::text,'via',${via}::text,'operator',${operator}::text,'pauseReason',pause_reason,'restorePercent',${percent}::int,'restoreUntil',restore_until) FROM resumed),
-  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed`)})
-  SELECT workspace_id FROM resumed`;
+    jsonb_build_object('reason',${reason}::text,'via',${via}::text,'operator',${operator}::text,'pauseReason',pause_reason,'marketingHoldReason',marketing_hold_reason,
+      'restorePercent',${percent}::int,'limitBefore',base,'restoreCap',restore_cap,'restoreUntil',restore_until,'waitsForTenants',resume_pending_at IS NOT NULL) FROM resumed),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM resumed WHERE was_paused`)})
+  SELECT workspace_id,resume_pending_at IS NOT NULL AS pending FROM resumed`;
 
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
 // delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts
