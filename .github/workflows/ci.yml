@@ -161,7 +161,7 @@ jobs:
 
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
-  # Fails above CLS 0.001 or on a long task over 200 ms during in-app navigation. Locally: cd app && bun run cls.
+  # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
   cls:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

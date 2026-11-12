@@ -1,6 +1,8 @@
 // CLS gate: cumulative layout shift on every main dashboard page, light and dark, on a cold full load and on in-app
 // navigation, over a throttled network with slow API responses that arrive out of order. Fails when any page's CLS
-// exceeds 0.001, or when an in-app navigation runs a long task over 200 ms.
+// exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
+// shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
+// 200 ms budget to fail on without flakes.
 //
 // From app/: bun run cls (builds first), or node scripts/cls.mjs against an existing build.
 //   CLS_ONLY=<regex>   only pages whose name matches
@@ -22,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { seed, start } from './cls-fixture.mjs';
 
-const LIMIT = 0.001, LONG_TASK_MS = 200, JOB_TIMEOUT_MS = 90_000;
+const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls');
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
 const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParallelism() * 4);
@@ -222,7 +224,7 @@ async function measure(browser, job, fx) {
 
 const format = r => !r ? '' : r.error ? `❌ ${r.cls ?? 'error'}` : `${r.cls > LIMIT ? '❌ ' : ''}${r.cls === 0 ? '0' : r.cls.toFixed(4)}`;
 function summarize(results, seconds) {
-  const failed = results.filter(r => r.error || r.cls > LIMIT || r.longTask > LONG_TASK_MS);
+  const failed = results.filter(r => r.error || r.cls > LIMIT);
   const rows = new Map();
   for (const r of results) {
     const row = rows.get(r.page) ?? rows.set(r.page, { path: r.path, long: null }).get(r.page);
@@ -232,16 +234,16 @@ function summarize(results, seconds) {
   const lines = [
     `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
     '',
-    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order. Limits: CLS ${LIMIT}, longest task during in-app navigation ${LONG_TASK_MS} ms. ${seconds}s.`,
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
     '',
     '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Longest task |',
     '| --- | --- | --: | --: | --: | --: | --: |',
-    ...[...rows].map(([page, row]) => `| ${page} | \`${row.path}\` | ${format(row['light load'])} | ${format(row['light in-app'])} | ${format(row['dark load'])} | ${format(row['dark in-app'])} | ${row.long === null ? '' : `${row.long > LONG_TASK_MS ? '❌ ' : ''}${row.long} ms`} |`),
+    ...[...rows].map(([page, row]) => `| ${page} | \`${row.path}\` | ${format(row['light load'])} | ${format(row['light in-app'])} | ${format(row['dark load'])} | ${format(row['dark in-app'])} | ${row.long === null ? '' : `${row.long} ms`} |`),
   ];
   if (failed.length) {
     lines.push('', '#### Failures', '');
     for (const r of failed) {
-      lines.push(`- **${r.page}** (${r.scheme}, ${r.mode}) \`${r.path}\`: ${r.error ?? (r.cls > LIMIT ? `CLS ${r.cls}` : `long task ${r.longTask} ms`)}`);
+      lines.push(`- **${r.page}** (${r.scheme}, ${r.mode}) \`${r.path}\`: ${r.error ?? `CLS ${r.cls}`}`);
       for (const e of r.entries.slice(0, 5)) for (const s of e.sources.slice(0, 3)) lines.push(`  - ${e.value.toFixed(4)} at ${e.at} ms: \`${s.node}\` ${JSON.stringify(s.from)} → ${JSON.stringify(s.to)}${s.text ? ` “${s.text.slice(0, 50)}”` : ''}`);
     }
   }
@@ -272,7 +274,7 @@ try {
       const job = jobs[next++];
       const r = await measure(browser, job, fx);
       results[job.index] = r;
-      const flag = r.error || r.cls > LIMIT || r.longTask > LONG_TASK_MS ? '✗' : '✓';
+      const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
       console.log(`${elapsed().padStart(6)} ${flag} ${r.scheme.padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
     }
   }));
