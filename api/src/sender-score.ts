@@ -92,7 +92,8 @@ export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> 
     pc AS (SELECT * FROM provider_connections WHERE workspace_id=${wid} AND kind='shared'),
     mail AS MATERIALIZED (SELECT (e.created_at AT TIME ZONE 'UTC')::date AS day,e.status,e.error_code,e.event_outcomes,e.provider_id,e.campaign_id,e.snapshot->>'kind' AS kind,
         lower(substring(e.from_address from '@([A-Za-z0-9.-]+)')) AS domain
-      FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND NOT EXISTS (SELECT FROM s) AND e.created_at>=date_trunc('day',now(),'UTC')-interval '29 days')
+      FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
+        AND NOT EXISTS (SELECT FROM s) AND e.created_at>=date_trunc('day',now(),'UTC')-interval '29 days')
     SELECT (SELECT to_jsonb(s) FROM s) AS standing,
       coalesce((SELECT json_agg(json_build_object('date',to_char(d.day,'YYYY-MM-DD'),'score',round(d.score,1)) ORDER BY d.day) FROM sender_score_daily d
         WHERE d.workspace_id=${wid} AND d.score IS NOT NULL AND d.day>(now() AT TIME ZONE 'UTC')::date-14),'[]') AS history,

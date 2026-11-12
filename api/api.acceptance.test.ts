@@ -4819,15 +4819,17 @@ describe('Dashboard API capabilities', () => {
       const wid = runtime.config.workspaceId;
       const { refreshStanding } = await import('./src/standing.js');
       // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
-      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; campaign?: boolean; daysAgo?: number } = {}) => db.query(
+      const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; campaign?: boolean; daysAgo?: number; to?: string } = {}) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
-         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', '["recipient@example.com"]', '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n)
+         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', jsonb_build_array($11::text), '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n)
          FROM generate_series(1, $8::int) n`,
-        [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null]);
+        [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null, options.to ?? 'recipient@example.com']);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
       const read = async () => ok(await request('GET', '/v1/sender-score', key.secret));
       // Self-hosted (no standing): simulated mail never counts; computed on read for display only, with no limit.
       await insert(500, { simulated: true }); await insert(99);
+      // Review of #115: live mail to the SES mailbox simulator earned a grade and a higher limit. It is not evidence.
+      await insert(300, { to: 'success+score@simulator.amazonses.com' });
       const warm = await read();
       assert.deepEqual([warm.state, warm.emails.firstEmails, warm.needed, warm.score, warm.grade, warm.history, warm.limit, warm.standing], ['warmup', 99, 100, null, null, [], null, null]);
       assert.deepEqual(warm.factors.filter((f: Json) => f.source === 'neutral').map((f: Json) => f.key), ['content', 'hygiene', 'auth', 'engagement']);

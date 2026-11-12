@@ -111,7 +111,10 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
         (e.status='delivered' OR e.event_outcomes & 2 <> 0) AS delivered,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,
         (e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,e.status='suppressed' AS suppressed,
         e.campaign_id IS NOT NULL AS first_send,coalesce(e.snapshot->>'kind'='marketing' OR e.campaign_id IS NOT NULL,false) AS marketing,e.event_outcomes & 32 <> 0 AS clicked
-      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated
+      -- Only real Hosted mail is evidence: never simulated runs, mail only to the SES mailbox simulator, or mail the
+      -- workspace sent through its own (BYO) account before (the unit is one email, in numerator and denominator alike).
+      FROM due d JOIN sending_emails e ON e.workspace_id=d.workspace_id AND NOT e.simulated AND hosted_real_cost(e.to_addresses||e.cc_addresses||e.bcc_addresses)>0
+        AND (e.feedback_topic_arn IS NULL OR EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=e.feedback_topic_arn AND h.kind='shared'))
         AND e.created_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
     ), days AS (
       SELECT workspace_id,day,count(*)::int AS emails,count(*) FILTER (WHERE accepted)::int AS accepted,count(*) FILTER (WHERE delivered)::int AS delivered,
