@@ -10634,7 +10634,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual((await receipt()).rows,[{status:'processed',error:null}]);
       });
       await t.test('inbound permanent and exhausted failures settle; oldest lost receipts recover first with a cap',async()=>{
-        for(const [mid,attempts] of [['denied',1],['unavailable',6]] as const){await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid},attempts);}
+        const {JobDeferred}=await import('./src/jobs.js'),receipt=async(mid:string)=>(await db.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
+        for(const [mid,attempts] of [['denied',1],['unavailable',6]] as const){await submit(mid,['a@receive.example']);if(mid==='denied')await run('mailbox.ingest',{sesMessageId:mid},attempts);}
+        // A transient failure on the last attempt keeps a receipt SES's staged copy still covers: it retries hourly with
+        // its attempts kept, instead of failing mail that nothing would ingest again.
+        const deferred=await run('mailbox.ingest',{sesMessageId:'unavailable'},6).then(()=>null,(e:unknown)=>e);
+        assert.ok(deferred instanceof JobDeferred && deferred.keepAttempts,String(deferred));
+        assert.ok(Date.parse(deferred.availableAt)>Date.now()+59*60_000);
+        assert.deepEqual(await receipt('unavailable'),{status:'pending',error:null});
+        // Two days on, the same failure settles.
+        await db.query("UPDATE mail_receipts SET created_at=now()-interval '49 hours' WHERE workspace_id=$1 AND ses_message_id='unavailable'",[wid]);
+        await run('mailbox.ingest',{sesMessageId:'unavailable'},6);
         assert.deepEqual((await db.query("SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id IN ('denied','unavailable') ORDER BY ses_message_id",[wid])).rows,[{status:'failed',error:'MAILBOX_RAW_ACCESS_DENIED'},{status:'failed',error:'MAILBOX_RAW_UNAVAILABLE'}]);
         await db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,created_at,recovery_attempts) SELECT $1,'lost-'||i,$2,$3,'unused','[]','{}',now()-interval '2 hours'-i*interval '1 minute',CASE WHEN i=101 THEN 3 ELSE 0 END FROM generate_series(1,101)i",[wid,REGION,bucket]);
         await recoverMailReceipts(runtime);
