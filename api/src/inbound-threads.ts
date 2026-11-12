@@ -23,6 +23,7 @@ const Address = z.object({ name: z.string().nullable(), address: z.string() });
 export const AddressState = z.object({addressId:Id, unreadCount:z.number().int(), archived:z.boolean(), starred:z.boolean(), trashed:z.boolean(), spam:z.boolean(), labels:z.array(z.string())}).openapi('InboundThreadAddressState');
 const Thread = z.object({
   id: z.string(), subject: z.string(), snippet: z.string(), lastMessageAt: z.string(),
+  from: Address.describe('Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address.'),
   addressIds: z.array(z.string()), messageCount: z.number().int().describe('Distinct messages visible within the requested address scope.'),
 }).openapi('InboundThread');
 const Message = z.object({
@@ -60,8 +61,9 @@ function visibleLinks(value: MailboxAccess, filter: Filter) {
 }
 
 // Delivery details (SMTP envelope, region, spam verdict, headers, raw message) go to owner and admin dashboard sessions and
-// unrestricted manage API keys only; MCP grants and agent tokens read mail without them. Shared with logs.ts.
-export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && v.admin);
+// unrestricted manage API keys only; MCP grants, agent tokens and the API keys a grant created read mail without them.
+// Shared with logs.ts.
+export const readsDelivery = (actor: Actor | undefined, v: MailboxAccess) => (actor?.credential==='dashboard' && actor.role!=='member') || (actor?.credential==='apiKey' && !actor.grantId && v.admin);
 // Which stored messages a reader can see, and the receiving addresses each was delivered to. Shared with the unified
 // logs (logs.ts), so both lists apply the same rule.
 export const accessibleMessages = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
@@ -85,7 +87,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
   // must not replace the newest visible snippet, narrow the address list, or reduce the count.
   const visibility = visibleLinks(value, filter); // Also validates an explicit address filter against the grant.
   // Page the per-address summaries first: opening Inbound shouldn't aggregate every message ever received.
-  const rows = await db.execute<{ id: string; subject: string; snippet: string; at: string; address_ids: string[]; message_count: number }>(sql`
+  const rows = await db.execute<{ id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number }>(sql`
     WITH threads AS MATERIALIZED (
       SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
       FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
@@ -94,13 +96,13 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
       GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
         ${state ? sql`AND bool_or(${state})` : sql``}
       ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
-    ) SELECT threads.id, m.subject, m.snippet, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
+    ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
       FROM threads CROSS JOIN LATERAL (SELECT count(DISTINCT mm.message_id)::int AS message_count,
         (array_agg(mm.message_id ORDER BY mm.received_at DESC, mm.message_id DESC))[1] AS latest_id
         FROM mailbox_messages mm WHERE mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
       JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
   const last = rows.rows[options.limit - 1];
-  return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
+  return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, from: { name: row.from_name, address: row.from_address }, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
     nextCursor: rows.rows.length > options.limit && last ? encodeCursor(last.at, last.id) : null };
 }
 

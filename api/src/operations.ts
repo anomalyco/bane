@@ -12,7 +12,7 @@ import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOO
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { SuppressionEventData, webhookUrlHint, WebhookUrlHint } from './core.js';
+import { SuppressionEventData, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -28,6 +28,7 @@ import type { RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
+import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
@@ -77,6 +78,29 @@ const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQ
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 export const DomainPage = listSchema(domainSchema, 'DomainPage');
 export function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
+// Like API keys, webhooks are set up, changed and removed by lasting credentials: a temporary agent token reads them and
+// their deliveries, and can test or retry a delivery, but does not create, change or delete them or read their signing
+// secrets.
+function webhookManager(c: Ctx) {
+  const a = workspaceActor(c, 'manage');
+  if (a.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, change or delete webhooks or read their signing secrets.');
+  return a;
+}
+// A webhook that an approval sets up, changes or reads the signing secret of is tied to the approval, like the keys it
+// creates: it is posted to only while the approval is active (webhookJob) and is held when the approval is removed
+// (migration 198). The approval is read again here, inside the write's transaction, and held (shared lock) until the
+// write commits: a removal under way finishes first and the write is refused; one that starts later waits for the
+// write and then holds the webhook. It is taken before the webhook row, the order a removal takes the two in.
+async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
+  if (!a.grantId) return;
+  const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, tx);
+  if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage')) throw new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was changed.');
+  await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.grantId},${a.workspaceId},'webhook',${webhookId}) ON CONFLICT DO NOTHING`);
+}
+// A held webhook is marked (reconfirm). Its URL is write-only, so nothing is posted to it, a test included, until
+// the URL is sent again. Sending the URL takes the webhook over: the mark goes, and so does the signing secret the
+// approval could read.
+const webhookNeedsUrl = () => new ApiError(409, 'WEBHOOK_URL_REQUIRED', 'Deliveries were held when the approval that set up or changed this webhook was removed, and its URL is write-only. Send the URL again to resume; the webhook then gets a new signing secret.', 'url');
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
   const sesv2 = await loadOperationsSesv2();
@@ -97,7 +121,7 @@ async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIde
   }
 }
 async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
-  const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, ...value } = row;
+  const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, reconfirm: _r, ...value } = row;
   return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
 }
 
@@ -999,12 +1023,13 @@ export function registerOperations(app: App) {
     return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(row => metadata(c.env, row, a))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
+    const a = webhookManager(c), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
     const [row] = await c.env.db.transaction(async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(140913,hashtext(${a.workspaceId}))`);
       if ((await tx.execute(sql`SELECT 1 FROM operation_webhooks WHERE workspace_id=${a.workspaceId} OFFSET 9 LIMIT 1`)).rowCount) throw new ApiError(409,'WEBHOOK_LIMIT_REACHED','A workspace can have at most 10 operation webhook endpoints (including paused endpoints).');
+      await ownWebhook(c, tx, a, webhookId);
       return tx.insert(webhooks).values(values).returning();
     });
     return c.json(await metadata(c.env, row!, a), 201);
@@ -1013,11 +1038,14 @@ export function registerOperations(app: App) {
     const a = workspaceActor(c); return c.json(await metadata(c.env, await getWebhook(c.env, a, c.req.valid('param').id), a), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/webhooks/{id}', operationId: 'updateWebhook', tags: ['Webhooks'], security, request: { params: IdParams, body: json(webhookPatch) }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), { headers, ...body } = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url);
+    const a = webhookManager(c), current = await getWebhook(c.env, a, c.req.valid('param').id), { headers, ...body } = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const row = await c.env.db.transaction(async tx => {
+      await ownWebhook(c, tx, a, current.id);
       const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
-      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers ?? (body.url && body.url !== locked.url ? [] : undefined), secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
+      if (locked.reconfirm && body.paused === false && !body.url) throw webhookNeedsUrl();
+      const takeover = locked.reconfirm && body.url ? { reconfirm: false, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, current.id)) } : {};
+      const [updated] = await tx.update(webhooks).set({ ...body, ...takeover, encryptedHeaders: await encryptWebhookHeaders(c.env, headers ?? (body.url && body.url !== locked.url ? [] : undefined), secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
       // A resumed delivery keeps the attempts it already made: a pause holds the remaining retries, it does not
       // refill them. One that already used its attempts fails instead of starting another round.
       if (locked.paused && body.paused === false) await tx.execute(sql`WITH parked AS (
@@ -1032,22 +1060,35 @@ export function registerOperations(app: App) {
     }); return c.json(await metadata(c.env, row, a), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
+    const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
   });
   for (const rotate of [false, true]) app.openapi(createRoute({ method: rotate ? 'post' : 'get', path: rotate ? '/v1/webhooks/{id}/rotate-secret' : '/v1/webhooks/{id}/secret', operationId: rotate ? 'rotateWebhookSecret' : 'revealWebhookSecret', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id), binding = secretBinding(a, row.id); c.header('Cache-Control', 'no-store');
-    const secret = rotate ? webhookSecret() : await decrypt(c.env, row.encryptedSecret, binding);
-    if (rotate) await c.env.db.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, row.id)));
+    const a = webhookManager(c), webhookId = c.req.valid('param').id, binding = secretBinding(a, webhookId); c.header('Cache-Control', 'no-store');
+    // The approval is held and the webhook row locked from the read to the end: the secret read or written is the one
+    // the row holds when this commits, and a removal that lands later holds the webhook, whose URL then takes it over
+    // with a new secret.
+    const secret = await c.env.db.transaction(async tx => {
+      await ownWebhook(c, tx, a, webhookId);
+      const [row] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))).for('update'); if (!row) return notFound('Webhook');
+      if (!rotate) return decrypt(c.env, row.encryptedSecret, binding);
+      const secret = webhookSecret();
+      await tx.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId)));
+      return secret;
+    });
     return c.json({ secret }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/test', operationId: 'testWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), endpoint = await getWebhook(c.env, a, c.req.valid('param').id); webhookUrl(c.env, endpoint.url);
+    if (endpoint.reconfirm) throw webhookNeedsUrl();
     const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
     await c.env.db.transaction(async tx => { await chargeManualDelivery(tx, a.workspaceId, 1); await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId, generation: 0 } }); });
     return c.json({ id: deliveryId, status: 'pending' as const }, 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
-    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'); const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), q.cursor ? lt(deliveries.id, q.cursor) : undefined)).orderBy(desc(deliveries.id)).limit(q.limit + 1); return c.json({ data: rows.slice(0, q.limit).map(row => visibleDelivery(row, a)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
+    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'), binding = `webhook-deliveries:${endpoint.id}`, cursor = readCursor(q.cursor, binding);
+    const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), cursor ? sql`(${deliveries.createdAt},${deliveries.id})<(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(desc(deliveries.createdAt), desc(deliveries.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(row => visibleDelivery(row, a)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   const deliveryParams = z.object({ id: z.string(), deliveryId: z.string() }).openapi('WebhookDeliveryParams');
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries/{deliveryId}', operationId: 'getWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 200: response(deliverySchema.extend({ attempts: z.array(attemptSchema) }).openapi('WebhookDeliveryDetail')), ...errors } }), async c => {
@@ -1424,7 +1465,13 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   ), ${webhookClaimCtes} ${claimedWithWebhooks}`)).rows[0]?.webhook;
   if (!delivery) return;
   const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
-  try {
+  // A webhook tied to an approval is posted to only while that approval is active, like a request from a key the
+  // approval created. Otherwise the delivery fails here, unsent; it can be retried by hand once the approval is active.
+  const inactive = !!delivery.owned && (await runtime.db.execute<{ inactive: boolean }>(sql`SELECT EXISTS(SELECT FROM mail_grant_objects g
+    WHERE g.workspace_id=${job.workspaceId} AND g.kind='webhook' AND g.resource=${delivery.webhook_id}
+      AND NOT mail_management_grant(g.workspace_id,g.grant_id,${receivingPolicy(runtime.config)}::jsonb,false)) AS inactive`)).rows[0]!.inactive;
+  if (inactive) { error = 'APPROVAL_INACTIVE'; retryable = false; }
+  else try {
     const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
     const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
@@ -1439,7 +1486,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
       WHERE workspace_id=${job.workspaceId} AND operation_deliveries.id=${delivery.delivery_id} AND generation=${delivery.generation})`;
   if (job.recordWithSettlement) job.recordWithSettlement(records);
   else await runtime.db.execute(sql`WITH settled AS (SELECT 1), ${records} SELECT 1`);
-  if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
+  if (error && !inactive) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
 const sesEvents: Record<string, { type: EventType; rawType: string }> = { Send: { type: 'email.sent', rawType: 'send' }, Delivery: { type: 'email.delivered', rawType: 'delivery' }, Bounce: { type: 'email.bounced', rawType: 'bounce' }, Complaint: { type: 'email.complained', rawType: 'complaint' }, DeliveryDelay: { type: 'email.delivery_delayed', rawType: 'delivery_delay' }, Reject: { type: 'email.rejected', rawType: 'reject' }, RenderingFailure: { type: 'email.rendering_failed', rawType: 'rendering_failure' }, Open: { type: 'email.opened', rawType: 'open' }, Click: { type: 'email.clicked', rawType: 'click' } };
