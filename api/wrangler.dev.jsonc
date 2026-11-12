@@ -45,7 +45,13 @@
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "bane-dev-work",
     "WEBHOOK_QUEUE_NAME": "bane-dev-webhooks",
-    "FEEDBACK_QUEUE_NAME": "bane-dev-feedback"
+    "FEEDBACK_QUEUE_NAME": "bane-dev-feedback-v2",
+    "FEEDBACK_DLQ_NAME": "bane-dev-feedback-v2-dlq",
+    "LEGACY_FEEDBACK_DLQ_NAME": "bane-dev-feedback-dlq",
+    // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
+    "LEGACY_FEEDBACK_QUEUE_NAME": "bane-dev-feedback",
+    // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
+    "LEGACY_FEEDBACK_CUTOVER": ""
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).
@@ -61,15 +67,21 @@
     "producers": [
       { "binding": "WAKE_QUEUE", "queue": "bane-dev-work" },
       { "binding": "WEBHOOK_QUEUE", "queue": "bane-dev-webhooks" },
-      { "binding": "FEEDBACK_DLQ", "queue": "bane-dev-feedback-dlq" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "bane-dev-feedback" }
+      { "binding": "FEEDBACK_DLQ", "queue": "bane-dev-feedback-v2-dlq" },
+      { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "bane-dev-feedback-dlq" },
+      { "binding": "FEEDBACK_QUEUE", "queue": "bane-dev-feedback-v2" }
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "bane-dev-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "bane-dev-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
-      { "queue": "bane-dev-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-dlq" }
+      { "queue": "bane-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-v2-dlq" },
+      // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
+      { "queue": "bane-dev-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-dlq" },
+      // Both DLQs archive to PostgreSQL/R2, never ingest. Cross-redrive keeps storage outages recoverable.
+      { "queue": "bane-dev-feedback-v2-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-dlq" },
+      { "queue": "bane-dev-feedback-dlq", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 100, "retry_delay": 300, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-v2-dlq" }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

@@ -185,7 +185,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('operation_deliveries', batch(sql`operation_deliveries`, sql`created_at < ${cutoff} AND status NOT IN ('pending','paused')`));
   await drain('operation_events', batch(sql`operation_events`, sql`created_at < ${cutoff}`));
   await drain('operation_sns_receipts', batch(sql`operation_sns_receipts`, sql`created_at < ${cutoff}`));
-  await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff}`));
+  await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff} AND reason NOT IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY')`));
   await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
   // A fixed 50 rows an hour fell behind any installation retiring more than about 1,200 uploads a day, so their objects and
