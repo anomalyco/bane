@@ -3495,6 +3495,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [other, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$8,'member'),($9,$10,$11,'owner')`,
         [unique('mem'), wid, admin.userId, unique('mem'), member.userId, unique('mem'), ops, operator.userId, unique('mem'), other, outsider.userId]);
+      // The session fixture also makes each user an owner of 'default'; here each belongs only where it was placed.
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[admin.userId, member.userId, operator.userId, outsider.userId]]);
 
       // Every customer credential type.
       const keys: Record<string, string> = {};
@@ -9475,6 +9477,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const f = await hostedHoldFixture(runtime, db);
       await gradedSender(db, f.wid, 10000);
       // The same owner opens a second workspace while the first is paused (it inherits the sponsor, as signup does).
+      // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
+      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
       const other = ok(await local('POST', '/v1/workspaces', { name: 'Second synthetic workspace' }), 201).id;
       await db.query(`UPDATE workspaces SET quota_sponsor='sponsor-fixture' WHERE id=ANY($1)`, [[f.wid, other]]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, f.pool]);

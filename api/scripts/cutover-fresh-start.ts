@@ -40,7 +40,10 @@ const PEOPLE = ['access_requests', 'auth_verification', 'auth_session', 'auth_ac
   'bane_oidc_identities', 'auth_user', 'bane_users'];
 // Kept-workspace rows the wipe is meant to change: people-scoped rows, and grant objects detached into the audit table.
 const PEOPLE_SCOPED = new Set(['agent_tokens', 'bane_resource_grants', 'workspace_invitations', 'workspace_members', 'mail_grant_objects', 'bane_retired_grant_objects']);
-const NEVER = new Set(['workspaces', 'bane_migrations', ...PEOPLE]);
+// The audit trail is append-only by design (migration 260: unexpired rows refuse UPDATE, DELETE and TRUNCATE). A
+// deleted workspace's entries stay until their retain_until; the retention purge removes them. Never swept.
+const APPEND_ONLY = new Set(['audit_events']);
+const NEVER = new Set(['workspaces', 'bane_migrations', ...PEOPLE, ...APPEND_ONLY]);
 
 type Key = { table: string; column: string; by: 'workspace' | 'connection' };
 type Connection = { id: string; kind: string; region: string; aws_account_id: string | null; role_arn: string | null; external_id: string | null;
@@ -49,7 +52,7 @@ type Tenant = { region: string; name: string; arn: string | null };
 type Victim = { id: string; name: string; created_at: string; members: number; domains: string[]; connections: Connection[]; tenants: Tenant[] };
 type Owner = { subject: string; issuer: string; acr: string | null; email: string | null; name: string | null; last_at: string };
 export type Plan = { anchor: { id: string; name: string }; domains: Record<string, string[]>; victims: Victim[]; kept: string[]; keptConnections: string[];
-  people: Record<string, number>; rows: Record<string, number>; keys: Key[]; owner: Owner; appliedAt: string | null };
+  people: Record<string, number>; rows: Record<string, number>; history: Record<string, number>; keys: Key[]; owner: Owner; appliedAt: string | null };
 
 const ident = (name: string) => '"' + name.replace(/"/g, '""') + '"';
 const exists = async (db: pg.Client, table: string) => !!(await db.query('SELECT to_regclass($1) AS t', ['public.' + table])).rows[0].t;
@@ -82,7 +85,7 @@ async function keys(db: pg.Client): Promise<Key[]> {
 
 export async function inspect(db: pg.Client, ownerSubject: string, issuer: string, allowMissingDomains = false): Promise<Plan> {
   const { rows: [marker] } = await db.query<{ at: string }>("SELECT at::text FROM hosted_operator_audit WHERE action=$1 ORDER BY at LIMIT 1", [MARKER]);
-  if (marker) return { anchor: { id: '', name: '' }, domains: {}, victims: [], kept: [], keptConnections: [], people: {}, rows: {}, keys: [],
+  if (marker) return { anchor: { id: '', name: '' }, domains: {}, victims: [], kept: [], keptConnections: [], people: {}, rows: {}, history: {}, keys: [],
     owner: { subject: ownerSubject, issuer, acr: null, email: null, name: null, last_at: '' }, appliedAt: marker.at };
   // The owner is bound by subject: it must be a recorded, verified, Google-authenticated sign-in at this issuer.
   const { rows: [owner] } = await db.query<Owner>(`SELECT subject,issuer,acr,email,name,last_at::text FROM bane_signin_attempts
@@ -134,9 +137,12 @@ export async function inspect(db: pg.Client, ownerSubject: string, issuer: strin
     const n = (await db.query(`SELECT count(*)::int n FROM ${ident(k.table)} WHERE ${ident(k.column)}=ANY($1)`, [k.by === 'connection' ? connectionIds : ids])).rows[0].n;
     if (n) rows[`${k.table}.${k.column}`] = n;
   }
+  const history: Record<string, number> = {};
+  for (const table of APPEND_ONLY) if (await exists(db, table))
+    history[table] = (await db.query(`SELECT count(*)::int n FROM ${ident(table)} WHERE workspace_id=ANY($1)`, [ids])).rows[0].n;
   const kept = [anchorId, INTERNAL];
   const keptConnections = (await db.query<{ id: string }>('SELECT id FROM provider_connections WHERE workspace_id=ANY($1) ORDER BY id', [kept])).rows.map(r => r.id);
-  return { anchor, domains, victims, kept, keptConnections, people, rows, keys: keyList,
+  return { anchor, domains, victims, kept, keptConnections, people, rows, history, keys: keyList,
     owner, appliedAt: null };
 }
 
@@ -156,6 +162,7 @@ export function describe(plan: Plan) {
   for (const [table, n] of Object.entries(plan.people)) if (n) out.push(`  ${table}: ${n}`);
   out.push(`Workspace data to delete (${plan.keys.length} keyed tables scanned):`);
   for (const [key, n] of Object.entries(plan.rows)) out.push(`  ${key}: ${n}`);
+  for (const [table, n] of Object.entries(plan.history)) if (n) out.push(`Kept (append-only, until their retention ends): ${table}: ${n} row(s) of deleted workspaces`);
   const o = plan.owner;
   out.push(`Owner (bound by subject): ${o.subject} at ${o.issuer}, Google sign-in at ${o.last_at.slice(0, 19)}; shown, not verified: ${o.name ?? '-'} <${o.email ?? '-'}>.`);
   out.push(`  becomes the only member (owner) of ${plan.anchor.id}. Confirm the subject and time with the person before --apply.`);
