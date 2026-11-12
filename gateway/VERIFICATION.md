@@ -1,4 +1,17 @@
-# First-slice verification (2026-11-11, Apple Silicon)
+# Gateway verification
+
+## PR #45, after merging dev through #55 (2026-11-12, Apple Silicon)
+
+| Gate | Result |
+| --- | --- |
+| Full API acceptance, both isolated CI shards | 339 passed, 0 failed, 6 skipped. Admission: 1 SQL statement; ingest: 2–3. |
+| `python3 e2e.py --real` (disposable PostgreSQL + MinIO) | 18 passed, 0 failed. Cold/cached LOGIN 1/0; SELECT 1; selected FLAGS, header and body PEEK 0; two-session IDLE refresh 1. |
+| Gateway tear `ci` | 483,357 steps, 0 mismatches, 0 errors. The inbox tear delete/subscribe race also matched PostgreSQL. |
+| Rust | Format and Clippy clean; 27 unit/property tests passed. Nightly `wire` fuzz without ASan: 191,330 executions in 21 s, 0 crashes. |
+
+The imaptest script runner has a separate fixture session cap for short-lived connections through the Docker proxy; admission and account fairness are tested separately. The real-store gate retains the upstream `\Recent` comparison below. Neither the run nor its database budgets measure hosted Fargate or Worker performance.
+
+## First-slice verification (2026-11-11, Apple Silicon)
 
 `cargo clippy --all-targets --locked -- -D warnings` clean; `cargo test --locked` 8/8, including two proptests. `python3 e2e.py` 11/11. No hosted services or real mail were used.
 

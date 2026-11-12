@@ -90,6 +90,7 @@ def real_services():
                 "POSTGRES_HOST_AUTH_METHOD=trust",
                 "-e",
                 "POSTGRES_DB=fixture",
+                "--tmpfs", "/var/lib/postgresql/data:rw,size=3g",
                 "-p",
                 "127.0.0.1::5432",
                 "pgvector/pgvector:pg17",
@@ -103,6 +104,7 @@ def real_services():
             [
                 "-e",
                 "MINIO_ROOT_USER=fixture",
+                "--tmpfs", "/data:rw,size=1g",
                 "-e",
                 "MINIO_ROOT_PASSWORD=" + pw,
                 "-p",
@@ -664,6 +666,14 @@ def imaptest(tmp, p, stress=False):
     assert "3 test groups: 0 failed" in scoped and "Error:" not in scoped
 
 
+def imaptest_scripts(tmp):
+    # This runner tests command semantics, not session limits. Its short-lived
+    # connections through the container proxy overlap on teardown. Keep the
+    # production limits on the separate admission and account-isolation gates.
+    with gateway(tmp, MAILGW_LOGIN_LIMIT="32") as (ports,_):
+        imaptest(tmp,ports)
+
+
 def clients(tmp, p):
     run(
         [ROOT / "target/debug/examples/client"],
@@ -1021,7 +1031,7 @@ def main():
                 ("literals/MIME", lambda: framing(p)),
                 ("preauth timeout", lambda: deadline(p)),
                 ("Rust/swaks/NeoMutt", lambda: clients(tmp, p)),
-                ("imaptest scripts", lambda: imaptest(tmp, p)),
+                ("imaptest scripts", lambda: imaptest_scripts(tmp)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
                 *([('account shares',lambda:account_fairness(tmp)),('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
