@@ -7,6 +7,8 @@
 .settings-rail a { display: flex; align-items: center; height: 28px; padding-inline: var(--space-8); border-radius: 4px; color: var(--color-muted); text-decoration: none; transition: background-color var(--motion-duration), color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { .settings-rail a:hover { color: var(--color-text); background: var(--color-hover); } }
 .settings-rail a[aria-current='page'] { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.settings-rail a[data-locked] { justify-content: space-between; }
+.settings-rail a[data-locked] svg { color: var(--color-faint); }
 .hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; padding-top: 52px; animation: section-enter 120ms ease-out both; }
 .hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-12)); }
 .hosted-settings__content .settings-rule { border-top: 0; padding-top: 0; }
@@ -25,7 +27,8 @@
 .settings-name-input.ui-input { width: min(320px, 100%); }
 .settings-name .ui-button[data-hidden] { visibility: hidden; }
 .settings-name-error { position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
-.settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); color: var(--color-text); text-decoration: none; }
+.settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: none; cursor: pointer; }
+.settings-readonly { overflow: hidden; text-overflow: ellipsis; }
 .settings-score b { font-weight: var(--font-weight-bold); }
 .settings-score__grade { font-family: var(--font-mono); font-weight: 700; }
 .settings-score svg { align-self: center; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong); }
