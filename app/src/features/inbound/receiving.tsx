@@ -18,6 +18,7 @@ import { RouteEditor } from './routing'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
+import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
 
 type Tab = 'routes' | 'rituals' | 'endpoints'
 const PAGE = 50
@@ -33,11 +34,12 @@ function note(r: RouteEntry) {
   const a = r.address
   if (r.kind === 'catch_all') return r.catchAll ? (r.catchAll === 'create_address' ? 'Catch-all · creates an address per recipient' : 'Catch-all · unknown addresses') : 'Catch-all route'
   if (r.kind === 'route') return kindNote.route
-  if (r.kind === 'pattern') return a ? `Pattern of ${a.address}` : kindNote.pattern
+  if (r.kind === 'pattern') return a ? <>Pattern of <PrivateAddress value={a.address} /></> : kindNote.pattern
   if (r.kind === 'inbox') return [a?.displayName, expiresIn(a?.expiresAt)].filter(Boolean).join(' · ') || kindNote.inbox
   if (a?.origin === 'auto') return kindNote.auto
-  const also = a?.aliases.length ? `also ${a.aliases.map(x => x.slice(0, x.indexOf('@') + 1)).join(', ')}` : null
-  return [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean).join(' · ') || 'Address'
+  const also = a?.aliases.length ? <>also <AddressList values={a.aliases.map(x => x.slice(0, x.indexOf('@') + 1))} /></> : null
+  const parts = [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean)
+  return parts.length ? parts.map((part, i) => <span key={i}>{i > 0 && ' · '}{part}</span>) : 'Address'
 }
 // Where a row leads: its address, its agent inbox, the domain that owns a default, or the route editor.
 const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : r.id.startsWith('default:') ? `/domains/${r.id.slice(8)}` : null

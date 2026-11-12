@@ -13,6 +13,7 @@ import { fieldError, MutationError } from '../settings/shared'
 import { addressName, cleanName, full, idempotencyFor, nameOf, when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
+import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
 
 const views: { value: InboundThreadView; label: string }[] = [{ value: 'inbox', label: 'Inbox' }, { value: 'starred', label: 'Starred' }, { value: 'archive', label: 'Archive' }, { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'all', label: 'All' }]
 const statusTone = (status: string) => status === 'delivered' ? 'success' as const : ['bounced', 'complained', 'rejected', 'suppressed', 'rendering_failed', 'canceled'].includes(status) ? 'danger' as const : status === 'delayed' ? 'warning' as const : 'neutral' as const
@@ -61,7 +62,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
-        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : nameOf(message.from)}</bdi></strong><bdi className="muted">{message.from.address}</bdi></span>
+        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : nameOf(message.from)}</bdi></strong><bdi className="muted"><PrivateAddress value={message.from.address} /></bdi></span>
         <span className="mailbox-message__meta">
           {unread && <StatusBadge status="New" tone="info" />}
           {outbound && <StatusBadge status={label(message.status)} tone={statusTone(message.status)} />}
@@ -69,8 +70,8 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         </span>
       </button>
       <p className="mailbox-message__context">
-        <span title={recipients.map(full).join(', ')}>to {recipients.map(person => own.has(person.address.toLowerCase()) ? person.address : person.name || person.address).join(', ') || '—'}</span>
-        {showAddresses && <span>via {message.addressIds.map(id => addressName(addresses, id)).join(', ')}</span>}
+        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) || !person.name ? <PrivateAddress value={person.address} /> : person.name}</span>) : '—'}</span>
+        {showAddresses && <span>via <AddressList values={message.addressIds.map(id => addressName(addresses, id))} /></span>}
         {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</span>
           : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}
       </p>

@@ -6,6 +6,7 @@ import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../
 import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as const : ['admin', 'member'] as const).map(role => ({ value: role, label: roleLabel[role] }))
 
@@ -25,7 +26,7 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
     <MutationError error={update.error} />
     {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable loading={members.isPending} skeletonRows={2} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
       { key: 'name', label: 'Name', width: '28%', render: member => <>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</> },
-      { key: 'email', label: 'Email', width: '34%', render: member => <span className="settings-break">{member.email}</span> },
+      { key: 'email', label: 'Email', width: '34%', render: member => <span className="settings-break"><PrivateAddress value={member.email} /></span> },
       { key: 'role', label: 'Role', width: 160, render: member => manageable(member) && !lastOwner(member) ? <Select aria-label={`Role for ${member.email}`} value={member.role} onValueChange={role => update.mutate({ id: member.id, role: role as WorkspaceRole })} disabled={update.isPending} options={roleOptions(owner)} /> : roleLabel[member.role] },
       { key: 'actions', label: '', align: 'right', render: member => manageable(member) && !lastOwner(member) ? <Button variant="danger" onClick={() => setRemoving(member)}>Remove</Button> : null },
     ]} />}
@@ -40,7 +41,7 @@ export function Invitations({ owner }: { owner: boolean }) {
   return <section className="section stack settings-rule">
     <SectionHeader title="Invitations" />
     {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={2} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={2} empty={<EmptyState title="No pending invitations" />} columns={[
-      { key: 'email', label: 'Email', width: '40%', render: invitation => <span className="settings-break">{invitation.email}</span> },
+      { key: 'email', label: 'Email', width: '40%', render: invitation => <span className="settings-break"><PrivateAddress value={invitation.email} /></span> },
       { key: 'role', label: 'Role', width: 160, render: invitation => roleLabel[invitation.role] },
       { key: 'expires', label: 'Expires', render: invitation => date(invitation.expiresAt) },
       { key: 'actions', label: '', align: 'right', width: 160, render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span> },

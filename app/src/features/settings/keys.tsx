@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
 import { useApiMutation, useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -10,6 +10,7 @@ import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
+import { AddressList } from '../../components/PrivateAddress'
 
 type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
 type ConnectedRow = { kind: 'token'; item: AgentTokenSummary } | { kind: 'mcp'; item: McpConnection }
@@ -61,7 +62,7 @@ export function ApiKeysPage() {
             { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} /> },
             { ...settingsColumns.keys[1], render: row => row.kind === 'api'
               ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
-              : <TwoLines first={`Inbound: ${row.key.addressIds ? row.key.addressIds.map(address).join(', ') : 'every address'}`} second={permissionList(row.key.permissions)} /> },
+              : <TwoLines first={<>Inbound: {row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} /> },
             { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
             { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt) },
             { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button> },
@@ -100,6 +101,6 @@ export function ApiKeysPage() {
   </div>
 }
 
-function TwoLines({ first, second }: { first: string; second: string }) {
-  return <div className="settings-cell-stack keys-cell"><span title={first}>{first}</span><span className="muted" title={second}>{second}</span></div>
+function TwoLines({ first, second }: { first: ReactNode; second: string }) {
+  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={second}>{second}</span></div>
 }

@@ -10496,10 +10496,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         }
         assert.equal((await call('GET', '/v1/inbound/overview')).endpointsTruncated, false);
       });
-      // PR #55 review P3: Trace showed the sender-written header To in full. The dashboard's one rule (app/src/lib/received-to.ts),
-      // now shared by Logs and Trace, shows only our receiving address or envelope recipient in full and masks the rest.
-      await t.test('inbound received To: real log rows show only our own address in full; a header To is masked', async () => {
-        const { receivedTo } = await import('../app/src/lib/received-to.js');
+      // PR #55 review P3: Trace traced received mail as the sender-written header To. The dashboard's one address rule
+      // (app/src/lib/private-address.ts) picks our receiving address or envelope recipient, never the header To, as the
+      // address to trace; every mailbox address it shows is masked, ours included.
+      await t.test('inbound received To: real log rows trace as our own address, never the header To; every mailbox address is masked', async () => {
+        const { receivedTo, ownRecipient, maskedParts } = await import('../app/src/lib/private-address.js');
         const stored = await route('mask-store@receive.example', []);
         const mail = async (mid: string, to: string) => {
           raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nTo: Someone Else <someone@elsewhere.example>\r\nSubject: Masking ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
@@ -10510,12 +10511,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await mail('mask-unrouted', 'mask-store@receive.example'); await mail('mask-routed', box.address);
           const unrouted = await row('mask-unrouted');
           assert.deepEqual([unrouted.addresses, unrouted.to], [[], ['someone@elsewhere.example']]);
-          assert.deepEqual(receivedTo(unrouted), { address: 'mask-store@receive.example', own: true }, 'the envelope recipient is ours');
-          assert.deepEqual(receivedTo(await row('mask-routed')), { address: box.address, own: true }, 'the receiving address it was delivered to');
+          assert.deepEqual([receivedTo(unrouted), ownRecipient(unrouted)], ['mask-store@receive.example', 'mask-store@receive.example'], 'the envelope recipient is ours');
+          assert.deepEqual([receivedTo(await row('mask-routed')), ownRecipient(await row('mask-routed'))], [box.address, box.address], 'the receiving address it was delivered to');
           // A message stored without its envelope (older mail): only the sender-written header To is known, so it is masked.
           await db.query("UPDATE mail_messages SET envelope_to='[]'::jsonb WHERE workspace_id=$1 AND subject='Masking mask-unrouted'", [wid]);
-          assert.deepEqual(receivedTo(await row('mask-unrouted')), { address: 'someone@elsewhere.example', own: false });
+          const headerOnly = await row('mask-unrouted');
+          assert.deepEqual([receivedTo(headerOnly), ownRecipient(headerOnly)], ['someone@elsewhere.example', undefined], 'shown, but never traced as ours');
           assert.equal(receivedTo({ to: [], addresses: [], envelopeTo: [] }), null);
+          // Ours and theirs alike: mailbox addresses and address patterns are masked; domains and *@domain stay readable.
+          assert.deepEqual([box.address, 'someone@elsewhere.example', 'sales-*@receive.example'].map(value => maskedParts(value)?.shown), [box.address.slice(0, 2), 'so', 'sa']);
+          assert.deepEqual(['receive.example', '@receive.example', '*@receive.example', ''].map(maskedParts), [null, null, null, null]);
         } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
       });
       // PR #55 recheck P2: listInboundWebhooks returned 100 webhooks with no cursor, and a route's subscribers were cut at

@@ -1,6 +1,8 @@
 import { Archive, Asterisk, AtSign, Ban, Bot, Clock, Forward, Hash, Inbox, MessageSquare, Plus, ScrollText, Webhook } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { outcomes } from './concepts'
+import { PRIVATE_TITLE, PrivateAddress } from '../../components/PrivateAddress'
+import { isMailbox } from '../../lib/private-address'
 import { typeLabel, type RouteEntry, type Target, type TargetType } from './overview'
 
 const targetIcons: Record<TargetType, typeof Inbox> = { inbox: Inbox, webhook: Webhook, slack: Hash, discord: MessageSquare, forward: Forward, store: Archive, drop: Ban, create_address: Plus }
@@ -14,11 +16,13 @@ export function RouteIcon({ entry, size = 14 }: { entry: Pick<RouteEntry, 'kind'
 }
 export const RitualIcon = ({ size = 14 }: { size?: number }) => <ScrollText className="rcv-icon" size={size} aria-hidden="true" />
 
-/** An address or pattern, host quieter so a column of them reads by local part; wildcards stand out so reply+*@ never reads as reply++@. */
+const wild = (text: string) => text.split('*').map((part, i) => <span key={i}>{i > 0 && <span className="rcv-wild">*</span>}{part}</span>)
+/** An address or pattern, host quieter so a column of them reads by local part; wildcards stand out so reply+*@ never reads as reply++@.
+ * Mailbox addresses and patterns are masked like every address (lib/private-address.ts); *@host and hosts stay readable. */
 export function Match({ value, host = true }: { value: string; host?: boolean }) {
-  const at = value.lastIndexOf('@')
-  const local = (at < 0 ? value : value.slice(0, at)).split('*')
-  return <span className="rcv-match" title={value}><span className="rcv-match__local">{local.map((part, i) => <span key={i}>{i > 0 && <span className="rcv-wild">*</span>}{part}</span>)}</span>{host && at >= 0 && <span className="rcv-match__host">{value.slice(at)}</span>}</span>
+  const at = value.lastIndexOf('@'), local = at < 0 ? value : value.slice(0, at), domain = host && at >= 0 ? value.slice(at) : ''
+  if (!isMailbox(value)) return <span className="rcv-match" title={value}><span className="rcv-match__local">{wild(local)}</span>{domain && <span className="rcv-match__host">{domain}</span>}</span>
+  return <span className="rcv-match private-address" title={PRIVATE_TITLE}><span className="rcv-match__local" aria-hidden="true">{wild(local.slice(0, 2))}<span className="private-address__rest">{wild(local.slice(2))}</span></span>{domain && <span className="rcv-match__host private-address__rest" aria-hidden="true">{domain}</span>}<span className="sr-only">{local + domain}</span></span>
 }
 
 export const targetName = (t: Target, ownId?: string | null) => t.type === 'inbox' ? (t.id === ownId ? 'Inbox' : `${t.name} inbox`) : t.type in outcomes ? outcomes[t.type as keyof typeof outcomes] : t.name
@@ -27,7 +31,7 @@ export function Targets({ to, ownId, max = 3, total = to.length }: { to: Target[
   if (!to.length) return <span className="muted">—</span>
   return <span className="rcv-targets">{to.slice(0, max).map(t => <span key={`${t.type}:${t.id}`} className="rcv-target" data-muted={t.type === 'store' || t.type === 'drop' || t.status === 'paused' || undefined}
     title={`${typeLabel[t.type]}${t.via ? ` · sent by the ${t.via} ritual, for the mail it chooses` : ''}`}>
-    <TargetIcon type={t.type} size={13} /><span>{targetName(t, ownId)}</span>{t.via && <span className="rcv-via">via {t.via}</span>}
+    <TargetIcon type={t.type} size={13} /><span>{t.type === 'inbox' && t.id !== ownId ? <><PrivateAddress value={t.name} /> inbox</> : <PrivateAddress value={targetName(t, ownId)} />}</span>{t.via && <span className="rcv-via">via {t.via}</span>}
   </span>)}{total > Math.min(max, to.length) && <span className="muted">+{total - Math.min(max, to.length)}</span>}</span>
 }
 

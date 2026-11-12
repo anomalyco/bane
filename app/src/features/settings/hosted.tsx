@@ -13,6 +13,7 @@ import { MutationError } from './shared'
 import { WebhooksSection } from './webhooks'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -112,7 +113,7 @@ function AccountRows() {
   const access = useWorkspaceAccess()
   if (!session?.identity) return null
   return <div className="settings-rows">
-    <Row title="Email">{session.identity.email || '—'}</Row>
+    <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
   </div>
