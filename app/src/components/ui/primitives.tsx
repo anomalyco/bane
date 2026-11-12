@@ -1,4 +1,4 @@
-import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactElement, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type InputHTMLAttributes, type ReactElement, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
@@ -7,7 +7,9 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
-import { SkeletonText, PaginationSkeleton } from './skeleton';
+import { usePhone, useTouch } from '../../lib/media';
+import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
+import { Sheet, SheetOpenEffects, useSheetDrag } from './sheet';
 
 const cx = (...values: (string | false | null | undefined)[]) => values.filter(Boolean).join(' ');
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
@@ -39,6 +41,11 @@ export type SelectProps = { value: string; onValueChange: (value: string) => voi
 export function Select({ value, onValueChange, options, placeholder = 'Select…', id, name, disabled, required, className, ...aria }: SelectProps) {
   const emptyValue = useId();
   const hasEmptyOption = options.some(option => option.value === '');
+  // Touch screens get the platform's own picker (the iOS wheel, Android's list): bigger targets, no zoom, no popover.
+  if (useTouch()) {
+    const known = options.some(option => option.value === value);
+    return <select {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>;
+  }
   return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
 }
 type CheckProps = { checked: boolean; onCheckedChange: (checked: boolean) => void; label: ReactNode; disabled?: boolean; id?: string; name?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean };
@@ -77,8 +84,11 @@ export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void
 export function Dialog({ open, onOpenChange, title, description, children, footer, className }: DialogProps) {
   const returnFocus = useRef<HTMLElement | null>(null);
   const descriptionId = useId();
+  // On a phone the dialog is a bottom sheet: in thumb reach, above the keyboard, swiped down to close.
+  const sheet = usePhone();
+  const drag = useSheetDrag(() => onOpenChange(false), sheet);
   // Native input autofocus can precede Radix's callback; retain the external opener, not the mounted input.
-  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content className={cx('ui-dialog', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}><div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
+  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
 export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
   const [busy, setBusy] = useState(false);
@@ -88,30 +98,100 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
 }
-export function DropdownMenu({ items, label = 'More actions', trigger }: { items: { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean }[]; label?: string; trigger?: ReactNode }) {
+export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };
+export function DropdownMenu({ items, label = 'More actions', trigger, title }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode }) {
+  const phone = usePhone();
+  const [open, setOpen] = useState(false);
+  // A phone gets an action sheet: full-width rows at the bottom of the screen, and Cancel.
+  if (phone) {
+    const button = trigger && isValidElement(trigger) ? cloneElement(trigger as ReactElement<{ onClick?: () => void }>, { onClick: () => setOpen(true) }) : <IconButton label={label} onClick={() => setOpen(true)}><MoreHorizontal size={16} /></IconButton>;
+    return <>{button}<ActionSheet open={open} onOpenChange={setOpen} title={title ?? label} items={items} /></>;
+  }
   return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align="end" sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
 }
-export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode };
-export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton'>;
+// The actions run once the sheet has started closing, so a confirmation they open takes focus cleanly.
+export function ActionSheet({ open, onOpenChange, title, items }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; items: MenuItem[] }) {
+  return <Sheet open={open} onOpenChange={onOpenChange} title={title} className="ui-action-sheet">
+    <div className="ui-action-sheet__items" role="group">{items.map((item, index) => <button key={`${item.label}-${index}`} type="button" disabled={item.disabled} className={cx('ui-action-sheet__item', item.destructive && 'ui-action-sheet__item--danger')} onClick={() => { onOpenChange(false); setTimeout(item.onSelect, 0); }}>{item.icon && <span className="ui-menu-icon">{item.icon}</span>}<span className="ui-action-sheet__label">{item.label}{item.hint && <span className="ui-action-sheet__hint">{item.hint}</span>}</span></button>)}</div>
+    <button type="button" className="ui-action-sheet__item ui-action-sheet__cancel" onClick={() => onOpenChange(false)}>Cancel</button>
+  </Sheet>;
+}
+// On a phone every table renders as a list of cards, from the same column definitions (so a route skeleton and its loaded
+// table always agree). A column's `card` slot places it: `title` (line 1, the row's link), `aside` (line 1, right),
+// `line` (a muted line of its own), `inline` (joins the line above), `field` (a line with the column's label first),
+// `end` (a control on the right, such as a row menu) or `hide`. Unset: the first column is the title, a column without a
+// label is `end`, the rest are fields. `cardRender` replaces a column's cell in the card only; `table: false` keeps a
+// column out of the table (a fact the table shows inside another cell).
+export type CardSlot = 'title' | 'aside' | 'line' | 'inline' | 'field' | 'end' | 'hide';
+export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode; card?: CardSlot; cardRender?: (row: T) => ReactNode; table?: false };
+export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton' | 'card' | 'table'>;
+type CardShape<C> = { title?: C; aside: C[]; lines: { column: C; labelled: boolean }[][]; end: C[] };
+function cardShape<C extends SkeletonColumn>(columns: C[]): CardShape<C> {
+  const shape: CardShape<C> = { aside: [], lines: [], end: [] };
+  columns.forEach((column, index) => {
+    const slot = column.card ?? (index === 0 ? 'title' : column.label === '' || column.label == null ? 'end' : 'field');
+    if (slot === 'hide') return;
+    if (slot === 'title' && !shape.title) shape.title = column;
+    else if (slot === 'aside') shape.aside.push(column);
+    else if (slot === 'end') shape.end.push(column);
+    else if (slot === 'inline' && shape.lines.length) shape.lines[shape.lines.length - 1].push({ column, labelled: false });
+    else shape.lines.push([{ column, labelled: slot === 'field' }]);
+  });
+  return shape;
+}
+// Every card of a table is the same height (12 px padding, a 20 px title line, 24 px per further line, or the 44 px
+// end control if taller), so its skeleton, a short page and a full page all hold the same space.
+const cardHeight = (shape: CardShape<unknown>) => 25 + Math.max(20 + 24 * shape.lines.length, shape.end.length ? 44 : 0);
+const cardLabel = (label: ReactNode) => typeof label === 'string' && label ? <span className="ui-card__label">{label}</span> : null;
 // onRowIntent: a pointer resting on a row (not crossing it) or focus on it, before the click: warm what the row opens.
 // rowHref: rows that open a page are real links. The first cell's content is an <a href> (keyboard, middle-click,
 // "open in new tab"); a click anywhere else on the row follows it too, opening a new tab with a modifier or the middle
 // button, while links and buttons inside the row keep their own action. Rows without an href use onRowClick (for
-// example, opening a dialog).
-export function DataTable<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; rowHref?: (row: T) => string | null | undefined; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string }) {
+// example, opening a dialog). A card's title is the link (or button), stretched over the whole card.
+type DataTableProps<T> = { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; onRowIntent?: (row: T) => void; rowHref?: (row: T) => string | null | undefined; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; tableRef?: (node: HTMLDivElement | null) => void; className?: string; card?: boolean };
+export function DataTable<T>(props: DataTableProps<T>) {
+  const phone = usePhone();
+  return phone && props.card !== false ? <CardList {...props} /> : <Table {...props} />;
+}
+function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
+  const columns = all.filter(column => column.table !== false)
   const intent = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(intent.current), [])
   const rest = (row: T) => { window.clearTimeout(intent.current); intent.current = window.setTimeout(() => onRowIntent?.(row), 80) }
   const navigate = useNavigate()
-  const own = (event: { target: EventTarget }) => Boolean((event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]'))
+  const own = (event: { target: EventTarget }) => Boolean((event.target as HTMLElement).closest('button, a, input, select, [role="checkbox"], [role="switch"]'))
   const follow = (href: string, event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; button: number }) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) window.open(href, '_blank', 'noopener'); else navigate(href) }
   return <div ref={tableRef} className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
-    <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
-      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
+    <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} data-col={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
+      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-col={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} data-col={column.key} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
         {!loading && rows.length > 0 && rows.length < minRows && <tr className="ui-table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: `calc(${minRows - rows.length} * var(--table-row-height))` }} /></tr>}
       </tbody></table>
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
+  </div>;
+}
+function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
+  const shape = cardShape(columns), height = cardHeight(shape);
+  const cell = (column: Column<T>, row: T) => (column.cardRender ?? column.render)(row);
+  const style = { '--table-row-height': `${height}px` } as CSSProperties;
+  return <div ref={tableRef} className={cx('ui-cards', className)} style={style} aria-busy={loading || undefined}>
+    {loading && <span className="sr-only" role="status">Loading list</span>}
+    {(loading || rows.length > 0) && <ul className="ui-cards__list">{loading ? Array.from({ length: skeletonRows }, (_, index) => <li key={index} className="ui-card" aria-hidden="true">
+      <div className="ui-card__main"><div className="ui-card__head"><span className="ui-card__title"><SkeletonText width="62%" /></span>{shape.aside.length > 0 && <span className="ui-card__aside"><SkeletonText width={56} /></span>}</div>
+        {shape.lines.map((_, line) => <div key={line} className="ui-card__line"><SkeletonText width={`${[78, 52, 66, 44][line % 4]}%`} /></div>)}</div>
+      {shape.end.length > 0 && <div className="ui-card__end"><ControlSkeleton width={44} /></div>}
+    </li>) : rows.map(row => {
+      const id = rowKey(row), href = rowHref?.(row) || undefined, title = shape.title ? cell(shape.title, row) : null;
+      return <li key={id} className="ui-card" data-selected={selectedId === id || undefined} data-clickable={href || onRowClick ? true : undefined} onPointerDown={onRowIntent && (() => onRowIntent(row))} onFocus={onRowIntent && (() => onRowIntent(row))}>
+        <div className="ui-card__main">
+          <div className="ui-card__head"><span className="ui-card__title">{href ? <Link className="ui-row-link ui-card__link" to={href}>{title}</Link> : onRowClick ? <button type="button" className="ui-row-link ui-card__link" onClick={() => onRowClick(row)}>{title}</button> : title}</span>{shape.aside.map(column => <span key={column.key} className="ui-card__aside">{cell(column, row)}</span>)}</div>
+          {shape.lines.map((segments, line) => <div key={line} className="ui-card__line">{segments.map(({ column, labelled }) => <span key={column.key} className="ui-card__segment">{labelled && cardLabel(column.label)}{cell(column, row)}</span>)}</div>)}
+        </div>
+        {shape.end.length > 0 && <div className="ui-card__end">{shape.end.map(column => <Fragment key={column.key}>{cell(column, row)}</Fragment>)}</div>}
+      </li>;
+    })}</ul>}
+    {!loading && rows.length > 0 && rows.length < minRows && <div aria-hidden="true" style={{ height: (minRows - rows.length) * height }} />}
+    {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: minRows * height }}>{empty ?? <EmptyState title="No results" />}</div>}
   </div>;
 }
 export function TableSkeleton({ columns, rows = 5, pagination = false, className }: { columns: SkeletonColumn[]; rows?: number; pagination?: boolean; className?: string }) {

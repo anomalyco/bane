@@ -1,7 +1,10 @@
 import { useCallback, useLayoutEffect, useState } from 'react'
+import { matches, SHELL_COMPACT } from './media'
 
-// The fitted page size of each list is remembered, so the next session can warm that exact first page.
-const sizeKey = (scope: string) => `bane.page-size.${scope}`
+// The fitted page size of each list is remembered, so the next session can warm that exact first page. A phone or tablet
+// (the document scrolls, nothing to fit) uses a fixed page and remembers it apart from the desktop's.
+const sizeKey = (scope: string) => `bane.page-size.${scope}${matches(SHELL_COMPACT) ? '.compact' : ''}`
+const COMPACT_PAGE = 25
 export function rememberedPageSize(scope: string) {
   try { const size = Number(localStorage.getItem(sizeKey(scope))); return Number.isInteger(size) && size > 0 ? size : null } catch { return null }
 }
@@ -11,7 +14,7 @@ function rememberPageSize(scope: string, size: number) {
 
 export function useAdaptivePageSize(minimum = 5, maximum = 20, scope?: string) {
   // The remembered size makes the first render ask for the page that was warmed (or cached) for it.
-  const [pageSize, setPageSize] = useState(() => (scope && rememberedPageSize(scope)) || minimum)
+  const [pageSize, setPageSize] = useState(() => matches(SHELL_COMPACT) ? Math.max(minimum, Math.min(maximum, COMPACT_PAGE)) : (scope && rememberedPageSize(scope)) || minimum)
   const [measured, setMeasured] = useState(false)
   const [table, setTable] = useState<HTMLDivElement | null>(null)
   const tableRef = useCallback((node: HTMLDivElement | null) => setTable(node), [])
@@ -23,6 +26,12 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20, scope?: string) {
     if (!surface) { setMeasured(true); return }
     const currentSurface = surface
     function measure() {
+      if (matches(SHELL_COMPACT)) {
+        const size = Math.max(minimum, Math.min(maximum, COMPACT_PAGE))
+        setPageSize(size); setMeasured(true)
+        if (scope) rememberPageSize(scope, size)
+        return
+      }
       const style = getComputedStyle(currentSurface)
       const tableStyle = getComputedStyle(currentTable)
       const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 53

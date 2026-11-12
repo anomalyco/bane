@@ -7,17 +7,21 @@ import { HEADERS_HINT } from './webhook-headers'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 export const settingsColumns = {
+  // A key's card: its name, what it can do, then its prefix and last use; Revoke is in the row's menu.
   keys: [
-    { key: 'name', label: 'Name', width: '26%', skeleton: twoLines },
-    { key: 'access', label: 'Access', width: '32%', skeleton: twoLines },
-    { key: 'prefix', label: 'Key prefix', width: '18%' },
-    { key: 'last', label: 'Last used' },
-    { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} /> },
+    { key: 'name', label: 'Name', width: '26%', skeleton: twoLines, card: 'title' },
+    { key: 'access', label: 'Access', width: '32%', skeleton: twoLines, card: 'line' },
+    { key: 'prefix', label: 'Key prefix', width: '18%', card: 'line' },
+    { key: 'last', label: 'Last used', card: 'inline' },
+    { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} />, card: 'end' },
   ],
+  // A domain's card: its name and sending status, then receiving (or what setup still waits for).
   domains: [
-    { key: 'name', label: 'Domain', width: '40%' },
-    { key: 'status', label: 'Status', width: '30%', skeleton: twoLines },
-    { key: 'region', label: 'Region' },
+    { key: 'name', label: 'Domain', width: '40%', card: 'title' },
+    { key: 'status', label: 'Status', width: '30%', skeleton: twoLines, card: 'aside' },
+    { key: 'receiving', label: 'Receiving', width: '28%', card: 'line' },
+    { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
+    { key: 'region', label: 'Region', card: 'hide' },
   ],
   dns: [
     { key: 'type', label: 'Type', width: 80 },
@@ -54,8 +58,8 @@ export const settingsColumns = {
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
-const hostedDomainColumns: SkeletonColumn[] = [settingsColumns.domains[0], { key: 'status', label: 'Status', skeleton: twoLines }]
-export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant ? hostedDomainColumns : settingsColumns.domains
+const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
+export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: multiTenant ? '30%' : '26%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '24%' }, domainReceiving, domainAddresses, ...multiTenant ? [] : [domainRegion]]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
 const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '56%' }, ...settingsColumns.webhooks.slice(2)]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
