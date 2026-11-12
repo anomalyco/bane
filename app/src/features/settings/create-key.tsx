@@ -13,7 +13,7 @@ const purposes: { value: Purpose; label: string; hint: string }[] = [
   { value: 'manage', label: 'Full access', hint: 'Send, read, and manage domains, keys and settings.' },
   { value: 'send', label: 'Send only', hint: 'Send email from your app. Can’t read logs or change settings.' },
   { value: 'read', label: 'Read only', hint: 'Read logs, events and settings. Can’t send.' },
-  { value: 'inbound', label: 'Inbound address', hint: 'For an agent that reads and replies on an inbound address. Nothing else.' },
+  { value: 'inbound', label: 'Inbound key', hint: 'Reads and replies to mail at the receiving addresses you choose. Nothing else. For an AI agent, Connect an agent sets it up for you.' },
 ]
 const mailboxPermissions: { value: MailboxPermission; label: string; hint: string }[] = [
   { value: 'read', label: 'Read', hint: 'List and read mail, events and attachments.' },
