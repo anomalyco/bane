@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { cachedDashboardRead } from './dashboard-cache.js';
 import { actor, ApiError, dashboardSession, errors, json, response, security, type App, type Runtime } from './core.js';
-import { burstFor, CALIBRATION, evaluateLadder, FACTOR_KEYS, GRADE_BANDS, GRADES, gradeOf, LIMIT_BANDS, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
+import { burstFor, CALIBRATION, evaluateLadder, FACTOR_KEYS, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
 
 // GET /v1/sender-score reads what the ten-minute standing job stored (src/standing.ts): the score, its factors, the
 // daily limit it sets and the ladder step. A workspace without a Hosted connection (self-hosted, BYO) has no standing;
@@ -192,4 +192,3 @@ export function registerSenderScore(app: App) {
     return c.json(scoreView(await loadStanding(c.env, session.workspaceId)), 200);
   });
 }
-export { LIMIT_BANDS };

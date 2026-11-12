@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, terminalColumns, terminalEvents } from './states.js';
-import { CALIBRATION, dailyLimit, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { dailyLimit, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
 // admission reads, and walks the ladder (notice → warn → restrict → pause). Every change of standing, by the job, an
@@ -324,4 +324,3 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   log('info', { code: 'STANDING_NOTIFIED', workspaceId: job.workspaceId, step: event.to_step, recipients: event.recipients.length, simulated: isSimulatedSes(runtime) });
 });
 export const standingJobs: Record<string, JobHandler> = { 'standing.notify': notifyJob };
-export { CALIBRATION };
