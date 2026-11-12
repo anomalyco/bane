@@ -8,11 +8,12 @@ import type { ApiKeyInput, MailboxKeyInput, MailboxPermission, PageRequest } fro
 import { fieldError, MutationError } from './shared'
 import '../inbound/inbound.css'
 
-type Purpose = ApiKeyInput['permission'] | 'inbound'
+export type Purpose = ApiKeyInput['permission'] | 'inbound'
 const purposes: { value: Purpose; label: string; hint: string }[] = [
-  { value: 'manage', label: 'Full access', hint: 'Send, read, and manage domains, keys and settings.' },
   { value: 'send', label: 'Send only', hint: 'Send email from your app. Can’t read logs or change settings.' },
+  { value: 'read_send', label: 'Send and read', hint: 'Send email and look up what happened to it in logs and events. Can’t change settings.' },
   { value: 'read', label: 'Read only', hint: 'Read logs, events and settings. Can’t send.' },
+  { value: 'manage', label: 'Full access', hint: 'Send, read, and manage domains, keys and settings.' },
   { value: 'inbound', label: 'Inbound address', hint: 'For an agent that reads and replies on an inbound address. Nothing else.' },
 ]
 const mailboxPermissions: { value: MailboxPermission; label: string; hint: string }[] = [
@@ -38,17 +39,19 @@ export function accessLabel(permissions: string[], admin: boolean) {
 export const domainScope = (domains: string[]) => domains.length ? domains.join(', ') : 'All domains'
 export const permissionList = (permissions: string[]) => capitalize(list.format(permissions))
 
-/** One dialog for every key: a plain choice up front, exact scope and permissions under Advanced. Render only while open, so form state and the created secret in mutation state go away on close. */
-export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (secret: string, title: string) => void }) {
+/** One dialog for every key: a plain choice up front, then the domains it may send from (inbound keys keep their
+ *  addresses and permissions under Advanced). `initial` pre-fills it, as Overview's "Create key" does with the domain it
+ *  just verified. Render only while open, so form state and the created secret in mutation state go away on close. */
+export function CreateKeyDialog({ open, onOpenChange, onCreated, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (secret: string, title: string) => void; initial?: { purpose?: Purpose; domain?: string } }) {
   const api = useApi()
   const createApiKey = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
   const createInboundKey = useApiMutation((api, input: MailboxKeyInput) => api.mailboxes.createKey(input), 'Inbound key created')
   const addresses = useApiDef(queries.inboundAddressOptions())
   const [name, setName] = useState('')
-  const [purpose, setPurpose] = useState<Purpose>('send')
+  const [purpose, setPurpose] = useState<Purpose>(initial?.purpose ?? 'send')
   const [advanced, setAdvanced] = useState(false)
-  const [allDomains, setAllDomains] = useState(true)
-  const [selectedDomains, setSelectedDomains] = useState<string[]>([])
+  const [allDomains, setAllDomains] = useState(!initial?.domain)
+  const [selectedDomains, setSelectedDomains] = useState<string[]>(initial?.domain ? [initial.domain.toLowerCase()] : [])
   const [allAddresses, setAllAddresses] = useState(false)
   const [addressIds, setAddressIds] = useState<string[]>([])
   const [granted, setGranted] = useState<MailboxPermission[]>(['read', 'send', 'modify'])
@@ -65,7 +68,8 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
     staleTime: 60_000,
     retry: false,
   })
-  const domains = [...new Set(domainOptions.data?.pages.flatMap(page => page.items.map(domain => domain.name.toLowerCase())) ?? [])].sort()
+  const options = new Map((domainOptions.data?.pages.flatMap(page => page.items) ?? []).map(domain => [domain.name.toLowerCase(), domain.status === 'verified']))
+  const domains = [...new Set([...options.keys(), ...selectedDomains])].sort()
   const nameError = errors.name || fieldError(create.error, 'name')
   const domainError = errors.domains || fieldError(createApiKey.error, 'domains')
   const addressError = errors.addressIds || fieldError(createInboundKey.error, 'addressIds')
@@ -93,7 +97,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
     } else if (!allDomains && !selectedDomains.length) next.domains = 'Select at least one domain, or choose All domains.'
     else if (!allDomains && selectedDomains.length > 50) next.domains = 'Select up to 50 domains.'
     setErrors(next)
-    if (next.domains || next.permissions) setAdvanced(true)
+    if (next.permissions) setAdvanced(true)
     if (Object.keys(next).length) return
     try {
       const result = inbound
@@ -102,14 +106,16 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
       onOpenChange(false)
       onCreated(result.secret, inbound ? 'Inbound key created' : 'API key created')
     } catch (cause) {
-      if (fieldError(cause, 'domains') || fieldError(cause, 'permissions')) setAdvanced(true)
+      if (fieldError(cause, 'permissions')) setAdvanced(true)
     }
   }
 
   // With several addresses (or none) chosen the Select shows a placeholder; its hidden native select then reports '' on change, which is ignored.
   const addressValue = allAddresses ? EVERY_ADDRESS : addressIds.length === 1 ? addressIds[0] : ''
   const addressPlaceholder = addressIds.length > 1 ? `${addressIds.length} addresses` : addresses.isPending ? 'Loading addresses…' : 'Choose an address'
-  const summary = inbound ? granted.length ? permissionList(granted) : 'No permissions' : allDomains ? 'All domains' : selectedDomains.length ? selectedDomains.join(', ') : 'No domains'
+  const summary = granted.length ? permissionList(granted) : 'No permissions'
+  // A sending domain covers its subdomains (SENDER_DOMAIN_FORBIDDEN names "this domain or its parent domain").
+  const example = selectedDomains[0] ?? domains[0]
 
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title="Create key" footer={<><Button disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" loading={pending} type="submit" form="create-key">Create key</Button></>}>
     <form id="create-key" className="stack" onSubmit={submit} noValidate>
@@ -127,38 +133,36 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
           onValueChange={value => { if (!value) return; clearError('addressIds'); if (value === EVERY_ADDRESS) { setAllAddresses(true); setAddressIds([]) } else { setAllAddresses(false); setAddressIds([value]) } }}
           options={[...(addresses.data ?? []).map(item => ({ value: item.id, label: item.address })), { value: EVERY_ADDRESS, label: 'Every address' }]} />
       </Field>}
-      <details className="keys-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
+      {inbound ? <details className="keys-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
         <summary>Advanced <span className="muted">· {summary}</span></summary>
         <div className="keys-advanced-body">
-          {inbound ? <>
-            <fieldset className="settings-key-domains" disabled={pending}>
-              <legend className="ui-field__label">Addresses</legend>
-              <p className="ui-field__hint">Choose several to share one key between them.</p>
-              <div className="settings-key-domain-options">
-                {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !addresses.data?.length ? <p className="muted">No addresses yet.</p>
-                  : addresses.data.map(item => <Checkbox key={item.id} label={item.address} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
-              </div>
-            </fieldset>
-            <fieldset className="settings-choices mailbox-key-permissions" disabled={pending}>
-              <legend className="ui-field__label">Permissions</legend>
-              {mailboxPermissions.map(item => <Checkbox key={item.value} label={<span className="settings-cell-stack"><span>{item.label}</span><span className="ui-field__hint">{item.hint}</span></span>} checked={granted.includes(item.value)} onCheckedChange={checked => { clearError('permissions'); setGranted(current => checked ? [...current, item.value] : current.filter(value => value !== item.value)) }} />)}
-              {permissionError && <p className="ui-field__error" role="alert">{permissionError}</p>}
-            </fieldset>
-          </> : <fieldset className="settings-key-domains" disabled={pending} aria-describedby={domainError ? 'key-domain-error' : undefined}>
-            <legend className="ui-field__label">Domains</legend>
-            <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes future domains.</span></span>} checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
+          <fieldset className="settings-key-domains" disabled={pending}>
+            <legend className="ui-field__label">Addresses</legend>
+            <p className="ui-field__hint">Choose several to share one key between them.</p>
             <div className="settings-key-domain-options">
-              {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains available.</p> : domains.map(domain => <Checkbox key={domain} label={domain} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending || !selectedDomains.includes(domain) && selectedDomains.length >= 50} />)}
+              {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !addresses.data?.length ? <p className="muted">No addresses yet.</p>
+                : addresses.data.map(item => <Checkbox key={item.id} label={item.address} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
             </div>
-            {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
-            {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
-            {purpose === 'manage' && !allDomains && <p className="ui-field__hint">Limited to domains, it can’t manage keys, inbound or settings.</p>}
-            {!allDomains && <p className="ui-field__hint">Sends and email logs are limited to these domains. Contacts, lists, templates and campaigns stay workspace-wide.</p>}
-            {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
-            {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
-          </fieldset>}
+          </fieldset>
+          <fieldset className="settings-choices mailbox-key-permissions" disabled={pending}>
+            <legend className="ui-field__label">Permissions</legend>
+            {mailboxPermissions.map(item => <Checkbox key={item.value} label={<span className="settings-cell-stack"><span>{item.label}</span><span className="ui-field__hint">{item.hint}</span></span>} checked={granted.includes(item.value)} onCheckedChange={checked => { clearError('permissions'); setGranted(current => checked ? [...current, item.value] : current.filter(value => value !== item.value)) }} />)}
+            {permissionError && <p className="ui-field__error" role="alert">{permissionError}</p>}
+          </fieldset>
         </div>
-      </details>
+      </details> : <fieldset className="settings-key-domains" disabled={pending} aria-describedby={domainError ? 'key-domain-error' : 'key-domain-hint'}>
+        <legend className="ui-field__label">Domains it can send from</legend>
+        <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes domains you add later.</span></span>} checked={allDomains} onCheckedChange={checked => { setAllDomains(checked); setSelectedDomains([]); clearError('domains') }} disabled={pending} />
+        <div className="settings-key-domain-options">
+          {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains yet. <Link to="/domains">Add one</Link>, or keep All domains.</p> : domains.map(domain => <Checkbox key={domain} label={<span>{domain}{options.get(domain) === false && <span className="ui-field__hint"> · not verified yet</span>}</span>} checked={!allDomains && selectedDomains.includes(domain)} onCheckedChange={checked => toggleDomain(domain, checked)} disabled={pending || !selectedDomains.includes(domain) && selectedDomains.length >= 50} />)}
+        </div>
+        {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
+        {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
+        <p id="key-domain-hint" className="ui-field__hint">{allDomains ? 'Sends from any domain in this workspace.' : `Sends and email logs are limited to these domains and their subdomains${example ? `: ${example} also covers mail from news.${example}` : ''}. Contacts, lists, templates and campaigns stay workspace-wide.`}</p>
+        {purpose === 'manage' && !allDomains && <p className="ui-field__hint">Limited to domains, it can’t manage keys, inbound or settings.</p>}
+        {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
+        {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
+      </fieldset>}
     </form>
   </Dialog>
 }

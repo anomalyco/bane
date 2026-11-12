@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -8,7 +9,7 @@ import { useCursorPagination } from '../../lib/pagination'
 import { SecretDialog } from './shared'
 import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
-import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
+import { CreateKeyDialog, accessLabel, domainScope, permissionList, type Purpose } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
 import { AddressList } from '../../components/PrivateAddress'
@@ -34,7 +35,12 @@ function ApiKeys() {
   const revokeInbound = useApiMutation((api, id: string) => api.mailboxes.revokeKey(id), 'Inbound key revoked')
   const revokeAgentToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
   const revokeMcpConnection = useApiMutation((api, id: string) => api.credentials.revokeMcpConnection(id), 'MCP connection revoked')
-  const [open, setOpen] = useState(false)
+  // /api-keys?create=send&domain=acme.com opens the dialog filled in (Overview's setup step links here); the
+  // parameters then leave the URL, so Back and reload don't open it again.
+  const [params, setParams] = useSearchParams()
+  const [initial] = useState(() => params.has('create') ? { purpose: (['send', 'read_send', 'read', 'manage', 'inbound'] as Purpose[]).find(value => value === params.get('create')) ?? 'send', domain: params.get('domain') || undefined } : undefined)
+  const [open, setOpen] = useState(Boolean(initial))
+  useEffect(() => { if (params.has('create')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true }) }, [params, setParams])
   const [secret, setSecret] = useState<{ value: string; title: string } | null>(null)
   const [revokeKey, setRevokeKey] = useState<KeyRow | null>(null)
   const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
@@ -95,7 +101,7 @@ function ApiKeys() {
         ]} />}
       </section>}
     </div>
-    {open && <CreateKeyDialog open onOpenChange={setOpen} onCreated={(value, title) => setSecret({ value, title })} />}
+    {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={(value, title) => setSecret({ value, title })} />}
     <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)}>{secret?.title === 'API key created' && <KeySendExample apiKey={secret.value} />}</SecretDialog>
     <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.key.name ?? 'key'}?`}
       description={revokeKey?.kind === 'inbound' ? 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.' : 'Requests using this key will stop working. Revoking a key cannot be undone.'}

@@ -17,8 +17,9 @@ export function sendSnippets({ origin, apiKey, from, to }: { origin: string; api
   const body = { from, to, subject: 'Hello from Bane', text: 'It works.' }
   const header = apiKey ? `"Authorization: Bearer ${apiKey}"` : '"Authorization: Bearer $BANE_API_KEY"'
   return {
-    curl: `curl --request POST \\\n  --url '${origin}/v1/emails/send' \\\n  --header ${header} \\\n  --header 'Content-Type: application/json' \\\n  --header 'Idempotency-Key: first-email' \\\n  --data '${JSON.stringify(body)}'`,
-    sdk: `import { createClient } from '@banemx/sdk/client'\nimport { sendEmail } from '@banemx/sdk'\n\nconst client = createClient({ baseUrl: '${origin}', auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined })\nconst { data } = await sendEmail({ client, headers: { 'Idempotency-Key': 'first-email' }, throwOnError: true,\n  body: { from: '${from}', to: '${to}', subject: 'Hello from Bane', text: 'It works.' } })\nconsole.log(data.id) // 202: queued, not delivered yet`,
+    // A new Idempotency-Key per run: reusing one returns the first email's ID and sends nothing new.
+    curl: `curl --request POST \\\n  --url '${origin}/v1/emails/send' \\\n  --header ${header} \\\n  --header 'Content-Type: application/json' \\\n  --header "Idempotency-Key: $(uuidgen)" \\\n  --data '${JSON.stringify(body)}'`,
+    sdk: `import { createClient } from '@banemx/sdk/client'\nimport { sendEmail } from '@banemx/sdk'\n\nconst client = createClient({ baseUrl: '${origin}', auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined })\n// One Idempotency-Key per email: a retry with the same key never sends it twice.\nconst { data } = await sendEmail({ client, headers: { 'Idempotency-Key': crypto.randomUUID() }, throwOnError: true,\n  body: { from: '${from}', to: '${to}', subject: 'Hello from Bane', text: 'It works.' } })\nconsole.log(data.id) // 202: queued, not delivered yet`,
   }
 }
 

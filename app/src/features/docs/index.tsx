@@ -10,7 +10,8 @@ import './docs.css'
 type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
 type QuickstartStep = { title: string; text: string; code?: string }
-type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
+type Guide = { id: string; title: string; text: string; code?: string; language?: string }
+type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]; 'x-guides'?: Guide[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 const methods = ['get', 'post', 'put', 'patch', 'delete']
 function operationTitle(value: string) {
   return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => /^mcp$/i.test(word) ? 'MCP' : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' ')
@@ -48,6 +49,14 @@ function Quickstart({ steps }: { steps: QuickstartStep[] }) {
     <ol>{steps.map(step => <li key={step.title}><strong>{step.title}.</strong> {step.text}
       {step.code && <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0}><code>{step.code}</code></pre><CopyAction value={step.code} label={`Copy ${step.title} example`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>}</li>)}</ol>
   </section>
+}
+
+// Guides from the API document (api/src/openapi-docs.ts), each at its own #id so the dashboard can link straight to it.
+function Guides({ guides }: { guides: Guide[] }) {
+  return <>{guides.map(guide => <section key={guide.id} id={guide.id} className="docs-section docs-guide" aria-labelledby={`${guide.id}-title`}><h2 id={`${guide.id}-title`}>{guide.title}</h2>
+    <p>{guide.text}</p>
+    {guide.code && <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0}><code>{guide.code}</code></pre><CopyAction value={guide.code} label={`Copy ${guide.title} example`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>}
+  </section>)}</>
 }
 
 function SchemaDefinition({ document, input }: {document: Document; input: Schema}) {
@@ -91,7 +100,7 @@ function OperationPage({ document, operation }: {document: Document; operation: 
 }
 
 // Agent setup sections the overview can be linked to, as on the former Developer page.
-const sectionAnchors = new Set(['agent-prompt', 'mcp'])
+const sectionAnchors = new Set(['agent-prompt', 'mcp', 'webhook-signatures'])
 
 // Workspace admins (and demo mode) get a prompt with this workspace's domain; null while it loads.
 // Members and signed-out readers get the general prompt, so they never call /v1/domains.
@@ -117,6 +126,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
     {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
+    {document.info['x-guides']?.length ? <Guides guides={document.info['x-guides']} /> : null}
     <AgentPrompt prompt={prompt} />
     <McpSetup chooseAccess />
     <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/@banemx/sdk">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
