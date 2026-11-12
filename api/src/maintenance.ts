@@ -1,5 +1,5 @@
 import { sql, type SQL } from 'drizzle-orm';
-import type { Runtime } from './core.js';
+import { ApiError, type Runtime } from './core.js';
 import { log } from './core.js';
 import { campaignActive, pauseHostedSending } from './states.js';
 import { expireDomainClaims } from './operations.js';
@@ -218,4 +218,19 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   const complete=inboxComplete && Date.now()<deadline;
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
+}
+/** The hourly upkeep. Every step is best-effort: a failing step (a retention statement that keeps timing out) must not
+ * skip the steps after it, and on Node, where this used to run inside the dispatch loop, it must not stop job processing
+ * and mail dispatch. Returns the codes of the steps that failed. */
+export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promise<Runtime> = async () => runtime) {
+  const failed: string[] = [];
+  for (const [code, step] of [
+    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
+    ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
+    ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
+    ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
+  ] as const) {
+    try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
+  }
+  return failed;
 }
