@@ -68,7 +68,11 @@ if (initialPath === '/onboarding') loadOnboarding().catch(noop)
 else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') loadHome().catch(noop) /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
 else if (initialPath === '/') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
-else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) loadCampaigns().catch(noop)
+else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) {
+  loadCampaigns().catch(noop)
+  // The composer is the largest chunk; an editor route fetches it alongside the campaigns chunk, not after it.
+  if (/^\/campaigns\/(?:new|templates\/[^/]+|[^/]+\/edit)\/?$/.test(initialPath)) import('./features/campaigns/EmailComposer').catch(noop)
+}
 else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
 else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
