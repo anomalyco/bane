@@ -9221,14 +9221,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'failed'}});
   });
   // tear witnesses: W accept m1, V accept m2, W commit (backlog 1) -> m2 pending; and a release pass waiting
-  // behind an admission released past the backlog (8 steps).
+  // behind an admission released past the backlog (8 steps). Since 156 the release does not wait at all.
   test('receive backlog: an admission or release waiting on the window row counts the backlog committed meanwhile',async t=>{
     const {a,b,w,accept,race,state}=await receiptRace(t,{messages:3,backlog:1});
     assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m2',['a@rwin.invalid'])),'held');
     assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'held'}});
     await a.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
     await a.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[w]);
-    assert.equal(await race(()=>accept(a,'m3',['a@rwin.invalid']),async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n),1);
+    // A release pass never waits (156): behind an in-flight admission it leaves the hold for its next pass,
+    // which then counts that admission's job.
+    const release=async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n;
+    await a.query('BEGIN');
+    try { await accept(a,'m3',['a@rwin.invalid']); assert.equal(await release(),0); await a.query('COMMIT'); }
+    finally { await a.query('ROLLBACK'); }
+    assert.equal(await release(),1);
     assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held',m3:'pending'}});
   });
   // tear witness (2 steps): accept m1 with 100 recipients, accept m1 with those plus one -> the reopen was refused.
@@ -9243,7 +9249,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
       const count=async()=>(await db.query('SELECT jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0].n;
       assert.equal(await notify(to(100)),1);
-      assert.equal(await notify(to(101)),1,'One new recipient reopens the receipt: 101 distinct recipients');
+      assert.equal(await notify(to(101)),0,'One new recipient reopens the receipt into its pending ingest job: 101 distinct recipients');
       assert.equal(await count(),101);
       assert.equal(await notify(to(101).map(a=>a.replace('@','x@'))),0,'202 distinct recipients exceed the bound');
       assert.equal(await count(),101);
@@ -9723,7 +9729,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('deduplicated uploads are reclaimed without expiring the owned attachment',async()=>{
         const mime=Buffer.from('From: fixture@example.net\r\nMessage-ID: <same@fixture.invalid>\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n--p\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=a.bin\r\n\r\nbody\r\n--p--\r\n');for(const mid of ['physical-1','physical-2']){raw.set(mid,mime);await submit(mid,['a@receive.example']);await run('mailbox.ingest',{sesMessageId:mid});}
-        onTag=async()=>{assert.equal(await submit('physical-2',['b@receive.example']),1);};
+        // The reopen merges b while cleanup tags. (It joins the receipt's ingest job when one is pending, so the
+        // count of queued jobs is not the point here: the merged recipients are.)
+        onTag=async()=>{await submit('physical-2',['b@receive.example']);assert.deepEqual((await db.query("SELECT status,recipients FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='physical-2'",[wid])).rows,[{status:'pending',recipients:['a@receive.example','b@receive.example']}]);};
         const tx=t.mock.method(runtime.db,'transaction',()=>{throw Error('cleanup must not hold a transaction across S3');});
         try {await db.query("UPDATE mail_candidate_uploads SET check_at=now() WHERE workspace_id=$1 AND ses_message_id='physical-2'",[wid]);await assert.rejects(run('mailbox.cleanUploads',{}),(await import('./src/jobs.js')).JobDeferred);}finally{tx.mock.restore();onTag=undefined;}
         const orphan=parts.pop();assert.deepEqual(orphan?.tags?.TagSet,[{Key:'bane-kind',Value:'orphan'}]);assert.equal((await db.query('SELECT FROM mail_attachments WHERE workspace_id=$1 AND storage_key=$2',[wid,orphan!.tagged])).rowCount,0);
