@@ -1,5 +1,6 @@
 // CLS gate: cumulative layout shift on every main dashboard page, light and dark, on a cold full load and on in-app
-// navigation, over a throttled network with slow API responses that arrive out of order. Fails when any page's CLS
+// navigation, over a throttled network with slow API responses that arrive out of order; the main pages again on a
+// phone (390 × 844, touch: the tab bar, cards and native selects). Fails when any page's CLS
 // exceeds 0.001 (or a page errors). The longest task during each in-app navigation is reported, not gated: on CI's
 // shared runner the composer and rituals chunks measured 105–179 ms between runs of the same page, too close to a
 // 200 ms budget to fail on without flakes.
@@ -10,6 +11,7 @@
 //   CLS_PG_URL=<url>   Postgres admin URL (CI); otherwise Docker or a local initdb (see cls-fixture.mjs)
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
+//   CLS_PHONE=0        skip the phone pass
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
@@ -54,12 +56,16 @@ const pages = ids => [
   ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving/webhooks' }],
   ['Campaigns', '/campaigns', { from: '/' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
+  ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
+  ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
+  ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt' }],
   ['Audience', '/audience', { from: '/' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
   ['Segments', '/audience/segments', { from: '/audience' }],
+  ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
   ['Domains', '/domains', { from: '/' }],
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
   ['API keys', '/api-keys', { from: '/' }],
@@ -73,6 +79,13 @@ const pages = ids => [
   ['Onboarding', '/onboarding', { user: 'ona' }],
   ['Signed out', '/', { user: null }],
 ];
+
+// The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · webhook', 'Onboarding']);
+const devices = {
+  desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
+  phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
+};
 
 // Every API path gets a stable delay of 300–1300 ms in 200 ms steps: slow, and out of request order, the same way
 // every run. Assets load through Chrome's own throttling (150 ms latency, 1.6 Mbps down).
@@ -150,8 +163,8 @@ const sharp = n => Math.round(n * 10000) / 10000;
 
 async function measure(browser, job, fx) {
   const origin = fx.origins[job.index % fx.origins.length];
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, colorScheme: job.scheme });
-  const result = { page: job.name, path: job.path, scheme: job.scheme, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
+  const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme });
+  const result = { page: job.name, path: job.path, scheme: job.scheme, device: job.device, mode: job.mode, cls: null, entries: [], longTask: null, error: null };
   let page, net;
   const problems = [];
   const work = (async () => {
@@ -179,7 +192,8 @@ async function measure(browser, job, fx) {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
       result.via = await page.evaluate(({ path, click, row }) => {
         const shown = el => el.getClientRects().length > 0, text = el => el.textContent.replace(/\s+/g, ' ').trim();
-        if (row) { const tr = [...document.querySelectorAll('tbody tr')].find(tr => shown(tr) && text(tr).includes(row)); tr?.click(); return tr ? 'row' : `no row with “${row}”`; }
+        // A table row, or on a phone its card (whose link covers it).
+        if (row) { const tr = [...document.querySelectorAll('tbody tr, .ui-card')].find(tr => shown(tr) && text(tr).includes(row)); (tr?.querySelector('.ui-card__link') ?? tr)?.click(); return tr ? 'row' : `no row with “${row}”`; }
         if (click) { const el = [...document.querySelectorAll('a, button, [role=tab]')].find(el => shown(el) && text(el).startsWith(click)); el?.click(); return el ? 'control' : `no control “${click}”`; }
         const target = new URL(path, location.href);
         const link = [...document.querySelectorAll('a[href]')].find(a => a.href === target.href && shown(a));
@@ -228,22 +242,22 @@ function summarize(results, seconds) {
   const rows = new Map();
   for (const r of results) {
     const row = rows.get(r.page) ?? rows.set(r.page, { path: r.path, long: null }).get(r.page);
-    row[`${r.scheme} ${r.mode}`] = r;
+    row[`${r.device === 'phone' ? 'phone' : r.scheme} ${r.mode}`] = r;
     if (r.longTask !== null) row.long = Math.max(row.long ?? 0, r.longTask);
   }
   const lines = [
     `### Layout shift: ${failed.length ? `❌ ${failed.length} of ${results.length} measurements failed` : `✅ ${results.length} measurements, every page at CLS ≤ ${LIMIT}`}`,
     '',
-    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
+    `Cold load and in-app navigation, throttled network, API responses delayed 300–1300 ms out of order; desktop 1440 × 900, phone 390 × 844 with touch. Limit: CLS ${LIMIT}. Longest task during in-app navigation is reported, not gated. ${seconds}s.`,
     '',
-    '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Longest task |',
-    '| --- | --- | --: | --: | --: | --: | --: |',
-    ...[...rows].map(([page, row]) => `| ${page} | \`${row.path}\` | ${format(row['light load'])} | ${format(row['light in-app'])} | ${format(row['dark load'])} | ${format(row['dark in-app'])} | ${row.long === null ? '' : `${row.long} ms`} |`),
+    '| Page | Path | Light load | Light in-app | Dark load | Dark in-app | Phone load | Phone in-app | Longest task |',
+    '| --- | --- | --: | --: | --: | --: | --: | --: | --: |',
+    ...[...rows].map(([page, row]) => `| ${page} | \`${row.path}\` | ${format(row['light load'])} | ${format(row['light in-app'])} | ${format(row['dark load'])} | ${format(row['dark in-app'])} | ${format(row['phone load'])} | ${format(row['phone in-app'])} | ${row.long === null ? '' : `${row.long} ms`} |`),
   ];
   if (failed.length) {
     lines.push('', '#### Failures', '');
     for (const r of failed) {
-      lines.push(`- **${r.page}** (${r.scheme}, ${r.mode}) \`${r.path}\`: ${r.error ?? `CLS ${r.cls}`}`);
+      lines.push(`- **${r.page}** (${r.device === 'phone' ? 'phone' : r.scheme}, ${r.mode}) \`${r.path}\`: ${r.error ?? `CLS ${r.cls}`}`);
       for (const e of r.entries.slice(0, 5)) for (const s of e.sources.slice(0, 3)) lines.push(`  - ${e.value.toFixed(4)} at ${e.at} ms: \`${s.node}\` ${JSON.stringify(s.from)} → ${JSON.stringify(s.to)}${s.text ? ` “${s.text.slice(0, 50)}”` : ''}`);
     }
   }
@@ -259,11 +273,12 @@ try {
   const ids = await seed(fx);
   console.log(`${elapsed()} seeded`);
   const jobs = [];
-  for (const scheme of ['light', 'dark']) for (const [name, path, { user = 'dana', from, click, row }] of pages(ids)) {
-    if (only && !only.test(name)) continue;
-    const slug = `${name}-${scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, scheme, mode: 'in-app', slug: slug + '-in-app' });
+  const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row }] of pages(ids)) {
+    if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
+    const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    jobs.push({ name, path, user, scheme, device, mode: 'load', slug: slug + '-load' });
+    if (from) jobs.push({ name, path, user, from, click, row, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
@@ -275,7 +290,7 @@ try {
       const r = await measure(browser, job, fx);
       results[job.index] = r;
       const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
-      console.log(`${elapsed().padStart(6)} ${flag} ${r.scheme.padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
+      console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
     }
   }));
   await browser.close();

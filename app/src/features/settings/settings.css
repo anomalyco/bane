@@ -158,7 +158,12 @@
   .reputation-panels { grid-template-columns: 1fr; }
   .settings-account { flex-wrap: wrap; }
   .settings-account > :first-child { flex-basis: 100%; }
-  .settings-facts { grid-template-columns: 1fr; }
+  /* One fact per row, label beside value, split by hairlines: a detail page reads like a phone's settings list. */
+  .settings-facts { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--color-border-muted); }
+  .settings-facts > div { display: grid; grid-template-columns: minmax(96px, 36%) minmax(0, 1fr); align-items: center; gap: var(--space-12); min-height: 53px; padding-block: var(--space-4); border-bottom: 1px solid var(--color-border-muted); }
+  .settings-facts dt { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+  .settings-facts dd { text-align: right; }
+  .settings-facts dd > :is(.ui-select-trigger, select) { width: 100%; }
 }
 
 .settings-section-note { margin: 0; font-size: var(--text-sm); }

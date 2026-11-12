@@ -7,13 +7,13 @@ import { templateAssetLinks, templateAssets, templates, type TemplateDraft } fro
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { readPublicImage } from './adapters/public-image.js';
 import { readOwnMailObject } from './mail-object-route.js';
-import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
 const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
 const Address = mailAddress();
 const BlockHtml = z.string().max(512 * 1024).describe('Concrete Bane block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.').optional();
 const AssetIds = z.array(z.string().regex(/^tasset_[0-9a-f]{32}$/)).max(20).default([]);
-const DraftFields = { name: z.string().trim().min(1).max(200), description: z.string().trim().max(500).default(''), subject: z.string().max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.').default(''), previewText: z.string().max(200).optional(), fromName: z.string().max(200).optional(), replyTo: z.array(Address).max(10).default([]), html: BlockHtml, attachments: AssetIds };
+const DraftFields = { name: z.string().trim().min(1).max(200), description: z.string().trim().max(500).default(''), subject: z.string().max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.').default(''), previewText: z.string().max(200).optional(), fromName: senderDisplayName().optional(), replyTo: z.array(Address).max(10).default([]), html: BlockHtml, attachments: AssetIds };
 const TemplateDraftSchema = z.object(DraftFields).strict().openapi('CampaignTemplateDraft');
 const Template = z.object({ id: z.string(), url: z.string().url(), revision: z.number().int(), draft: TemplateDraftSchema, published: z.union([TemplateDraftSchema, z.null()]), publishedRevision: z.number().int().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('CampaignTemplate');
 const TemplateSummary = Template.omit({ draft: true, published: true }).extend({ name: z.string(), description: z.string(), subject: z.string(), published: z.boolean() }).openapi('CampaignTemplateSummary');
