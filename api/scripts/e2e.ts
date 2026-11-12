@@ -228,6 +228,11 @@ async function workspaceReads() {
   check(catalog.data.some(r => r.region === region && r.enabled) && catalog.data.some(r => r.region === catalog.defaultRegion && r.isDefault), 'invalid regional catalog');
   const tokens = await api('listAgentTokens', { query: { includeInactive: 'false', limit: 1 } });
   check(Array.isArray(tokens.data) && tokens.data.every(t => t.id.startsWith('agt_') && t.revokedAt === null && !('token' in t)), 'invalid active agent-token metadata');
+  // Overview's setup in one read. Each part follows its own list operation: this unrestricted manage key (listAgentTokens
+  // above) reads domains, keys (itself at least) and webhooks; an API key has no invitations and no workspace list.
+  const setup = await api('getOverviewSetup', {});
+  check(setup.domains !== null && setup.domains.data.length > 0 && (setup.apiKeys?.active ?? 0) >= 1 && setup.webhooks !== null && setup.invitations === null, 'invalid Overview setup summary');
+  check((await api('getCurrentIdentity', {})).workspaces === null, 'an API key must not list dashboard memberships');
   // Even an unrestricted workspace manager must not see the shared SES account.
   await expectDenial(() => api('getSesSettings', { query: { region } }), 403, 'SHARED_ACCOUNT_PRIVATE');
   await expectDenial(() => api('discoverRegion', { path: { region } }), 409, 'CONNECTION_MANAGED_REGION');

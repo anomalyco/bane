@@ -271,6 +271,34 @@
         ],
         "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
       },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "role"
+        ]
+      },
       "AgentToken": {
         "type": "object",
         "properties": {
@@ -12107,34 +12135,6 @@
           "updatedAt"
         ]
       },
-      "Workspace": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "slug": {
-            "type": "string"
-          },
-          "role": {
-            "type": "string",
-            "enum": [
-              "owner",
-              "admin",
-              "member"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "slug",
-          "role"
-        ]
-      },
       "WorkspaceMember": {
         "type": "object",
         "properties": {
@@ -12903,6 +12903,92 @@
           "medianSendLatencyMs",
           "regions"
         ]
+      },
+      "OverviewSetup": {
+        "type": "object",
+        "properties": {
+          "domains": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DomainPage"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The ten newest domains, exactly as listDomains with limit=10 and refresh=false returns them (continue there with nextCursor). Null when listDomains would refuse the caller, such as a member or a self-hosted installation without live SES."
+              }
+            ]
+          },
+          "apiKeys": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "active": {
+                "type": "integer",
+                "description": "Unrevoked API keys."
+              }
+            },
+            "required": [
+              "active"
+            ],
+            "description": "Null when listApiKeys would refuse the caller: it needs unrestricted manage, and agent tokens never list keys."
+          },
+          "emails": {
+            "type": "object",
+            "properties": {
+              "any": {
+                "type": "boolean",
+                "description": "Whether any email the caller can read exists. Same scope as listEmails: a domain-restricted key sees only direct sends from its domains."
+              }
+            },
+            "required": [
+              "any"
+            ]
+          },
+          "webhooks": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "description": "Outbound webhooks, paused ones included."
+              }
+            },
+            "required": [
+              "total"
+            ],
+            "description": "Null when listWebhooks would refuse the caller: members and domain-restricted keys."
+          },
+          "invitations": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "pending": {
+                "type": "integer",
+                "description": "Pending, unexpired invitations."
+              }
+            },
+            "required": [
+              "pending"
+            ],
+            "description": "Null unless listWorkspaceInvitations would answer: an owner or admin dashboard session on a hosted installation."
+          }
+        },
+        "required": [
+          "domains",
+          "apiKeys",
+          "emails",
+          "webhooks",
+          "invitations"
+        ]
       }
     },
     "parameters": {}
@@ -13348,6 +13434,16 @@
                     },
                     "connection": {
                       "$ref": "#/components/schemas/ConnectionSummary"
+                    },
+                    "workspaces": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "$ref": "#/components/schemas/Workspace"
+                      },
+                      "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
                     }
                   },
                   "required": [
@@ -13362,7 +13458,8 @@
                     "domains",
                     "origin",
                     "host",
-                    "connection"
+                    "connection",
+                    "workspaces"
                   ]
                 }
               }
@@ -51676,7 +51773,8 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "deprecated": true,
+        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
         "responses": {
           "200": {
             "description": "Success",
@@ -55141,6 +55239,151 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/public/stats' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/overview/setup": {
+      "get": {
+        "operationId": "getOverviewSetup",
+        "tags": [
+          "Settings"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "What this workspace has set up, in one read",
+        "description": "The newest domains, the number of active API keys, outbound webhooks and pending invitations, and whether any email exists. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewSetup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getOverviewSetup } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getOverviewSetup({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/overview/setup' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }

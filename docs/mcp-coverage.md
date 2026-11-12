@@ -244,3 +244,4 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getConnectionRegionStatus` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `verifyConnection` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getPublicStats` | Public, installation-wide homepage numbers; no workspace data. |
+| `getOverviewSetup` | `settings` · `setup` · admin |

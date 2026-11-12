@@ -89,6 +89,13 @@ export type ConnectionSummary = {
     };
 } | null;
 
+export type Workspace = {
+    id: string;
+    name: string;
+    slug: string;
+    role: 'owner' | 'admin' | 'member';
+};
+
 export type AgentToken = {
     id: string;
     token: string;
@@ -3472,13 +3479,6 @@ export type InboundWebhookDelivery = {
     updatedAt: string;
 };
 
-export type Workspace = {
-    id: string;
-    name: string;
-    slug: string;
-    role: 'owner' | 'admin' | 'member';
-};
-
 export type WorkspaceMember = {
     id: string;
     userId: string;
@@ -3667,6 +3667,45 @@ export type PublicStats = {
      * AWS regions that accepted mail in the last 30 days. Hosted installations list only their shared sending regions.
      */
     regions: Array<string>;
+};
+
+export type OverviewSetup = {
+    domains: DomainPage & ({
+        [key: string]: unknown;
+    } | null);
+    /**
+     * Null when listApiKeys would refuse the caller: it needs unrestricted manage, and agent tokens never list keys.
+     */
+    apiKeys: {
+        /**
+         * Unrevoked API keys.
+         */
+        active: number;
+    } | null;
+    emails: {
+        /**
+         * Whether any email the caller can read exists. Same scope as listEmails: a domain-restricted key sees only direct sends from its domains.
+         */
+        any: boolean;
+    };
+    /**
+     * Null when listWebhooks would refuse the caller: members and domain-restricted keys.
+     */
+    webhooks: {
+        /**
+         * Outbound webhooks, paused ones included.
+         */
+        total: number;
+    } | null;
+    /**
+     * Null unless listWorkspaceInvitations would answer: an owner or admin dashboard session on a hosted installation.
+     */
+    invitations: {
+        /**
+         * Pending, unexpired invitations.
+         */
+        pending: number;
+    } | null;
 };
 
 export type ListMcpConnectionsData = {
@@ -3871,6 +3910,10 @@ export type GetCurrentIdentityResponses = {
         origin: string;
         host: string;
         connection: ConnectionSummary;
+        /**
+         * Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.
+         */
+        workspaces: Array<Workspace> | null;
     };
 };
 
@@ -19615,3 +19658,64 @@ export type GetPublicStatsResponses = {
 };
 
 export type GetPublicStatsResponse = GetPublicStatsResponses[keyof GetPublicStatsResponses];
+
+export type GetOverviewSetupData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/overview/setup';
+};
+
+export type GetOverviewSetupErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetOverviewSetupError = GetOverviewSetupErrors[keyof GetOverviewSetupErrors];
+
+export type GetOverviewSetupResponses = {
+    /**
+     * Success
+     */
+    200: OverviewSetup;
+};
+
+export type GetOverviewSetupResponse = GetOverviewSetupResponses[keyof GetOverviewSetupResponses];

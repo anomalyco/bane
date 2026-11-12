@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, ownerRoute, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -13,7 +13,7 @@ import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview';
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/v1/public/stats') return 'public-stats';
@@ -33,6 +33,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/routing' || pathname.startsWith('/v1/routing/') || pathname === '/v1/inbound' || pathname.startsWith('/v1/inbound/')) return 'mailbox';
   if (pathname === '/v1/workspaces' || pathname.startsWith('/v1/workspaces/')) return 'workspaces';
   if (pathname === '/v1/connection' || pathname.startsWith('/v1/connection/')) return 'provider-connections';
+  if (pathname === '/v1/overview' || pathname.startsWith('/v1/overview/')) return 'overview';
   return null;
 }
 
@@ -69,6 +70,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'workspaces': return (await import('./workspaces.js')).registerWorkspaces;
       case 'provider-connections': return (await import('./provider-connections.js')).registerProviderConnections;
       case 'public-stats': return (await import('./public-stats.js')).registerPublicStats;
+      case 'overview': return (await import('./overview-setup.js')).registerOverviewSetup;
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
@@ -158,11 +160,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   app.use('/v1/*', (c, next) => mailboxRoute(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.
-  const notMember = async (c: Ctx, next: () => Promise<void>) => {
-    if (c.get('actor')?.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
-    await next();
-  };
-  app.use('/v1/*', (c, next) => ownerRoute(c.req.method, c.req.path) ? notMember(c, next) : next());
+  app.use('/v1/*', (c, next) => {
+    if (memberRefused(c.get('actor'), c.req.method, c.req.path)) throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
+    return next();
+  });
   const regions = async (c: Ctx, next: () => Promise<void>) => {
     c.env = await timed(c, 'region-db', () => withRegionSettings(c.env, c.get('actor').workspaceId));
     await next();
@@ -224,15 +225,15 @@ export async function createOpenApiApp(): Promise<App> {
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
-    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats },
+    { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
-    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'),
+    import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'),
   ]));
   registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
-  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full);
+  registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full);
   return full;
 }
 
