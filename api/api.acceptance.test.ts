@@ -126,7 +126,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
   }
-  for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);  // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.
+  for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
+  // Campaign delivery controls are owner/admin only; MCP listings follow REST, so a member's grant is never offered them.
   for (const name of ['sendCampaign', 'scheduleCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'cancelCampaign']) assert.equal(catalog.get(name)?.ownerOnly, true, name);
 });
 test('rituals: compiler diagnostics, linear regex, plain scores and atomic step/output budgets',async()=>{
@@ -12631,6 +12632,32 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const waiting = (await db.query('SELECT status, available_at FROM jobs WHERE id = $1', [jobId])).rows[0];
         assert.deepEqual({ status: waiting.status, at: new Date(waiting.available_at).getTime() }, { status: 'pending', at: Date.parse(earlier) });
       } finally { await runtime.db.execute(sql`DROP TABLE IF EXISTS pg_temp.jobs`); }
+    });
+  });
+  test('a run that found the old time due cannot start sending after a later reschedule', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const [{ JobDeferred }, { jobHandlers }, { PgDialect }] = await Promise.all([import('./src/jobs.js'), import('./src/sending.js'), import('drizzle-orm/pg-core')]);
+      const campaign = await scheduledCampaign(local, run, 3_600_000), jobId = `campaign.run:${campaign.id}`;
+      // The send time has come: the run will find it due and move scheduled -> sending.
+      await db.query("UPDATE sending_campaigns SET scheduled_at = now() - interval '1 second' WHERE id = $1", [campaign.id]);
+      const later = new Date(Date.now() + 7_200_000).toISOString(), dialect = new PgDialect();
+      let moved: Json | undefined;
+      // Pause the run right before its scheduled -> sending statement and reschedule two hours later through REST.
+      const paused = new Proxy(runtime.db, { get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property !== 'execute') return typeof value === 'function' ? value.bind(target) : value;
+        return async (query: Parameters<typeof target.execute>[0]) => {
+          const text = typeof query === 'object' && 'getSQL' in query ? dialect.sqlToQuery(query.getSQL()) : null;
+          if (!moved && text?.sql.startsWith('UPDATE sending_campaigns SET state=') && text.params[0] === 'sending' && text.params.includes('scheduled')) moved = ok(await local('POST', `/v1/campaigns/${campaign.id}/reschedule`, { scheduledAt: later }));
+          return target.execute(query);
+        };
+      } });
+      const payload = (await db.query('SELECT payload FROM jobs WHERE id = $1', [jobId])).rows[0].payload;
+      await assert.rejects(jobHandlers['campaign.run']!({ ...runtime, db: paused }, payload, { id: jobId, attempts: 1, workspaceId: runtime.config.workspaceId }), (cause: unknown) => cause instanceof JobDeferred && Date.parse(cause.availableAt) === Date.parse(later), 'The run reads the new time and waits for it.');
+      assert.ok(moved, 'The reschedule ran between the due decision and the start.');
+      const current = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.deepEqual({ state: current.state, expanded: current.delivery.expanded, emails: current.counts.total, at: Date.parse(current.scheduledAt) }, { state: 'scheduled', expanded: 0, emails: 0, at: Date.parse(later) }, 'Nothing is released before the new time.');
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/unschedule`, {})).state, 'draft', 'The promised edit window is still open.');
     });
   });
 

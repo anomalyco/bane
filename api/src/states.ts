@@ -303,7 +303,10 @@ export const cancelCampaign = (ref: CampaignRef, error: { code: string; message:
 export const failCampaign = (ref: CampaignRef | SQL, error: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'failed', sql`,error=${JSON.stringify(error)}::jsonb,scheduled_at=NULL,waiting_reason=NULL,waiting_until=NULL`);
 /** Preparation advanced to `prepared`; when the whole list is validated the campaign moves to its schedule or straight to sending. */
 export const recordPrepared = (ref: CampaignRef, prepared: number, next: RunningState) => next === 'preparing' ? progressCampaign(ref, 'preparing', sql`,prepared=${prepared}`) : moveCampaign(ref, ['preparing'], next, sql`,prepared=${prepared}`);
-export const startSending = (ref: CampaignRef) => moveCampaign(ref, ['scheduled'], 'sending');
+/** scheduled -> sending only for the schedule and snapshot the run found due: a reschedule (or a new launch) that landed
+ *  after the run read the row leaves it scheduled, and the run reads it again. */
+export const startSending = (ref: CampaignRef, due: { scheduledAt: string | null; reviewId: string | null }) =>
+  moveCampaign(ref, ['scheduled'], 'sending', sql``, sql`scheduled_at IS NOT DISTINCT FROM ${due.scheduledAt}::timestamptz AND review_id IS NOT DISTINCT FROM ${due.reviewId}`);
 export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null) {
   return progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? 'hosted_daily_quota' : null},waiting_until=${hostedUntil}::timestamptz`);
 }

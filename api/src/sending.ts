@@ -2066,7 +2066,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
       if (row.state === 'preparing') await prepareStep(runtime, a, row, job.id);
       else if (row.state === 'scheduled') {
         if (row.scheduledAt && Date.parse(row.scheduledAt) > Date.now()) throw new JobDeferred(row.scheduledAt, payload);
-        await runtime.db.execute(startSending(ref));
+        await runtime.db.execute(startSending(ref, { scheduledAt: row.scheduledAt, reviewId: row.reviewId }));
       } else if (await releaseStep(runtime, a, row, payload) === 'done') return;
       if (Date.now() - started >= RUN_BUDGET_MS) throw new JobDeferred(now(), payload);
     }
