@@ -11,7 +11,8 @@ export type HeaderDraft = HeaderRow[] | null
 export const HEADERS_HINT = 'Sent with every delivery, such as Authorization. Values are hidden once saved.'
 let nextKey = 0
 const row = (name = ''): HeaderRow => ({ key: `header-${++nextKey}`, name, value: '' })
-const clean = (rows: HeaderRow[]) => rows.map(({ name, value }) => ({ name: name.trim(), value: value.trim() }))
+// A row left completely blank is ignored rather than blocking the save.
+const clean = (rows: HeaderRow[]) => rows.map(({ name, value }) => ({ name: name.trim(), value: value.trim() })).filter(row => row.name || row.value)
 
 export const headerDraftErrors = (draft: HeaderDraft) => draft ? webhookHeaderErrors(clean(draft), true) : {}
 /** The `headers` field for a create or update, or undefined to leave the endpoint's headers unchanged. */

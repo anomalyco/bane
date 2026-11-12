@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
-import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, platformRole, requireOperator, userEmail } from './audit.js';
+import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Bane's operators and its
 // support platform, never for customers.
@@ -46,10 +46,8 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   if (!hasSessionCookie(c.req.raw.headers)) throw operatorRequired();
   const { authenticate } = await import('./auth.js');
-  try { await authenticate(c, async () => {}); }
-  catch (error) { if (error instanceof ApiError && (error.status === 401 || error.status === 403)) throw operatorRequired(); throw error; }
-  const a = c.get('actor');
-  if (a?.credential !== 'dashboard' || !await platformRole(c.env.db, a.keyId.slice(5))) throw operatorRequired();
+  try { await authenticate(c, async () => {}); await requireOperator(c, 'operator:read'); }
+  catch (error) { if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) throw operatorRequired(); throw error; }
   return next();
 };
 
@@ -190,13 +188,15 @@ async function domainSummaries(db: DbExecutor, list: string[], limit = 200) {
 }
 async function standings(db: DbExecutor, list: string[]) {
   if (!list.length) return [];
-  const standing = (await db.execute<{ t: boolean }>(sql`SELECT to_regclass('sender_standing') IS NOT NULL AS t`)).rows[0]?.t;
   const { rows } = await db.execute<z.infer<typeof Standing>>(sql`SELECT w.id AS "workspaceId",
       (SELECT jsonb_build_object('kind', pc.kind, 'region', pc.region, 'state', to_jsonb(pc) ->> 'state', 'pausedAt', pc.paused_at, 'pauseReason', left(to_jsonb(pc) ->> 'pause_reason', 300),
         'resumedAt', to_jsonb(pc) ->> 'resumed_at') FROM provider_connections pc WHERE pc.workspace_id = w.id) AS connection,
       jsonb_build_object('dailyOverride', w.send_cap_override, 'pendingOverride', w.pending_cap_override, 'exempt', w.exempt_hosted_quotas,
         'overrideExpiresAt', to_jsonb(w) ->> 'send_cap_override_expires_at') AS limits,
-      ${standing ? sql`(SELECT to_jsonb(s) - 'workspace_id' FROM sender_standing s WHERE s.workspace_id = w.id)` : sql`NULL::jsonb`} AS standing,
+      -- What the customer's own score card and banners show (#115), never operator-only fields such as the watch flag.
+      (SELECT jsonb_build_object('step', s.step, 'since', s.since, 'reasons', s.reasons, 'phase', s.phase, 'score', s.score, 'dailyLimit', s.daily_limit, 'factors', s.factors,
+        'pauseKind', s.pause_kind, 'marketingHold', s.marketing_hold, 'releaseUntil', s.release_until, 'releasePercent', s.release_percent, 'strikes', jsonb_array_length(s.strikes),
+        'strikeUntil', s.strike_until, 'version', s.version) FROM sender_standing s WHERE s.workspace_id = w.id) AS standing,
       (SELECT coalesce(jsonb_object_agg(status, n), '{}') FROM (SELECT status, count(*)::int AS n FROM (SELECT status FROM sending_emails
         WHERE workspace_id = w.id AND created_at > now() - interval '24 hours' LIMIT 50000) x GROUP BY status) y) AS "last24h"
     FROM workspaces w WHERE w.id = ANY(${ids(list)}) ORDER BY w.name, w.id`);

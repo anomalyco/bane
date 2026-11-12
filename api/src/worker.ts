@@ -26,8 +26,8 @@ function initRuntimeDeps() {
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage, workWake }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -59,6 +59,11 @@ async function wakeDispatchers(env: Env, region: string, accountId?: string, ema
   }));
 }
 
+// Every line names the Worker and the commit it runs (DEPLOY_SHA, set by .github/scripts/deploy-worker.sh).
+function stampLogs(env: Env, core: typeof import('./core.js')) {
+  core.setLogContext({ service: 'worker', deploy: (env as unknown as Record<string, unknown>).DEPLOY_SHA });
+}
+
 let cachedConfig: { key: string; config: Config } | undefined;
 function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record<string, unknown>) => Config): Config {
   const input: Record<string, unknown> = {};
@@ -71,7 +76,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -125,7 +130,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -150,7 +155,7 @@ export default {
       let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
       return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
-    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
+    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
     if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
@@ -159,6 +164,7 @@ export default {
     try {
       deps = await loadHttpDeps();
       const { app, core } = deps;
+      stampLogs(env, core);
       const admissionStarted = performance.now();
       const address = core.admissionPeer(request.headers.get('CF-Connecting-IP') ?? '127.0.0.1');
       const peer = await core.digest(core.admissionKey(address, request.headers.get('CF-Worker')));
@@ -187,26 +193,40 @@ export default {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const known = deps && error instanceof deps.core.ApiError ? error : null;
       const code = known ? known.code : 'RUNTIME_UNAVAILABLE';
-      console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), requestId, code, message: known ? known.message : 'Unable to initialize Worker database/runtime.' }));
+      if (deps) { stampLogs(env, deps.core); deps.core.logError(known ?? error, { event: 'request', requestId, route: 'worker-runtime', method: request.method, status: 503, code }); }
+      else console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', event: 'request', requestId, route: 'worker-runtime', method: request.method, status: 503, code, message: 'Unable to load the Worker runtime modules.' }));
       return fastSecure(Response.json({ error: { code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } }, { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } }));
     }
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadRuntimeDeps();
+    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
+    stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
-    if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback')) {
-      const { ingestFeedbackBatch } = await core.wrapModuleLoad(() => import('./operations.js'));
+    const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
+      : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
+      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
+    if (feedbackLane) {
+      const { ingestFeedbackBatch, archiveQueueFeedback, retainLegacyFeedback, completeLegacyFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
-      // payload never blocks a batch of routine deliveries.
+      // payload never blocks a batch of routine deliveries. Only items this installation tagged at
+      // /v1/events/ses are ingested. Only platform-dated, pre-cutover legacy items may drain unsigned;
+      // newer ones are quarantined for review. Every replay is evaluated again.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
-        const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
-        let retiredUnmatched=0;
-        for (const [index, message] of messages.entries()) if(settleFeedbackMessage(message, outcomes[index])==='retired_unmatched') retiredUnmatched++;
-        const failed=outcomes.filter(outcome=>!outcome.ok).length-retiredUnmatched, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, oldestMs });
+        const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, sourceQueue: batch.queue, messages,
+          legacyCutover: legacyFeedbackCutover('LEGACY_FEEDBACK_CUTOVER' in env ? env.LEGACY_FEEDBACK_CUTOVER : undefined),
+          ingest: items => ingestFeedbackBatch(runtime, items),
+          promoteLegacy: async item => {
+            if (await retainLegacyFeedback(runtime, item) === 'storage') return;
+            try { await env.FEEDBACK_QUEUE.send(item); }
+            catch { core.log('warn', { code: 'FEEDBACK_LEGACY_RECOVERY_PENDING', sourceQueue: item.source.queue, sourceId: item.source.id }); }
+          }, completeLegacy: item => completeLegacyFeedback(runtime, item),
+          archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
+        const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
+        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
       return;
     }
@@ -228,32 +248,30 @@ export default {
   },
   async scheduled(controller, env) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
+    stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
       import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
     ]));
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') {
-        const [{ cleanup, reconcileUploads }, { checkReputationAlerts }, { mailboxHourly }, { resolveRegionRuntime }] = await core.wrapModuleLoad(() => Promise.all([
-          import('./maintenance.js'), import('./reputation-alerts.js'), import('./mailbox-ingest.js'), import('./ses-region-state.js'),
-        ]));
-        await cleanup(runtime);
-        await reconcileUploads(runtime);
-        // Alerts are best-effort and must not stop the minute recovery work below.
-        try { await checkReputationAlerts(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
-        await mailboxHourly(await resolveRegionRuntime(runtime));
+        const [{ hourlyUpkeep }, { resolveRegionRuntime }] = await core.wrapModuleLoad(() => Promise.all([import('./maintenance.js'), import('./ses-region-state.js')]));
+        // Each step is best-effort: a failing cleanup no longer skips upload reconciliation and receipt recovery.
+        await hourlyUpkeep(runtime, () => resolveRegionRuntime(runtime));
       }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
-      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
+      await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
-          const alarm=(name==='feedback-dlq' && m.backlogCount>0) || oldestMs>60000;
+          const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
+      catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
@@ -262,6 +280,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
+      // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
+      if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./standing.js'))).standingTick(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

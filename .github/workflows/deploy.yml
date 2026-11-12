@@ -512,6 +512,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
           AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
           AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
+          DEPLOY_SHA: ${{ needs.authorize.outputs.sha }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check

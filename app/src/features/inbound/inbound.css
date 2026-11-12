@@ -124,7 +124,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .alias-editor { container: aliases / inline-size; }
 .alias-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 0 var(--space-8); padding-block: var(--space-6); border-bottom: 1px solid var(--color-border-muted); }
 .alias-list li[data-unsaved] { animation: alias-in 160ms var(--ease-out-strong); }
-.alias-list code { min-width: 0; line-height: var(--leading-sm); overflow-wrap: anywhere; }
+.alias-list .rcv-match { min-width: 0; line-height: var(--leading-sm); }
 .alias-list__note { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .alias-list .ui-icon-button { margin-inline-end: calc(-1 * var(--space-6)); }
 .alias-list + .alias-add { margin-top: var(--space-4); }

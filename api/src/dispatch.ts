@@ -40,6 +40,8 @@ function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
     if (type === 'hosted.trusted') return (await import('./trusted-pool.js')).trustedProvision;
     if (type === 'byo.verify') return (await import('./provider-connections.js')).byoVerifyJob;
     if (type === 'tenant.provision') return (await import('./provider-connections.js')).tenantJob;
+    if (type === 'hosted.tenantStatus') return (await import('./provider-connections.js')).tenantStatusJob;
+    if (type.startsWith('standing.')) return (await import('./standing.js')).standingJobs[type];
     if (type.startsWith('byo.')) return (await import('./byo-regional.js')).regionalByoJobs[type];
     return undefined;
   });
@@ -100,7 +102,7 @@ export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDu
     const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
     try { return (await runDispatcher(runtime, { accountId, region, gate, priorityWake, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
     catch (error) {
-      log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', accountId, region, message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying next cycle.' });
+      log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', accountId, region }); // Retried on the next cycle.
       return 0;
     }
   };

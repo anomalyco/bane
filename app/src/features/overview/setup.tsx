@@ -9,6 +9,7 @@ import type { Identity, SendingLimit } from '../../data/types'
 import { date, number } from '../../lib/format'
 import { TestSend } from '../docs/first-send'
 import './setup.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 // The hosted limit as GET /v1/me reports it, refreshed with the overview so usage stays current.
 export function useSendingLimit() {
@@ -41,43 +42,50 @@ export type SetupStep = { key: string; done: boolean; title: string; detail: Rea
 
 // Hosted admins until the first email is sent: each step read from server state, not from this browser.
 // `loading` is true until the setup read (shared with the next steps) settles, so the page can hold its layout until it knows.
-export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep } {
+export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[] } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
   const setup = useApiDef(queries.overviewSetup(), { enabled })
+  // Receiving counts as set up once an address exists, not merely once the MX record resolves.
+  const receivingVerified = setup.data?.domains?.some(domain => domain.receiving === 'verified') ?? false
+  const inbound = useApiDef(queries.inboundDomains(), { enabled: enabled && receivingVerified })
   // A test sent from the steps keeps them up, with its result, until the next visit.
   const [testId, setTestId] = useState<string | null>(null)
   if (!enabled) return { loading: false, steps: null }
-  if (setup.isPending) return { loading: true, steps: null }
+  if (setup.isPending || (receivingVerified && inbound.isPending && !inbound.error)) return { loading: true, steps: null }
   if (setup.error || !setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
   const items = setup.data.domains, keyed = setup.data.apiKeys.active > 0
   const verified = items.find(domain => domain.status === 'verified')
   const pending = items.find(domain => domain.status !== 'verified')
   const receiving = items.find(domain => domain.receiving === 'verified')
+  const addresses = inbound.data?.reduce((sum, domain) => sum + domain.addressCount, 0) ?? 0
   const sent = setup.data.emails.any || !!testId
   if (verified && keyed && sent && !testId) return { loading: false, steps: null }
   const steps: SetupStep[] = [
     { key: 'domain', done: !!verified, title: 'Verify a domain',
       detail: verified ? `${verified.name} can send.` : pending ? `${pending.name} is waiting for its DNS records.` : 'Add the domain you send from and publish its DNS records.',
       action: !verified && <Link className="ui-button ui-button--secondary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
-    { key: 'key', done: keyed, title: 'Create an API key', detail: keyed ? 'Your app or agent can authenticate.' : 'A Send only key restricted to your domain is enough.',
-      action: !keyed && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Create key</Link> },
-    { key: 'send', done: sent, title: 'Send your first email', detail: testId ? <>Test email queued to {identity?.email}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the examples in <Link to="/docs">Docs</Link>.</> : 'Possible once a domain is verified.',
+    { key: 'key', done: keyed, title: 'Create an API key', detail: keyed ? 'Your app or agent can authenticate.' : verified ? `A Send only key for ${verified.name} is enough.` : 'A Send only key restricted to your domain is enough.',
+      action: !keyed && <Link className="ui-button ui-button--secondary ui-button--md" to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
+    { key: 'send', done: sent, title: 'Send your first email', detail: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : sent ? 'It’s in Logs.' : verified ? <>Send a test to yourself, or use the examples in <Link to="/docs">Docs</Link>.</> : 'Possible once a domain is verified.',
       action: !sent && verified && <TestSend domain={verified} onSent={setTestId} /> },
-    { key: 'receive', done: !!receiving, optional: true, title: 'Receive email', detail: receiving ? `${receiving.name} receives mail.` : 'Add the receiving MX record from a domain’s page.',
-      action: !receiving && (verified ?? pending) && <Link className="ui-button ui-button--ghost ui-button--md" to={`/domains/${(verified ?? pending)!.id}`}>Set up</Link> },
+    { key: 'receive', done: !!receiving && addresses > 0, optional: true, title: 'Receive email', detail: receiving ? `${receiving.name} can receive. Create an address, such as support@, to start.` : 'Add the receiving MX record from a domain’s page.',
+      action: receiving ? addresses === 0 && <Link className="ui-button ui-button--ghost ui-button--md" to="/receiving">Create address</Link> : (verified ?? pending) && <Link className="ui-button ui-button--ghost ui-button--md" to={`/domains/${(verified ?? pending)!.id}`}>Set up</Link> },
   ]
-  return { loading: false, steps, current: steps.find(step => !step.done && !step.optional) ?? steps.find(step => !step.done) }
+  // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.
+  const current = steps.find(step => !step.done && !step.optional) ?? steps.find(step => !step.done)
+  const open = steps.filter(step => step === current || (step.key === 'send' && !step.done && !!verified))
+  return { loading: false, steps, current, open }
 }
 
 // Numbered steps in Overview's detail column; only the current step is open. A finished step's number turns into a check.
-export function SetupRail({ steps, current }: { steps: SetupStep[]; current?: SetupStep }) {
+export function SetupRail({ steps, current, open: opened = current ? [current] : [] }: { steps: SetupStep[]; current?: SetupStep; open?: SetupStep[] }) {
   const required = steps.filter(step => !step.optional)
   return <section className="setup-rail" aria-label="Get started">
-    <div className="setup-rail__head"><h2>Get started</h2><span className="muted">{required.filter(step => step.done).length} of {required.length}</span></div>
+    <div className="setup-rail__head"><h2>Get started</h2><span className="muted">{required.filter(step => step.done).length} of {required.length} done</span></div>
     <ol>{steps.map((step, index) => {
-      const open = step === current
+      const open = opened.includes(step)
       return <li key={step.key} data-done={step.done || undefined} data-open={open || undefined} style={{ '--i': index } as CSSProperties}>
         <span className="setup-rail__mark" aria-hidden="true"><span>{index + 1}</span><Check size={12} strokeWidth={2.75} /></span>
         <div className="setup-rail__body"><span>{step.title}{step.optional && <span className="muted"> · optional</span>}{step.done && <span className="sr-only"> (done)</span>}</span>

@@ -19,9 +19,11 @@ import { ritualTemplates } from '../../../../api/src/ritual-schema'
 import { concepts, guides } from './concepts'
 import { useOverview } from './overview'
 import { ConceptLine } from './parts'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { defaultChoice, EmailPicker, TraceView, traceInput, useDryRun, useRecentMail, type EmailChoice } from './trace'
 import './inbound.css'
 import './receiving.css'
+import { useSingleFlight } from '../../lib/single-flight'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -177,8 +179,10 @@ export function RitualsPage() {
       return r.diagnostics
     } catch { return [] }
   }
-  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown. */
-  async function save(attachments?: Binding[]): Promise<boolean> {
+  /** Saves the draft (and any attachment to add with it). Resolves false when it didn't save; the reason is shown.
+   *  Single flight, like the writes below: a second Save or ⌘S before the first answers would send the same version again
+   *  and report a conflict next to the success; it gets the first one's result instead. */
+  const save = useSingleFlight('rituals.save', async (attachments?: Binding[]): Promise<boolean> => {
     if (!saved || !config || !keyValid) return false
     setPending(true); setProblems([])
     try {
@@ -193,9 +197,9 @@ export function RitualsPage() {
       toast(`Not saved: ${errorText(e)}`, 'error')
       return false
     } finally { setPending(false) }
-  }
+  })
   /** Attach, detach, reorder and "Run the next one too" save at once; the draft script is left as it is. */
-  async function saveBindings(attachments: Binding[], done: string) {
+  const saveBindings = useSingleFlight('rituals.attachments', async (attachments: Binding[], done: string) => {
     if (!saved) return
     // A ritual that was never saved can't be attached on its own: it is saved with its first attachment.
     if (!isSaved && attachments.some(b => b.ritual === key)) { if (await save(attachments)) setTarget(''); return }
@@ -205,14 +209,14 @@ export function RitualsPage() {
       setSaved(s); setTarget(''); refresh(); toast(done, 'success')
     } catch (e) { toast(errorText(e), 'error') }
     finally { setBinding(false) }
-  }
-  async function remove() {
+  })
+  const remove = useSingleFlight('rituals.delete', async () => {
     if (!saved) return
     const s = await request<Saved>(`/v1/rituals/scripts/${encodeURIComponent(key)}`, { method: 'DELETE', ifMatch: saved.version })
     setSaved(s); refresh(); toast(`${key} deleted`, 'success')
     open(s, s.config.rituals[0]?.key ?? '')
     setParams(current => { const p = new URLSearchParams(current); p.delete('key'); p.delete('new'); return p }, { replace: true })
-  }
+  }, key)
   const leaveGuard = useLeaveGuard(dirty, { what: `the changes to ${key || 'this ritual'}`, save: () => save() })
   // ⌘S / Ctrl+S saves the draft from anywhere on the page, the editor included. A new ritual can be saved as it starts.
   const saveRef = useRef(save)
@@ -259,17 +263,17 @@ export function RitualsPage() {
   const bindingColumns: Column<Binding & { i: number }>[] = [
     { key: 'order', label: '#', width: 48, card: 'hide', render: b => b.i + 1 },
     { key: 'ritual', label: 'Ritual', card: 'line', render: b => <code>{b.ritual}</code>, cardRender: b => <><code>{b.ritual}</code> · runs {b.i + 1}{b.i === 0 ? 'st' : b.i === 1 ? 'nd' : 'rd'}{b.continue ? ', then the next one' : ''}</> },
-    { key: 'target', label: 'Runs on mail to', card: 'title', render: b => targetName(b.target) },
+    { key: 'target', label: 'Runs on mail to', card: 'title', render: b => <PrivateAddress value={targetName(b.target)} /> },
     { key: 'continue', label: 'After it acts', width: 190, card: 'hide', render: b => <Checkbox checked={b.continue} disabled={binding} onCheckedChange={v => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: v } : x), v ? `${b.ritual} now lets the next ritual run` : `${b.ritual} now stops the next ritual`)} label="Run the next one too" /> },
-    { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual} on ${targetName(b.target)}`} title={`${b.ritual} on ${targetName(b.target)}`} items={[
+    { key: 'actions', label: '', width: 132, align: 'right', card: 'end', cardRender: b => <DropdownMenu label={`Actions for ${b.ritual}`} title={<>{b.ritual} on <PrivateAddress value={targetName(b.target)} /></>} items={[
       { label: b.continue ? 'Stop the next one after it acts' : 'Run the next one too', disabled: binding, onSelect: () => void saveBindings(bindings.map((x, i) => i === b.i ? { ...x, continue: !b.continue } : x), b.continue ? `${b.ritual} now stops the next ritual` : `${b.ritual} now lets the next ritual run`) },
       ...(b.i ? [{ label: 'Move up', disabled: binding, onSelect: () => move(b.i, -1) }] : []),
       ...(b.i < bindings.length - 1 ? [{ label: 'Move down', disabled: binding, onSelect: () => move(b.i, 1) }] : []),
-      { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual} from ${targetName(b.target)}`) },
+      { label: 'Detach', destructive: true, disabled: binding, onSelect: () => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`) },
     ]} />, render: b => <span className="ritual-row-actions">
       <IconButton label="Move up" disabled={!b.i || binding} onClick={() => move(b.i, -1)}>↑</IconButton>
       <IconButton label="Move down" disabled={b.i === bindings.length - 1 || binding} onClick={() => move(b.i, 1)}>↓</IconButton>
-      <IconButton label={`Detach ${b.ritual} from ${targetName(b.target)}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual} from ${targetName(b.target)}`)}>×</IconButton>
+      <IconButton label={`Detach ${b.ritual}`} disabled={binding} onClick={() => void saveBindings(bindings.filter((_, i) => i !== b.i), `Detached ${b.ritual}`)}>×</IconButton>
     </span> },
   ]
   const recipients = (addresses.data ?? []).filter(a => !a.expiresAt).map(a => a.address)
@@ -303,8 +307,10 @@ export function RitualsPage() {
         ? <>No problems{check.calls.length ? <> · calls <code>{check.calls.join(', ')}</code></> : null}{check.omens.length ? <> · omens <code>{check.omens.join(', ')}</code></> : null}</>
         : (p => <>Line {p.line}, column {p.column}: {p.message}{p.hint ? ` ${p.hint}` : ''}{check.diagnostics.length > 1 ? ` (+${check.diagnostics.length - 1} more)` : ''}</>)(check.diagnostics[0]!)}</p>
 
-      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later. */}
-      {check !== null && (recent.data !== undefined || !!recent.error) && <>
+      {/* The sections below appear with the first check (it names the omens to answer) and recent mail, so nothing shifts in later.
+          Gated on recent mail's first answer (isFetched), not data or error: the picker retries a failed read when it mounts, which
+          clears the error, so a gate on the error unmounted it and remounted it in a loop of requests. */}
+      {check !== null && recent.isFetched && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
         <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Bane’s AI isn’t asked: you set each omen’s answer here.`} />

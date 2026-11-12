@@ -6,7 +6,7 @@ import { log } from '../src/core.js';
 export async function setWorkspaceExemption(db: Client, args: string[]) {
   const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { reason: { type: 'string' } } });
   const [wid, state] = positionals, reason = values.reason?.trim();
-  if (positionals.length !== 2 || !wid || (state !== 'on' && state !== 'off') || !reason) throw new Error('Usage: set-workspace-exemption.ts WORKSPACE_ID on|off --reason "..."');
+  if (positionals.length !== 2 || !wid || (state !== 'on' && state !== 'off') || !reason || reason.length < 10) throw new Error('Usage: set-workspace-exemption.ts WORKSPACE_ID on|off --reason "why (at least 10 characters)"');
   // The row change and its audit must either both commit or neither commit.
   const { rows: [audit] } = await db.query(`WITH previous AS (
     SELECT w.id,w.exempt_hosted_quotas FROM provider_connections c JOIN workspaces w ON w.id=c.workspace_id
@@ -15,7 +15,7 @@ export async function setWorkspaceExemption(db: Client, args: string[]) {
     UPDATE workspaces w SET exempt_hosted_quotas=$2 FROM previous p WHERE w.id=p.id
     RETURNING w.id,p.exempt_hosted_quotas AS old_value,w.exempt_hosted_quotas AS new_value
   ) INSERT INTO hosted_operator_audit(workspace_id,action,details)
-    SELECT id,'set-workspace-exemption',jsonb_build_object('old',old_value,'new',new_value,'reason',$3::text) FROM changed RETURNING details`, [wid, state === 'on', reason]);
+    SELECT id,'set-workspace-exemption',jsonb_build_object('old',old_value,'new',new_value,'reason',$3::text,'via','script') FROM changed RETURNING details`, [wid, state === 'on', reason]);
   if (!audit) throw new Error('No Hosted connection for this workspace.');
   log('info', { code: 'HOSTED_EXEMPTION_CHANGED', workspaceId: wid, ...audit.details });
 }

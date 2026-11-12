@@ -17,6 +17,10 @@
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
+// Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
+// beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
+// cold desktop load, hovering the first few reveals them without anything moving.
+//
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
 // no request is in flight, fonts are loaded and the page has rendered and gone idle twice in a row; there are no
@@ -38,7 +42,8 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // [name, path, { user, from, click, row }]. The in-app navigation starts on `from` and clicks the control whose text
 // starts with `click`, the table row containing `row`, or else a link to `path`; with none of those (pages reached
 // from a dropdown menu) it pushes `path` through the router's history. It must land on `path`.
-// dana owns an established hosted workspace, nia a brand-new one with a verified domain, ona one still onboarding.
+// dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
+// still onboarding, rae a restricted one (the standing banner on every page).
 const pages = ids => [
   ['Overview', '/', { from: '/logs' }],
   ['Overview · setup', '/', { user: 'nia' }],
@@ -48,7 +53,7 @@ const pages = ids => [
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
   ['Receiving', '/receiving', { from: '/' }],
   ['Receiving · endpoints', '/receiving?tab=endpoints', { from: '/receiving', click: 'Endpoints' }],
-  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving', row: 'support@northwind.example' }],
+  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
   ['Receiving · trace', '/receiving/trace', { from: '/receiving' }],
   ['Receiving · rituals', '/receiving/rituals', { from: '/receiving' }],
@@ -77,8 +82,13 @@ const pages = ids => [
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
   ['Settings · activity', '/settings#activity', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
+  ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Docs', '/docs', { from: '/' }],
+  ['Operator', '/operator', { from: '/' }],
+  ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
+  ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
+  ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
   ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
   ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
@@ -86,7 +96,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · webhook', 'Onboarding']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -172,6 +182,51 @@ async function settle(page, net) {
 }
 const sharp = n => Math.round(n * 10000) / 10000;
 
+// Masked addresses, in the page. A seeded mailbox address (cls-fixture.mjs) may be spelled out only where it is typed or
+// chosen (a field, a picker, a dialog) or in a code example; everywhere else the page holds its first two characters.
+const maskedLeaks = () => {
+  const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|example\.net|example\.com)\b/gi;
+  const mailbox = value => value.slice(0, value.lastIndexOf('@')).replace(/\*/g, '') !== '';
+  const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog]');
+  const found = [], note = (what, value) => { if (found.length < 5) found.push(`${what} spells out ${value.slice(0, 2)}…`); };
+  for (const el of document.querySelectorAll('.private-address:not([data-revealed])')) {
+    const text = el.querySelector('.private-address__value')?.textContent ?? el.textContent;
+    if ([...text].length > 2 || !el.querySelector('.private-address__rest')) note('a masked address', text);
+  }
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node; (node = walker.nextNode());) for (const value of node.nodeValue.match(SEEDED) ?? []) if (mailbox(value) && !exempt(node.parentElement) && !node.parentElement.closest('[data-revealed]')) note(`text in <${node.parentElement.tagName.toLowerCase()} class="${node.parentElement.className}">`, value);
+  for (const el of document.body.querySelectorAll('[title], [aria-label], [aria-description], [alt], a[href]')) for (const name of ['title', 'aria-label', 'aria-description', 'alt', 'href']) {
+    let value = el.getAttribute(name) ?? ''; try { value = decodeURIComponent(value); } catch {}
+    for (const match of value.match(SEEDED) ?? []) if (mailbox(match) && !exempt(el)) note(`${name} on <${el.tagName.toLowerCase()} class="${el.className}">`, match);
+  }
+  return found;
+};
+// Where to hover the first few masked addresses in view that the pointer can reach, and what must stay where it is.
+const maskedTargets = () => [...document.querySelectorAll('.private-address:not([data-revealed])')].map((el, index) => {
+  const r = el.getBoundingClientRect(), x = r.left + 3, y = r.top + r.height / 2;
+  return r.width > 0 && r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y)) ? { index, x, y } : null;
+}).filter(Boolean).slice(0, 3);
+const maskedState = index => {
+  const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
+  return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
+};
+async function masking(page, hover) {
+  const problems = await page.evaluate(maskedLeaks);
+  if (!hover) return problems;
+  const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  for (const { index, x, y } of await page.evaluate(maskedTargets)) {
+    const before = await page.evaluate(maskedState, index);
+    await page.mouse.move(x, y); await frame();
+    const shown = await page.evaluate(maskedState, index);
+    await page.mouse.move(1, 1); await frame();
+    const after = await page.evaluate(maskedState, index);
+    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`hovering ${before.text}… did not reveal it`);
+    else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
+    if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
+  }
+  return problems;
+}
+
 async function measure(browser, job, fx) {
   const origin = fx.origins[job.index % fx.origins.length];
   const context = await browser.newContext({ ...devices[job.device], colorScheme: job.scheme });
@@ -235,6 +290,7 @@ async function measure(browser, job, fx) {
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
+    problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
     if (result.cls > LIMIT || process.env.CLS_SHOTS) {
       await page.evaluate(() => { for (const n of window.__cls.nodes) if (n.isConnected && n.style) n.style.outline = '2px solid #f0f'; });
       result.screenshot = `${job.slug}.png`;

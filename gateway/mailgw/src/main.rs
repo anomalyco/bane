@@ -177,7 +177,17 @@ impl Gateway {
                 biased;
                 _=tokio::time::sleep_until(read_deadline)=>break,
                 _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
-                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{let r=tokio::task::block_in_place(||store.wake(i,&mut stale))?;write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
+                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{
+                    let generation=event?;
+                    if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}
+                    stale=true;
+                    if idling && let Some(store)=backend.as_mut() && let Core::Imap(i)=&mut core {
+                        let r = tokio::task::block_in_place(|| store.wake(i, &mut stale)).unwrap_or_else(snapshot_bye);
+                        write(&mut stream, &r.bytes).await?;
+                        if r.action == Action::Close {break}
+                    }
+                    continue
+                },
                 n=stream.read(&mut buf)=>n?,
                 _=tokio::time::sleep_until(heartbeat),if idling=>{
                     write(&mut stream,b"* OK Still here\r\n").await?;
@@ -327,9 +337,9 @@ impl Gateway {
                             Ok(match &mut core {
                                 // Store::imap refreshes a stale snapshot, steps the core and
                                 // finishes the command (drops an unclaimed APPEND spool).
-                                Core::Imap(i) => {
-                                    store.imap(i, &bytes, identity, &mut stale, now)?
-                                }
+                                Core::Imap(i) => store
+                                    .imap(i, &bytes, identity, &mut stale, now)
+                                    .unwrap_or_else(snapshot_bye),
                                 Core::Smtp(s) => {
                                     let reply = s.step(&bytes, identity, store, now);
                                     store.finish_command();
@@ -419,11 +429,22 @@ impl Gateway {
                 }
                 if r.action == Action::Failure {
                     failures += 1;
+                    let protocol = match port.protocol {
+                        Protocol::Imap => "imap",
+                        Protocol::Smtp => "smtp",
+                    };
                     if identity.as_ref().is_some_and(|i| {
                         i.unavailable
                             .swap(false, std::sync::atomic::Ordering::Relaxed)
                     }) {
                         failures -= 1;
+                        tracing::error!(
+                            service = "gateway",
+                            event = "auth",
+                            code = "GATEWAY_AUTH_UNAVAILABLE",
+                            protocol,
+                            "authentication service unavailable"
+                        );
                         if matches!(port.protocol, Protocol::Imap) {
                             let tag = r
                                 .bytes
@@ -438,7 +459,14 @@ impl Gateway {
                             r = Reply::one("454 4.7.0 Authentication service unavailable");
                         }
                     } else {
-                        tracing::info!(reason = "credentials_denied", "login refused");
+                        tracing::info!(
+                            service = "gateway",
+                            event = "auth",
+                            code = "GATEWAY_AUTH_FAILED",
+                            protocol,
+                            reason = "credentials_denied",
+                            "login refused"
+                        );
                     }
                     tokio::time::sleep_until(
                         auth_deadline.min(Instant::now() + Duration::from_secs(1)),
@@ -479,6 +507,12 @@ impl Gateway {
         Ok(())
     }
 }
+fn snapshot_bye(e: mailgw_core::store::Error) -> Reply {
+    Reply {
+        action: Action::Close,
+        ..Reply::one(&format!("* BYE {e}"))
+    }
+}
 async fn write(stream: &mut Stream, data: &[u8]) -> Result<()> {
     if !data.is_empty() {
         timeout(IO, async {
@@ -508,7 +542,13 @@ fn tls_materials(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One JSON object per line, like the API's logs (api/src/core.ts): CloudWatch Logs Insights reads the fields and
+    // the nightly report (api/scripts/nightly-report.ts) counts `code` per day. Never log addresses or credentials.
     tracing_subscriber::fmt()
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();

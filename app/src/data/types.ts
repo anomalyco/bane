@@ -11,7 +11,7 @@ export type CampaignStatus = 'draft' | 'preparing' | 'scheduled' | 'sending' | '
 export const campaignEditable = (campaign: Pick<Campaign, 'status' | 'delivery'>) => campaign.status === 'draft' || (campaign.status === 'failed' && !(campaign.delivery?.expanded ?? 0))
 export const campaignResumable = (campaign: Pick<Campaign, 'status' | 'delivery'>) => campaign.status === 'paused' || (campaign.status === 'failed' && (campaign.delivery?.expanded ?? 0) > 0)
 export const campaignActive = (campaign: Pick<Campaign, 'status' | 'delivery'>) => ['preparing', 'scheduled', 'sending', 'paused'].includes(campaign.status) || campaignResumable(campaign)
-export type WebhookEvent = 'send' | 'delivered' | 'bounced' | 'complaint' | 'rejected' | 'delivery_delayed' | 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'
+export type WebhookEvent = 'send' | 'delivered' | 'bounced' | 'complaint' | 'rejected' | 'delivery_delayed' | 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed' | 'account.standing.changed'
 export type TimeRange = '24h' | '7d' | '30d'
 export interface PageRequest { page?: number; pageSize?: number; search?: string; regionId?: RegionId; status?: string; stream?: string; listId?: string; segmentId?: string; campaignId?: string; cursor?: string; to?: string; from?: string }
 export interface PageResult<T> { items: T[]; total?: number; nextCursor?: string | null; page: number; pageSize: number; facets?: Record<string, number> }
@@ -45,8 +45,16 @@ export interface Email { contact?: {id:string; suppressed:boolean} | null; campa
 export interface ChartPoint { at: ISODate; sent: number; delivered: number; bounced: number; complaints: number }
 /** GET /v1/sender-score: the workspace's reputation grade, computed by the API. */
 export type SenderGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
-export interface SenderScoreFactor { key: 'complaints' | 'bounces' | 'content' | 'auth' | 'hygiene' | 'consistency'; label: string; weight: number; value: number | null; score: number | null; points: number | null; source: 'measured' | 'neutral'; basis: string }
-export interface SenderScore { state: 'warmup' | 'graded'; emails: { firstEmails: number; last30Days: number }; needed: number; score: number | null; grade: SenderGrade | null; target: number; raw: number; band: { min: number; max: number } | null; next: { grade: SenderGrade; at: number } | null; factors: SenderScoreFactor[]; history: { date: string; score: number }[]; computedAt: ISODate }
+export interface SenderScoreFactor { key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement'; label: string; weight: number; value: number | null; score: number | null; points: number | null; source: 'measured' | 'neutral'; basis: string }
+/** Hosted only: the daily limit the score sets (rolling 24 hours, recipients) and what changes it. */
+export interface SenderLimit { daily: number | null; source: 'calibrating' | 'score' | 'override' | 'exempt'; band: number; next: { limit: number; atScore: number } | null; override: { daily: number; expiresAt: ISODate | null } | null; restore: { daily: number; until: ISODate } | null; strikeCapUntil: ISODate | null; perMinute: number; marketingPerHour: number; transactionalReserve: number }
+export type StandingStep = 'ok' | 'notice' | 'warn' | 'restrict' | 'pause'
+export interface StandingReason { code: string; metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external'; value: number; count: number; threshold: number; minimum: number; window: '24h' | '7d' | null; step: StandingStep; message: string }
+/** Hosted only: the enforcement step, why, and what an owner may release from the dashboard. */
+export interface SenderStanding { step: StandingStep; reasons: StandingReason[]; since: ISODate; pauseKind: 'bounce' | 'full' | null; marketingHeld: boolean; marketingRelease: { percent: number; until: ISODate } | null; strikes: number; selfService: { available: boolean; action: 'release_marketing' | 'resume_sending' | null; reason: string | null; availableAt: ISODate | null }; version: number; sequence: number }
+export interface SenderScore { state: 'warmup' | 'graded'; emails: { firstEmails: number; last30Days: number }; needed: number; calibratedAt: ISODate | null; score: number | null; grade: SenderGrade | null; target: number; raw: number; band: { min: number; max: number } | null; next: { grade: SenderGrade; at: number } | null; factors: SenderScoreFactor[]; history: { date: string; score: number }[]; limit: SenderLimit | null; standing: SenderStanding | null; computedAt: ISODate }
+/** POST /v1/sender-score/release: the fix checklist an owner confirms before releasing a restrict or a bounce-only pause. */
+export interface StandingReleaseInput { checklist: { bouncedRemoved: true; listSourceConfirmed: true } }
 export interface Overview { periodStart: ISODate; periodEnd: ISODate; sent: number; delivered: number; bounced: number; complaints: number; deferred: number; previousSent: number; points: ChartPoint[]; streams: { name: Stream; sent: number }[]; recentCampaigns: Campaign[] }
 export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; consent: { source: string; at: ISODate | null }; suppressionReason?: string }
 export interface ContactInput { id?: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[] }
@@ -70,7 +78,7 @@ export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'pr
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
 export interface ApiKey { revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
-export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
+export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'read_send' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }
 export interface AgentTokenSummary { id: string; grantId: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate }
@@ -146,7 +154,8 @@ export interface InboundMessage {
   read?: boolean
 }
 export interface InboundAttachment { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }
-export interface InboundMessageDetail extends InboundMessage { html: string | null; attachments: InboundAttachment[] }
+// htmlTooComplex: the HTML is past the API's parsing budget; show the text instead of rendering it.
+export interface InboundMessageDetail extends InboundMessage { html: string | null; htmlTooComplex?: boolean; attachments: InboundAttachment[] }
 export interface InboundAddressState { addressId: string; unreadCount: number; archived: boolean; starred: boolean; trashed: boolean; spam: boolean; labels: string[] }
 export interface InboundThreadPatch { addressId?: string; read?: boolean; starred?: boolean; archived?: boolean; trashed?: boolean; spam?: boolean; addLabels?: string[]; removeLabels?: string[] }
 export interface InboundRecipients { to: string[]; cc: string[]; bcc: string[] }
@@ -184,17 +193,23 @@ export interface ReceivedEmail {
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
   sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
-  text: string; replyText: string; html: string | null; bodyTruncated: boolean; headers?: { name: string; value: string }[]
+  text: string; replyText: string; html: string | null; htmlTooComplex?: boolean; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
   sizeBytes?: number | null; rawUrl?: string | null
 }
-export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
-export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
+export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown>; /** A Test endpoint delivery, not real traffic. */ test?: boolean }
+export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; /** The signing secret: only in the response that created the webhook. */ secret?: string }
 // An update without regionIds keeps the endpoint's saved region scope.
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
+// A dashboard session that meets these is a member: say who can do it instead of the key jargon behind the code.
+const ownersOnly = 'Only workspace owners and admins can do this. Ask one of them to do it for you, or to make you an admin.'
+export const permissionCodes = new Set(['PERMISSION_DENIED', 'ADMIN_REQUIRED', 'OWNER_REQUIRED'])
 const friendlyErrors: Record<string, (detail: string) => string> = {
+  PERMISSION_DENIED: detail => /permission|owner or admin|administration|principal/i.test(detail) ? ownersOnly : detail,
+  ADMIN_REQUIRED: () => ownersOnly,
+  OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
   TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. This usually takes a minute or two, so try again shortly.',
   HOSTED_SENDING_PAUSED: detail => `Sending is paused for this workspace while its reputation is reviewed${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
@@ -240,7 +255,7 @@ export interface BaneApi {
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
   workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name: string }, signal?: AbortSignal): Promise<Workspace> }
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview>; setup(signal?: AbortSignal): Promise<OverviewSetup> }
-  senderScore: { get(signal?: AbortSignal): Promise<SenderScore> }
+  senderScore: { get(signal?: AbortSignal): Promise<SenderScore>; release(input: StandingReleaseInput, signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email> }
   logs: { list(input: PageRequest & { direction?: LogDirection }, signal?: AbortSignal): Promise<PageResult<LogEntry>> }
   campaigns: { list(input: PageRequest & { archived?: boolean }, signal?: AbortSignal): Promise<PageResult<Campaign>>; get(id: string, signal?: AbortSignal): Promise<Campaign>; state(id: string, signal?: AbortSignal): Promise<CampaignState>; preview(id: string, signal?: AbortSignal): Promise<CampaignPreview>; setArchived(input: { id: string; archived: boolean }, signal?: AbortSignal): Promise<Campaign>; save(input: CampaignInput, signal?: AbortSignal): Promise<Campaign>; audience(input: { id: string; listId: string; segmentId: string | null }, signal?: AbortSignal): Promise<AudiencePreview>; send(input: SendCampaignInput, signal?: AbortSignal): Promise<Campaign | CampaignSendReceipt>; pause(id: string, signal?: AbortSignal): Promise<Campaign>; resume(id: string, signal?: AbortSignal): Promise<Campaign>; setPacing(id: string, input: CampaignPacingInput, signal?: AbortSignal): Promise<Campaign>; unschedule(id: string, signal?: AbortSignal): Promise<Campaign>; reschedule(id: string, scheduledAt: ISODate, signal?: AbortSignal): Promise<Campaign>; cancel(id: string, signal?: AbortSignal): Promise<{ canceled: number; inFlight: number }>; stats(id: string, signal?: AbortSignal): Promise<CampaignStats>; test(input: { id: string; to: string; data?: Record<string, string> }, signal?: AbortSignal): Promise<{ accepted: boolean; id?: string; status?: string; simulated?: boolean }> }
@@ -295,11 +310,11 @@ export interface BaneApi {
     deleteRoute(id: string, signal?: AbortSignal): Promise<void>
     test(input: RoutingTestInput, signal?: AbortSignal): Promise<RoutingTestResult>
   }
-  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number } }) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Bane staff only: the platform operator role, which opens /operator. */ operator?: 'operator' | 'operator:read' | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 // GET /v1/overview/setup: Overview's setup and next steps in one read. A part is null where its own list would refuse the caller.

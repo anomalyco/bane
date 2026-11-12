@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { SQL, sql } from 'drizzle-orm';
-import { operatorRole, type OperatorRole } from './operator-identity.js';
+import type { OperatorRole } from './operator-identity.js';
 import { ApiError, dashboardSession, errors, notFound, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 
 // The per-account audit trail (migration 260): one append-only table, written by recordAudit() inside the
@@ -172,10 +172,10 @@ export async function purgeExpiredAudit(runtime: Pick<Runtime, 'db'>, limit = 50
 
 export type OperatorIdentity = { id: string; role: OperatorRole; via: 'console' | 'support'; userId: string | null };
 /**
- * The one operator gate for the audit and support routes, and the guard for every /v1/operator/* request (app.ts).
- * A signed-in dashboard session holds a platform role through src/operator-identity.ts (#115's single link between the
- * role and the user; until #115's migration is on a database, nobody holds one). The support platform's server
- * presents its own read-only credential (BANE_SUPPORT_PLATFORM_TOKEN). Never a workspace role: owners get 403.
+ * Who the operator is, for the audit and support routes and the /v1/operator/* gate (support.ts operatorGate). There is
+ * one operator check: a signed-in dashboard session goes through #115's operatorActor (src/operator.ts, which reads the
+ * role through src/operator-identity.ts). The only other operator is the support platform's server with its own
+ * read-only credential (BANE_SUPPORT_PLATFORM_TOKEN). Never a workspace role: owners get 403.
  */
 export async function requireOperator(c: Ctx, level: OperatorRole): Promise<OperatorIdentity> {
   const a = c.get('actor');
@@ -183,21 +183,13 @@ export async function requireOperator(c: Ctx, level: OperatorRole): Promise<Oper
     if (level !== 'operator:read') throw operatorRequired();
     return { id: a.keyId, role: 'operator:read', via: 'support', userId: null };
   }
-  if (a?.credential !== 'dashboard') throw operatorRequired();
-  const userId = a.keyId.slice(5), role = await platformRole(c.env.db, userId);
-  if (!role || (level === 'operator' && role !== 'operator')) throw operatorRequired();
-  return { id: userId, role, via: 'console', userId };
+  if (!c.env.config.multiTenant || a?.credential !== 'dashboard') throw operatorRequired();
+  // Loaded on demand: operator.ts brings the standing model, which most audited routes never need.
+  const { operatorActor } = await import('./operator.js');
+  const operator = await operatorActor(c, level);
+  return { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId };
 }
 export const operatorRequired = () => new ApiError(403, 'OPERATOR_REQUIRED', 'This area is for Bane operators.');
-/**
- * operatorRole(), or null while platform_operators does not exist yet (before #115's migration 231). The table is
- * checked first rather than the error caught, so the lookup never aborts a caller's transaction.
- * TODO(#115): once 231 is on dev, call operatorRole() directly.
- */
-export async function platformRole(db: DbExecutor, userId: string) {
-  if (!(await db.execute<{ t: boolean }>(sql`SELECT to_regclass('platform_operators') IS NOT NULL AS t`)).rows[0]?.t) return null;
-  return operatorRole(db, userId);
-}
 export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContext => ({ ...auditContext(c), actor: { type: 'operator', id: operator.id, userId: operator.userId, via: operator.via } });
 
 // ---------- reading the trail ----------
@@ -282,10 +274,10 @@ export async function customerTrail(db: DbExecutor, workspaceIds: string[], f: F
 
 // Enforcement (#111/#115) and the billing ledger join the operator view when their tables exist on this database.
 // They are read through to_jsonb(row), so only id, workspace_id and the time column are assumed.
-let sources: Promise<{ standing: boolean; billing: boolean; operatorAudit: boolean }> | undefined;
+let sources: Promise<{ standing: boolean; billing: boolean }> | undefined;
 const optionalSources = (db: DbExecutor) => sources ??= db.execute<{ standing: boolean; billing: boolean; operator_audit: boolean }>(sql`SELECT
-    to_regclass('standing_events') IS NOT NULL AS standing, to_regclass('billing_transactions') IS NOT NULL AS billing, to_regclass('hosted_operator_audit') IS NOT NULL AS operator_audit`)
-  .then(r => ({ standing: !!r.rows[0]?.standing, billing: !!r.rows[0]?.billing, operatorAudit: !!r.rows[0]?.operator_audit }))
+    to_regclass('standing_events') IS NOT NULL AS standing, to_regclass('billing_transactions') IS NOT NULL AS billing`)
+  .then(r => ({ standing: !!r.rows[0]?.standing, billing: !!r.rows[0]?.billing }))
   .catch(error => { sources = undefined; throw error; });
 
 /** Everything about a workspace or a user, for operators; the read itself is written to the trail in the same statement. */
@@ -298,8 +290,7 @@ async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { worksp
     NULL::text AS user_agent, NULL::text AS actor_email, NULL::text AS subject_id, NULL::text AS subject_email, ${at} AS at, true AS internal FROM ${from}`;
   if (wid && include.includes('enforcement') && available.standing) parts.push(extra(sql`'enf_' || x.id`, sql`x.at`, sql`'standing.' || coalesce(x.kind, 'event')`, sql`coalesce(x.detail #>> '{actor,kind}', 'system')`,
     sql`(SELECT s.id::text AS id, s.at, s.kind, to_jsonb(s) - 'workspace_id' AS detail FROM standing_events s WHERE s.workspace_id = ${wid}) x`));
-  if (wid && include.includes('enforcement') && available.operatorAudit) parts.push(extra(sql`'opa_' || x.id`, sql`x.at`, sql`'operator.' || replace(x.action, '-', '_')`, sql`'operator'`,
-    sql`(SELECT md5(o.at::text || o.action) AS id, o.at, o.action, to_jsonb(o) - 'workspace_id' AS detail FROM hosted_operator_audit o WHERE o.workspace_id = ${wid}) x`));
+  // Operator actions (hosted_operator_audit) are already in audit_events: migration 262 mirrors and backfilled them.
   if (wid && include.includes('billing') && available.billing) parts.push(extra(sql`'bill_' || x.id`, sql`x.at`, sql`'billing.' || coalesce(x.kind, 'entry')`, sql`'system'`,
     sql`(SELECT b.id::text AS id, coalesce((to_jsonb(b) ->> 'effective_at')::timestamptz, (to_jsonb(b) ->> 'created_at')::timestamptz) AS at, to_jsonb(b) ->> 'kind' AS kind, to_jsonb(b) - 'workspace_id' AS detail
       FROM billing_transactions b WHERE b.workspace_id = ${wid}) x`));
