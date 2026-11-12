@@ -375,15 +375,22 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
   }
   return response;
 }
-// All credentials and image-producing routes share one atomic workspace counter.
-export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
-  const limit = 30;
-  const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${workspaceId}, 'render:images', date_trunc('minute', now()), 1)
+/**
+ * One atomic per-minute counter in api_request_budgets, named by `key` within a workspace: true while this minute's
+ * charges, this one included, stay within `limit`. A window stored in the future (an operator's or a test's hold) stays.
+ */
+export async function chargeBudget(runtime: Pick<Runtime, 'db'>, workspaceId: string, key: string, limit: number) {
+  const { rows: [row] } = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+    VALUES (${workspaceId}, ${key}, date_trunc('minute', now()), 1)
     ON CONFLICT (workspace_id, key_id) DO UPDATE SET
       used = CASE WHEN excluded.window_start > api_request_budgets.window_start THEN 1 ELSE least(api_request_budgets.used + 1, ${limit + 1}) END,
       window_start = greatest(api_request_budgets.window_start, excluded.window_start) RETURNING used`);
-  if (budget.rows[0]!.used > limit) {
+  return row!.used <= limit;
+}
+// All credentials and image-producing routes share one atomic workspace counter.
+export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
+  const limit = 30;
+  if (!await chargeBudget(c.env, workspaceId, 'render:images', limit)) {
     c.header('Retry-After', '60');
     throw new ApiError(429, 'RENDER_RATE_LIMITED', `This workspace allows ${limit} image previews and imports per minute. Retry after the window resets.`, undefined, true);
   }

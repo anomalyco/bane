@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
@@ -38,6 +38,13 @@ export function OverviewPage() {
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
   </div>
   const data = query.data
+  // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
+  // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
+  const latest = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
+  const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
+  const seen = useRef<string | undefined>(undefined)
+  const refetch = query.refetch
+  useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head) void refetch(); seen.current = head }, [head, refetch])
   return <>
     <PageHeader title="Overview" actions={controls} />
     <div className="ov-split">
@@ -61,7 +68,7 @@ function Aside() {
   const next = useNextSteps(score.data)
   const ready = (score.data || score.isError) && !setup.loading && next.ready
   return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
-    {setup.steps && <SetupRail steps={setup.steps} current={setup.current} />}
+    {setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : <ReportCard report={score.data} />}
     <SendingLimitRow />
     {!setup.steps && <NextSteps items={next.items} />}
@@ -171,7 +178,7 @@ export function ActivityChart({ points, range, createdOnly = false }: { points: 
   const tickSteps = Math.max(1, Math.min(6, Math.floor((right - left) / 72)))
   const tickIndices = [...new Set([0, ...Array.from({ length: tickSteps }, (_, i) => Math.round((i + 1) * (points.length - 1) / tickSteps))])]
   return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={createdOnly ? `Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.` : `Email activity per ${hourly ? 'hour' : 'day'}. Sends use the left scale; bounces and complaints use the right scale.`}>
-    <text x={0} y={12} className="chart-label">{createdOnly ? 'Created' : 'Sent'}</text>{hasOutcomes && <text x={width - 2} y={12} textAnchor="end" className="chart-label">Exceptions</text>}
+    <text x={0} y={12} className="chart-label">Emails</text>{hasOutcomes && <text x={width - 2} y={12} textAnchor="end" className="chart-label">Bounces and complaints</text>}
     {[0, 1, 2, 3].map(i => <g key={i}><line x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" /><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}
     {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, maxSent)} width={barWidth} height={bottom - y(p.sent, maxSent)} rx={Math.min(2, barWidth / 2)} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{hasOutcomes && <><path d={line('bounced', maxException)} className="chart-line chart-line--bounces" /><path d={line('complaints', maxException)} className="chart-line chart-line--complaints" /></>}
     {/* 24 h: the hour, and the date under the first tick and wherever the day changes, so 12:00 yesterday and 12:00
@@ -183,5 +190,5 @@ export function ActivityChart({ points, range, createdOnly = false }: { points: 
       return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" tabIndex={0} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} ${createdOnly ? 'created' : 'sent'}${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => setActive(i)} onBlur={() => setActive(null)} />
     })}
     {selectedPoint && active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
-  </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{pointLabel(selectedPoint.at)}</strong><span>{createdOnly ? 'Created' : 'Sent'} <b>{number(selectedPoint.sent)}</b></span>{hasOutcomes && <><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></>}</div>}</div>
+  </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{pointLabel(selectedPoint.at)}</strong><span>Emails <b>{number(selectedPoint.sent)}</b></span>{hasOutcomes && <><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></>}</div>}</div>
 }

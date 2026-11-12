@@ -12,6 +12,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a { min-height: 32px; display: flex; align-items: center; padding-inline: var(--space-12); border-radius: 4px; font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); text-decoration: none; transition: color var(--motion-duration), background var(--motion-duration); }
 .main-navigation a:hover { color: var(--color-text); background: var(--color-hover); }
 .main-navigation a.active { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.main-navigation a[data-locked] { justify-content: space-between; }
+.main-navigation a[data-locked] svg { color: var(--color-faint); }
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; padding-inline: var(--space-12); }
 /* The sender score card spans the sidebar's inner width and always holds 56px. */
 .sidebar-score-slot { height: 56px; margin-inline: calc(-1 * var(--space-12)); }
@@ -138,6 +140,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .received-facts { display: grid; gap: var(--space-12); margin: 0; }
 .received-facts > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
 .received-facts dt { color: var(--color-muted); font-size: var(--text-xs); }
+.received-checks-note { display: block; margin-top: var(--space-4); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .received-facts dd { margin: 0; overflow-wrap: anywhere; }
 .received-attachments { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
 .received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
@@ -190,6 +193,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 /* More: the rest of the pages, then the sidebar's footer (sender score, SES quota). */
 .more-sheet__links { display: flex; flex-direction: column; margin: 0 calc(-1 * var(--space-8)); }
 .more-sheet__link { display: flex; align-items: center; gap: var(--space-12); min-height: 52px; padding-inline: var(--space-8); border-radius: var(--radius-sm); color: var(--color-text); font-size: 15px; text-decoration: none; transition: background-color 120ms ease; }
+.more-sheet__lock { margin-left: auto; color: var(--color-faint); }
 .more-sheet__link:active { background: var(--color-pressed); transition-duration: 0ms; }
 .more-sheet__link.active { background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
 .more-sheet__icon { display: grid; place-items: center; width: 28px; color: var(--color-muted); }

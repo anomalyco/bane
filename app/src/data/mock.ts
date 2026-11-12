@@ -1,11 +1,13 @@
 import { ApiError } from './types'
-import type { LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { ApiKey, LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 import type { AudiencePlan, ConsentEvent, ImportPreview } from './types'
 import { parseCsv } from '../features/audience/csv'
+// Demo webhook signing secrets, so revealing one shows the same value until it is rotated.
+const demoSecrets = new Map<string, string>()
 
 const STORAGE_KEY = 'bane.demo.v1'
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
@@ -947,10 +949,10 @@ export function createMockApi(): BaneApi {
       list: (signal, _cursor, includeRevoked = true) => run(signal, false, s => s.keys.filter(key => includeRevoked || !key.revokedAt)),
       create: (input, signal) => run(signal, true, s => {
         const name = text(input.name, 'name', 100)
-        if (input.permission !== 'send' && input.permission !== 'read' && input.permission !== 'manage') invalid('permission', 'Choose send, read, or manage permission.')
+        if (input.permission !== 'send' && input.permission !== 'read' && input.permission !== 'read_send' && input.permission !== 'manage') invalid('permission', 'Choose send, read, or manage permission.')
         if (!Array.isArray(input.domains) || !input.domains.every(name => typeof name === 'string' && s.domains.some(domain => domain.name === name))) invalid('domains', 'Choose connected domain hostnames.')
         const secret = `demo_key_${crypto.randomUUID().replaceAll('-', '')}`
-        const key = { id: id('key'), name, prefix: secret.slice(0, 17), permission: input.permission, domains: [...input.domains], createdAt: now(), lastUsedAt: null }
+        const key = { id: id('key'), name, prefix: secret.slice(0, 17), permission: input.permission === 'read_send' ? 'read, send' as ApiKey['permission'] : input.permission, domains: [...input.domains], createdAt: now(), lastUsedAt: null }
         s.keys.push(key)
         return { key, secret }
       }),
@@ -1189,10 +1191,11 @@ export function createMockApi(): BaneApi {
           regionIds = [...new Set(input.regionIds)]
           regionIds.forEach(regionId => checkRegion(s, regionId))
         }
-        const webhook: Webhook = { id: existing?.id ?? id('wh'), name, url, events, regionIds, status: existing?.status ?? 'active', secretHint: existing?.secretHint ?? `demo_wh_…${crypto.randomUUID().slice(0, 8)}`, headers, deliveries: existing?.deliveries ?? [] }
+        const secret = existing ? undefined : `demo_wh_${crypto.randomUUID().replaceAll('-', '')}`
+        const webhook: Webhook = { id: existing?.id ?? id('wh'), name, url, events, regionIds, status: existing?.status ?? 'active', secretHint: existing?.secretHint ?? `demo_wh_…${secret!.slice(-8)}`, headers, deliveries: existing?.deliveries ?? [] }
         if (existing) Object.assign(existing, webhook)
-        else s.webhooks.push(webhook)
-        return webhookView(webhook)
+        else { s.webhooks.push(webhook); demoSecrets.set(webhook.id, secret!) }
+        return secret ? { ...webhookView(webhook), secret } : webhookView(webhook)
       }),
       setStatus: (webhookId, status, signal) => run(signal, true, s => {
         const webhook = find(s.webhooks, webhookId, 'Webhook')
@@ -1222,7 +1225,13 @@ export function createMockApi(): BaneApi {
         const webhook = find(s.webhooks, webhookId, 'Webhook')
         const secret = `demo_wh_${crypto.randomUUID().replaceAll('-', '')}`
         webhook.secretHint = `demo_wh_…${secret.slice(-8)}`
+        demoSecrets.set(webhook.id, secret)
         return { secret }
+      }),
+      reveal: (webhookId, signal) => run(signal, false, s => {
+        const webhook = find(s.webhooks, webhookId, 'Webhook')
+        if (!demoSecrets.has(webhook.id)) demoSecrets.set(webhook.id, `demo_wh_${crypto.randomUUID().replaceAll('-', '')}`)
+        return { secret: demoSecrets.get(webhook.id)! }
       }),
       remove: (webhookId, signal) => run(signal, true, s => { find(s.webhooks, webhookId, 'Webhook'); s.webhooks = s.webhooks.filter(webhook => webhook.id !== webhookId) }),
     },

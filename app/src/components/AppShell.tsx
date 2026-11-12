@@ -1,12 +1,13 @@
-import { Suspense, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
-import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, ScrollText, Send, Settings, Users } from 'lucide-react'
+import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, Lock, ScrollText, Send, Settings, Users } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
+import { useScoreAbout } from '../lib/score-about'
 import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, SkeletonText } from './ui'
 import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
@@ -16,6 +17,8 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
+// The sender score explainer: one dialog for every place the score appears, loaded when first opened.
+const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -32,6 +35,9 @@ export function AppShell() {
   const session = useSession()
   const access = useWorkspaceAccess()
   const location = useLocation()
+  const scoreAbout = useScoreAbout()
+  const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
+  useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
   const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
   // Hosted workspaces view every region at once and never read the SES region catalog.
@@ -125,6 +131,19 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
+  // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="dialog"]')) return
+      const search = content.current?.querySelector<HTMLInputElement>('input[type="search"]:not(:disabled)')
+      if (!search) return
+      event.preventDefault(); search.focus(); search.select()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -137,7 +156,10 @@ export function AppShell() {
       }
     }
   }
-  const links = navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path))
+  // Members see every page: owner and admin ones carry a lock and open a short note on who can use them.
+  const links = navigation
+  const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
+  const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const context = <>
     {access.multiTenant && <WorkspaceSwitcher />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
@@ -168,8 +190,9 @@ export function AppShell() {
       <div className="mobile-bar__context">{context}</div>
       <ThemeToggle />
     </header>
+    {scoreHost}
     {main}
-    <TabBar links={links} intent={intent} footer={footer} />
+    <TabBar links={links} intent={intent} footer={footer} locked={locked} />
   </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -177,9 +200,11 @@ export function AppShell() {
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">{context}</div>
-      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
+      {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
+      <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
       <div className="sidebar-footer">{footer}</div>
     </aside>
+    {scoreHost}
     {main}
   </div>
 }
@@ -187,7 +212,8 @@ export function AppShell() {
 // The tab bar and its More sheet. More opens as a history entry of its own, so Back (or a swipe back) closes it
 // instead of leaving the page; a page picked in it replaces that entry, so Back from there returns to the page below.
 const issued = new Set<string>()
-function TabBar({ links, intent, footer }: { links: (typeof navigation)[number][]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode }) {
+const lockedProps = { title: 'Owners and admins only', 'data-locked': true }
+function TabBar({ links, intent, footer, locked }: { links: readonly (typeof navigation)[number][]; intent: ReturnType<typeof useRouteIntent>; footer: ReactNode; locked: (path: string) => boolean }) {
   const location = useLocation(), navigate = useNavigate()
   // Only an entry opened in this visit counts: a reload on it shows the page, not a stale sheet.
   const token = (location.state as { more?: string } | null)?.more
@@ -202,7 +228,7 @@ function TabBar({ links, intent, footer }: { links: (typeof navigation)[number][
       <button type="button" className="tab-bar__item" aria-haspopup="dialog" aria-expanded={open} aria-current={inMore ? 'page' : undefined} data-active={inMore || open || undefined} onClick={show}><span className="tab-bar__icon" aria-hidden="true"><Ellipsis /></span><span className="tab-bar__label">More</span></button>
     </nav>
     <Sheet open={open} onOpenChange={next => { if (!next) close() }} title="More" hideTitle className="more-sheet">
-      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}</NavLink>)}</nav>
+      <nav className="more-sheet__links" aria-label="More pages">{more.map(([path, title]) => <NavLink key={path} className="more-sheet__link" to={path} replace {...locked(path) ? lockedProps : intent(path)}><span className="more-sheet__icon" aria-hidden="true">{icons[path]}</span>{title}{locked(path) && <Lock className="more-sheet__lock" size={14} aria-label="Owners and admins only" />}</NavLink>)}</nav>
       <div className="more-sheet__footer">{footer}</div>
     </Sheet>
   </>
