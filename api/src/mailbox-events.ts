@@ -69,7 +69,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   const {deliverInboundWebhook}=await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   let actionError:ActionRetry|undefined;try {
-    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery));
+    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery),job);
     // Paused after the claim (the fence parked it for resume), or no longer this claim's: nothing was sent.
     if(result.parked)return;
     if(result.status===410)retryable=false;

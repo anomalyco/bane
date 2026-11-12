@@ -177,6 +177,10 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // Mail stored before forward verdicts existed was refused by a later forward, safe or not.
     (1, &["ingest m1 z", "strip m1", "rituals forward", "ingest m1 b+z", "run K m1:F"]),
     (1, &["ingest m1 z loop", "strip m1", "rituals forward", "ingest m1 b+z loop", "run K m1:F"]),
+    // With the extra claim above, a runner stalled before the fence and fenced out only by the
+    // delivery's state still sent after the next claim: two requests for one attempt.
+    (0, &["ingest m1 z", "claim K m1:V", "expire m1:V", "run L m1:V", "go K"]),
+    (1, &["ingest m1 b", "claim K m1:U", "expire m1:U", "run L m1:U", "go K"]),
     // A delivery held past retention was deleted silently; it is dead-lettered with a reason.
     (1, &["ingest m1 a", "pause W", "run K m1:W", "age m1:W", "prune", "prune"]),
     // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).

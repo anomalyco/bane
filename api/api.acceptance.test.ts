@@ -10969,6 +10969,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a runner whose job lease is no longer its own sends nothing, for every delivery kind',async t=>{
+    // tear/delivery witness (retryAttempts 0): ingest m1 z, claim K m1:V, expire m1:V, run L m1:V, go K.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'leased',url:'https://example.com/leased',retryAttempts:0}),201);
+      ok(await local('PATCH','/v1/endpoints/leased',{idempotent:true}));
+      const routed=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='leased'",[wid])).rows[0].id;
+      const plain=ok(await local('POST','/v1/inbound/webhooks',{url:'https://example.com/leased-sub',eventTypes:['message.received']}),201).id;
+      const transport=runtime.webhookFetch;let posts=0;runtime.webhookFetch=async()=>{posts++;return {status:204};};
+      try{
+        for(const [n,hook,isRouted] of [[1,routed,true],[2,plain,false]] as const){
+          const id='mwd_leased_'+n,job='job_leased_'+n;
+          await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,event_seq,payload) VALUES($1,$2,$3,$4,$5,$6)',[id,wid,hook,isRouted,n,{id:'mev_'+id,type:'message.received',messageId:'msg_'+id,data:{recipients:['a@example.net']}}]);
+          // Runner K claimed it first (attempt 1); its lease expired and runner L claimed it again (attempt 2).
+          const old=(await db.query("SELECT (now()-interval '4 minutes')::text AS t")).rows[0].t;
+          const lease=(await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES($1,'mailbox.webhook',$2,$3,'running',2,now()+interval '3 minutes') RETURNING lease_until::text AS t",[job,wid,{deliveryId:id}])).rows[0].t;
+          const before=posts;
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id},{id:job,workspaceId:wid,attempts:1,leaseFence:old});
+          assert.equal(posts,before,`stale runner K, ${isRouted?'routed':'plain'}`);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[id])).rows[0].status,'pending');
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:id},{id:job,workspaceId:wid,attempts:2,leaseFence:lease});
+          assert.equal(posts,before+1,`current runner L, ${isRouted?'routed':'plain'}`);
+        }
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('a rate-limited delivery keeps its spent attempts: retries still end at 1 + retryAttempts',async t=>{
     // tear/delivery witness: rate W 1, ingest m1 a, run K m1:W, reply K 503, run K m1:W.
     await simulatedSesFixture(t,async({runtime,local,db})=>{

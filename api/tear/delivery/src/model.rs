@@ -586,8 +586,9 @@ impl Model {
         }
         let ep = d.ep.clone();
         let Some(e) = self.eps.get(&ep).cloned() else { return done };
-        // The fence attempts only a delivery still pending at the claimed generation.
-        if d.status != "pending" || d.generation != generation {
+        // The fence attempts only a delivery still pending at the claimed generation, for a runner
+        // whose job lease is still its own.
+        if stale || d.status != "pending" || d.generation != generation {
             self.settle(label, attempts, stale, Some(("completed", json!(null))), None);
             return done;
         }
