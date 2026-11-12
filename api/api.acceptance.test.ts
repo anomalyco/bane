@@ -409,22 +409,22 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
     assert.equal(await claim(true), 'legacy');
     assert.equal(await claim(true), null);
     assert.equal((await db.query('SELECT count(*) FROM auth_account')).rows[0].count, '2');
-    // 247: Google-only legacy users carry over on their first Google sign-in, once, by exact verified address.
-    await db.query(`INSERT INTO auth_user(id,name,email,email_verified) VALUES ('google','Gia','gia@example.org',true),('mixed','Max','max@example.org',true),('unverified','Uma','uma@example.org',false);
-      INSERT INTO bane_users(id,name,email,email_verified) SELECT id,name,email,email_verified FROM auth_user WHERE id IN ('google','mixed','unverified');
-      INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES ('g1','456','google','google'),('m1','789','google','mixed'),('m2','pw','credential','mixed'),('u1','999','google','unverified')`);
+    // 247: no bulk carry-over; a bootstrap claim pins the issuer and the Google context, is used once and audited.
+    await db.query(`INSERT INTO auth_user(id,name,email,email_verified) VALUES ('google','Gia','gia@example.org',true);
+      INSERT INTO bane_users(id,name,email,email_verified) SELECT id,name,email,email_verified FROM auth_user WHERE id='google';
+      INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES ('g1','456','google','google')`);
     for (const file of ['244_current_email','247_legacy_google_claims']) await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
-    assert.deepEqual((await db.query('SELECT user_id,issuer,source FROM bane_legacy_claims ORDER BY user_id')).rows,[{user_id:'google',issuer:null,source:'google'}]);
-    const google = async (email: string, acr: string | null, subject = 'G') =>
-      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,true,$4) AS id', ['https://id.example.org', subject, email, acr])).rows[0].id;
-    assert.equal(await google('gia@example.org','urn:anomaly:acr:passkey'), null, 'Only a Google sign-in can use an automatic claim');
+    assert.equal((await db.query('SELECT FROM bane_legacy_claims')).rowCount,0,'Nobody is carried over without a claim');
+    await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source,required_acr) VALUES('google','https://id.example.org','gia@example.org','bootstrap','urn:anomaly:acr:google')");
+    const google = async (email: string, acr: string | null, subject = 'G', issuer = 'https://id.example.org') =>
+      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,true,$4) AS id', [issuer, subject, email, acr])).rows[0].id;
+    assert.equal(await google('gia@example.org','urn:anomaly:acr:passkey'), null, 'The claim needs the Google context');
     assert.equal(await google('gia@example.org',null), null);
     assert.equal(await google('Gia@example.org','urn:anomaly:acr:google'), null, 'The verified address must match exactly');
-    assert.equal(await google('max@example.org','urn:anomaly:acr:google'), null, 'A user with another sign-in method needs an operator claim');
-    assert.equal(await google('uma@example.org','urn:anomaly:acr:google'), null, 'An unverified legacy address is never claimed');
+    assert.equal(await google('gia@example.org','urn:anomaly:acr:google','G','https://other.example.org'), null, 'The issuer is pinned');
     assert.equal(await google('gia@example.org','urn:anomaly:acr:google'), 'google');
     assert.equal(await google('gia@example.org','urn:anomaly:acr:google','H'), null, 'A claim is consumed once');
-    assert.deepEqual((await db.query('SELECT user_id,issuer,subject,source FROM bane_legacy_claim_audit')).rows,[{user_id:'google',issuer:'https://id.example.org',subject:'G',source:'google'}]);
+    assert.deepEqual((await db.query('SELECT user_id,issuer,subject,source FROM bane_legacy_claim_audit')).rows,[{user_id:'google',issuer:'https://id.example.org',subject:'G',source:'bootstrap'}]);
   } finally {
     await db.query('ROLLBACK');
   }
@@ -526,14 +526,14 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
-  // Carry-over (migration 247): a Google-only legacy user's first Google sign-in adopts the existing user ID,
-  // so its workspace and role are unchanged; the claim is used once and audited.
+  // Bootstrap claim (migration 247, scripts/cutover-fresh-start.ts): the pre-assigned person's first Google sign-in
+  // adopts the prepared user ID, so its workspace and role are as assigned; the claim is used once and audited.
   const legacyId=randomUUID(), legacyEmail=`legacy-${randomUUID()}@example.org`;
   cleanup(t,async()=>{await db.query('DELETE FROM auth_user WHERE id=$1',[legacyId]);});
   await db.query("INSERT INTO auth_user(id,name,email,email_verified) VALUES($1,'Legacy',$2,true)",[legacyId,legacyEmail]);
   await db.query("INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES($1,$2,'google',$3)",[randomUUID(),randomUUID(),legacyId]);
   await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),legacyId,me.workspaceId]);
-  await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source) VALUES($1,NULL,$2,'google')",[legacyId,legacyEmail]);
+  await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source,required_acr) VALUES($1,$2,$3,'bootstrap','urn:anomaly:acr:google')",[legacyId,issuer,legacyEmail]);
   subject=randomUUID();subjects.push(subject);email=legacyEmail;useUserInfo=false;
   tokenAcr='urn:anomaly:acr:passkey';
   assert.equal((await login()).headers.get('location'),origin+'/?auth=google_required');
@@ -543,7 +543,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const carriedMe=await (await request('/v1/me','GET',carriedSession)).json() as {id:string;workspaceId:string;role:string};
   assert.deepEqual([carriedMe.id,carriedMe.workspaceId,carriedMe.role],[legacyId,me.workspaceId,'admin']);
   assert.equal((await db.query('SELECT FROM bane_legacy_claims WHERE user_id=$1',[legacyId])).rowCount,0);
-  assert.deepEqual((await db.query('SELECT subject,source FROM bane_legacy_claim_audit WHERE user_id=$1',[legacyId])).rows,[{subject,source:'google'}]);
+  assert.deepEqual((await db.query('SELECT subject,source FROM bane_legacy_claim_audit WHERE user_id=$1',[legacyId])).rows,[{subject,source:'bootstrap'}]);
   subject=randomUUID();subjects.push(subject);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error','A second subject cannot claim the same address');
 });
