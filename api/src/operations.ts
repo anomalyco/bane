@@ -1573,6 +1573,40 @@ async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspac
   } catch { return {ok:false,error:'FEEDBACK_PERSIST_FAILED'}; }
 }
 
+const UNTAGGED_QUARANTINE_CAP = 10000, UNTAGGED_PAYLOAD_CAP = 65536;
+/**
+ * Keeps an untagged item from the legacy feedback queue for operator review. The body is untrusted:
+ * it is stored as bounded text under a content digest, its workspace is never taken from it, and the
+ * quarantine holds at most UNTAGGED_QUARANTINE_CAP such rows (false means the caller dead-letters).
+ */
+export async function quarantineUntaggedFeedback(runtime: Runtime, lane: string, body: unknown): Promise<boolean> {
+  let text: string; try { text = JSON.stringify(body) ?? 'null'; } catch { text = JSON.stringify({ unserializable: String(body).slice(0, 256) }); }
+  if (text.length > UNTAGGED_PAYLOAD_CAP) text = JSON.stringify({ truncated: true, head: text.slice(0, UNTAGGED_PAYLOAD_CAP) });
+  const topic = (body as { topicArn?: unknown } | null)?.topicArn, key = `untagged:${await digest(`${lane}\n${text}`)}`;
+  const result = await runtime.db.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,reason)
+    SELECT ${key},${text},${typeof topic === 'string' && topic.length <= 512 ? topic : null},'FEEDBACK_UNTAGGED'
+    WHERE (SELECT count(*) FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED') < ${UNTAGGED_QUARANTINE_CAP}
+    ON CONFLICT (id) DO UPDATE SET reason=EXCLUDED.reason RETURNING id`);
+  return result.rowCount === 1;
+}
+/** Ingests reviewed untagged quarantine rows as if they had arrived verified, and removes the ones that were ingested. */
+export async function replayQuarantinedFeedback(runtime: Runtime, ids: string[]): Promise<{ id: string; ok: boolean; error?: string }[]> {
+  if (!ids.length) return [];
+  const rows = (await runtime.db.execute<{ id: string; payload: string }>(sql`SELECT id,payload FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND id = ANY(${sql.param(ids)}::text[])`)).rows;
+  const items: { id: string; item?: FeedbackItem; error?: string }[] = rows.map(row => {
+    try {
+      const value = JSON.parse(row.payload) as Partial<FeedbackItem> | null;
+      if (!value || typeof value !== 'object' || typeof value.region !== 'string' || typeof value.topicArn !== 'string' || typeof value.messageId !== 'string' || !value.message || typeof value.message !== 'object') return { id: row.id, error: 'FEEDBACK_INVALID' };
+      const { mac: _, ...item } = value as FeedbackItem; return { id: row.id, item };
+    } catch { return { id: row.id, error: 'FEEDBACK_INVALID' }; }
+  });
+  const outcomes = await ingestFeedbackBatch(runtime, items.flatMap(entry => entry.item ? [entry.item] : []));
+  const results = items.map(entry => entry.item ? { id: entry.id, ...outcomes.shift()! } : { id: entry.id, ok: false, error: entry.error });
+  const done = results.filter(r => r.ok).map(r => r.id);
+  if (done.length) await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND id = ANY(${sql.param(done)}::text[])`);
+  return results;
+}
+
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const data = payload.message as Record<string, any>;

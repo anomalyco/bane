@@ -60,33 +60,45 @@ export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry
 }
 
 /**
- * The tagged lane (`FEEDBACK_QUEUE`) carries only items this installation tagged; the legacy lane is the
- * queue the previous Worker version wrote to without tags and is consumed, untagged items included,
- * until it and its dead letters are drained and the binding is removed. An item that fails the lane's
- * check is dead-lettered on its own and acknowledged, so it is kept for review without a retry and
- * without affecting the other messages in the batch; if the dead-letter send fails it is retried later.
+ * No lane ever ingests an untagged item. The tagged lane (`FEEDBACK_QUEUE`) carries what this installation
+ * tagged; anything else on it is refused: wrapped, dead-lettered on its own and acknowledged, so it is kept
+ * as evidence, never retried, and a replay of that dead letter is refused again. The legacy lane is the
+ * queue the previous Worker version wrote to without tags: its untagged items are quarantined in the
+ * database for an operator to review and replay (scripts/replay-feedback-quarantine.ts), tagged items are
+ * verified like the tagged lane's. One message's verdict never changes another's; a quarantine or
+ * dead-letter write that fails holds only that message for a later attempt.
  */
 export type FeedbackLane = 'tagged' | 'legacy';
+export type FeedbackVerdict = 'ingest' | 'untagged' | 'refused';
+export function feedbackVerdict(secrets: FeedbackSecrets, lane: FeedbackLane, body: unknown): FeedbackVerdict {
+  if (authenticFeedback(secrets, body)) return 'ingest';
+  if (lane === 'legacy' && typeof body === 'object' && body !== null && !Array.isArray(body) && !('mac' in body) && !('refused' in body)) return 'untagged';
+  return 'refused';
+}
+/** What a refused item looks like in the dead-letter queue: never a feedback item, whichever lane replays it. */
+export type RefusedFeedback = { refused: 'FEEDBACK_UNAUTHENTICATED'; lane: FeedbackLane; body: unknown };
 type FeedbackMessage = Pick<Message, 'attempts' | 'retry' | 'ack'> & { body: unknown };
 export async function settleFeedbackBatch(options: {
   secrets: FeedbackSecrets; lane: FeedbackLane; messages: readonly FeedbackMessage[];
-  ingest: (items: FeedbackItem[]) => Promise<{ ok: boolean; error?: string }[]>; deadLetter: (body: unknown) => Promise<void>;
+  ingest: (items: FeedbackItem[]) => Promise<{ ok: boolean; error?: string }[]>;
+  /** Stores an untagged legacy item for review; false when the quarantine is full, so it is dead-lettered instead. */
+  quarantine: (body: unknown) => Promise<boolean>;
+  deadLetter: (item: RefusedFeedback) => Promise<void>;
 }) {
-  const { secrets, lane, messages, ingest, deadLetter } = options;
-  const accepted = messages.map(message => {
-    const body = message.body as FeedbackItem | null;
-    if (authenticFeedback(secrets, body)) return true;
-    // Legacy lane: an untagged item is what the previous version queued. A tagged item that fails is not.
-    return lane === 'legacy' && typeof body === 'object' && body !== null && !('mac' in body);
-  });
-  const ingested = await ingest(messages.filter((_, index) => accepted[index]).map(message => message.body as FeedbackItem));
-  const outcomes = accepted.map(ok => ok ? ingested.shift()! : { ok: false, error: 'FEEDBACK_UNAUTHENTICATED' });
-  let retiredUnmatched = 0, deadLettered = 0, held = 0;
+  const { secrets, lane, messages, ingest, quarantine, deadLetter } = options;
+  const verdicts = messages.map(message => feedbackVerdict(secrets, lane, message.body));
+  const ingested = await ingest(messages.filter((_, index) => verdicts[index] === 'ingest').map(message => message.body as FeedbackItem));
+  const outcomes = verdicts.map(verdict => verdict === 'ingest' ? ingested.shift()! : { ok: false, error: verdict === 'untagged' ? 'FEEDBACK_UNTAGGED' : 'FEEDBACK_UNAUTHENTICATED' });
+  let retiredUnmatched = 0, quarantined = 0, deadLettered = 0, held = 0;
   for (const [index, message] of messages.entries()) {
-    if (accepted[index]) { if (settleFeedbackMessage(message as Pick<Message, 'attempts' | 'retry' | 'ack'> & { body?: FeedbackItem }, outcomes[index]) === 'retired_unmatched') retiredUnmatched++; continue; }
-    try { await deadLetter(message.body); message.ack(); deadLettered++; }
-    catch { message.retry({ delaySeconds: 60 }); held++; }
+    const verdict = verdicts[index]!;
+    if (verdict === 'ingest') { if (settleFeedbackMessage(message as Pick<Message, 'attempts' | 'retry' | 'ack'> & { body?: FeedbackItem }, outcomes[index]) === 'retired_unmatched') retiredUnmatched++; continue; }
+    try {
+      if (verdict === 'untagged' && await quarantine(message.body)) quarantined++;
+      else { await deadLetter({ refused: 'FEEDBACK_UNAUTHENTICATED', lane, body: message.body }); deadLettered++; }
+      message.ack();
+    } catch { message.retry({ delaySeconds: 60 }); held++; }
   }
-  const unauthenticated = accepted.filter(ok => !ok).length;
-  return { outcomes, unauthenticated, deadLettered, held, retiredUnmatched, failed: outcomes.filter(outcome => !outcome.ok).length - retiredUnmatched - unauthenticated };
+  const untagged = verdicts.filter(v => v === 'untagged').length, unauthenticated = verdicts.filter(v => v === 'refused').length;
+  return { outcomes, untagged, unauthenticated, quarantined, deadLettered, held, retiredUnmatched, failed: outcomes.filter(outcome => !outcome.ok).length - retiredUnmatched - untagged - unauthenticated };
 }

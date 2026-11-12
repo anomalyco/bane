@@ -197,16 +197,18 @@ export default {
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy' : undefined;
     if (feedbackLane) {
-      const { ingestFeedbackBatch } = await core.wrapModuleLoad(() => import('./operations.js'));
+      const { ingestFeedbackBatch, quarantineUntaggedFeedback } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
-      // payload never blocks a batch of routine deliveries. On the tagged lane only items this
-      // installation tagged at /v1/events/ses are ingested; the rest are dead-lettered one by one.
+      // payload never blocks a batch of routine deliveries. Only items this installation tagged at
+      // /v1/events/ses are ingested; the previous version's untagged items (legacy lane) are
+      // quarantined for review and everything else is dead-lettered, one message at a time.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, messages,
-          ingest: items => ingestFeedbackBatch(runtime, items), deadLetter: async body => { await env.FEEDBACK_DLQ.send(body); } });
+          ingest: items => ingestFeedbackBatch(runtime, items), quarantine: body => quarantineUntaggedFeedback(runtime, feedbackLane, body),
+          deadLetter: async item => { await env.FEEDBACK_DLQ.send(item); } });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(counts.failed || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+        core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
       return;
     }
