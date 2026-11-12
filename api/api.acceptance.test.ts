@@ -6596,6 +6596,47 @@ describe('Billing: API, MCP and notices', () => {
     });
   });
 
+  test('money routes reach Stripe: a manage key gets a top-up link once per Idempotency-Key; the owner pays, saves the card, sets auto-recharge and removes the card', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const wid = await hostedBilling(runtime, db);
+      runtime.config.billing = { stripe: { secretKey: 'sk_test_fake', webhookSecret: STRIPE_TEST_WEBHOOK_SECRET, automaticTax: false, apiBase: STRIPE_TEST_BASE } };
+      // The fixture's own fetch guard stays outside: Stripe is faked for this subtest only.
+      await t.test('through the fake Stripe', async st => {
+        const fake = fakeStripe(st, () => false);
+        const manage = ok(await local('POST', '/v1/api-keys', { name: 'Billing agent', permissions: ['manage'] }), 201).secret; secrets.add(manage);
+        const link = await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' });
+        const first = ok(link, 201);
+        assert.match(first.url, /^https:\/\/checkout\.stripe\.test\//);
+        assert.deepEqual(ok(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' }), 201), first, 'A retry returns the same link.');
+        error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 6000 }, { 'Idempotency-Key': 'link-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        assert.equal(fake.count(/^POST \/v1\/checkout\/sessions$/), 1);
+        const pending = ok(await request('GET', `/v1/billing/payments/${first.attemptId}`, manage));
+        assert.deepEqual([pending.kind, pending.status, pending.amountCents], ['checkout', 'pending', 5000]);
+        assert.equal((await db.query('SELECT created_by FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].created_by.startsWith('key:'), true);
+        // Without a saved card, auto-recharge can't be turned on.
+        error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 409, 'PAYMENT_METHOD_REQUIRED');
+        // A person pays on the Checkout page; Stripe's webhook credits it and saves the card.
+        const session = (await db.query('SELECT stripe_checkout_session FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].stripe_checkout_session;
+        const event = await signedStripeEvent('checkout.session.completed', fake.payCheckout(session));
+        assert.equal((await fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST', headers: { 'stripe-signature': event.signature, 'content-type': 'application/json' }, body: event.body }))).status, 200);
+        const funded = ok(await local('GET', '/v1/billing'));
+        assert.deepEqual([funded.balance.paid, funded.paymentMethod.brand, funded.paymentMethod.last4], ['5000000000', 'visa', '4242']);
+        const [topup] = page(await local('GET', '/v1/billing/ledger'));
+        assert.deepEqual([topup.kind, topup.description, topup.paymentId, typeof topup.invoiceUrl], ['topup', 'Credit added', first.attemptId, 'string']);
+        const [paid] = page(await local('GET', '/v1/billing/payments'));
+        assert.deepEqual([paid.id, paid.status, paid.card.last4, typeof paid.invoiceUrl, typeof paid.receiptUrl], [first.attemptId, 'succeeded', '4242', 'string', 'string']);
+        // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
+        const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
+        assert.deepEqual([on.state.autoRecharge, on.autoRecharge.enabled, on.autoRecharge.thresholdCents, on.autoRecharge.monthlyCapCents], ['on', true, 1500, 30000]);
+        const removed = ok(await local('DELETE', '/v1/billing/payment-method'));
+        assert.deepEqual([removed.paymentMethod, removed.autoRecharge.enabled, removed.state.autoRecharge], [null, false, 'off']);
+        assert.equal(fake.count(/^POST \/v1\/payment_methods\/[^/]+\/detach$/), 1);
+        const setup = ok(await local('POST', '/v1/billing/payment-method'), 201);
+        assert.match(setup.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+      });
+    });
+  });
+
   test('usage by meter: day, hour and month totals; received mail and Omens only for credentials that may read all received mail', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = await hostedBilling(runtime, db), day = new Date().toISOString().slice(0, 10);

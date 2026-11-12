@@ -6,7 +6,7 @@ import { mutate, operatorActor } from '../operator.js';
 import { MicroCentsJson } from './money.js';
 import { readBilling } from './state.js';
 import { chargeSavedCardTopUp, createCardSetup, createCheckoutTopUp, getPayment, listPayments, refundTopUp, removePaymentMethod, setAutoRecharge } from './stripe.js';
-import type { BillingPosition, LedgerKind, PaymentView } from './types.js';
+import type { BillingPosition, LedgerKind } from './types.js';
 
 // The billing API (hosted only): the balance, usage by meter, the ledger and payments for owners, admins and manage
 // credentials, and the money routes. Who may do what:
@@ -105,14 +105,18 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
 const INTERNAL = new Set(['reason', 'ticketRef', 'operator', 'operatorId', 'note']);
 const publicDetail = (detail: Record<string, unknown>) => Object.fromEntries(Object.entries(detail ?? {}).filter(([key]) => !INTERNAL.has(key)));
 
-type LedgerRow = { id: string; at: string; kind: LedgerKind; source_id: string; paid_uc: string; promo_uc: string; balance_after_uc: string; promo_after_uc: string; detail: Record<string, unknown> };
+type LedgerRow = { id: string; at: string; kind: LedgerKind; payment_id: string | null; invoice_url: string | null; paid_uc: string; promo_uc: string; balance_after_uc: string; promo_after_uc: string; detail: Record<string, unknown> };
+/** One page of the ledger, newest first, with each top-up's or refund's payment and its invoice link (one statement). */
 async function ledgerPage(db: DbExecutor, workspaceId: string, cursor: string | undefined, limit: number) {
-  const { rows } = await db.execute<LedgerRow>(sql`SELECT id::text,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,kind,source_id,paid_uc::text,promo_uc::text,balance_after_uc::text,promo_after_uc::text,detail
-    FROM billing_ledger WHERE workspace_id=${workspaceId} ${cursor ? sql`AND id<${cursor}::bigint` : sql``} ORDER BY id DESC LIMIT ${limit + 1}`);
+  const { rows } = await db.execute<LedgerRow>(sql`SELECT l.id::text,to_char(l.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,l.kind,x.payment_id,p.invoice_url,
+      l.paid_uc::text,l.promo_uc::text,l.balance_after_uc::text,l.promo_after_uc::text,l.detail
+    FROM (SELECT * FROM billing_ledger WHERE workspace_id=${workspaceId} ${cursor ? sql`AND id<${cursor}::bigint` : sql``} ORDER BY id DESC LIMIT ${limit + 1}) l
+    CROSS JOIN LATERAL (SELECT CASE WHEN l.source_id LIKE 'attempt:%' THEN substr(l.source_id,9) ELSE l.detail->>'attemptId' END AS payment_id) x
+    LEFT JOIN billing_payment_attempts p ON p.workspace_id=l.workspace_id AND p.id=x.payment_id
+    ORDER BY l.id DESC`);
   const page = rows.slice(0, limit);
   return { rows: page, nextCursor: rows.length > limit ? page.at(-1)!.id : null };
 }
-const paymentOf = (row: LedgerRow) => row.source_id.startsWith('attempt:') ? row.source_id.slice(8) : typeof row.detail?.attemptId === 'string' ? row.detail.attemptId : null;
 
 export function registerBilling(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/billing', operationId: 'getBilling', tags: ['Billing'], security, summary: 'Balance, free allowance and billing state',
@@ -149,14 +153,10 @@ export function registerBilling(app: App) {
     responses: { 200: response(z.object({ data: z.array(LedgerEntry), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     const a = billingActor(c, 'manage'), q = c.req.valid('query');
     const page = await ledgerPage(c.env.db, a.workspaceId, q.cursor, q.limit);
-    // Invoice links live on the payment (package B); one read per distinct payment on the page.
-    const ids = [...new Set(page.rows.map(paymentOf).filter((id): id is string => !!id))];
-    const payments = new Map<string, PaymentView | null>();
-    for (const id of ids) payments.set(id, await getPayment(c.env.db, a.workspaceId, id));
     return c.json({ data: page.rows.map(row => {
-      const paid = BigInt(row.paid_uc), promo = BigInt(row.promo_uc), paymentId = paymentOf(row);
+      const paid = BigInt(row.paid_uc), promo = BigInt(row.promo_uc);
       return { id: row.id, at: row.at, kind: row.kind, amount: (paid + promo).toString(), paid: row.paid_uc, promo: row.promo_uc, balanceAfter: (BigInt(row.balance_after_uc) + BigInt(row.promo_after_uc)).toString(),
-        description: describe(row.kind, row.detail ?? {}), detail: publicDetail(row.detail), paymentId, invoiceUrl: paymentId ? payments.get(paymentId)?.invoiceUrl ?? null : null };
+        description: describe(row.kind, row.detail ?? {}), detail: publicDetail(row.detail), paymentId: row.payment_id, invoiceUrl: row.invoice_url };
     }), nextCursor: page.nextCursor }, 200);
   });
 
@@ -256,15 +256,13 @@ function registerOperatorBilling(app: App) {
     await operatorActor(c, 'operator:read');
     const wid = c.req.valid('param').wid;
     await existingWorkspace(c.env.db, wid);
-    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: boolean }>(sql`SELECT
+    const { rows: [row] } = await c.env.db.execute<{ account: unknown; position: BillingPosition; ledger: unknown[]; notices: unknown[]; refunds: unknown[] }>(sql`SELECT
       (SELECT to_jsonb(a) FROM billing_accounts a WHERE a.workspace_id=${wid}) AS account, billing_position(${wid}) AS position,
       coalesce((SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id DESC) FROM (SELECT * FROM billing_ledger WHERE workspace_id=${wid} ORDER BY id DESC LIMIT 50) l),'[]') AS ledger,
       coalesce((SELECT jsonb_agg(to_jsonb(n) ORDER BY n.created_at DESC) FROM (SELECT * FROM billing_notices WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) n),'[]') AS notices,
-      to_regclass('billing_refunds') IS NOT NULL AS refunds`);
-    // Refunds are package B's table (migration 250); read it only once it exists.
-    const refunds = row!.refunds ? (await c.env.db.execute(sql`SELECT * FROM billing_refunds WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50`)).rows : [];
+      coalesce((SELECT jsonb_agg(to_jsonb(r) ORDER BY r.created_at DESC) FROM (SELECT * FROM billing_refunds WHERE workspace_id=${wid} ORDER BY created_at DESC LIMIT 50) r),'[]') AS refunds`);
     const payments = (await listPayments(c.env.db, wid, null, 50)).data;
-    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds, notices: row!.notices }, 200);
+    return c.json({ account: row!.account, position: row!.position, ledger: row!.ledger, payments, refunds: row!.refunds, notices: row!.notices }, 200);
   });
 
   const moneyChange = async (c: Ctx, wid: string, body: { reason: string; ticketRef?: string }, action: string, change: (tx: DbExecutor, before: Account, who: string, operatorId: string) => Promise<Posted | Account>) => {
