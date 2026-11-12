@@ -11616,43 +11616,68 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('exhausted inbound leases never reclaim their worker; a young receipt gets a new final attempt an hour out, an old one fails',async t=>{
+  test('an exhausted inbound lease never reclaims its worker; every enqueue path keeps a young receipt at an hourly final attempt',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {processJobs,MAX_ATTEMPTS,JobDeferred}=await import('./src/jobs.js'),{recoverMailReceipts}=await import('./src/mailbox-ingest.js'),wid=runtime.config.workspaceId;
+      // A private jobs table with the production jobs triggers on it (the backlog admission, the job-end drain and the
+      // active count), so the real enqueue paths run without the shard's runner seeing these jobs.
       await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const triggers=(await db.query("SELECT pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE tgrelid='public.jobs'::regclass AND NOT tgisinternal")).rows.map(r=>r.def as string);
+      assert.ok(triggers.some(d=>d.includes('mail_ingest_admit()'))&&triggers.some(d=>d.includes('mail_ingest_head_change()')),triggers.join('\n'));
+      for(const def of triggers)await db.query(def.replace(' ON public.jobs ',' ON pg_temp.jobs '));
+      await db.query("INSERT INTO mail_receive_windows(workspace_id,window_at,messages,bytes) VALUES($1,date_trunc('hour',now()),0,0) ON CONFLICT(workspace_id) DO NOTHING",[wid]);
+      const backlog=(n:number)=>db.query('INSERT INTO mail_receive_limits(workspace_id,backlog_limit) VALUES($1,$2) ON CONFLICT(workspace_id) DO UPDATE SET backlog_limit=excluded.backlog_limit',[wid,n]);
       const receipt=(mid:string,age:string)=>db.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,notification,recipients,created_at) VALUES($1,$2,$3,'bucket','key','{}','[]',now()-$4::interval)",[wid,mid,REGION,age]);
-      const state=async(mid:string)=>(await db.query("SELECT status,error,recovery_attempts FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2",[wid,mid])).rows[0];
-      const jobsFor=async(mid:string)=>(await db.query("SELECT id,status,attempts,last_error,available_at>now()+interval '59 minutes' AS hour_out FROM jobs WHERE payload->>'sesMessageId'=$1 ORDER BY created_at,id",[mid])).rows;
-      // Deferral-write disconnect: the final attempt defers (a transient failure on a young receipt), but the database drops
-      // before the deferral commits, so the job is left running on its lease, as when a worker dies mid-attempt.
-      await receipt('young','1 hour');
+      const state=async(mid:string)=>(await db.query("SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2",[wid,mid])).rows[0];
+      const active=async(mid:string)=>(await db.query("SELECT id,status,attempts,available_at>now()+interval '59 minutes' AS hour_out FROM jobs WHERE payload->>'sesMessageId'=$1 AND status IN ('pending','running')",[mid])).rows;
+      // The retry an outage leaves: one job, at its final attempt, an hour out.
+      const finalAttempt=async(mid:string)=>{assert.deepEqual((await active(mid)).map(j=>[j.status,j.attempts,j.hour_out]),[['pending',MAX_ATTEMPTS-1,true]],mid);assert.deepEqual(await state(mid),{status:'pending',error:null},mid);};
+      const exhausted=(mid:string)=>db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,last_error) VALUES($1,'mailbox.ingest',$2,$3,'failed',$4,'JOB_LEASE_EXHAUSTED')",['job_'+mid,wid,{sesMessageId:mid},MAX_ATTEMPTS]);
+
+      // 1. The final attempt defers (a young receipt's transient failure), but the database drops before the deferral commits:
+      // the job is left running at its sixth attempt, as when a worker dies mid-attempt.
+      await receipt('young','2 hours');
       await db.query("INSERT INTO jobs(id,type,workspace_id,payload,attempts) VALUES('young_job','mailbox.ingest',$1,'{\"sesMessageId\":\"young\"}',$2)",[wid,MAX_ATTEMPTS-1]);
-      // The temp jobs table has no ingest-turn trigger: open this workspace's ingest lane by hand so the claim can lease the job.
-      await db.query("INSERT INTO mail_ingest_turns(workspace_id,served_at,active) VALUES($1,'-infinity',1) ON CONFLICT(workspace_id) DO UPDATE SET active=1",[wid]);
       const update=runtime.db.update;
       runtime.db.update=(()=>{throw new Error('Connection terminated unexpectedly');}) as unknown as typeof update;
       try { await assert.rejects(processJobs(runtime,{'mailbox.ingest':async()=>{throw new JobDeferred(new Date(Date.now()+3600_000).toISOString(),undefined,true);}},1,1),/Connection terminated/); }
       finally { runtime.db.update=update; }
-      assert.deepEqual((await jobsFor('young')).map(j=>[j.status,j.attempts]),[['running',MAX_ATTEMPTS]]);
+      const {lease}=(await db.query("SELECT status,attempts,lease_until::text AS lease FROM jobs WHERE id='young_job'")).rows[0];
       await db.query("UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id='young_job'");
-      // The same lost lease on a receipt past the outage window.
-      await receipt('old','49 hours');
-      await db.query("INSERT INTO jobs(id,type,workspace_id,payload,status,attempts,lease_until) VALUES('poison','mailbox.ingest',$1,'{\"sesMessageId\":\"old\"}','running',$2,now()-interval '1 hour')",[wid,MAX_ATTEMPTS]);
-      // The claim retires both leases for good; the old workers get no authority back.
+      // 2. Hourly recovery runs before the claim retires that lease: its replacement is held behind the still-running job.
+      await recoverMailReceipts(runtime);
+      assert.deepEqual(await state('young'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG'});
+      assert.deepEqual((await active('young')).map(j=>j.id),['young_job']);
+      // The claim retires the lease (never the old worker back); the job-end drain queues the held receipt at its final attempt.
       assert.equal(await processJobs(runtime,{},1,1),0);
-      for(const id of ['young_job','poison'])assert.deepEqual((await db.query('SELECT status,last_error FROM jobs WHERE id=$1',[id])).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+      assert.deepEqual((await db.query("SELECT status,last_error FROM jobs WHERE id='young_job'")).rows[0],{status:'failed',last_error:'JOB_LEASE_EXHAUSTED'});
+      await finalAttempt('young');
+      // The retired worker's own terminal write is refused (migration 164's fence).
+      assert.equal((await db.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',settled_by=$3 WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending'",[wid,'young',`young_job|${lease}`])).rowCount,0);
+
+      // 3. A full backlog: recovery's replacement is held; when another ingest job ends, the drain queues it at its final attempt.
+      await backlog(1);
+      await receipt('full','2 hours');await exhausted('full');
       await recoverMailReceipts(runtime);
-      // Young: still pending, one fresh job an hour out at its final attempt (not a tight retry loop).
-      assert.deepEqual(await state('young'),{status:'pending',error:null,recovery_attempts:1});
-      const young=await jobsFor('young'),fresh=young.filter(j=>j.id!=='young_job');
-      assert.equal(young.length,2);
-      assert.deepEqual(fresh.map(j=>[j.status,j.attempts,j.hour_out]),[['pending',MAX_ATTEMPTS-1,true]]);
-      // Old: fails as before.
-      assert.deepEqual(await state('old'),{status:'failed',error:'MAILBOX_INGEST_EXHAUSTED',recovery_attempts:1});
-      assert.equal((await jobsFor('old')).filter(j=>j.status==='pending').length,0);
-      // A second sweep while the new job is pending queues nothing more.
+      assert.deepEqual(await state('full'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG'});assert.equal((await active('full')).length,0);
+      await db.query("UPDATE jobs SET status='completed' WHERE payload->>'sesMessageId'='young' AND status='pending'");
+      await finalAttempt('full');
+
+      // 4. A full backlog released by the hourly hold release instead of a job end.
+      await receipt('released','2 hours');await exhausted('released');
       await recoverMailReceipts(runtime);
-      assert.equal((await jobsFor('young')).length,2);
+      assert.deepEqual(await state('released'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG'});
+      await backlog(5);
+      await db.query('SELECT release_receive_budget_holds($1)',[wid]);
+      await finalAttempt('released');
+
+      // 5. Past the outage window, a lost final lease fails the receipt as before and queues nothing.
+      await receipt('old','49 hours');await exhausted('old');
+      await recoverMailReceipts(runtime);
+      assert.deepEqual(await state('old'),{status:'failed',error:'MAILBOX_INGEST_EXHAUSTED'});assert.equal((await active('old')).length,0);
+      // Another sweep while the final attempts are pending queues nothing more: one active job per receipt.
+      await recoverMailReceipts(runtime);
+      for(const mid of ['full','released'])assert.equal((await active(mid)).length,1,mid);
     });
   });
 

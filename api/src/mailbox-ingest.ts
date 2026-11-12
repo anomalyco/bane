@@ -568,13 +568,15 @@ export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
   // outage like any other while SES's staged copy lives: a receipt younger than the outage window gets a fresh job an hour
   // out, at its final attempt again, and never the old job back. Past the window it fails as before. Every sweep still counts
   // a recovery attempt: migration 164's settle fence lets the sweep fail a receipt only with that increment. The young path is
-  // bounded by the receipt's age, not by the count.
+  // bounded by the receipt's age, not by the count. The retry is recorded on the receipt (205): if this insert is held for the
+  // backlog, or the old job still runs, the drain or the hold release queues the job later and mail_ingest_admit applies it.
   const result=await runtime.db.execute<{n:number}>(sql`WITH due AS (SELECT r.workspace_id,r.ses_message_id,EXISTS(SELECT FROM jobs j WHERE ${jobFor} AND j.attempts>=${MAX_ATTEMPTS} AND (j.status='failed' OR (j.status='running' AND j.lease_until<now()))) AS exhausted,
       r.created_at>now()-${INGEST_OUTAGE_MS/1000}*interval '1 second' AS young
     FROM mail_receipts r WHERE r.status='pending' AND coalesce(r.last_recovered_at,r.created_at)<now()-interval '30 minutes'
     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE ${jobFor} AND (j.status='pending' OR (j.status='running' AND (j.lease_until>=now() OR j.attempts<${MAX_ATTEMPTS}))))
     ORDER BY coalesce(r.last_recovered_at,r.created_at),r.workspace_id,r.ses_message_id LIMIT 100 FOR UPDATE OF r SKIP LOCKED), recovered AS (
     UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),
+      ingest_retry_at=CASE WHEN d.exhausted AND d.young THEN greatest(r.ingest_retry_at,now()+interval '1 hour') ELSE r.ingest_retry_at END,
       status=CASE WHEN d.exhausted AND NOT d.young OR NOT d.exhausted AND r.recovery_attempts>=3 THEN 'failed' ELSE 'pending' END,
       error=CASE WHEN d.exhausted AND NOT d.young THEN 'MAILBOX_INGEST_EXHAUSTED' WHEN NOT d.exhausted AND r.recovery_attempts>=3 THEN 'MAILBOX_RECOVERY_EXHAUSTED' END,
       processed_at=CASE WHEN d.exhausted AND NOT d.young OR NOT d.exhausted AND r.recovery_attempts>=3 THEN now() END
@@ -639,7 +641,11 @@ export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs,'m
     // it is two days old. The deferral keeps the spent attempts, so each later claim is a final attempt again.
     else if ((!(error instanceof ApiError) || error.retryable || error.status>=500 || error.status===429) && claim.createdAt && Date.now()-Date.parse(claim.createdAt)<INGEST_OUTAGE_MS) {
       log('warn',{code:'MAILBOX_INGEST_OUTAGE',cause:error instanceof ApiError?error.code:'MAILBOX_INGEST_FAILED',workspaceId:job.workspaceId,jobId:job.id});
-      throw new JobDeferred(new Date(Date.now()+3600_000).toISOString(),undefined,true);
+      const retryAt=new Date(Date.now()+3600_000).toISOString();
+      // Also on the receipt (205), best-effort: a job queued for it by another path (a reopen held behind this one, then the
+      // drain) starts at this final attempt and time too. If this write fails, lost-receipt recovery records it later.
+      await runtime.db.execute(sql`UPDATE mail_receipts SET ingest_retry_at=greatest(ingest_retry_at,${retryAt}::timestamptz) WHERE workspace_id=${job.workspaceId} AND ses_message_id=${String(payload.sesMessageId)} AND status IN ('pending','held')`).catch(()=>{});
+      throw new JobDeferred(retryAt,undefined,true);
     }
     const code=error instanceof ApiError ? (error.code==='MAILBOX_ATTACHMENT_UPLOAD_FAILED'?'ATTACHMENT_UPLOAD_FAILED':error.code) : 'MAILBOX_INGEST_FAILED';
     await runtime.db.update(mailReceipts).set({status:'failed',error:code,processedAt:new Date().toISOString(),settledBy:claimToken(job)}).where(and(eq(mailReceipts.workspaceId,job.workspaceId),eq(mailReceipts.sesMessageId,String(payload.sesMessageId)),claim.recipients?claimedBy(claim.recipients):eq(mailReceipts.status,'pending')));
