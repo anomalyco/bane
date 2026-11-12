@@ -81,4 +81,11 @@
 }
 @media (max-width: 640px) {
   .audience-page > .data-toolbar > .cluster { min-width: 0; max-width: 100%; }
+  /* Search, then the consent and list filters side by side, then the list finder: fixed cells, so nothing moves as
+     the lists load. */
+  .audience-page > .data-toolbar > .cluster:has(.audience-list-search) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-8); }
+  .audience-page > .data-toolbar > .cluster:has(.audience-list-search) > :is(.search-box, .audience-list-search) { grid-column: 1 / -1; }
+  .audience-page > .data-toolbar > .cluster:has(.audience-list-search) > .audience-list-search { grid-row: 3; }
+  .audience-page > .data-toolbar > .cluster:has(.audience-list-search) > :is(.ui-select-trigger, .ui-loading-layout, .ui-loading-layout > *) { width: 100% !important; min-width: 0; max-width: none; }
 }
+.ui-card__segment .audience-cell-text { display: inline; }

@@ -5,13 +5,15 @@ import {
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
+// A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
 export const campaignColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div> },
-  { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} /> },
-  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} /> },
-  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} /> },
-  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" /> },
-  { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span /> },
+  { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div>, card: 'title' },
+  { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'subject', label: 'Subject', card: 'line', table: false },
+  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} />, card: 'line' },
+  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} />, card: 'inline' },
+  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" />, card: 'inline' },
+  { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
 export const templateColumns: SkeletonColumn[] = [

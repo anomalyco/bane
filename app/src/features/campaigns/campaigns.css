@@ -120,3 +120,5 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .template-picker .ui-empty-state { border: 0; }
 .template-preview-dialog { width: min(760px, calc(100vw - 32px)); }
 .template-preview-dialog .ui-email-preview { min-height: 520px; }
+/* Phone and tablet: the editor fills the space between the top bar and the tab bar and scrolls inside, as on a desktop. */
+.app-shell--compact .page-surface:has(.campaign-compose-page), body:has(.campaign-compose-page) .app-shell--compact .page-surface:has(.campaign-compose-page) { height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); min-height: 0; margin: 0; padding: var(--space-8); border-radius: 0; overflow: hidden; }
