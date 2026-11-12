@@ -7,7 +7,7 @@ import { CopyAction } from '../../components/motion'
 import { useApiQuery, usePublicOrigin, useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
-import { claudeAddCommand, mcpClientConfig, mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, type McpClient } from '../../../../api/src/mcp-clients'
+import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
 import './developer.css'
 
 /** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. */
@@ -22,10 +22,6 @@ const clientTabs = mcpClients.map(value => ({ value, label: mcpClientNames[value
 /** The hosted MCP URL on this installation's canonical address, or null until that is known. */
 export function useMcpUrl() { const origin = usePublicOrigin(); return origin ? mcpServerUrl(origin) : null }
 
-/** The snippet to paste for a client: Claude Code gets its one-line command, the others a JSON config. */
-export function mcpSnippet(client: McpClient, url: string, auth: { bearer: string } | { scope?: string }) {
-  return client === 'claude' ? claudeAddCommand(url, 'bearer' in auth ? auth.bearer : undefined) : JSON.stringify(mcpClientConfig(client, url, auth), null, 2)
-}
 
 /** Client tabs, the snippet with its copy button and the steps after it. Every tab shares one cell, so the height holds. */
 export function McpClientSetup({ client, onClient, url, auth, label = 'MCP client' }: { client: McpClient; onClient: (client: McpClient) => void; url: string | null; auth: { bearer: string } | { scope?: string }; label?: string }) {
@@ -37,7 +33,7 @@ export function McpClientSetup({ client, onClient, url, auth, label = 'MCP clien
       const snippet = mcpSnippet(value, url, auth)
       return <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client}>
         <div className="developer-snippet">
-          <pre className={value === 'claude' ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${mcpClientNames[value]} setup`}><code>{snippet}</code></pre>
+          <pre className={snippet.startsWith('claude ') ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${mcpClientNames[value]} setup`}><code>{snippet}</code></pre>
           <CopyAction key={`${value}:${snippet.length}`} value={snippet} label={`Copy ${mcpClientNames[value]} setup`} variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />
         </div>
         <ol className="developer-steps">{mcpClientSteps(value, kind).map(step => <li key={step}>{step}</li>)}</ol>

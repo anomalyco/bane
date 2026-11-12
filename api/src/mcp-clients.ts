@@ -31,9 +31,14 @@ export function mcpClientConfig(client: McpClient, url: string, auth: McpAuth): 
   return { url, ...headers };
 }
 
-/** Claude Code's one-line alternative to editing .mcp.json. */
-export const claudeAddCommand = (url: string, bearer?: string) =>
-  `claude mcp add --transport http bane ${url}${bearer ? ` --header "Authorization: Bearer ${bearer}"` : ''}`;
+/** Claude Code's one-line setup for OAuth. It takes no key: a key on a command line stays in shell history and in
+ * the process list, so a key always goes in a JSON config instead (mcpSnippet). */
+export const claudeAddCommand = (url: string) => `claude mcp add --transport http bane ${url}`;
+
+/** What to paste for a client: Claude Code's command for OAuth, otherwise (and always with a key) a JSON config. */
+export function mcpSnippet(client: McpClient, url: string, auth: McpAuth): string {
+  return client === 'claude' && !('bearer' in auth) ? claudeAddCommand(url) : JSON.stringify(mcpClientConfig(client, url, auth), null, 2);
+}
 
 /** The steps after pasting the config, per client and sign-in. */
 export function mcpClientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
@@ -42,7 +47,7 @@ export function mcpClientSteps(client: McpClient, auth: 'key' | 'oauth'): string
     ? [`Merge this into your project or global ${file}, keeping your other servers.`, 'OpenCode connects on save; /mcps shows bane as connected.']
     : [`Merge this into your project or global ${file}, keeping your other servers.`, 'In OpenCode, run /mcps, select bane and choose Sign in.', 'Approve the access in your browser. A dashboard session in that browser skips Google sign-in.'];
   if (client === 'claude') return auth === 'key'
-    ? ['Run this in your project’s terminal. It adds bane to the project’s .mcp.json.', 'In Claude Code, run /mcp to check that bane is connected.']
+    ? ['Merge this into the mcpServers of ~/.claude.json (your user settings), so the key stays out of your project and its history. A project’s .mcp.json works too if it is never committed.', 'In Claude Code, run /mcp to check that bane is connected.']
     : ['Run this in your project’s terminal. It adds bane to the project’s .mcp.json.', 'In Claude Code, run /mcp, select bane and choose Authenticate.', 'Approve the access in your browser.'];
   if (client === 'cursor') return auth === 'key'
     ? [`Merge this into ${file} in your project, or ~/.cursor/mcp.json for every project.`, 'Cursor Settings → MCP shows bane as connected.']

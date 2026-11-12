@@ -105,6 +105,20 @@ test('review PR #84 P2: examples use the server’s canonical origin, never the 
   assert.deepEqual(canonicalOrigin({ identity: null, instance: null, demo: true, page: 'http://127.0.0.1:5173' }), { origin: 'http://127.0.0.1:5173', foreign: false });
   assert.equal(originOf('https://bane.mx/'), 'https://bane.mx');
 });
+test('review PR #84 P3: an inbox key never goes on a command line; with a key every MCP client gets a JSON config', async () => {
+  // A bearer in a shell command stays in shell history and the process list.
+  const { mcpClients, mcpClientSteps, mcpSnippet, claudeAddCommand } = await import('./src/mcp-clients.js');
+  const url = 'https://bane.mx/mcp', bearer = 'bane_mbx_' + 'f'.repeat(64);
+  for (const client of mcpClients) {
+    const snippet = mcpSnippet(client, url, { bearer });
+    assert.doesNotMatch(snippet, /^\s*(?:claude|opencode|npx|curl)\b/, `${client} key setup must not be a command`);
+    assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${bearer}`), true);
+    for (const step of mcpClientSteps(client, 'key')) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
+  }
+  assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.bane.headers.Authorization, `Bearer ${bearer}`);
+  assert.equal(mcpSnippet('claude', url, {}), claudeAddCommand(url));
+  assert.doesNotMatch(claudeAddCommand(url), /Bearer|Authorization/);
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
