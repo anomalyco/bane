@@ -68,6 +68,7 @@ const pages = ids => [
   ['Settings · sending', '/settings#sending', { from: '/settings' }],
   ['Settings · webhooks', '/settings#webhooks', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
+  ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Docs', '/docs', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],

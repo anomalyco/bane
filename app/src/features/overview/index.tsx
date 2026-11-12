@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
@@ -38,6 +38,13 @@ export function OverviewPage() {
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
   </div>
   const data = query.data
+  // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
+  // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
+  const latest = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
+  const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
+  const seen = useRef<string | undefined>(undefined)
+  const refetch = query.refetch
+  useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head) void refetch(); seen.current = head }, [head, refetch])
   return <>
     <PageHeader title="Overview" actions={controls} />
     <div className="ov-split">

@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
-import { ArrowUpRight } from 'lucide-react'
+import { ArrowUpRight, Info, Lock } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, Input, SectionHeader, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
@@ -9,7 +9,10 @@ import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspac
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
 import { limitSummary, useSendingLimit } from '../overview/setup'
+import { openScoreAbout } from '../../lib/score-about'
+import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
+import { PlanUsage } from './usage'
 import { WebhooksSection } from './webhooks'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
@@ -17,34 +20,40 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'account'
-const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }] },
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'usage' | 'account'
+// Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
+// controls they can't use, so nothing is silently missing.
+const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'usage', label: 'Plan & usage' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
-const keys: SectionKey[] = ['general', 'members', 'sending', 'webhooks', 'account']
+const items = groups.flatMap(group => group.items)
 
 export function HostedSettings() {
   const { hash } = useLocation()
   const { canAdminister } = useWorkspaceAccess()
   const requested = decodeURIComponent(hash.slice(1))
-  const wanted = requested === 'workspace' ? 'general' : keys.find(key => key === requested) ?? 'general'
-  const visible = groups.flatMap(group => group.items).filter(item => canAdminister || !item.admin)
-  const section = visible.some(item => item.key === wanted) ? wanted : 'general'
+  const section = (requested === 'workspace' ? 'general' : items.find(item => item.key === requested)?.key) ?? 'general'
+  const locked = (item: typeof items[number]) => !canAdminister && Boolean(item.admin)
+  const current = items.find(item => item.key === section)!
   return <div className="hosted-settings">
     <nav className="settings-rail" aria-label="Settings">
       <h1 className="settings-rail__title">Settings</h1>
       {groups.map(group => <div key={group.title} className="settings-rail__group"><span className="settings-rail__group-title">{group.title}</span>
-        {group.items.filter(item => canAdminister || !item.admin).map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined}>{item.label}</Link>)}
+        {group.items.map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined} data-locked={locked(item) || undefined} title={locked(item) ? 'Owners and admins only' : undefined}>{item.label}{locked(item) && <Lock size={12} aria-label="Owners and admins only" />}</Link>)}
       </div>)}
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
     <div key={section} className="hosted-settings__content">
-      {section === 'general' && <><SectionHeader title="General" /><WorkspaceRows /></>}
-      {section === 'members' && <Team />}
-      {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
-      {section === 'webhooks' && <WebhooksSection note={false} />}
-      {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
+      {locked(current) ? <AdminOnly title={current.label} action={current.admin!} />
+        : <>
+          {section === 'general' && <><SectionHeader title="General" /><WorkspaceRows /></>}
+          {section === 'members' && <Team />}
+          {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
+          {section === 'webhooks' && <WebhooksSection note={false} />}
+          {section === 'usage' && <PlanUsage row={Row} />}
+          {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
+        </>}
     </div>
   </div>
 }
@@ -94,15 +103,15 @@ function SendingRows() {
       {region && <Row title="Region"><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
       <ScoreRow />
-      {limit && limit.cap !== null && <Row title="Daily limit" hint="Rolling 24 hours"><span title={limitSummary(limit)}>{number(limit.used)} / {number(limit.cap)}</span></Row>}
+      {limit && limit.cap !== null && <Row title="Daily limit" hint="Recipients in the last 24 hours"><Link to="/settings#usage" replace className="settings-score" title={limitSummary(limit)}><span>{number(limit.used)} / {number(limit.cap)}</span><span className="muted">Plan & usage</span><ArrowUpRight size={14} aria-hidden="true" /></Link></Row>}
     </div>
     <DisconnectRow kind={kind} />
   </>
 }
 function ScoreRow() {
   const { data: report } = useSenderScore()
-  return <Row title="Sender score" hint="Bane’s abuse signal">
-    {!report ? <Skeleton width={96} height={20} /> : <Link to="/#sender-score" className="settings-score">{report.state === 'graded' ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <span>{report.emails.firstEmails} of {report.needed} emails</span>}<ArrowUpRight size={14} /></Link>}
+  return <Row title="Sender score" hint="Your sending health, 0–100">
+    {!report ? <Skeleton width={96} height={20} /> : <button type="button" onClick={() => openScoreAbout()} className="settings-score">{report.state === 'graded' ? <><b>{Math.round(report.score!)}</b><span className="settings-score__grade">{report.grade}</span></> : <><span>Not graded yet</span><span className="muted">{number(report.emails.firstEmails)} of {number(report.needed)} real emails</span></>}<Info size={14} aria-hidden="true" /></button>}
   </Row>
 }
 function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
 import { Lock } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
@@ -7,6 +7,7 @@ import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
+import { useScoreAbout } from '../lib/score-about'
 import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
@@ -15,6 +16,8 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
+// The sender score explainer: one dialog for every place the score appears, loaded when first opened.
+const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -25,6 +28,9 @@ export function AppShell() {
   const session = useSession()
   const access = useWorkspaceAccess()
   const location = useLocation()
+  const scoreAbout = useScoreAbout()
+  const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
+  useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
   const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
   // Hosted workspaces view every region at once and never read the SES region catalog.
@@ -150,6 +156,7 @@ export function AppShell() {
       </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
       </div>
     </aside>
+    {(scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>}
     <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
       <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
         {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
