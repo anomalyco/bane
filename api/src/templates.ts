@@ -47,7 +47,7 @@ async function saveAsset(runtime: Runtime, identity: Actor, metadata: Attachment
 }
 function readTemplateCursor(value?: string) {
   if (!value) return null;
-  try { const parsed = z.tuple([z.string().regex(/^(?!0000)\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}(?::?\d{2})?)$/), z.string().min(1).max(120)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))); return { at: parsed[0], id: parsed[1] }; }
+  try { const parsed = z.tuple([z.string().regex(/^(?!0000)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])[ T](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:0\d|1[0-5])(?::?[0-5]\d)?)$/), z.string().min(1).max(120)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))); return { at: parsed[0], id: parsed[1] }; }
   catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned template cursor with the same filters.', 'cursor'); }
 }
 function templateCursor(rows: (typeof templates.$inferSelect)[], limit: number) { const last = rows[limit - 1]; return rows.length > limit && last ? Buffer.from(JSON.stringify([last.updatedAt, last.id])).toString('base64url') : null; }

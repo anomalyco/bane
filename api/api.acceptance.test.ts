@@ -7175,19 +7175,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
-  test('malformed cursors and out-of-range page numbers are a 422 or a first page, not a 500', async t => {
-    await simulatedSesFixture(t, async ({ local }) => {
-      const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-      for (const cursor of ['1.5', '1e10', '99999999999']) error(await local('GET', `/v1/routing/versions?cursor=${cursor}`), 422, 'INVALID_CURSOR');
-      ok(await local('GET', '/v1/routing/versions?cursor=5'));
-      for (const at of ['x', '0000-01-01 00:00:00+00']) error(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`), 422, 'INVALID_CURSOR');
-      ok(await local('GET', `/v1/templates?cursor=${b64(['2026-11-12 17:42:19.355123+00', 'tpl_cursor'])}`));
-      for (const rank of [1.5, 1e12]) error(await local('GET', `/v1/inbound/overview?cursor=${b64(['host.example', rank, 'match', 'id'])}`), 422, 'INVALID_CURSOR');
-      error(await local('GET', '/v1/inbound/events?after=9999999999999999999'), 422, 'INVALID_CURSOR');
-      // A version cursor past the integer range starts from the newest version.
-      ok(await local('GET', '/v1/rituals/history?cursor=3000000000'));
-    });
-  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
@@ -10075,6 +10062,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }finally{await db.query('ROLLBACK');}
   });
   // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
+  test('malformed cursors and out-of-range page numbers are a 422 or a first page, not a 500', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      for (const cursor of ['1.5', '1e10', '99999999999']) error(await local('GET', `/v1/routing/versions?cursor=${cursor}`), 422, 'INVALID_CURSOR');
+      ok(await local('GET', '/v1/routing/versions?cursor=5'));
+      for (const at of ['x', '0000-01-01 00:00:00+00', '2026-13-01 00:00:00+00', '2026-01-01 00:00:00+99']) error(await local('GET', `/v1/templates?cursor=${b64([at, 'tpl_cursor'])}`), 422, 'INVALID_CURSOR');
+      ok(await local('GET', `/v1/templates?cursor=${b64(['2026-11-12 17:42:19.355123+00', 'tpl_cursor'])}`));
+      for (const rank of [1.5, 1e12]) error(await local('GET', `/v1/inbound/overview?cursor=${b64(['host.example', rank, 'match', 'id'])}`), 422, 'INVALID_CURSOR');
+      error(await local('GET', '/v1/inbound/events?after=9999999999999999999'), 422, 'INVALID_CURSOR');
+      // A version cursor past the integer range starts from the newest version.
+      ok(await local('GET', '/v1/rituals/history?cursor=3000000000'));
+    });
+  });
   test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
     const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
     await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'fence.invalid',$3,'active','store')",[bid,w,REGION]);
