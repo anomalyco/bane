@@ -146,7 +146,9 @@ export default {
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !request.headers.has('X-Bane-Environment') && !request.headers.has('X-OpenSend-Environment')) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
+      // The installation's canonical origin (PUBLIC_URL), never the request's Host; omitted if PUBLIC_URL isn't a URL.
+      let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
+      return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
