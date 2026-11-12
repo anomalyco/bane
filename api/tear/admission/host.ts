@@ -489,10 +489,12 @@ async function autoAct(words: string[]): Promise<unknown> {
       return Number((await auto.client.query("SELECT count(*) n FROM mail_receipts WHERE workspace_id=ANY($1) AND last_recovered_at>now()-interval '1 minute'", [ws])).rows[0].n);
     }
     case 'stash': {
-      // An envelope held for a host that was not routable yet, due for replay now.
+      // An envelope held for a host that was not routable yet, due for replay now (again, after a replay
+      // released an earlier one for the message).
       const to = recipients(b), owners = Object.fromEntries(to.map(addr => [addr, [wsOf(addr.includes(hosts[1]!) ? 'B' : 'A')]]));
       await auto.client.query(`INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,binding_workspace,owners,recipients,notification,received_at,expires_at,next_check,status)
-        VALUES($1,$2,$3,$4,NULL,$5,$6,'{}',now(),now()+interval '48 hours',now()-interval '1 second','held')`, [BUCKET, sesId(a), REGION, TOPIC, JSON.stringify(owners), JSON.stringify(to)]);
+        VALUES($1,$2,$3,$4,NULL,$5,$6,'{}',now(),now()+interval '48 hours',now()-interval '1 second','held')
+        ON CONFLICT(bucket,ses_message_id) DO UPDATE SET owners=excluded.owners,recipients=excluded.recipients,expires_at=excluded.expires_at,next_check=excluded.next_check,status='held',error=NULL`, [BUCKET, sesId(a), REGION, TOPIC, JSON.stringify(owners), JSON.stringify(to)]);
       return 'ok';
     }
     case 'replay': return autoTxn(statement(words, auto));

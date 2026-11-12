@@ -239,10 +239,16 @@ impl Recv {
         t.receipts.insert(k.to_owned(), rc);
     }
 
-    /// The ingest-job insert for a receipt this statement admitted (mail_ingest_admit): one active
-    /// job per receipt, then backlog room under the backlog row. Returns true when it must wait.
+    /// The ingest-job insert for a receipt this statement admitted (mail_ingest_admit): under the
+    /// backlog row, taken first for every insert, one active job per receipt, then backlog room.
+    /// Returns true when it must wait.
     fn queue_job(&self, me: &str, t: &mut RTxn, k: &str, stamp: i64) -> bool {
         let (x, _) = unkey(k);
+        let turns = format!("turns:{}", WS[x]);
+        if self.held(me, &turns) {
+            return true;
+        }
+        t.locks.insert(turns);
         let j = self.jobs(k);
         if j.pending > 0 {
             // A pending job reads the merged recipients when claimed. A claim in progress (its row
@@ -259,11 +265,6 @@ impl Recv {
             self.hold(t, k, stamp);
             return false;
         }
-        let lock = format!("turns:{}", WS[x]);
-        if self.held(me, &lock) {
-            return true;
-        }
-        t.locks.insert(lock);
         if self.active(x, t) >= self.ws[x].backlog {
             self.hold(t, k, stamp);
         } else {
