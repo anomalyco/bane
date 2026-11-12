@@ -97,6 +97,17 @@ export const readAttempt = async (db: Pick<DbExecutor, 'execute'>, attemptId: st
 const cents = (uc: string | bigint) => Number(BigInt(uc) / UC_PER_CENT);
 const oneLine = (value: string, max: number) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 
+/**
+ * Takes the workspace's account row lock in a statement of its own (creating the row when asked). Read what the
+ * decision depends on in the NEXT statement: under READ COMMITTED a statement that waited for the row lock re-reads that
+ * row's columns, but its subqueries and functions (billing_position, attempt counts) keep the snapshot from before the
+ * wait, so a credit or attempt committed meanwhile would be missed (review finding 1: a second auto-recharge charge).
+ */
+export async function lockAccount(tx: Pick<DbExecutor, 'execute'>, workspaceId: string, create = true): Promise<boolean> {
+  if (create) await tx.execute(sql`INSERT INTO billing_accounts(workspace_id) VALUES (${workspaceId}) ON CONFLICT DO NOTHING`);
+  return (await tx.execute(sql`SELECT 1 FROM billing_accounts WHERE workspace_id=${workspaceId} FOR UPDATE`)).rows.length > 0;
+}
+
 /** Locks the account, then the attempt (the money lock order). Returns undefined when the attempt does not exist. */
 async function lockAttempt(tx: DbExecutor, attemptId: string) {
   const [owner] = await rows<{ workspace_id: string }>(tx, sql`SELECT workspace_id FROM billing_payment_attempts WHERE id=${attemptId}`);
@@ -257,9 +268,9 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
   if (!whole(thresholdCents, 500, 100_000) || !whole(amountCents, 2000, 100_000) || !whole(monthlyCapCents, amountCents, 1_000_000))
     throw new ApiError(422, 'TOP_UP_AMOUNT_INVALID', 'Use a threshold of $5–$1,000, an amount of $20–$1,000 and a monthly limit of at least the amount, up to $10,000.');
   await runtime.db.transaction(async tx => {
-    await tx.execute(sql`INSERT INTO billing_accounts(workspace_id) VALUES (${workspaceId}) ON CONFLICT DO NOTHING`);
+    await lockAccount(tx, workspaceId);
     const [a] = await rows<{ stripe_payment_method: string | null; blocked: boolean }>(tx, sql`SELECT stripe_payment_method,
-      EXISTS (SELECT FROM billing_blocked_cards b WHERE b.fingerprint=a.card_fingerprint) AS blocked FROM billing_accounts a WHERE workspace_id=${workspaceId} FOR UPDATE`);
+      EXISTS (SELECT FROM billing_blocked_cards b WHERE b.fingerprint=a.card_fingerprint) AS blocked FROM billing_accounts a WHERE workspace_id=${workspaceId}`);
     if (enabled && (!a?.stripe_payment_method || a.blocked)) throw new ApiError(409, 'PAYMENT_METHOD_REQUIRED', 'Save a card in Settings → Billing before turning on auto-recharge.');
     await tx.execute(sql`UPDATE billing_accounts SET recharge_enabled=${enabled}, recharge_threshold_uc=${BigInt(thresholdCents) * UC_PER_CENT}, recharge_amount_uc=${BigInt(amountCents) * UC_PER_CENT},
       recharge_month_cap_uc=${BigInt(monthlyCapCents) * UC_PER_CENT},
@@ -277,13 +288,18 @@ function providerError(error: unknown): unknown {
     : new ApiError(502, 'BILLING_PROVIDER_ERROR', 'Stripe refused the request. Try again or contact support.');
 }
 
-/** A new attempt in state created. Off-session charges record the saved card they will use (disputes block it). */
-export const insertAttempt = (tx: Pick<DbExecutor, 'execute'>, attemptId: string, workspaceId: string, kind: AttemptRow['kind'], amountUc: bigint, actor: string) => tx.execute(sql`
+/**
+ * A new attempt in state created; false when none was written. Off-session charges record the saved card they will use
+ * (disputes block it). A recharge is written only while no other recharge for the workspace is open: one charge at a time.
+ */
+export const insertAttempt = async (tx: Pick<DbExecutor, 'execute'>, attemptId: string, workspaceId: string, kind: AttemptRow['kind'], amountUc: bigint, actor: string) => (await tx.execute(sql`
   INSERT INTO billing_payment_attempts(id,workspace_id,kind,status,amount_uc,idempotency_key,created_by,card_brand,card_last4,card_fingerprint)
   SELECT ${attemptId},${workspaceId},${kind},'created',${amountUc},${'attempt:' + attemptId},${actor},
     CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_brand END, CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_last4 END,
     CASE WHEN ${kind} IN ('saved_card','recharge') THEN b.card_fingerprint END
-  FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=${workspaceId}`);
+  FROM (SELECT 1) one LEFT JOIN billing_accounts b ON b.workspace_id=${workspaceId}
+  WHERE ${kind}<>'recharge' OR NOT EXISTS (SELECT FROM billing_payment_attempts p WHERE p.workspace_id=${workspaceId} AND p.kind='recharge' AND p.status IN ${open})
+  RETURNING id`)).rows.length > 0;
 
 /** Validates a person's top-up and writes its attempt (state created). Serialized per workspace by the account lock. */
 async function openAttempt(runtime: Runtime, input: { workspaceId: string; kind: 'checkout' | 'saved_card' | 'setup'; amountCents: number; actor: string }) {
@@ -291,18 +307,19 @@ async function openAttempt(runtime: Runtime, input: { workspaceId: string; kind:
   if (kind !== 'setup' && (!Number.isInteger(amountCents) || amountCents < MIN_CENTS || amountCents > MAX_CENTS))
     throw new ApiError(422, 'TOP_UP_AMOUNT_INVALID', 'Add between $20 and $10,000 at a time.', 'amountCents');
   return runtime.db.transaction(async tx => {
-    await tx.execute(sql`INSERT INTO billing_accounts(workspace_id) VALUES (${workspaceId}) ON CONFLICT DO NOTHING`);
+    // Counted after the lock, in a fresh statement, so concurrent requests can't all count the same five (finding 7).
+    await lockAccount(tx, workspaceId);
     const [a] = await rows<{ mode: string; stripe_payment_method: string | null; hour: number; failed: number; funded: boolean; blocked: boolean }>(tx, sql`SELECT mode, stripe_payment_method,
       (SELECT count(*) FROM billing_payment_attempts p WHERE p.workspace_id=a.workspace_id AND p.kind<>'recharge' AND p.created_at>now()-interval '1 hour')::int AS hour,
       (SELECT count(*) FROM billing_payment_attempts p WHERE p.workspace_id=a.workspace_id AND p.kind<>'recharge' AND p.status='failed' AND p.created_at>now()-interval '1 day')::int AS failed,
       EXISTS (SELECT FROM billing_payment_attempts p WHERE p.workspace_id=a.workspace_id AND p.status='succeeded' AND p.amount_uc>0) AS funded,
       EXISTS (SELECT FROM billing_blocked_cards b WHERE b.fingerprint=a.card_fingerprint) AS blocked
-      FROM billing_accounts a WHERE workspace_id=${workspaceId} FOR UPDATE`);
+      FROM billing_accounts a WHERE workspace_id=${workspaceId}`);
     if (a!.hour >= 5 || a!.failed >= 3) throw new ApiError(429, 'TOP_UP_RATE_LIMITED', 'Too many payment attempts for this workspace. Try again later.', undefined, true);
     if (kind !== 'setup' && !a!.funded && amountCents > FIRST_MAX_CENTS) throw new ApiError(409, 'FIRST_TOP_UP_LIMIT', 'The first top-up is limited to $500. Larger top-ups work after it succeeds.', 'amountCents');
     if (kind === 'saved_card' && (!a!.stripe_payment_method || a!.blocked)) throw new ApiError(409, 'PAYMENT_METHOD_REQUIRED', 'Save a card in Settings → Billing first, or pay with Stripe Checkout.');
     const attemptId = id('bpa');
-    await insertAttempt(tx, attemptId, workspaceId, kind, kind === 'setup' ? 0n : BigInt(amountCents) * UC_PER_CENT, input.actor);
+    await insertAttempt(tx, attemptId, workspaceId, kind, kind === 'setup' ? 0n : BigInt(amountCents) * UC_PER_CENT, input.actor); // never a recharge: always written
     return attemptId;
   });
 }
@@ -408,17 +425,22 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
   } catch (error) {
     if (!(error instanceof StripeError)) throw error;
     if (error.uncertain) { log('warn', { code: 'BILLING_CHARGE_UNCONFIRMED', workspaceId: a.workspace_id, attemptId, status: error.status }); return 'pending'; }
+    // Any refusal Stripe won't change its mind about (a decline, 3DS, or a non-card one such as
+    // customer_tax_location_invalid) ends the charge the same way: the invoice is voided and a recharge turns
+    // auto-recharge off with one notice. Otherwise every trigger would open a new attempt and invoice (finding 2).
     if (invoiceId) await voidInvoice(cfg, invoiceId, key);
-    // A refusal that isn't about the card (the saved card or tax setting changed between retries) does not turn
-    // auto-recharge off or email the owner; the next trigger starts a fresh attempt.
-    const cardError = error.type === 'card_error' || error.status === 402;
-    return failAttempt(runtime, attemptId, error.reason, error.message, 'failed', cardError);
+    return failAttempt(runtime, attemptId, error.reason, error.message);
   }
 }
-/** Voids an open invoice (best effort): a void invoice can never be paid later. */
+/** Voids an open invoice, or deletes one still in draft (best effort): neither can be paid later. */
 export async function voidInvoice(cfg: StripeConfig, invoiceId: string, key: string) {
-  try { await stripeRequest(cfg, 'POST', `/v1/invoices/${encodeURIComponent(invoiceId)}/void`, {}, `${key}:void`); return true; }
-  catch (error) { log('warn', { code: 'BILLING_INVOICE_VOID_FAILED', invoiceId, reason: error instanceof StripeError ? error.reason : 'error' }); return false; }
+  const path = `/v1/invoices/${encodeURIComponent(invoiceId)}`;
+  try { await stripeRequest(cfg, 'POST', `${path}/void`, {}, `${key}:void`); return true; }
+  catch (error) {
+    if (error instanceof StripeError && !error.uncertain) try { await stripeRequest(cfg, 'DELETE', path); return true; } catch { /* Neither open nor draft: reported below. */ }
+    log('warn', { code: 'BILLING_INVOICE_VOID_FAILED', invoiceId, reason: error instanceof StripeError ? error.reason : 'error' });
+    return false;
+  }
 }
 
 // ---------- reading payments ----------
@@ -592,16 +614,20 @@ export async function refundTopUp(runtime: Runtime, input: { workspaceId: string
   stripeConfig(runtime);
   if (input.amountCents !== undefined && (!Number.isInteger(input.amountCents) || input.amountCents < 1)) throw new ApiError(422, 'REFUND_AMOUNT_INVALID', 'Refund a whole number of cents.', 'amountCents');
   const refundId = await runtime.db.transaction(async tx => {
-    await tx.execute(sql`INSERT INTO billing_accounts(workspace_id) VALUES (${input.workspaceId}) ON CONFLICT DO NOTHING`);
-    const [account] = await rows<{ balance_uc: string }>(tx, sql`SELECT balance_uc FROM billing_accounts WHERE workspace_id=${input.workspaceId} FOR UPDATE`);
+    await lockAccount(tx, input.workspaceId);
+    // Usage not settled yet is owed too (finding 3): settlement takes promotional credit first, so the paid credit
+    // that will be left is min(balance, balance + promo − unsettled) = min(balance_uc, availableUc).
+    const [account] = await rows<{ balance_uc: string; available_uc: string }>(tx, sql`SELECT balance_uc::text AS balance_uc,
+      billing_position(workspace_id)->>'availableUc' AS available_uc FROM billing_accounts WHERE workspace_id=${input.workspaceId}`);
     const [a] = await rows<AttemptRow>(tx, sql`SELECT *, 0 AS age_s FROM billing_payment_attempts WHERE id=${input.attemptId} AND workspace_id=${input.workspaceId} FOR UPDATE`);
     if (!a) notFound('Payment');
     if (a.status !== 'succeeded' || BigInt(a.amount_uc) === 0n) throw new ApiError(409, 'REFUND_NOT_ALLOWED', 'Only a completed top-up can be refunded.');
     const [{ held }] = await rows<{ held: string }>(tx, sql`SELECT coalesce(sum(amount_uc),0)::text AS held FROM billing_refunds WHERE attempt_id=${a.id} AND status IN ('held','pending')`) as [{ held: string }];
-    const left = BigInt(a.amount_uc) - BigInt(a.refunded_uc) - BigInt(held), paid = BigInt(account!.balance_uc) > 0n ? BigInt(account!.balance_uc) : 0n;
+    const balance = BigInt(account!.balance_uc), available = BigInt(account!.available_uc), unspent = balance < available ? balance : available;
+    const left = BigInt(a.amount_uc) - BigInt(a.refunded_uc) - BigInt(held), paid = unspent > 0n ? unspent : 0n;
     const refundable = ((left < paid ? left : paid) / UC_PER_CENT) * UC_PER_CENT;
     const amount = input.amountCents === undefined ? refundable : BigInt(input.amountCents) * UC_PER_CENT;
-    if (amount <= 0n || amount > refundable) throw new ApiError(409, 'REFUND_EXCEEDS_BALANCE', `At most ${cents(refundable)}¢ of this payment can be refunded: refunds come only from unspent paid credit.`, 'amountCents');
+    if (amount <= 0n || amount > refundable) throw new ApiError(409, 'REFUND_EXCEEDS_BALANCE', `At most ${cents(refundable)}¢ of this payment can be refunded: refunds come only from paid credit not yet spent, including usage that is not settled yet.`, 'amountCents');
     const refund = id('brf');
     await tx.execute(sql`INSERT INTO billing_refunds(id,workspace_id,attempt_id,amount_uc,status,reason,operator) VALUES (${refund},${input.workspaceId},${a.id},${amount},'held',${input.reason.slice(0, 500)},${input.operator})`);
     await tx.execute(sql`SELECT billing_post(${input.workspaceId}, 'refund_hold', ${'refund:' + refund}, ${-amount}::bigint, 0::bigint, ${JSON.stringify({ refundId: refund, attemptId: a.id, reason: input.reason.slice(0, 500) })}::jsonb, ${input.operator})`);

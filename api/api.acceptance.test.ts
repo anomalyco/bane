@@ -5879,7 +5879,7 @@ describe('Campaign authorization and dispatch credentials', () => {
 // sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with switches for
 // declines, a 5xx before any effect, an answer lost after the effect, and refusals. No real key exists in this file.
 const STRIPE_TEST_BASE = 'https://stripe.test', STRIPE_TEST_WEBHOOK_SECRET = 'whsec_test';
-type FakeRule = { match: RegExp; times: number };
+type FakeRule = { match: RegExp; times: number; code?: string };
 function decodeStripeForm(form: URLSearchParams): Json {
   const out: Json = {};
   for (const [key, value] of form) {
@@ -6002,7 +6002,7 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       default: return error(404, 'invalid_request_error', 'unrecognized_url');
     }
   };
-  const take = (rules: FakeRule[], line: string) => { const rule = rules.find(r => r.times > 0 && r.match.test(line)); if (rule) rule.times--; return !!rule; };
+  const take = (rules: FakeRule[], line: string) => { const rule = rules.find(r => r.times > 0 && r.match.test(line)); if (rule) rule.times--; return rule; };
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     if (url.origin !== STRIPE_TEST_BASE) throw new Error(`Network is forbidden in billing scenarios: ${url.origin}`);
@@ -6021,7 +6021,8 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       if (prior.signature !== signature) [status, json] = error(400, 'idempotency_error', 'idempotency_key_in_use');
       else ({ status, body: json } = prior);
     } else {
-      [status, json] = take(fake.refused, line) ? error(400, 'invalid_request_error', 'synthetic_refusal') : route(method, path, params, url.searchParams);
+      const refusal = take(fake.refused, line);
+      [status, json] = refusal ? error(400, 'invalid_request_error', refusal.code ?? 'synthetic_refusal') : route(method, path, params, url.searchParams);
       json = structuredClone(json);
       if (key && status < 500) keys.set(key, { signature, status, body: json });
     }
@@ -6379,6 +6380,99 @@ describe('Billing: Stripe', () => {
     assert.equal((await deliver('payment_method.detached', fake.objects.get((await account()).stripe_payment_method)!)).body.outcome, 'processed');
     assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4], [null, null]);
     await db.query('DELETE FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint]);
+  });
+  // Review finding 1 / POC 14: runner 1's credit waits on the account lock (another money write holds it when Stripe
+  // answers /pay) and runner 2, re-claiming the job, queues behind it. Runner 2 must decide on what runner 1 committed.
+  test('Auto-recharge under lock contention: a second runner queued behind the first one\'s credit does not charge again', async t => {
+    const { runtime, db, fake, wid, account, enforcement, saveCard, recharge, stripe } = await stripeFixture(t);
+    await enforcement('enforce');
+    await saveCard();
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const holder = await fixtureDatabase(t), watcher = await fixtureDatabase(t);
+    cleanup(t, async () => { await holder.query('ROLLBACK'); });
+    const waiting = async (n: number) => {
+      for (let i = 0; i < 200; i++) {
+        const { rows: [{ count }] } = await watcher.query(`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND state = 'active'
+          AND wait_event_type = 'Lock' AND query ILIKE '%FROM billing_accounts%FOR UPDATE%'`);
+        if (count >= n) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail(`expected ${n} sessions waiting on the account lock`);
+    };
+    let second: Promise<void> | undefined, released: Promise<void> | undefined;
+    fake.onRequest = async (method, path) => {
+      if (method !== 'POST' || !/\/pay$/.test(path) || released) return;
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM billing_accounts WHERE workspace_id = $1 FOR UPDATE', [wid]);
+      released = (async () => {
+        await waiting(1);                 // runner 1's credit, after /pay answered
+        second = recharge();              // runner 2 claims the job again
+        await waiting(2);
+        await holder.query('COMMIT');
+      })();
+    };
+    await recharge();
+    await released; await second;
+    fake.onRequest = undefined;
+    const rows = (await db.query("SELECT status FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge'", [wid])).rows;
+    assert.deepEqual(rows.map(r => r.status), ['succeeded'], 'One low-balance episode charges the card once.');
+    assert.deepEqual([fake.count(/^POST \/v1\/invoices\/[^/]+\/pay$/), (await account()).balance], [1, String(2500n * UC)]);
+  });
+
+  // Review finding 2: a refusal that isn't a card error must not leave auto-recharge on to open an attempt every minute.
+  test('Auto-recharge: a non-card refusal turns it off with one notice and a voided invoice, instead of a new attempt every minute', async t => {
+    const { runtime, db, fake, wid, account, enforcement, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await enforcement('enforce');
+    await saveCard();
+    const on = () => stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
+    const notices = async () => (await db.query("SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed'", [wid])).rows[0].n;
+    const warnings = t.mock.method(console, 'warn', () => {});
+    // Refused after the invoice exists (at /pay): the open invoice is voided.
+    await on();
+    fake.refused.push({ match: /\/pay$/, times: 1, code: 'invoice_payment_intent_requires_action' });
+    await recharge();
+    const [paid] = await recharges();
+    assert.deepEqual([paid.status, paid.failure_code], ['failed', 'invoice_payment_intent_requires_action']);
+    assert.equal(fake.invoices().find(i => i.metadata.bane_attempt === paid.id)!.status, 'void');
+    assert.deepEqual([(await account()).recharge_enabled, (await account()).recharge_disabled_reason, await notices()], [false, 'invoice_payment_intent_requires_action', 1]);
+    // Every invoice create refused (Stripe Tax turned on for a card saved without an address): one attempt, then off.
+    await on();
+    fake.refused.push({ match: /^POST \/v1\/invoices$/, times: Infinity, code: 'customer_tax_location_invalid' });
+    for (let minute = 0; minute < 10; minute++) { await jobs.billingMinute(runtime); await recharge(); }
+    warnings.mock.restore();
+    assert.deepEqual((await recharges()).map(r => [r.status, r.failure_code]), [['failed', 'invoice_payment_intent_requires_action'], ['failed', 'customer_tax_location_invalid']]);
+    assert.deepEqual([(await account()).recharge_enabled, (await account()).recharge_disabled_reason, await notices()], [false, 'customer_tax_location_invalid', 2]);
+    assert.equal(fake.count(/^POST \/v1\/invoices$/), 2, 'No new invoice once auto-recharge is off.');
+  });
+
+  // Review finding 3: an hour of sends isn't settled yet; refunding it would leave the workspace in debt.
+  test('Refund: usage that is not settled yet is not refundable, so settlement never leaves the workspace in debt', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, enforcement, stripe } = await stripeFixture(t);
+    await enforcement('enforce');
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
+    // The free tier is used up and 240,000 recipients went out an hour ago: $48 owed, not settled yet, $2 left.
+    await db.query('UPDATE billing_accounts SET free_emails_used = 3000 WHERE workspace_id = $1', [wid]);
+    await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
+    assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Unused credit', operator: 'operator:fixture' });
+    await assert.rejects(refund(201), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    const done = await refund();
+    assert.equal(done.status, 'succeeded');
+    assert.equal((await db.query('SELECT amount_uc::text AS a FROM billing_refunds WHERE id = $1', [done.refundId])).rows[0].a, String(200n * UC));
+    await db.query(`SELECT billing_settle($1, date_trunc('hour', now(), 'UTC'))`, [wid]);
+    const settled = await account();
+    assert.deepEqual([settled.balance, settled.unpaid_since], ['0', null], 'The sends are paid for and nothing is owed.');
+  });
+
+  // Review finding 7: the hourly limit counted before the lock wait, so concurrent requests all saw the same count.
+  test('Top-up limit: 20 concurrent requests open exactly five payment pages', async t => {
+    const { runtime, fake, wid, stripe } = await stripeFixture(t);
+    const outcomes = await Promise.allSettled(Array.from({ length: 20 }, () => stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'key:fixture', billingEmail: null })));
+    assert.equal(outcomes.filter(o => o.status === 'fulfilled').length, 5);
+    assert.ok(outcomes.every(o => o.status === 'fulfilled' || (o.reason as Json).code === 'TOP_UP_RATE_LIMITED'));
+    assert.deepEqual([fake.count(/^POST \/v1\/checkout\/sessions$/), new Set(fake.calls.filter(c => c.path === '/v1/customers').map(c => c.key)).size], [5, 1]);
   });
 });
 

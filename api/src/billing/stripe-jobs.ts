@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { id, log, type JobHandler, type Runtime } from '../core.js';
-import { chargeSavedCard, insertAttempt, reconcileAttempt, reconcileRefund, StripeError } from './stripe.js';
+import { chargeSavedCard, insertAttempt, lockAccount, reconcileAttempt, reconcileRefund, StripeError } from './stripe.js';
 
 /** Hosted and configured: the minute sweep and the recharge job do nothing on an installation without Stripe keys. */
 const configured = (runtime: Runtime) => runtime.config.multiTenant && !!runtime.config.billing?.stripe;
@@ -14,26 +14,29 @@ const rechargeDue = sql`a.recharge_enabled AND a.recharge_pending_attempt IS NUL
 
 /**
  * billing.recharge (job ID billing.recharge:<wid>, queued by the gate, the settler and the minute sweep). One pending
- * charge at a time: under the account lock, re-check eligibility against billing_position (balance + promo − unsettled
- * usage), write the attempt and mark it pending on the account; then charge the saved card outside the transaction.
- * A decline or a 3DS request turns auto-recharge off with one email (failAttempt); there is no automatic retry.
+ * charge at a time: take the account lock, then (in a new statement, so it sees every credit and attempt committed
+ * while this job waited) re-check eligibility against billing_position (balance + promo − unsettled usage), write the
+ * attempt only while no other recharge is open, and mark it pending; then charge the saved card outside the
+ * transaction. Any refusal (a decline, 3DS, a non-card refusal) turns auto-recharge off with one email; no retry.
  */
 export const rechargeJob: JobHandler = async (runtime, _payload, job) => {
   if (!configured(runtime)) { log('warn', { code: 'BILLING_RECHARGE_SKIPPED', workspaceId: job.workspaceId, reason: 'stripe_not_configured' }); return; }
   const attemptId = await runtime.db.transaction(async tx => {
+    if (!await lockAccount(tx, job.workspaceId, false)) return null;
     const [a] = (await tx.execute<{ enforce: boolean; eligible: boolean; below: boolean; capped: boolean; amount_uc: string }>(sql`SELECT
         (SELECT mode='enforce' FROM billing_config WHERE singleton) AS enforce,
         a.recharge_enabled AND a.recharge_pending_attempt IS NULL AND a.recharge_disabled_at IS NULL AND a.mode='prepaid'
           AND a.stripe_payment_method IS NOT NULL AND a.stripe_customer IS NOT NULL
-          AND NOT EXISTS (SELECT FROM billing_blocked_cards b WHERE b.fingerprint=a.card_fingerprint) AS eligible,
+          AND NOT EXISTS (SELECT FROM billing_blocked_cards b WHERE b.fingerprint=a.card_fingerprint)
+          AND NOT EXISTS (SELECT FROM billing_payment_attempts p WHERE p.workspace_id=a.workspace_id AND p.kind='recharge' AND p.status IN ('created','pending','requires_action')) AS eligible,
         (billing_position(a.workspace_id)->>'availableUc')::bigint < a.recharge_threshold_uc AS below,
         CASE WHEN a.recharge_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date THEN a.recharge_month_total_uc ELSE 0 END + a.recharge_amount_uc > a.recharge_month_cap_uc AS capped,
         a.recharge_amount_uc::text AS amount_uc
-      FROM billing_accounts a WHERE a.workspace_id=${job.workspaceId} FOR UPDATE`)).rows;
+      FROM billing_accounts a WHERE a.workspace_id=${job.workspaceId}`)).rows;
     if (!a?.enforce || !a.eligible || !a.below) return null;
     if (a.capped) { log('info', { code: 'BILLING_RECHARGE_CAPPED', workspaceId: job.workspaceId }); return null; }
     const attempt = id('bpa');
-    await insertAttempt(tx, attempt, job.workspaceId, 'recharge', BigInt(a.amount_uc), 'system');
+    if (!await insertAttempt(tx, attempt, job.workspaceId, 'recharge', BigInt(a.amount_uc), 'system')) return null;
     await tx.execute(sql`UPDATE billing_accounts SET recharge_pending_attempt=${attempt}, updated_at=now() WHERE workspace_id=${job.workspaceId}`);
     return attempt;
   });
