@@ -8788,6 +8788,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(await race(()=>accept(a,'m3',['a@rwin.invalid']),async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n),1);
     assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held',m3:'pending'}});
   });
+  // tear witness (2 steps): accept m1 with 100 recipients, accept m1 with those plus one -> the reopen was refused.
+  test('receipt reopen: the 200-recipient bound counts the merged recipients once',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {acceptInboundNotification}=await import('./src/mailbox-receipts.js');
+      const wid=runtime.config.workspaceId,topicArn=`arn:aws:sns:${REGION}:111122223333:reopen-fixture`,bucket='reopen-fixture',host='reopen.invalid';
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[unique('dom'),wid,host,REGION]);
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,$3,$4) ON CONFLICT(workspace_id,region) DO UPDATE SET bucket=excluded.bucket,topic_arn=excluded.topic_arn',[wid,REGION,bucket,topicArn]);
+      const mid=unique('reopen'),to=(n:number)=>Array.from({length:n},(_,i)=>`r${String(i).padStart(3,'0')}@${host}`);
+      const notify=(recipients:string[])=>acceptInboundNotification(runtime,{topicArn,region:REGION,message:{notificationType:'Received',mail:{messageId:mid,timestamp:new Date().toISOString()},
+        receipt:{timestamp:new Date().toISOString(),recipients,action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+mid}}}});
+      const count=async()=>(await db.query('SELECT jsonb_array_length(recipients) n FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0].n;
+      assert.equal(await notify(to(100)),1);
+      assert.equal(await notify(to(101)),1,'One new recipient reopens the receipt: 101 distinct recipients');
+      assert.equal(await count(),101);
+      assert.equal(await notify(to(101).map(a=>a.replace('@','x@'))),0,'202 distinct recipients exceed the bound');
+      assert.equal(await count(),101);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
