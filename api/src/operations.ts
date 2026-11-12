@@ -115,7 +115,9 @@ const hookTimeouts=new Map<string,{count:number;until:number}>();
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
 export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string, timeoutSeconds=5) {
   const key=await digest(binding+'\n'+url),prior=hookTimeouts.get(key);
-  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString());
+  // Nothing leaves while the breaker is open: return only this claim's attempt. Resetting the count let every delivery to an
+  // endpoint that always times out retry forever (three real tries per window, the rest deferred back to attempt 0).
+  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString(),undefined,true);
   const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
   const merged = new Headers();
   for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
