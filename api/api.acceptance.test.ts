@@ -4127,6 +4127,39 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
   });
 
+  test('block HTML: campaign and template validation bound parsing before changing drafts',async t=>{
+    const key=await keyFixture(t,{permissions:['send']});
+    const manager=await keyFixture(t,{permissions:['manage']});
+    const {validateBlockHtml,renderBlockHtml,renderBlockText,BlockContentError}=await import('./src/campaign-blocks.js');
+    const inputs=[
+      '<div>'.repeat(40_000),
+      '<p>'+'<code>'.repeat(3_000)+'text'+'</code>'.repeat(3_000)+'</p>',
+      '<p '+Array.from({length:300},(_,i)=>`a${i}="x"`).join(' ')+'>text</p>',
+      '<p>text</p>'.repeat(20_001),
+    ];
+    for(const html of inputs){
+      for(const [method,path,apiKey,body,code] of [
+        ['POST','/v1/campaigns',key.secret,{name:'Complex content',html},'CAMPAIGN_CONTENT_INVALID'],
+        ['PATCH','/v1/templates/tpl_fixture',manager.secret,{revision:1,draft:{name:'Complex content',html}},'TEMPLATE_CONTENT_INVALID'],
+      ] as const){
+        const start=performance.now();
+        error(await http(method,path,apiKey,body,{},20_000),422,code);
+        const ms=performance.now()-start;t.diagnostic(`${path}: ${Buffer.byteLength(html)} bytes rejected in ${Math.round(ms)} ms`);
+        assert.ok(ms<2000,'Block content validation must finish before its two-second request budget.');
+      }
+      for(const render of [validateBlockHtml,renderBlockHtml,renderBlockText])assert.throws(()=>render(html),BlockContentError);
+    }
+    for(const href of ['#','&#35;',' # ']){
+      const html=`<p><a href="${href}">Link</a></p>`;
+      assert.doesNotThrow(()=>validateBlockHtml(html));
+      assert.throws(()=>validateBlockHtml(html,{complete:true}),/placeholder/);
+    }
+    const html='<h1>Example</h1><p>Some <strong>formatted</strong> text.</p>';
+    assert.doesNotThrow(()=>validateBlockHtml(html,{complete:true}));
+    assert.ok(renderBlockHtml(html).includes('<strong>formatted</strong>'));
+    assert.equal(renderBlockText(html),'Example\n\nSome formatted text.');
+  });
+
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
     const [{ sanitizeBlockStyle: serverStyle }, { sanitizeBlockStyle: composerStyle }] = await Promise.all([import('./src/block-style.js'), import('../app/src/features/campaigns/block-style.js')]);
     for (const value of ['color:#3156c7; padding:24px; border-radius:8px', 'font-size:32px;line-height:1.2;', 'position:absolute', 'background-image:url(https://example.com/x.png)', 'padding:200px']) assert.equal(composerStyle(value), serverStyle(value), `Composer and renderer style sanitizers disagree for ${value}`);
