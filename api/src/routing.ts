@@ -356,8 +356,10 @@ const addressesOf = (list: MimeAddress[] | undefined): string[] =>
 export function registerRouting(app: App) {
   const path = '/v1/routing',
     meta = { security, tags: ['Routing'] };
-  const workspace = (c: Ctx) => {
-    const a=actor(c,c.get('actor')?.receivingConsent&&(c.req.method==='GET'||c.req.path.endsWith('/test'))?'read':'manage');
+  // Each operation says whether it only reads. With receiving consent, reads and the dry run need
+  // read; every change needs manage.
+  const workspace = (c: Ctx, read = c.req.method === 'GET') => {
+    const a=actor(c,c.get('actor')?.receivingConsent&&read?'read':'manage');
     if (a.domains.length || a.role === 'member')
       throw fail(
         403,
@@ -371,7 +373,7 @@ export function registerRouting(app: App) {
     change: (routes: Route[], tx: DbExecutor, version: number) => Route[] | Promise<Route[]>,
     options: Parameters<typeof save>[6] = {},
   ) => {
-    const w = workspace(c);
+    const w = workspace(c, false);
     if (c.get('actor').credential==='agentToken'||(c.get('actor').grantId&&!c.get('actor').receivingConsent))
       throw fail(403, 'ADMIN_REQUIRED', 'MCP and agent credentials can read and test routing, not change it. Change routes in the dashboard or with an API key.');
     const result = await c.env.db.transaction(async (tx) => {
@@ -648,7 +650,7 @@ export function registerRouting(app: App) {
       responses: { 200: response(RoutingTestResult), ...errors },
     }),
     async (c) => {
-      const w = workspace(c),
+      const w = workspace(c, true),
         input = c.req.valid('json');
       if(input.config){if(input.config.routes.length>1000)throw fail(422,'TEST_CONFIG_LIMIT','A preview accepts up to 1,000 routes.');checkReferenceBudget(input.config.routes);}
       if (input.messageId && input.raw) throw fail(422, 'INVALID_TEST', 'Supply messageId or raw, not both.', 'raw');
