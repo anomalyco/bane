@@ -34,6 +34,7 @@
     "@modelcontextprotocol/server": "2.4.0",
     "@smithy/fetch-http-handler": "^5.8.0",
     "acorn": "^8",
+    "devalue": "6.0.3",
     "drizzle-orm": "^0.45.2",
     "hono": "4.13.17",
     "oauth4webapi": "^3.8.8",

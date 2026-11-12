@@ -151,11 +151,13 @@ def real_services():
             ACCOUNT_CLIENT_ID='fixture',
             ACCOUNT_CLIENT_PRIVATE_KEY='fixture',
         )
+        sql("CREATE ROLE bane_mailgw_listen LOGIN CONNECTION LIMIT 2; GRANT CONNECT ON DATABASE fixture TO bane_mailgw_listen")
         run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)
+        assert sql("SELECT rolconnlimit FROM pg_roles WHERE rolname='bane_mailgw_listen'") == "4"
         prk = hmac.digest(bytes(32), secret.encode(), "sha256")
         pepper = hmac.digest(prk, b"bane:protocol-password:v1\x01", "sha256")
         digest = hmac.new(pepper, PASS.encode(), "sha256").hexdigest()
-        sql(f"""CREATE EXTENSION pg_stat_statements; CREATE ROLE fixture_observer SUPERUSER LOGIN; CREATE ROLE fixture_listener LOGIN; GRANT CONNECT ON DATABASE fixture TO fixture_listener;
+        sql(f"""CREATE EXTENSION pg_stat_statements; CREATE ROLE fixture_observer SUPERUSER LOGIN;
         INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES('fixture','default','fixture','example.invalid','us-east-1','active','store');
         INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES('default','us-east-1','mailgw','fixture');
         INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES('mbx_fixture','default','fixture','{USER}','inbox','forever');
@@ -201,7 +203,7 @@ def real_services():
         REAL.update(
             MAILGW_API_TOKEN=key,
             MAILGW_API_URL=url,
-            DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
+            DATABASE_URL=db.replace("postgres@", "bane_mailgw_listen@"),
             MAILGW_HEALTH_PORT="0",
         )
         def acceptance():
@@ -776,22 +778,36 @@ set certificate_file="{tmp / "cert.pem"}"
             assert ok(c.search(None, "SUBJECT", subject))[0]
 
 
-def memory(tmp):
+def memory(tmp, *, aged=False):
     with (
         gateway(tmp, MAILGW_LOGIN_LIMIT="300", MAILGW_TENANT_SESSIONS="300") as (p, pid),
         contextlib.ExitStack() as stack,
     ):
         rss = lambda: int(run(["ps", "-o", "rss=", "-p", str(pid)]).strip())
         base = 0
-        for i in range(272):
+        clients = []
+        for i in range(200 if aged else 272):
             time.sleep(.11) # stay inside the production per-IP accept budget
             c = connect(p["IMAPS"])
             stack.callback(c.shutdown)
             ok(c.select("INBOX"))
             c.send(b"i IDLE\r\n")
             assert c.readline().startswith(b"+")
+            if aged:
+                clients.append(c)
             if i == 15:
                 base = rss()
+        if aged:
+            time.sleep(245)  # Real wall time: cross both heartbeat and snapshot TTL.
+            for c in clients:
+                c.send(b"DONE\r\n")
+            for c in clients:
+                line = c.readline()
+                while line == b"* OK Still here\r\n":
+                    line = c.readline()
+                assert line == b"i OK IDLE ended\r\n", line
+            print(f"{len(clients)}/200 tagged DONE replies after 245 s", flush=True)
+            return
         final = rss()
         print(
             f"IDLE measured {(final - base) / 256:.1f} KiB/connection (process RSS {base} -> {final} KiB, 16 -> 272 TLS IDLE sockets; excludes kernel)",
@@ -1090,6 +1106,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest_scripts(tmp)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
+                *([('aged IDLE',lambda:memory(tmp, aged=True))] if REAL and 'aged IDLE' in sys.argv else []),
                 *([('account shares',lambda:account_fairness(tmp)),('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:

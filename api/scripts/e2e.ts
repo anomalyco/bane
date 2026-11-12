@@ -618,6 +618,7 @@ async function webhook() {
   check(edited.description === subject && edited.headers?.[0]?.name === 'Authorization', 'webhook edit not persisted or dropped its custom header');
   check(hasId(await api('listWebhooks', { query: { limit: 100 } }), item.id), 'webhook not listed');
   const before = await api('revealWebhookSecret', { path });
+  check(item.secret.startsWith('whsec_') && item.secret === before.secret && !('secret' in created), 'createWebhook did not return the signing secret once');
   const after = await api('rotateWebhookSecret', { path });
   check(after.secret.startsWith('whsec_') && before.secret !== after.secret, 'test endpoint signing secret did not rotate');
   const test = await api('testWebhook', { path });
@@ -927,9 +928,13 @@ async function run() {
         ]);
       })(),
     ]);
-    await step('Regional metrics for this run window', async () => {
+    await step('Regional metrics, sender score and plan usage for this run window', async () => {
       const sender = await api('getSenderScore', {});
       check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
+      // Plan & usage: pricing is information only, this run's sends are in the month, a manage key sees the received count
+      // (members and read-only keys get null), and the daily limit names its steps.
+      const usage = await api('getUsage', {});
+      check(usage.billing.enabled === false && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
       check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
     });

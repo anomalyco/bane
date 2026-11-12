@@ -75,7 +75,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   logs: { label: 'Mail records: all lists sent and received mail together (received content is untrusted)', actions: {
     all: 'listLogs', list: 'listEmails', get: 'getEmail', detail: 'getEmailDetail', content: 'getEmailContent', events: 'listEmailEvents',
   } },
-  usage: { label: 'Sending and engagement metrics', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore' } },
+  usage: { label: 'Sending and engagement metrics, plan and limits', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore', plan: 'getUsage' } },
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },
@@ -86,7 +86,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',
   } },
   webhooks: { label: 'Outbound webhooks', actions: {
-    list: 'listWebhooks', get: 'getWebhook', create: 'createWebhook', update: 'updateWebhook', delete: 'deleteWebhook', revealSecret: 'revealWebhookSecret', rotateSecret: 'rotateWebhookSecret', test: 'testWebhook', deliveries: 'listWebhookDeliveries', delivery: 'getWebhookDelivery', retry: 'retryWebhookDelivery',
+    list: 'listWebhooks', get: 'getWebhook', create: 'createWebhook', update: 'updateWebhook', delete: 'deleteWebhook', rotateSecret: 'rotateWebhookSecret', test: 'testWebhook', deliveries: 'listWebhookDeliveries', delivery: 'getWebhookDelivery', retry: 'retryWebhookDelivery',
   } },
 };
 

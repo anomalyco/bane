@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { CopyAction } from '../../components/motion'
 import { builtins, ctxFields, emailFields, endpointPayloads, type Field } from '../../../../api/src/ritual-schema'
+import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide'
 import { concepts } from '../inbound/concepts'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
@@ -163,5 +164,14 @@ export const guides: Guide[] = [
         <p>Keys are shown once when they’re made. Store them on your server, never in a browser. Revoke any of them in <Link to="/api-keys">API keys</Link>.</p>
       </Section>
     </>,
+  },
+  {
+    // The same words and code as /docs.md and /llms.txt (api/src/webhook-signature-guide.ts).
+    id: webhookSignatureGuide.id, title: webhookSignatureGuide.title, summary: webhookSignatureGuide.summary,
+    body: () => <Section title="Check the Webhook-Signature header">
+      <p>{webhookSignatureGuide.text}</p>
+      <Code label="webhook signature check">{webhookSignatureGuide.code}</Code>
+      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for inbound webhooks in <Link to="/receiving/webhooks">Receiving → Webhooks</Link>.</p>
+    </Section>,
   },
 ]

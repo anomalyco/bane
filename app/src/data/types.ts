@@ -70,7 +70,7 @@ export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'pr
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
 export interface ApiKey { revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
-export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
+export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'read_send' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }
 export interface AgentTokenSummary { id: string; grantId: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate; status?: 'active'|'expired'|'revoked'; workspaceId?: string | null; receiving?: boolean }
@@ -189,12 +189,18 @@ export interface ReceivedEmailDetail extends ReceivedEmail {
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
   sizeBytes?: number | null; rawUrl?: string | null
 }
-export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
-export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
+export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown>; /** A Test endpoint delivery, not real traffic. */ test?: boolean }
+export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null; /** The signing secret: only in the response that created the webhook. */ secret?: string }
 // An update without regionIds keeps the endpoint's saved region scope.
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
+// A dashboard session that meets these is a member: say who can do it instead of the key jargon behind the code.
+const ownersOnly = 'Only workspace owners and admins can do this. Ask one of them to do it for you, or to make you an admin.'
+export const permissionCodes = new Set(['PERMISSION_DENIED', 'ADMIN_REQUIRED', 'OWNER_REQUIRED'])
 const friendlyErrors: Record<string, (detail: string) => string> = {
+  PERMISSION_DENIED: detail => /permission|owner or admin|administration|principal/i.test(detail) ? ownersOnly : detail,
+  ADMIN_REQUIRED: () => ownersOnly,
+  OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
   TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. This usually takes a minute or two, so try again shortly.',
   HOSTED_SENDING_PAUSED: detail => `Sending is paused for this workspace while its reputation is reviewed${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
@@ -295,7 +301,7 @@ export interface BaneApi {
     deleteRoute(id: string, signal?: AbortSignal): Promise<void>
     test(input: RoutingTestInput, signal?: AbortSignal): Promise<RoutingTestResult>
   }
-  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; reveal(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
