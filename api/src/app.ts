@@ -205,13 +205,13 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
     // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
-    // date outside its range, such as year 0000, which ISO 8601 validation accepts (22007/22008). A client error, not a 500.
+    // date outside its range, such as year 0000 or a +16:00 offset, which ISO 8601 validation accepts (22007/22008/22009). A client error, not a 500.
     const refused = known || invalidJson ? undefined : databaseCodeOf(error);
-    const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008';
+    const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008' || refused === '22009';
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
       : transient ? databaseUnavailable()
       : nul ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).')
-      : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999.')
+      : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999 and an offset within ±15:59.')
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
       : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')

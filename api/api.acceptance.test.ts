@@ -6713,22 +6713,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
-  test('a NUL character or a date Postgres cannot store is a 422 in bodies, paths and queries, not a 500', async t => {
-    const key = (await keyFixture(t)).secret, nul = 'a\u0000b';
-    for (const [method, path, body] of [
-      ['POST', '/v1/lists', { name: nul }],
-      ['POST', '/v1/contacts', { email: address(), name: nul }],
-      ['POST', '/v1/contacts', { email: address(), properties: { note: nul } }],
-      ['GET', `/v1/contacts/${encodeURIComponent(nul)}`],
-      ['GET', `/v1/contacts?cursor=${encodeURIComponent(nul)}`],
-      ['GET', `/v1/inbound/messages?q=${encodeURIComponent(nul)}`],
-    ] as const) assert.match(error(await http(method, path, key, body), 422, 'VALIDATION_FAILED').message, /NUL character/, `${method} ${path}`);
-    // ISO 8601 allows year 0000; Postgres does not.
-    for (const path of ['/v1/emails?from=0000-01-01T00:00:00Z', '/v1/metrics?to=0000-01-01T00:00:00Z'])
-      assert.match(error(await http('GET', path, key), 422, 'VALIDATION_FAILED').message, /out of range/, path);
-    // Valid neighbors still answer.
-    ok(await http('GET', '/v1/emails?from=0001-01-01T00:00:00Z', key));
-  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
@@ -6885,6 +6869,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a NUL character or a date Postgres cannot store is a 422 in bodies, paths and queries, not a 500', async t => {
+    const key = (await keyFixture(t)).secret, nul = 'a\u0000b';
+    for (const [method, path, body] of [
+      ['POST', '/v1/lists', { name: nul }],
+      ['POST', '/v1/contacts', { email: address(), name: nul }],
+      ['POST', '/v1/contacts', { email: address(), properties: { note: nul } }],
+      ['GET', `/v1/contacts/${encodeURIComponent(nul)}`],
+      ['GET', `/v1/contacts?cursor=${encodeURIComponent(nul)}`],
+      ['GET', `/v1/inbound/messages?q=${encodeURIComponent(nul)}`],
+    ] as const) assert.match(error(await http(method, path, key, body), 422, 'VALIDATION_FAILED').message, /NUL character/, `${method} ${path}`);
+    // ISO 8601 allows year 0000; Postgres does not.
+    for (const path of ['/v1/emails?from=0000-01-01T00:00:00Z', '/v1/metrics?to=0000-01-01T00:00:00Z', `/v1/emails?from=${encodeURIComponent('2026-01-01T00:00:00+16:00')}`])
+      assert.match(error(await http('GET', path, key), 422, 'VALIDATION_FAILED').message, /out of range/, path);
+    // Valid neighbors still answer.
+    ok(await http('GET', '/v1/emails?from=0001-01-01T00:00:00Z', key));
+  });
   test('Hosted trusted pool: concurrent setup, signed publish, fenced send-only adoption and retention',async t=>{
     const [{nodeRuntime},{createApp},{trustedProvision},{setDomainPool},{adoptIdentities},{ensureRegionSettings},{JobDeferred},{SESv2Client},{SNSClient},{STSClient},{SESClient},{S3Client}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
