@@ -10,7 +10,8 @@ import { ImportContactsDialog } from './import'
 import { BulkSubscribeDialog } from './bulk'
 import { AudienceHeader } from './header'
 import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
-import { AddressText, PrivateAddress } from '../../components/PrivateAddress'
+import { PrivateAddress } from '../../components/PrivateAddress'
+import { AddressText } from '../../components/AddressText'
 
 // Search, consent status, list and page live in the URL (q, status, list, page), so Back from a contact, a reload or a
 // shared link shows the same contacts. Each change replaces the entry: Back leaves the page instead of undoing typing.

@@ -1,5 +1,5 @@
-import { Fragment, type ReactNode } from 'react'
-import { maskedParts, splitAddresses } from '../lib/private-address'
+import type { ReactNode } from 'react'
+import { maskedParts } from '../lib/private-address'
 
 // Renders any address by the dashboard's one rule (lib/private-address.ts): a mailbox address is masked after its first
 // two characters until hovered or focused; a domain or domain-only label renders as it is. Blurred and revealed are
@@ -17,9 +17,4 @@ export function NamedAddress({ name, address }: { name?: string | null; address:
 /** A list of addresses, each masked. */
 export function AddressList({ values }: { values: string[] }) {
   return <>{values.map((value, i) => <span key={`${i}:${value}`}>{i > 0 && ', '}<PrivateAddress value={value} /></span>)}</>
-}
-/** Free text that may hold addresses (a contact property's name or value): each address in it is masked by the same
- *  rule, the rest reads as written. */
-export function AddressText({ text }: { text: string }) {
-  return <>{splitAddresses(text).map((part, i) => part.address ? <PrivateAddress key={i} value={part.text} /> : <Fragment key={i}>{part.text}</Fragment>)}</>
 }
