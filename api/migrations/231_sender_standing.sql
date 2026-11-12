@@ -141,10 +141,20 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- The limit before any resume restore: an active operator override, nothing when exempt, else the standing's limit
+-- (first_week for a workspace the standing job has not seen yet). A resume stores restore_cap from it (src/states.ts).
+CREATE OR REPLACE FUNCTION hosted_base_cap(wid text,first_week int,second_week int,mature int) RETURNS int LANGUAGE sql STABLE AS $$
+  SELECT coalesce(CASE WHEN w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at>now() THEN w.send_cap_override END,
+    CASE WHEN NOT w.exempt_hosted_quotas THEN coalesce(s.daily_limit,first_week) END)
+  FROM workspaces w LEFT JOIN sender_standing s ON s.workspace_id=w.id WHERE w.id=wid
+$$;
 -- Admission reads the stored limit. Unchanged from 230 otherwise: the age-tier arguments are kept for the running
 -- Workers (first_week is the limit of a workspace the standing job has not seen yet); an expired operator override no
 -- longer applies; the standing adds the marketing hold, the owner's release share and a strike cap. The marketing
 -- reserve is max(100, headroom% of the limit), so a small sender always keeps 100 a day for receipts and resets.
+-- A resume's restore_cap applies to the base, operator overrides included (as in 230). A marketing hold placed by
+-- the hourly check before this shipped (provider_connections.marketing_held_at) still holds until the standing job
+-- turns it into a restrict.
 CREATE OR REPLACE FUNCTION hosted_allowance_read(wid text,incoming int,marketing int,first_week int,second_week int,mature int,headroom numeric)
 RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
  WITH policy AS MATERIALIZED (
@@ -152,12 +162,12 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
      CASE WHEN s.release_until>now() THEN s.release_percent END AS release_percent,
      CASE WHEN w.send_cap_override_expires_at IS NULL OR w.send_cap_override_expires_at>now() THEN p.send_cap_override END AS override,
      CASE WHEN NOT p.exempt_hosted_quotas AND (p.send_cap_override IS NULL OR w.send_cap_override_expires_at<=now()) THEN w.quota_sponsor END AS sponsor,
-     CASE WHEN NOT p.exempt_hosted_quotas THEN coalesce(s.daily_limit,first_week) END AS full_cap
+     hosted_base_cap(wid,first_week,second_week,mature) AS full_cap
    FROM hosted_admission_policy_read p JOIN workspaces w ON w.id=p.workspace_id LEFT JOIN sender_standing s ON s.workspace_id=p.workspace_id
    WHERE p.workspace_id=wid
  ), capped AS (
-   SELECT p.*,CASE WHEN p.override IS NULL AND p.full_cap IS NOT NULL AND p.restore_until>now() THEN p.restore_until END AS restored_until,
-     coalesce(p.override,CASE WHEN p.full_cap IS NOT NULL AND p.restore_until>now() THEN greatest(1,p.full_cap*p.restore_percent/100) ELSE p.full_cap END) AS cap FROM policy p
+   SELECT p.*,CASE WHEN p.full_cap IS NOT NULL AND p.restore_cap IS NOT NULL AND p.restore_until>now() THEN p.restore_until END AS restored_until,
+     CASE WHEN p.full_cap IS NOT NULL AND p.restore_cap IS NOT NULL AND p.restore_until>now() THEN least(p.full_cap,p.restore_cap) ELSE p.full_cap END AS cap FROM policy p
  ), siblings AS (
    SELECT wid AS id UNION ALL SELECT w.id FROM workspaces w WHERE w.id<>wid AND w.quota_sponsor=(SELECT sponsor FROM capped)
      AND (w.send_cap_override IS NULL OR w.send_cap_override_expires_at<=now()) AND NOT w.exempt_hosted_quotas
@@ -168,8 +178,9 @@ RETURNS TABLE(allowance jsonb) LANGUAGE sql STABLE AS $$
  SELECT jsonb_build_object('cap',p.cap,'marketingCap',m.cap,'used',u.used,'resetAt',u.reset,
    'nextChangeAt',least(p.restored_until,coalesce(u.first_expiry,date_trunc('hour',now(),'UTC')+interval '24 hours')),
    'pauseReason',p.pause_reason,'pendingCapOverride',p.pending_cap_override,'exemptHostedQuotas',p.exempt_hosted_quotas,
-   'nextCap',CASE WHEN p.restored_until IS NOT NULL THEN p.full_cap END,'nextCapAt',p.restored_until,
-   'marketingHeld',coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false),'step',coalesce(p.step,'ok'))
+   'nextCap',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.full_cap END,'nextCapAt',CASE WHEN p.restored_until IS NOT NULL AND p.full_cap>p.cap THEN p.restored_until END,
+   'marketingHeld',coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false) OR p.marketing_held_at IS NOT NULL,
+   'marketingHoldReason',CASE WHEN NOT coalesce((p.step IN ('restrict','pause') AND p.release_percent IS NULL) OR p.operator_hold,false) THEN p.marketing_hold_reason END,'step',coalesce(p.step,'ok'))
  FROM capped p CROSS JOIN LATERAL (SELECT CASE WHEN p.cap IS NOT NULL THEN
      (greatest(0,p.cap-CASE WHEN p.override IS NULL THEN greatest(least(100,p.cap),ceil(p.cap*headroom/100)::int) ELSE ceil(p.cap*headroom/100)::int END)
        *coalesce(p.release_percent,100)/100) END AS cap) m CROSS JOIN LATERAL (

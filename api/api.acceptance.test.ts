@@ -4868,6 +4868,11 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
       assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
+      // A change of standing inside the same minute shows at once (it used to be served from the cache for up to 60 s).
+      const { applyChange } = await import('./src/standing.js');
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', step: 'warn' }));
+      const changed = await local('GET', '/v1/sender-score');
+      assert.deepEqual([changed.headers.get('x-bane-sender-score-cache'), changed.body.standing.step], ['miss', 'warn']);
     });
   });
 
@@ -8201,7 +8206,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const report = await runDispatcher(runtime,{region:REGION, accountId:pool}); assert.equal(report.sent,0); assert.equal(report.claimed,0);
       assert.deepEqual((await db.query('SELECT status,lease_until FROM sending_emails WHERE id=$1',[queued])).rows,[{status:'queued',lease_until:null}]);
       await runtime.db.execute(resumeHostedSending(wid,{reason:'Reviewed synthetic hold',percent:100,caps:runtime.config.hostedSendCaps})); assert.equal(await pause(),null);
-      assert.equal((await marketingHold()).marketing_held_at,null,'The resume lifts the marketing hold too.');
       await checkHostedHealth(runtime); assert.equal(await pause(),null,'Reviewed events cannot re-pause the workspace.');
       assert.equal((await standing()).step,'warn','A resume leaves the workspace at warn, its limit frozen.');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
@@ -8211,8 +8215,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES('suppressed-fixture',$1,'blocked@example.net',true)`,[wid]);
       const blocked=ok(await send({to:'blocked@example.net'}),202);
-      // The queued message plus the two transactional messages admitted during the marketing hold.
-      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,3); assert.equal(ses.mock.callCount(),4);
+      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
       assert.equal(ok(await local('GET',`/v1/emails/${blocked.id}`)).status,'suppressed');
       // Complaints stop everything at 0.3% and 5 in 24 hours.
       await event('complaint',1,5); await checkHostedHealth(runtime); assert.equal(await pause(),null);
@@ -8304,6 +8307,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // A resume of a pause whose tenant AWS really disabled holds sending until the tenant is enabled again.
       assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [true]);
       assert.match((await f.connection()).pause_reason, /resuming/);
+      // The standing treats a resuming pause as lifted: the ladder neither re-pauses it nor cancels its queued mail.
+      await checkHostedHealth(runtime);
+      assert.deepEqual([!!(await f.connection()).resume_pending_at, (await db.query('SELECT step FROM sender_standing WHERE workspace_id=$1', [f.wid])).rows[0].step], [true, 'warn']);
       await tenantStatusJob(runtime, {}, job);
       assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } });
       // Review round 2: AWS applies a disable but its response is lost. The journal says "possibly disabled" (it used to
@@ -8358,18 +8364,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await status()).marketing, 'accepted');
     });
   });
-  test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking or forgiving history', async t => {
+  test('MX review: a resume restores min(current limit, 50% of the limit before it) for 48 hours, overrides included, without stacking', async t => {
     await simulatedSesFixture(t, async ({ db, runtime, local }) => {
-      const f = await hostedHoldFixture(runtime, db, { createdDaysAgo: 15 });
+      const f = await hostedHoldFixture(runtime, db);
       const limit = async () => ok(await local('GET', '/v1/me')).connection.sendingLimit;
-      // A dirty history (1,000 accepted, 100 hard bounces) earns the first-week cap of 100.
-      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints) VALUES($1,'-infinity',date_trunc('hour',now())-interval '3 days',1000,100,0)`, [f.wid]);
-      assert.equal((await limit()).cap, 100);
+      // The score earned 1,000 a day; the resume keeps it and restores half (no restart at the calibrating 100).
+      await gradedSender(db, f.wid, 1000);
+      assert.equal((await limit()).cap, 1000);
       await f.pause(); await f.resume();
-      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [50, 100], 'The resume halves the limit and does not forgive the history (it used to grant 5,000).');
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [500, 1000]);
+      assert.deepEqual([ok(await local('GET', '/v1/sender-score')).limit.daily, ok(await local('GET', '/v1/sender-score')).limit.restore.daily], [500, 500], 'The score card shows the limit admission enforces.');
       // A finite operator override is restored at half too, and a second resume inside the window cannot raise it.
       await db.query(`UPDATE workspaces SET send_cap_override=10000 WHERE id=$1`, [f.wid]);
-      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [50, 10000]);
+      assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [500, 10000]);
       await db.query(`UPDATE provider_connections SET restore_until=now()-interval '1 second' WHERE id=$1`, [f.wid]);
       assert.equal((await limit()).cap, 10000);
       await f.pause(); await f.resume();
@@ -8379,7 +8386,26 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await f.pause(); await f.resume(100);
       assert.deepEqual([(await limit()).cap, (await limit()).nextCap], [10000, null], 'The explicit 100% restore is the opt-out.');
       const audits = (await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='resume-hosted-sending' ORDER BY at`, [f.wid])).rows.map(r => [r.details.restorePercent, r.details.limitBefore, r.details.restoreCap]);
-      assert.deepEqual(audits, [[50, 100, 50], [50, 10000, 5000], [50, 10000, 5000], [100, 10000, null]]);
+      assert.deepEqual(audits, [[50, 1000, 500], [50, 10000, 5000], [50, 10000, 5000], [100, 10000, null]]);
+    });
+  });
+  test('MX review: a marketing hold from before the standing becomes a restrict on the next standing run', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js');
+      const f = await hostedHoldFixture(runtime, db);
+      await gradedSender(db, f.wid, 1000);
+      const legacy = 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.';
+      await db.query(`UPDATE provider_connections SET marketing_held_at=now(),marketing_hold_reason=$2 WHERE id=$1`, [f.wid, legacy]);
+      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: 'Fixture', text: 'Fixture', kind });
+      assert.equal(error(await send('marketing'), 409, 'MARKETING_HELD').message, `${legacy} Remove the addresses that bounced; Bane reviews the hold.`);
+      ok(await send('transactional'), 202);
+      await checkHostedHealth(runtime);
+      const standing = (await db.query('SELECT step,reasons FROM sender_standing WHERE workspace_id=$1', [f.wid])).rows[0];
+      assert.deepEqual([standing.step, standing.reasons.map((r: Json) => r.code)], ['restrict', ['MARKETING_HELD']]);
+      assert.equal((await db.query('SELECT marketing_held_at FROM provider_connections WHERE id=$1', [f.wid])).rows[0].marketing_held_at, null, 'The ladder holds marketing now.');
+      assert.match(error(await send('marketing'), 409, 'MARKETING_HELD').message, /sending standing is restricted/);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).connection.standing, { step: 'restrict', marketingHeld: true });
+      ok(await send('transactional'), 202);
     });
   });
   test('MX: an exempt (first-party) workspace crosses every pause line and keeps sending transactional and marketing; operators are warned and only an operator pauses it', async t => {
@@ -9154,13 +9180,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('PUT', `${base}/limit`, { daily: 25000, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), reason: 'Approved migration volume' }));
       assert.equal(ok(await local('GET', '/v1/me')).connection.sendingLimit.cap, 25000);
       ok(await local('PUT', `${base}/limit`, { daily: null, reason: 'Back to the score limit' }));
-      // One evidence stream and one audit log.
+      // One evidence stream and one audit log, in ISO time, paged by a cursor that never skips rows sharing a timestamp.
+      await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) SELECT 'stev_tie'||n,$1,1000+n,now()-interval '1 minute','limit','warn','warn','{"kind":"system"}' FROM generate_series(1,3) n`, [wid]);
       const timeline = ok(await local('GET', `${base}/timeline`)).data;
+      assert.ok(timeline.every((e: Json) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(e.at)));
+      const paged: Json[] = [];
+      for (let cursor = '', pages = 0; pages < 100; pages++) {
+        const page = ok(await local('GET', `${base}/timeline?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+        paged.push(...page.data); if (!page.nextCursor) break; cursor = page.nextCursor;
+      }
+      assert.deepEqual(paged, timeline, 'Every row once, in order, across page boundaries inside a shared timestamp.');
+      assert.equal(timeline.filter((e: Json) => e.at === timeline.find((x: Json) => x.detail?.sequence === 1001)?.at && e.kind === 'limit').length, 3);
+      error(await local('GET', `${base}/timeline?cursor=yesterday`), 422);
       assert.ok(timeline.some((e: Json) => e.title === 'ok → pause' && e.detail.actor.kind === 'operator'));
       assert.ok(timeline.some((e: Json) => e.kind === 'audit' && e.title === 'operator-set-limit' && e.detail.reason === 'Approved migration volume'));
       assert.ok(!JSON.stringify(timeline).includes(AUTH_EMAIL), 'No addresses on the timeline.');
-      assert.deepEqual(ok(await local('GET', `/v1/operator/actions?workspaceId=${wid}`)).data.map((a: Json) => a.action).sort(),
-        ['operator-hold-marketing', 'operator-pause', 'operator-release-marketing', 'operator-resume', 'operator-set-limit', 'operator-set-limit'].sort());
+      const actions = ok(await local('GET', `/v1/operator/actions?workspaceId=${wid}`));
+      assert.deepEqual([actions.data.map((a: Json) => a.action).sort(), actions.nextCursor],
+        [['operator-hold-marketing', 'operator-pause', 'operator-release-marketing', 'operator-resume', 'operator-set-limit', 'operator-set-limit'].sort(), null]);
+      const first = ok(await local('GET', `/v1/operator/actions?workspaceId=${wid}&limit=4`)), rest = ok(await local('GET', `/v1/operator/actions?workspaceId=${wid}&cursor=${encodeURIComponent(first.nextCursor)}`));
+      assert.deepEqual([...first.data, ...rest.data], actions.data);
+      // Every event type can be chosen at once, account.standing.changed included.
+      const { eventTypes } = await import('./src/db/operations.js');
+      assert.deepEqual(ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/every-event', eventTypes: [...eventTypes] }), 201).eventTypes.length, eventTypes.length);
       // Customers get each step change on account.standing.changed, without operator identity or reason.
       const published = (await db.query(`SELECT payload->'event'->'data' AS d FROM jobs WHERE workspace_id=$1 AND type='operation.publish' AND payload->'event'->>'type'='account.standing.changed'`, [wid])).rows
         .map(r => r.d).sort((a: Json, b: Json) => a.sequence - b.sequence);
@@ -9205,7 +9247,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.match(error(await release(), 409, 'STANDING_REVIEW_REQUIRED').message, /needs a review/);
       await db.query(`UPDATE sender_standing SET pause_kind='bounce' WHERE workspace_id=$1`, [wid]);
       const resumed = ok(await release());
-      assert.deepEqual([resumed.standing.step, resumed.standing.marketingHeld, resumed.limit.restore.percent, resumed.limit.daily], ['warn', true, 50, 1000]);
+      assert.deepEqual([resumed.standing.step, resumed.standing.marketingHeld, resumed.limit.restore.daily, resumed.limit.daily], ['warn', true, 1000, 1000]);
       const me = ok(await local('GET', '/v1/me')).connection;
       assert.deepEqual([me.sendingPause, me.standing.marketingHeld], [null, true]);
       assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${wid}`])).rows[0].status, 'pending', 'The resume re-enables the SES tenants.');
