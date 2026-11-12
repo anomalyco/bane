@@ -115,9 +115,12 @@ export function registerSesRegions(app: App) {
     const value = access(c, true, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');
     const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before configuring Auto Validation.', 'region');
-    await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
-    // The change is in SES, not in a database row: the audit row follows it.
-    await recordAudit(c.env.db, c, { action: 'region.auto_validation', workspaceId: value.workspaceId, target: { type: 'region', id: region }, after: { stream: input.stream, mode: input.mode } });
+    // The change is in SES, not in a database row. Fail closed: the audit row is written first and committed only once SES
+    // accepted the change, so a change without its row needs a lost commit (the client then sees 500 and retries).
+    await c.env.db.transaction(async tx => {
+      await recordAudit(tx, c, { action: 'region.auto_validation', workspaceId: value.workspaceId, target: { type: 'region', id: region }, after: { stream: input.stream, mode: input.mode } });
+      await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
+    });
     const [row] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
     if (row?.report) {
       const report = SesDiscoverySchema.parse(row.report);

@@ -908,9 +908,12 @@ export function registerOperations(app: App) {
       }); a.wakeJobs=1; return c.json(report,200);
     }
     const client = await getSes(c.env, row.region);
-    await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
-    // The change is in SES, not in a database row: the audit row follows it.
-    await recordAudit(c.env.db, c, mailFromAudit);
+    // The change is in SES, not in a database row. Fail closed: the audit row is written first and committed only once SES
+    // accepted the change, so a change without its row needs a lost commit (the client then sees 500 and retries).
+    await c.env.db.transaction(async tx => {
+      await recordAudit(tx, c, mailFromAudit);
+      await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    });
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,

@@ -3613,14 +3613,20 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // The support platform's server verifies an emailed request and mints a grant for that one user.
       const service = bearer(platformToken);
-      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: { kind: 'dmarc', result: 'pass', aligned: true }, ticketRef: 'T-1' }));
+      const dmarc = { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<support-1@example.com>' };
+      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
       assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
       assert.deepEqual(ok(await send('POST', '/v1/operator/support/verify-email', service, { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'fail', aligned: true } }), 422);
+      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
+      // Evidence the platform could not have: a DMARC pass without the verified message, a magic link opened in the future.
+      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
+      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
       const mint = (body: Json) => send('POST', '/v1/operator/support/grants', service, { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
       assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
-      assert.equal(grant.contentShared, true); assert.ok(grant.workspaceIds.includes(wid));
+      assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
+      error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
+      assert.equal(ok(await send('GET', `/v1/operator/support/handoffs/${handoff.id}`, service)).grantId, grant.id);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
       error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
       const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
@@ -3658,6 +3664,9 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.view' AND actor_id = $1 AND workspace_id = $2 AND NOT internal`, [grant.id, wid])).rows[0].n, 1);
       const seen = ok(await local('GET', '/v1/activity?actorType=support')).data;
       assert.deepEqual(seen.map((e: Json) => [e.action, e.actor.id]).sort(), [['support.view', grant.id], ['support.view', plain.id]].sort());
+      // Owners see whose request let support in, and which ticket.
+      const view = seen.find((e: Json) => e.actor.id === grant.id);
+      assert.deepEqual([view.subject, view.summary.ticket, view.summary.handoff, view.summary.contentShared], [{ userId: manager!.userId, email: manager!.email }, 'T-1', handoff.id, true]);
       // Rate limit, revocation and expiry.
       await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
       error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
@@ -3672,6 +3681,45 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await send('GET', `/v1/support/emails/${emailId}`, bearer(theirs.token)), 404);
       assert.deepEqual((await db.query(`SELECT action FROM audit_events WHERE user_id = $1 AND actor_type = 'operator' AND action LIKE 'support.%' ORDER BY id`, [manager!.userId])).rows.map(r => r.action),
         ['support.verify_email', 'support.grant', 'support.grant', 'support.grant', 'support.grant_revoke', 'support.grant']);
+
+      // Review M1: sharing content from one workspace never opens another. The owner of this workspace is a plain
+      // member of Beta and contacts support from Beta, ticking "share message content".
+      const beta = unique('beta-ws'), betaEmail = unique('email');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [beta]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), beta, manager!.userId]);
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
+        VALUES ($1, $2, $3, 'fixture', 'beta@example.com', '["someone@example.org"]', '[]', '[]', 'Beta receipt', 'delivered', $4, true)`,
+        [betaEmail, beta, REGION, JSON.stringify({ from: 'beta@example.com', to: ['someone@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Beta receipt', text: 'beta body words', attachments: [], tracking: false })]);
+      const fromBeta = async () => ok(await local('POST', '/v1/contact-support', { shareContent: true }, 'live', { 'x-bane-workspace': beta }), 201);
+      const betaHandoff = await fromBeta(), wider = await fromBeta();
+      const betaGrant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-5', verification: 'handoff', handoffId: betaHandoff.id }), 201); secrets.add(betaGrant.token);
+      assert.deepEqual([betaGrant.workspaceIds, betaGrant.contentWorkspaceId], [[beta], beta]);
+      error(await send('GET', `/v1/support/emails/${emailId}`, bearer(betaGrant.token)), 404, 'NOT_FOUND');
+      // Asked to cover both workspaces, the grant still reads bodies only where the customer opted in.
+      const both = ok(await mint({ userId: manager!.userId, ticketRef: 'T-6', verification: 'handoff', handoffId: wider.id, workspaceIds: [wid, beta] }), 201); secrets.add(both.token);
+      assert.deepEqual([both.workspaceIds.sort(), both.contentWorkspaceId], [[wid, beta].sort(), beta]);
+      assert.equal(ok(await send('GET', `/v1/support/emails/${betaEmail}`, bearer(both.token))).content.text, 'beta body words');
+      assert.equal(ok(await send('GET', `/v1/support/emails/${emailId}`, bearer(both.token))).content, null, 'No content from a workspace the customer did not opt in from.');
+      assert.equal(ok(await send('GET', '/v1/support/context', bearer(both.token))).grant.contentWorkspaceId, beta);
+      // A handoff opens one grant, within 30 minutes.
+      const late = await fromBeta();
+      await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
+      error(await mint({ userId: manager!.userId, ticketRef: 'T-7', verification: 'handoff', handoffId: late.id }), 404);
+
+      // Rotation: the previous platform token works until it is removed, and the trail names which one acted.
+      const nextToken = `bane_ops_${hex()}`; secrets.add(nextToken);
+      Object.assign(runtime.config.support!, { platformToken: nextToken, previousPlatformToken: platformToken });
+      ok(await send('GET', '/v1/operator/support/grants?ticketRef=T-5', service));
+      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, bearer(nextToken)));
+      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, service));
+      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE action = 'audit.read' AND actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id),
+        ['service:support-platform:current', 'service:support-platform:previous']);
+      Object.assign(runtime.config.support!, { previousPlatformToken: undefined });
+      error(await send('GET', '/v1/operator/support/grants', service), 403, 'OPERATOR_REQUIRED');
+
+      // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
+      await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
+      assert.equal((await db.query(`SELECT FROM audit_events WHERE action = 'operator.set_operator' AND user_id IS NULL AND workspace_id IS NULL`)).rowCount, 0);
     });
   });
 
@@ -4217,7 +4265,15 @@ describe('DB region catalog and explicit SES setup', () => {
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, reader), 403);
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, scoped), 403);
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: false }, admin), 422);
+        // The change lives in SES, so its audit row is written first: when the row cannot be written, SES is not touched.
+        await db.query(`CREATE FUNCTION audit_refused_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit refused'; END $$`);
+        await db.query(`CREATE TRIGGER audit_refused_fixture BEFORE INSERT ON audit_events FOR EACH ROW WHEN (NEW.action = 'region.auto_validation') EXECUTE FUNCTION audit_refused_fixture()`);
+        const writesBefore = writes().length;
+        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, admin), 500);
+        assert.equal(writes().length, writesBefore, 'No SES change without its audit row.');
+        await db.query('DROP TRIGGER audit_refused_fixture ON audit_events'); await db.query('DROP FUNCTION audit_refused_fixture()');
         assert.deepEqual(ok(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, admin)), { stream: 'transactional', mode: 'high' });
+        assert.equal((await db.query(`SELECT FROM audit_events WHERE workspace_id = $1 AND action = 'region.auto_validation'`, [runtime.config.workspaceId])).rowCount, 1);
         assert.equal(sets.get(expectedSets[0]!)!.SuppressionOptions.ValidationOptions.ConditionThreshold.OverallConfidenceThreshold.ConfidenceVerdictThreshold, 'HIGH');
         // A foreign destination must survive retries, while managed resources and
         // pending subscriptions remain singleton resources rather than duplicates.

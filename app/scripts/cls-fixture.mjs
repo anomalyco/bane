@@ -244,7 +244,7 @@ export async function seed(fx) {
   if ((await db.query("SELECT to_regclass('audit_events') IS NOT NULL AS ok")).rows[0].ok) await db.query(`INSERT INTO audit_events
     (workspace_id,user_id,actor_type,actor_id,actor_label,via,action,target_type,target_id,summary,reason,request_id,ip_network,user_agent,internal,at,retain_until) VALUES
     ('ws_northwind','user_sam','member','user_sam',NULL,'dashboard','member.join','member','user_sam','{"after":{"role":"admin"}}',NULL,'req_fixture_join','198.51.100.0/24','Safari 18 on macOS',false,now()-interval '6 days',now()+interval '1 year'),
-    ('ws_northwind',NULL,'support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{}','Asked why a domain shows pending.','req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
+    ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The signed-out homepage's figures, as the minute job publishes them.
   const hourly = Array.from({ length: 24 }, (_, i) => 1200 + (i * 7919) % 900);

@@ -5073,7 +5073,7 @@ export const listActivity = <ThrowOnError extends boolean = false>(options?: Opt
 });
 
 /**
- * Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, and only for this request. Any member may contact support.
+ * Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, only in this workspace and only for this request (one grant, within 30 minutes). Any member may contact support.
  */
 export const contactSupport = <ThrowOnError extends boolean = false>(options: Options<ContactSupportData, ThrowOnError>): RequestResult<ContactSupportResponses, ContactSupportErrors, ThrowOnError> => (options.client ?? client).post<ContactSupportResponses, ContactSupportErrors, ThrowOnError>({
     security: [{

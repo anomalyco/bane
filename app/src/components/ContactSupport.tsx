@@ -7,7 +7,8 @@ import { Button, Checkbox, CopyButton, Dialog, Field, Textarea } from './ui'
 
 const MAX = 2000
 // Hosted only: from the workspace menu and Settings → Account. Sends the page and the last failed request IDs with the
-// optional message; message content is shared with support only when the person turns it on, and only for this request.
+// optional message; message content is shared with support only when the person turns it on, only in this workspace and
+// only for this request (one grant, opened within 30 minutes).
 export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
   const [message, setMessage] = useState('')
   const [shareContent, setShareContent] = useState(false)
@@ -39,7 +40,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
       </Field>
       <div className="contact-support__share">
         <Checkbox label="Share message content with support for this request" checked={shareContent} onCheckedChange={setShareContent} disabled={contact.isPending} aria-describedby="contact-support-share-hint" />
-        <div id="contact-support-share-hint" className="ui-field__hint">Support can read email bodies only if this is on, and only for this request.</div>
+        <div id="contact-support-share-hint" className="ui-field__hint">Support can read email bodies only if this is on, only in this workspace, and only for this request.</div>
       </div>
     </form>
   </Dialog>

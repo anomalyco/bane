@@ -9,6 +9,8 @@ export type AuditEntry = {
   actor: { type: AuditActorType; id: string | null; label: string | null; email: string | null }
   via: string
   target: { type: string; id: string | null } | null
+  /** The member the event concerns when it is not the actor: whose role changed, or whose support request let Bane support in. */
+  subject: { userId: string; email: string | null } | null
   summary: Record<string, unknown>
   reason: string | null
   requestId: string | null

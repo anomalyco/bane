@@ -13145,6 +13145,28 @@
             ],
             "description": "The object acted on."
           },
+          "subject": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "userId": {
+                "type": "string"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "userId",
+              "email"
+            ],
+            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in."
+          },
           "summary": {
             "type": "object",
             "additionalProperties": {},
@@ -13185,6 +13207,7 @@
           "actor",
           "via",
           "target",
+          "subject",
           "summary",
           "reason",
           "requestId",
@@ -13215,7 +13238,7 @@
           },
           "expiresAt": {
             "type": "string",
-            "description": "Until when support can use this handoff to open read access."
+            "description": "Until when support can use this handoff to open read access (30 minutes, once)."
           },
           "shareContent": {
             "type": "boolean"
@@ -13247,13 +13270,21 @@
               "contentShared": {
                 "type": "boolean",
                 "description": "Whether this request may read email bodies (the customer opted in)."
+              },
+              "contentWorkspaceId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The one workspace whose email bodies this request may read, or null."
               }
             },
             "required": [
               "id",
               "ticketRef",
               "expiresAt",
-              "contentShared"
+              "contentShared",
+              "contentWorkspaceId"
             ]
           },
           "user": {
@@ -13799,7 +13830,7 @@
                   "text",
                   "html"
                 ],
-                "description": "The body, only when the customer shared message content with this request; otherwise null."
+                "description": "The body, only when the customer shared message content with this request and the email is in that workspace (grant.contentWorkspaceId); otherwise null."
               }
             },
             "required": [
@@ -57062,7 +57093,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, and only for this request. Any member may contact support.",
+        "description": "Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, only in this workspace and only for this request (one grant, within 30 minutes). Any member may contact support.",
         "requestBody": {
           "required": true,
           "content": {
@@ -57098,7 +57129,7 @@
                   "shareContent": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Let support read message content (email bodies) for this request only."
+                    "description": "Let support read message content (email bodies) in this workspace, for this request only."
                   },
                   "message": {
                     "type": "string",

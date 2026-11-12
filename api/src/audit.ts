@@ -113,7 +113,8 @@ export function auditInsert(context: AuditContext, event: AuditEvent, options: {
 }
 /**
  * Writes one audit row inside the caller's transaction (pass the transaction, not the pool). For a change that is a
- * single statement, compose auditInsert() into it instead, which costs no extra round trip.
+ * single statement, compose auditInsert() into it instead, which costs no extra round trip. A change made outside the
+ * database (an SES call) writes its row first in a transaction held across the call, so it fails closed.
  */
 export async function recordAudit(db: DbExecutor, context: AuditContext | Ctx, event: AuditEvent): Promise<void> {
   await db.execute(auditInsert('actor' in context && 'requestId' in context ? context : auditContext(context as Ctx), event));
@@ -216,6 +217,7 @@ export const AuditEntry = z.object({
   }),
   via: z.string().describe('Where the action came from: dashboard, api, mcp, support, job, webhook.'),
   target: z.object({ type: z.string(), id: z.string().nullable() }).nullable().describe('The object acted on.'),
+  subject: z.object({ userId: z.string(), email: z.string().nullable() }).nullable().describe('The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in.'),
   summary: z.record(z.string(), z.unknown()).describe('Before and after, with secrets and message content removed.'),
   reason: z.string().nullable(),
   requestId: z.string().nullable().describe('The x-request-id of the API request that made the change.'),
@@ -256,12 +258,15 @@ function filterSql(f: Filters, columns: { at: SQL; uid: SQL; action: SQL; actorT
   ], sql` AND `);
 }
 const entrySelect = sql`'aud_' || e.id AS uid, e.at::text AS at_text, e.action, e.actor_type, e.actor_id, e.actor_label, e.via, e.target_type, e.target_id, e.summary, e.reason,
-  e.request_id, e.ip_network, e.user_agent, CASE WHEN e.actor_type = 'member' THEN ${userEmail(sql`e.actor_id`)} END AS actor_email`;
+  e.request_id, e.ip_network, e.user_agent, CASE WHEN e.actor_type = 'member' THEN ${userEmail(sql`e.actor_id`)} END AS actor_email,
+  CASE WHEN e.user_id IS DISTINCT FROM e.actor_id OR e.actor_type <> 'member' THEN e.user_id END AS subject_id,
+  CASE WHEN e.user_id IS DISTINCT FROM e.actor_id OR e.actor_type <> 'member' THEN ${userEmail(sql`e.user_id`)} END AS subject_email`;
 type Row = { uid: string; at_text: string; action: string; actor_type: Entry['actor']['type']; actor_id: string | null; actor_label: string | null; via: string; target_type: string | null;
-  target_id: string | null; summary: Record<string, unknown> | null; reason: string | null; request_id: string | null; ip_network: string | null; user_agent: string | null; actor_email: string | null };
+  target_id: string | null; summary: Record<string, unknown> | null; reason: string | null; request_id: string | null; ip_network: string | null; user_agent: string | null; actor_email: string | null;
+  subject_id: string | null; subject_email: string | null };
 function entries(rows: Row[], limit: number): { data: Entry[]; nextCursor: string | null } {
   const data = rows.slice(0, limit).map((r): Entry => ({ id: r.uid, at: new Date(r.at_text).toISOString(), action: r.action, actor: { type: r.actor_type, id: r.actor_id, label: r.actor_label, email: r.actor_email },
-    via: r.via, target: r.target_type ? { type: r.target_type, id: r.target_id } : null, summary: r.summary ?? {}, reason: r.reason, requestId: r.request_id, network: r.ip_network, client: r.user_agent }));
+    via: r.via, target: r.target_type ? { type: r.target_type, id: r.target_id } : null, subject: r.subject_id ? { userId: r.subject_id, email: r.subject_email } : null, summary: r.summary ?? {}, reason: r.reason, requestId: r.request_id, network: r.ip_network, client: r.user_agent }));
   return { data, nextCursor: rows.length > limit ? cursorOf(rows[limit - 1]!) : null };
 }
 const columns = { at: sql`e.at`, uid: sql`('aud_' || e.id)`, action: sql`e.action`, actorType: sql`e.actor_type`, actorId: sql`e.actor_id`, requestId: sql`e.request_id` };
@@ -290,7 +295,7 @@ async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { worksp
   const parts = [sql`SELECT ${entrySelect}, e.at, e.internal FROM audit_events e WHERE ${wid ? sql`e.workspace_id = ${wid}` : sql`e.user_id = ${(scope as { userId: string }).userId}`}`];
   const extra = (uid: SQL, at: SQL, action: SQL, actorType: SQL, from: SQL) => sql`SELECT ${uid} AS uid, ${at}::text AS at_text, ${action} AS action, ${actorType} AS actor_type, NULL::text AS actor_id,
     NULL::text AS actor_label, 'job' AS via, NULL::text AS target_type, NULL::text AS target_id, x.detail AS summary, NULL::text AS reason, NULL::text AS request_id, NULL::text AS ip_network,
-    NULL::text AS user_agent, NULL::text AS actor_email, ${at} AS at, true AS internal FROM ${from}`;
+    NULL::text AS user_agent, NULL::text AS actor_email, NULL::text AS subject_id, NULL::text AS subject_email, ${at} AS at, true AS internal FROM ${from}`;
   if (wid && include.includes('enforcement') && available.standing) parts.push(extra(sql`'enf_' || x.id`, sql`x.at`, sql`'standing.' || coalesce(x.kind, 'event')`, sql`coalesce(x.detail #>> '{actor,kind}', 'system')`,
     sql`(SELECT s.id::text AS id, s.at, s.kind, to_jsonb(s) - 'workspace_id' AS detail FROM standing_events s WHERE s.workspace_id = ${wid}) x`));
   if (wid && include.includes('enforcement') && available.operatorAudit) parts.push(extra(sql`'opa_' || x.id`, sql`x.at`, sql`'operator.' || replace(x.action, '-', '_')`, sql`'operator'`,

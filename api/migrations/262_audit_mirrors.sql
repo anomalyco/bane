@@ -18,7 +18,7 @@ BEGIN
   RETURN NULL;
 END $$;
 CREATE TRIGGER audit_mirror_operator AFTER INSERT ON hosted_operator_audit FOR EACH ROW
-  WHEN (NEW.workspace_id <> 'platform' OR NEW.details ? 'userId') EXECUTE FUNCTION audit_mirror_operator();
+  WHEN (NEW.workspace_id <> 'platform' OR NEW.details ->> 'userId' IS NOT NULL) EXECUTE FUNCTION audit_mirror_operator();
 
 -- The operator actions recorded before this migration, once.
 INSERT INTO audit_events(at, workspace_id, actor_type, actor_id, via, action, target_type, target_id, summary, internal, retain_until)

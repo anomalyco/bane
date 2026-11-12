@@ -52,7 +52,7 @@ export interface Config {
   /** The one Hosted workspace that may own the installation's own domain (PUBLIC_URL's host). */
   platformDomainWorkspace?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
-  support?: { platformToken?: string; url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
+  support?: { platformToken?: string; previousPlatformToken?: string; url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;
@@ -118,7 +118,7 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 /** A support grant (src/support.ts): one user, the workspaces they still belong to, read-only, for one ticket. */
-export type SupportScope = { grantId: string; userId: string; ticketRef: string; operatorId: string; shareContent: boolean; expiresAt: string;
+export type SupportScope = { grantId: string; userId: string; ticketRef: string; operatorId: string; contentWorkspaceId: string | null; expiresAt: string;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;

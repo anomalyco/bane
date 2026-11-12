@@ -29,7 +29,13 @@ function targetName(entry: AuditEntry) {
   }
   return entry.target?.id ?? null
 }
+// Support's view names the request that let it in: whose request, and the ticket.
+const ticketOf = (entry: AuditEntry) => typeof entry.summary.ticket === 'string' ? entry.summary.ticket : null
 function Target({ entry }: { entry: AuditEntry }) {
+  if (entry.action === 'support.view') {
+    const ticket = ticketOf(entry)
+    return <>{entry.subject?.email ? <>For <PrivateAddress value={entry.subject.email} /></> : 'Support request'}{ticket && <span className="muted"> · {ticket}</span>}</>
+  }
   const name = targetName(entry)
   return name ? <PrivateAddress value={name} /> : <span className="muted">—</span>
 }
@@ -90,8 +96,10 @@ function ActivityDetails({ entry, onClose }: { entry: AuditEntry | null; onClose
     {entry && <div className="stack">
       <dl className="settings-facts activity-facts">
         <div><dt>Who</dt><dd><Who actor={entry.actor} /></dd></div>
-        <div><dt>Target</dt><dd>{entry.target ? <><Target entry={entry} />{targetName(entry) !== entry.target.id && entry.target.id && <span className="muted"> · <code>{entry.target.id}</code></span>}</> : '—'}</dd></div>
+        <div><dt>Target</dt><dd>{entry.target ? <><Target entry={entry} />{entry.action !== 'support.view' && targetName(entry) !== entry.target.id && entry.target.id && <span className="muted"> · <code>{entry.target.id}</code></span>}</> : '—'}</dd></div>
         <div><dt>From</dt><dd>{fromText(entry)}</dd></div>
+        {entry.subject && <div><dt>{entry.action === 'support.view' ? 'Requested by' : 'Member'}</dt><dd>{entry.subject.email ? <PrivateAddress value={entry.subject.email} /> : <code>{entry.subject.userId}</code>}</dd></div>}
+        {entry.action === 'support.view' && ticketOf(entry) && <div><dt>Ticket</dt><dd>{ticketOf(entry)}</dd></div>}
         {entry.reason && <div className="settings-fact-wide"><dt>Reason</dt><dd>{entry.reason}</dd></div>}
         <div className="settings-fact-wide"><dt>Request ID</dt><dd>{entry.requestId ? <span className="cluster settings-inline"><code>{entry.requestId}</code><CopyButton value={entry.requestId} label="Copy request ID" /></span> : '—'}</dd></div>
       </dl>

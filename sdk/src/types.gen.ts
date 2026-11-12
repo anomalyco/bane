@@ -3776,6 +3776,13 @@ export type AuditEntry = {
         id: string | null;
     } | null;
     /**
+     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in.
+     */
+    subject: {
+        userId: string;
+        email: string | null;
+    } | null;
+    /**
      * Before and after, with secrets and message content removed.
      */
     summary: {
@@ -3810,7 +3817,7 @@ export type SupportHandoff = {
      */
     token: string | null;
     /**
-     * Until when support can use this handoff to open read access.
+     * Until when support can use this handoff to open read access (30 minutes, once).
      */
     expiresAt: string;
     shareContent: boolean;
@@ -3825,6 +3832,10 @@ export type SupportContext = {
          * Whether this request may read email bodies (the customer opted in).
          */
         contentShared: boolean;
+        /**
+         * The one workspace whose email bodies this request may read, or null.
+         */
+        contentWorkspaceId: string | null;
     };
     user: {
         id: string;
@@ -3998,7 +4009,7 @@ export type SupportEmailDetail = SupportEmail & {
         [key: string]: unknown;
     } | null;
     /**
-     * The body, only when the customer shared message content with this request; otherwise null.
+     * The body, only when the customer shared message content with this request and the email is in that workspace (grant.contentWorkspaceId); otherwise null.
      */
     content: {
         subject: string;
@@ -20340,7 +20351,7 @@ export type ContactSupportData = {
          */
         requestIds?: Array<string>;
         /**
-         * Let support read message content (email bodies) for this request only.
+         * Let support read message content (email bodies) in this workspace, for this request only.
          */
         shareContent?: boolean;
         message?: string;

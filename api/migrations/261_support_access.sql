@@ -1,7 +1,8 @@
 -- Support access (src/support.ts, api/README.md "Support integration"). Internal: customers never call these routes.
 --
 -- A handoff is what a signed-in member sends from the dashboard's "Contact support": the workspace, the user, the
--- page and recent request IDs, and whether they let support read message content for this one request.
+-- page and recent request IDs, and whether they let support read message content for this one request. It opens at
+-- most one grant (used_at, grant_id), within 30 minutes.
 CREATE TABLE support_handoffs (
   id text PRIMARY KEY CHECK (id ~ '^sho_[0-9a-f]{32}$'),
   user_id text NOT NULL,
@@ -12,13 +13,17 @@ CREATE TABLE support_handoffs (
   message text CHECK (length(message) <= 2000),
   share_content boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL CHECK (expires_at > created_at)
+  expires_at timestamptz NOT NULL CHECK (expires_at > created_at AND expires_at <= created_at + interval '30 minutes'),
+  used_at timestamptz,
+  grant_id text,
+  CHECK ((used_at IS NULL) = (grant_id IS NULL))
 );
 CREATE INDEX support_handoffs_user ON support_handoffs (user_id, created_at DESC);
 
 -- A grant is a short-lived, read-only bearer (bane_support_<64 hex>, stored as its SHA-256) that an operator mints for
 -- one ticket, bound to one user and the workspaces they belonged to then (narrowed at use to those they still belong
--- to). It reads only /v1/support/*. Message content only through the customer's own in-app opt-in (the handoff).
+-- to). It reads only /v1/support/*. Message content only through the customer's own in-app opt-in (the handoff), and
+-- only in the workspace they pressed "Contact support" in (content_workspace_id).
 CREATE TABLE support_grants (
   id text PRIMARY KEY CHECK (id ~ '^sgr_[0-9a-f]{32}$'),
   token_hash text NOT NULL UNIQUE,
@@ -27,7 +32,7 @@ CREATE TABLE support_grants (
   ticket_ref text NOT NULL CHECK (length(ticket_ref) BETWEEN 1 AND 200),
   verification text NOT NULL CHECK (verification IN ('handoff','dmarc','magic_link')),
   handoff_id text,
-  share_content boolean NOT NULL DEFAULT false,
+  content_workspace_id text,
   operator_id text NOT NULL,
   operator_via text NOT NULL CHECK (operator_via IN ('console','support')),
   reason text NOT NULL CHECK (length(reason) BETWEEN 10 AND 1000),
@@ -39,7 +44,7 @@ CREATE TABLE support_grants (
   used integer NOT NULL DEFAULT 0,
   last_used_at timestamptz,
   CHECK (expires_at > created_at AND expires_at <= created_at + interval '2 hours'),
-  CHECK (NOT share_content OR (verification = 'handoff' AND handoff_id IS NOT NULL))
+  CHECK (content_workspace_id IS NULL OR (verification = 'handoff' AND handoff_id IS NOT NULL AND content_workspace_id = ANY(workspace_ids)))
 );
 -- One active grant per ticket. An expired grant is closed (revoked_at = expires_at) before a new one is minted.
 CREATE UNIQUE INDEX support_grants_ticket ON support_grants (ticket_ref) WHERE revoked_at IS NULL;
