@@ -10310,6 +10310,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }finally{runtime.webhookFetch=transport;}
     });
   });
+  test('a resumed delivery keeps the attempts it made before its endpoint was paused',async t=>{
+    // tear/delivery witness: ingest m1 a, run K m1:W, reply K 503, pause W, run K m1:W, unpause W, run K m1:W, reply K 503.
+    await simulatedSesFixture(t,async({runtime,local,db})=>{
+      const {processJobs}=await import('./src/jobs.js'),{mailboxEventJobs}=await import('./src/mailbox-events.js');
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const wid=runtime.config.workspaceId;
+      ok(await local('POST','/v1/endpoints',{type:'webhook',name:'held',url:'https://example.com/held',retryAttempts:1}),201);
+      const hook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='held'",[wid])).rows[0].id;
+      await db.query('INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,routed,payload) VALUES($1,$2,$3,true,$4)',['mwd_held',wid,hook,{id:'mev_held',type:'message.received',messageId:'msg_held',data:{recipients:['a@example.net']}}]);
+      await db.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES('job_held','mailbox.webhook',$1,'{\"deliveryId\":\"mwd_held\"}')",[wid]);
+      const due=()=>db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid]);
+      const delivery=async()=>(await db.query("SELECT status,attempt_count FROM mailbox_webhook_deliveries WHERE id='mwd_held'")).rows[0];
+      const transport=runtime.webhookFetch;let posts=0;
+      try{
+        runtime.webhookFetch=async()=>{posts++;return {status:503};};
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await delivery(),{status:'pending',attempt_count:1});
+        // Paused before its retry: the claim parks it. Unpausing resumes it with one attempt left.
+        ok(await local('PATCH','/v1/endpoints/held',{paused:true}));await due();
+        await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.deepEqual(await delivery(),{status:'paused',attempt_count:1});
+        ok(await local('PATCH','/v1/endpoints/held',{paused:false}));
+        await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:'job_held_resume',workspaceId:wid,attempts:1});
+        assert.deepEqual((await db.query("SELECT attempts FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND status='pending'",[wid])).rows,[{attempts:1}]);
+        await due();await processJobs(runtime,mailboxEventJobs,1,1,20000,'webhooks');
+        assert.equal(posts,2);
+        assert.deepEqual(await delivery(),{status:'failed',attempt_count:2});
+      }finally{runtime.webhookFetch=transport;}
+    });
+  });
   test('operation webhooks retry past 24 hours before job and delivery fail together',async t=>{
     await simulatedSesFixture(t,async({runtime,local,db})=>{
       const {processJobs,WEBHOOK_ATTEMPTS}=await import('./src/jobs.js'),{operationJobs}=await import('./src/operations.js');

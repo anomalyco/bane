@@ -137,6 +137,8 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // Mail first stored before any ritual ran had no forward verdict: a later forward was refused.
     (1, &["ingest m1 z", "rituals forward", "ingest m1 b+z", "run K m1:F"]),
     (1, &["ingest m1 z loop", "rituals forward", "ingest m1 b+z loop", "run K m1:F"]),
+    // A delivery resumed after a pause got a fresh attempt budget (found by delivery.attempts).
+    (1, &["ingest m1 a", "run K m1:W", "reply K 503", "pause W", "run K m1:W", "unpause W", "run K m1:W", "reply K 503"]),
 ];
 
 fn model(v: &Value) -> R<Model> {

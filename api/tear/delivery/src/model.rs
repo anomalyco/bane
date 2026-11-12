@@ -298,7 +298,8 @@ impl Model {
                         let d = self.dm(&label).unwrap();
                         d.status = "pending".into();
                         d.err = None;
-                        d.job = Some(Job { status: "pending".into(), attempts: 0, expired: false });
+                        // The attempts already made still count: a pause holds retries, it does not refill them.
+                        d.job = Some(Job { status: "pending".into(), attempts: d.count, expired: false });
                         d.delay = json!(0);
                     }
                 }
