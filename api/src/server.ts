@@ -95,7 +95,7 @@ try {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
   });
   server.on('error', error => {
-    log('error', { code: 'LISTEN_FAILED', message: 'Unable to bind the API port. Check PORT and HOST.', errorType: error.name });
+    logError(error, { code: 'LISTEN_FAILED' }); // Unable to bind the API port: check PORT and HOST.
     void close().then(() => { process.exitCode = 1; });
   });
   let stopping = false;
@@ -104,6 +104,6 @@ try {
     server.close(() => { void close().then(() => process.exit(0)); });
   });
 } catch (error) {
-  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'API startup failed; check deployment configuration.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' }); // Check the deployment configuration.
   process.exitCode = 1;
 }

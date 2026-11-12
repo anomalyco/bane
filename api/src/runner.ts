@@ -67,12 +67,12 @@ try {
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
-        logError(error, { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED', message: error instanceof ApiError ? error.message : 'Job polling failed. Check database connectivity and migrations.' });
+        logError(error, { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED' }); // Job polling failed: check database connectivity and migrations.
         await setTimeout(5000);
       }
     }
   } finally { stopped=true;await hooks;await sharedSetup;await publicStats; await listener?.end(); await close(); }
 } catch (error) {
-  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;
 }

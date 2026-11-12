@@ -5368,7 +5368,8 @@ describe('Dashboard API capabilities', () => {
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Refusal reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
       const execute = runtime.db.execute.bind(runtime.db);
       let fault: unknown = null;
-      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      // Built where it is thrown, as a driver's error is: a stack shows where an error was made, and the log keeps Bane's frames.
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message, { cause: thrown.cause }); } return execute(...args); }) as typeof execute);
       const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
       for (const failure of [wrapped('58000', 'Failed to acquire a connection from the pool.'), wrapped('58000', 'Server connection attempt failed: connection_refused'), wrapped('53300', 'sorry, too many clients already'), wrapped('08006', 'connection failure'), new Error('Connection terminated unexpectedly')]) {
         const reply = await refused(failure);
@@ -7188,8 +7189,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
   // The nightly report (scripts/nightly-report.ts) counts these lines; the Worker writes them to Workers Logs.
-  test('request logs: one line per request with its route template, code, workspace and principal, and no addresses, tokens or bodies', async t => {
-    await simulatedSesFixture(t, async ({ runtime, local, request }) => {
+  test('request logs: one line per request with its route template, code, workspace and principal, and no addresses, tokens, bodies or smuggled stack text', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const lines: string[] = [];
       for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
       t.mock.method(Math, 'random', () => 0); // Keep every sampled success.
@@ -7197,8 +7198,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const forged = `bane_${'5e'.repeat(32)}`;
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Log reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
       const execute = runtime.db.execute.bind(runtime.db);
-      let fault: unknown = null;
-      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault; fault = null; throw thrown; } return execute(...args); }) as typeof execute);
+      let fault: unknown = null; // Thrown as a new Error with its message, so the stack is the API's call, as a driver's error would be.
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message); } return execute(...args); }) as typeof execute);
       const seen = async (reply: Reply, expected: Json) => {
         const requestId = reply.headers.get('x-request-id'), entries = lines.map(line => JSON.parse(line) as Json).filter(entry => entry.requestId === requestId && entry.event === 'request');
         assert.equal(entries.length, 1, `one request line for ${requestId}`);
@@ -7217,18 +7218,43 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(sent.status >= 400 && sent.status < 500, diagnostic(sent));
       await seen(sent, { route: '/v1/emails/send', method: 'POST', code: sent.body.error.code, principal: 'dashboard', workspace: wid });
       await seen(await request('GET', `/v1/no-such-route/${encodeURIComponent(email)}`, reader.secret), { route: 'unmatched', status: 404, code: 'NOT_FOUND' });
-      // An unexpected failure: the request line plus one error line with the stack, never the error's own message.
-      fault = new Error(`insert failed for ${email} using ${forged}: ${body}`);
+      // An unexpected failure: the request line plus one error line with Bane's own stack frames, never the message. A
+      // message can span lines that look like frames, even like a frame in the Worker bundle (PR #131 review).
+      const errorLine = (reply: Reply) => lines.map(line => JSON.parse(line) as Json).find(entry => entry.requestId === reply.headers.get('x-request-id') && entry.event !== 'request');
+      const ownFrames = (stack: string) => stack.split('\n').every(frame => /^[\w$.<>[\]]+(?: \[as [\w$]+\])? \((?:worker\.js|(?:src|dist)\/[\w./-]+\.(?:ts|js)):\d+:\d+\)$/.test(frame));
+      fault = new Error(`insert failed for ${email} using ${forged}: ${body}\n    at injectedframe (worker.js:1:1)\n    at https://example.invalid/?code=oauth-private-code ip=192.0.2.13`);
       const broken = await request('GET', '/v1/emails', reader.secret);
       await seen(broken, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR', level: 'error' });
-      const failure = lines.map(line => JSON.parse(line) as Json).find(entry => entry.requestId === broken.headers.get('x-request-id') && entry.event !== 'request');
-      assert.ok(failure?.stack && failure.errorType === 'Error' && failure.code === 'INTERNAL_ERROR' && failure.route === '/v1/emails', JSON.stringify(failure));
+      const failure = errorLine(broken);
+      assert.ok(failure?.stack && failure.errorType === 'Error' && failure.code === 'INTERNAL_ERROR' && failure.route === '/v1/emails' && failure.message === undefined, JSON.stringify(failure));
+      assert.ok(ownFrames(failure.stack) && /\(src\/[\w./-]+\.ts:\d+:\d+\)/.test(failure.stack), failure.stack);
+      // Unsupported keys are caller text: the line names no field rather than the key (an IP address, a code).
+      const unsupported = await local('POST', '/v1/contacts', { email: address(), pr131_OAuthCode_123: 1, '192.0.2.131': 1 });
+      await seen(unsupported, { route: '/v1/contacts', status: 422, code: 'VALIDATION_FAILED', field: undefined });
+      await seen(await local('POST', '/v1/contacts', { email: address(), name: 7 }), { route: '/v1/contacts', status: 422, field: 'name' });
+      // A request the first middlewares refuse is still one line.
+      await seen(await local('GET', '/v1/emails', undefined, 'test'), { route: '/v1/emails', status: 400, code: 'ENVIRONMENT_REMOVED' });
+      // MCP is an app.all handler that authenticates itself and answers natively.
+      const rpc = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'log-fixture', version: '1' } } };
+      const mcpHeaders = { accept: 'application/json, text/event-stream' };
+      await seen(await request('POST', '/mcp', undefined, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED', principal: 'anonymous' });
+      await seen(await request('POST', '/mcp', forged, rpc, mcpHeaders), { route: '/mcp', status: 401, code: 'MCP_AUTH_REQUIRED' });
+      await seen(await request('POST', '/mcp', undefined, rpc, { ...mcpHeaders, origin: 'https://elsewhere.example' }), { route: '/mcp', status: 403, code: 'ORIGIN_NOT_ALLOWED' });
       // A caller that does pass caller data still cannot log an address or a credential.
       const { log } = await import('./src/core.js');
       log('warn', { code: 'LOG_SCRUB_FIXTURE', note: `to ${email} with ${forged}` });
       assert.match(lines.at(-1)!, /"note":"to \[email\] with \[redacted\]"/);
-      const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('=')].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
-      assert.deepEqual(leaked, [], 'no address, body, token or session cookie reaches a log line');
+      // The review's real case: PostgreSQL refuses a NUL byte (SQLSTATE 22021), and the driver's message quotes the
+      // parameters, so the request's own lines come first in error.stack. Last, behind a savepoint: it aborts the statement.
+      await db.query('SAVEPOINT log_privacy');
+      const nul = await local('POST', '/v1/contacts', { email: address(), name: 'Person\u0000\n    at pr131-confidential-subject Authorization: Bearer short-secret\n    at https://example.invalid/?code=oauth-private-code&email=customer%40private.invalid ip=192.0.2.13' });
+      await db.query('ROLLBACK TO SAVEPOINT log_privacy');
+      await seen(nul, { route: '/v1/contacts', status: 500, code: 'INTERNAL_ERROR', databaseCode: '22021', principal: 'dashboard', workspace: wid });
+      const refused = errorLine(nul);
+      assert.ok(refused?.databaseCode === '22021' && (refused.stack === undefined || ownFrames(refused.stack)), JSON.stringify(refused));
+      const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('='), 'injectedframe', 'pr131-confidential-subject',
+        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
+      assert.deepEqual(leaked, [], 'no address, body, token, session cookie or text a request smuggled into an error reaches a log line');
     });
   });
 

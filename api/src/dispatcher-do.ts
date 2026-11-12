@@ -118,9 +118,9 @@ export class DispatcherShard extends DurableObject<Env> {
       }
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
-      if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED', errorType: error instanceof Error ? error.name : typeof error }));
+      if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
       else {
-      deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), message: error instanceof deps.ApiError ? error.message : 'Dispatcher run failed; retrying.' }); }
+      deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity) }); }
       await this.closePool();
       await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
     } finally {

@@ -7,7 +7,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
@@ -1163,7 +1163,7 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
-    try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', errorType: error instanceof Error ? error.name : 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 7).join('\n') : undefined }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { logError(error, { code: 'SNS_CERTIFICATE_FETCH_FAILED' }, 'warn'); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
     if (!res.ok) {
       await res.body?.cancel();
       if(res.status===404 || res.status===410){

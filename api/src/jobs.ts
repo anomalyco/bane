@@ -154,7 +154,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         const delay = Math.min(15 * 60_000, 15_000 * 4 ** (loadFailures - 1));
         const nextPayload = { ...handlerPayload, _loadFailures: loadFailures };
         await runtime.db.update(jobs).set({ status: 'pending', attempts: refundedAttempts, leaseUntil: null, lastError: error.code, availableAt: new Date(Date.now() + delay).toISOString(), payload: nextPayload }).where(fence);
-        log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error.message });
+        log(loadFailures >= LOAD_ERROR_THRESHOLD ? 'error' : 'warn', { ...context, jobType: job.type, attempt: refundedAttempts, loadFailures, code: error.code, retryable: true, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
         return;
       }
       if (error instanceof JobDeferred) {
@@ -174,7 +174,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
       const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
       await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
-      logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: failure instanceof ApiError ? failure.message : 'Unexpected background failure; inspect stack frames.' });
+      logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } finally {
       activeJobs--;
     }

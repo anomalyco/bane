@@ -116,8 +116,10 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
-  /** The error code and field a failed request answered with, for its request log line. */
-  failure?: { code: string; field?: string; databaseCode?: string } } };
+  /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
+  /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
+  principal?: { type: string; workspace?: string } } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
@@ -130,6 +132,8 @@ export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, jo
 export class ApiError extends Error {
   /** Structured detail for errors that have several parts, such as ritual compile diagnostics. */
   details?: Record<string, unknown>[];
+  /** The field names a log line may name: the schema's own, never a key the caller sent (app.ts invalidFields). */
+  logField?: string;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 export class ModuleLoadError extends ApiError {
@@ -334,17 +338,41 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
   if (rate < 1 && Math.random() >= rate) return;
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...(scrub(fields) as Record<string, unknown>), ...(rate < 1 ? { sampleRate: rate } : {}) }));
 }
-/** Stack frames only: an error's message can quote SQL parameters, addresses or provider text. */
+// A V8 stack is "<name>: <message>" and then "    at <function> (<location>)" frames, but a message can span lines
+// that look exactly like frames: a database error quotes its SQL parameters, so a request can put its own text there
+// (PR #131 review). So skip as many lines as the message has, after checking the stack really starts with it, and keep
+// only frames whose location is Bane's own code: the Worker bundle, or src/ or dist/ outside node_modules. Each kept
+// frame is rebuilt from the function name and file:line:column. Anything else fails closed: no frames.
+const FRAME = /^\s+at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;
+const OWN_CODE = /(?:^|\/)(worker\.js|(?:src|dist)\/[\w./-]{1,200}\.(?:ts|js))$/;
 export function stackFrames(error: unknown, limit = 12) {
-  return error instanceof Error ? error.stack?.split('\n').filter(line => /^\s+at /.test(line)).slice(0, limit).map(line => line.trim()).join('\n') || undefined : undefined;
+  if (!(error instanceof Error) || typeof error.stack !== 'string') return undefined;
+  const lines = error.stack.split('\n'), message = typeof error.message === 'string' ? error.message : '';
+  const headerLines = message ? message.split('\n').length : 1;
+  if (message ? !lines.slice(0, headerLines).join('\n').endsWith(message) : /^\s+at /.test(lines[0] ?? '')) return undefined;
+  const frames: string[] = [];
+  for (const line of lines.slice(headerLines)) {
+    const match = FRAME.exec(line);
+    if (!match) { if (/^\s+at /.test(line)) continue; return undefined; } // A native or eval frame, or not a stack at all.
+    const [, name, location, row, column] = match;
+    const file = location!.includes('node_modules') ? undefined : OWN_CODE.exec(location!)?.[1];
+    if (file) frames.push(`${name ?? '<anonymous>'} (${file}:${row}:${column})`);
+    if (frames.length >= limit) break;
+  }
+  return frames.join('\n') || undefined;
+}
+/** An error's class name when it looks like one (`TypeError`, `DrizzleQueryError`); anything else is just `Error`. */
+export function errorTypeOf(error: unknown) {
+  const name = error instanceof Error ? error.name : undefined;
+  return name && /^[A-Z][A-Za-z0-9]{0,40}$/.test(name) ? name : error instanceof Error ? 'Error' : typeof error;
 }
 /**
- * One line for an unexpected failure: its code, error class, SQLSTATE and stack frames, never the error's own message.
- * `fields.message` is for Bane's own text (an ApiError's message), which never contains caller data.
+ * One line for an unexpected failure: its code, error class, SQLSTATE and Bane's own stack frames. Never a message:
+ * neither the error's nor an ApiError's, whose text can quote request data (a template variable, a filename).
  */
-export function logError(error: unknown, fields: Record<string, unknown> & { code: string }, level: 'error' | 'warn' = 'error') {
+export function logError(error: unknown, fields: Record<string, unknown> & { code: string; message?: never }, level: 'error' | 'warn' = 'error') {
   const known = error instanceof ApiError;
-  log(level, { ...fields, errorType: known ? undefined : error instanceof Error ? error.name : typeof error, databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
+  log(level, { ...fields, errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
 }
 export const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",

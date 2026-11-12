@@ -76,15 +76,19 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
 }
 
 // The route template that answered (`/v1/emails/:id`), never the raw path: paths carry IDs, addresses and capability
-// tokens. Middleware is registered before handlers, so the last method-specific match is the handler.
+// tokens. Middleware is registered before handlers, so the last match that is a handler names the route: a
+// method-specific route, or an `app.all` handler such as /mcp (a handler takes the context alone; middleware also
+// takes `next`). Wildcard prefixes (`/api/auth/*`) are the last resort, and a request that reached notFound is unmatched.
 function routeOf(c: Ctx) {
-  const routes = c.req.matchedRoutes.filter(route => route.method !== 'ALL');
-  return (routes.findLast(route => !route.path.endsWith('*')) ?? routes.at(-1))?.path ?? 'unmatched';
+  if (c.get('failure')?.unmatched) return 'unmatched';
+  const routes = c.req.matchedRoutes, exact = routes.filter(route => !route.path.endsWith('*'));
+  return (exact.findLast(route => route.method !== 'ALL') ?? exact.findLast(route => route.handler.length < 2)
+    ?? routes.findLast(route => route.method !== 'ALL'))?.path ?? 'unmatched';
 }
 function principalOf(c: Ctx, route: string) {
   const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
   if (route === '/internal/v1/mail') return 'gateway';
-  return actor?.credential ?? (actor ? 'internal' : c.get('mailboxAccess') ? 'inboxKey' : 'anonymous');
+  return c.get('principal')?.type ?? actor?.credential ?? (actor ? 'internal' : c.get('mailboxAccess') ? 'inboxKey' : 'anonymous');
 }
 // One line per request: what the nightly report (scripts/nightly-report.ts) counts. Successes are sampled (core.log).
 function logRequest(c: Ctx, durationMs: number) {
@@ -93,9 +97,14 @@ function logRequest(c: Ctx, durationMs: number) {
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs,
     code: failure?.code, field: failure?.field, databaseCode: failure?.databaseCode,
-    workspace: (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId, principal: principalOf(c, route),
+    workspace: c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
+}
+
+// The first segment of each reported field (`to` of `to.0.email`), when it reads like a schema key.
+function schemaFields(field?: string) {
+  return [...new Set((field ?? '').split(', ').map(item => item.split('.')[0]!).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)))].join(', ') || undefined;
 }
 
 // Names the first invalid field and why, so a person can fix it. Zod messages carry types, limits and schema
@@ -112,12 +121,15 @@ function invalidFields(issues: readonly Issue[]) {
     return { fields: [path], text: path ? `${path}: ${issue.message}` : issue.message };
   });
   const first = described[0];
-  return { message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
+  // For the log: top-level field names the schema defines. An unsupported key names its parent object instead, since
+  // the key itself is whatever the caller sent (an IP address, a token).
+  const logField = [...new Set(issues.map(issue => issue.path[0]).filter((key): key is string => typeof key === 'string'))].join(', ');
+  return { logField, message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
 }
 
 function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
-    if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field); }
+    if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw Object.assign(new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field), { logField: invalid.logField }); }
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
@@ -131,7 +143,6 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
-    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
@@ -155,6 +166,11 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
+  });
+  // After the request line's middleware, so a refused request is logged like any other.
+  app.use('*', (c, next) => {
+    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
+    return next();
   });
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
@@ -237,8 +253,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       const peer=c.req.header('x-bane-client-ip')??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
     }
-    // Messages and even record-key validation paths can contain caller-supplied addresses.
-    const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
+    // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
+    const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
     c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
     if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
@@ -246,7 +262,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND' }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
