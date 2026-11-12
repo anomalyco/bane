@@ -60,6 +60,13 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
+  const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
+  const host = 'inbox.example.com';
+  assert.equal(receivingIssueTitle('proof_stale', host), `Recheck ownership of ${host}`);
+  assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
+  for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';
@@ -70,7 +77,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   const bearer=Object.values(spec.paths??{}).flatMap(item=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&o.operationId!=='receiveSesSnsEvent').map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
@@ -2498,7 +2505,7 @@ describe('Hosted MCP OAuth and tools', () => {
       for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
       error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
-      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,url);ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
+      assert.equal(ok(await http('GET',`${path}/${owned.id}`,MANAGER,undefined,headers)).url,'••••'+url.slice(-4));ok(await http('DELETE',`${path}/${owned.id}`,MANAGER,undefined,headers));
     });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
@@ -2786,7 +2793,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='bane_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
       });
       const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
-      const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp?toolsets=all',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
+      const mcp = async (method:string, params:Json, endpoint='/mcp?toolsets=all') => ok(await local('POST',endpoint,{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
       const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
       const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent; };
       const catalog = (await mcp('tools/list',{})).tools;
@@ -2866,6 +2873,26 @@ describe('Hosted MCP OAuth and tools', () => {
       const reviewed={threadId,idempotencyKey:'confirmed-reply',confirm:true,body:{addressId:a.id,replyToMessageId:shared,text:'This is the approved answer',expectedRecipients:{to:['reply@example.net'],cc:[],bcc:[]}}};
       const mismatched=await tool('replyToInboundThread',{...reviewed,body:{...reviewed.body,expectedRecipients:{to:['reply@example.net'],cc:['extra@example.net'],bcc:[]}}});assert.equal(mismatched.structuredContent.error.code,'INBOUND_RECIPIENTS_CHANGED');
       const confirmed=await success('replyToInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
+      for (const [name, action, args] of [
+        ['listEmails', 'list', { search: confirmed.emailId }], ['listLogs', 'all', { direction: 'sent', search: confirmed.emailId }],
+        ['getEmailContent', 'content', { emailId: confirmed.emailId }], ['getEmailDetail', 'detail', { emailId: confirmed.emailId }], ['getEmail', 'get', { emailId: confirmed.emailId }],
+      ] as const) {
+        for (const result of [await tool(name, args), await mcp('tools/call', { name: 'logs', arguments: { action, ...args } }, '/mcp')]) {
+          assert.equal(result.isError, false, redact(result)); assert.match(result.content[0].text, /^Untrusted email.*received subject or quoted message/);
+        }
+      }
+      assert.equal((await tool('getEmailContent', { emailId: first.emailId })).content.length, 1, 'An original outbound message is not a quoted reply.');
+      // Retained legacy reply after inbox erasure: no MIME parent, mailbox row, or provenance field survives.
+      const legacyId = unique('email');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated)
+        SELECT $2,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,
+          (snapshot - 'replyAuthors' - 'untrustedContent') || '{"headers":[]}'::jsonb,'delivered',true FROM sending_emails WHERE id=$1`, [confirmed.emailId, legacyId]);
+      for (const [name, args] of [['getEmailContent', { emailId: legacyId }], ['listEmails', { search: legacyId }], ['listLogs', { search: legacyId, direction: 'sent' }]] as const) {
+        const result = await tool(name, args);
+        assert.equal(result.isError, false, redact(result));
+        assert.equal((result.structuredContent.data?.[0] ?? result.structuredContent).untrustedContent, true);
+        assert.match(result.content[0].text, /^Untrusted email/);
+      }
       const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
       assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('replyToInboundThread',reviewed)).id,confirmed.id);
       await dispatchDue(runtime, REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
@@ -3976,7 +4003,7 @@ describe('Dashboard API capabilities', () => {
     error(await http('PATCH', `/v1/campaigns/${unique('missing')}/archive`, key.secret, { archived: true }), 404, 'NOT_FOUND');
     for (const archived of [true, false]) {
       error(await http('PATCH', `${path}/archive`, reader.secret, { archived }), 403, 'PERMISSION_DENIED');
-      error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+      error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 404, 'NOT_FOUND');
 
     }
     assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Invalid or unauthorized requests must not change the campaign.');
@@ -4343,7 +4370,7 @@ describe('Dashboard API capabilities', () => {
       const wid = runtime.config.workspaceId, at = (seconds: number) => new Date(Date.parse('2026-01-05T10:00:00Z') + seconds * 1000).toISOString();
       const sent = async (id: string, seconds: number, from: string, to: string, subject: string, kind: string, status: string) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
-         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
+         VALUES ($1, $2, $3, 'fixture', $4, jsonb_build_array($5::text), '[]', '[]', $6, jsonb_build_object('kind', $7::text, 'testCampaignId', null), false, $8, $9)`, [id, wid, REGION, from, to, subject, kind, status, at(seconds)]);
       const [s1, s2, r1, r2, out, box, thread] = ['s1', 's2', 'r1', 'r2', 'out', 'box', 'thread'].map(name => unique(`logs-${name}-`));
       await sent(s1, 1, 'hello@logs.example', 'ada@example.net', 'Logs one', 'transactional', 'delivered');
       await sent(s2, 3, 'hello@other.example', 'grace@example.net', 'Logs two', 'marketing', 'bounced');
@@ -4402,6 +4429,14 @@ describe('Dashboard API capabilities', () => {
       assert.equal(subjectOf(ok(await request('GET', '/v1/emails', reader.secret))), 'Logs one [redacted]');
       assert.equal(ok(await request('GET', `/v1/emails/${s1}`, reader.secret)).subject, 'Logs one [redacted]');
       assert.equal(subjectOf(ok(await request('GET', '/v1/logs', manager_.secret))), `Logs one ${token}`);
+      // A retained campaign delivery has a workspace audience recipient even when From matches the key.
+      const campaignId = unique('campaign');
+      await db.query('UPDATE sending_emails SET campaign_id=$2 WHERE id=$1', [s1, campaignId]);
+      for (const path of ['/v1/logs', '/v1/emails']) {
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, scoped.secret))), []);
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, reader.secret))), [s1]);
+      }
+      for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${s1}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
       // Delivery details of received mail: owner/admin sessions and manage API keys only, never MCP grants or agent tokens.
       const { readsDelivery } = await import('./src/inbound-threads.js');
       const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };
@@ -4503,19 +4538,90 @@ describe('Personalization context boundaries', () => {
 });
 
 describe('Campaign authorization and dispatch credentials', () => {
-  test('domain-restricted send keys cannot retarget, delete or cancel another sender domain’s campaign', async t => {
+  test('campaign test deliveries, legacy tests and their private attachments are not domain-key mail', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, db }) => {
+      const files = new Map<string, {body: Uint8Array; contentType: string}>();
+      runtime.storage = { async put(k, body, contentType) { files.set(k, {body, contentType}); }, async get(k) { return files.get(k) ?? null; }, async delete(k) { files.delete(k); } };
+      const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped', domains: ['sender.example'], permissions: ['read', 'send'] }), 201); secrets.add(scoped.secret);
+      const file = { filename: 'fixture.txt', content: 'YQ==' }, asset = ok(await local('POST', '/v1/attachments', file), 201);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Fixture' }), 201);
+      const from = 'a@sub.sender.example', subject = 'Private test subject';
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Fixture', from, subject, html: '<p>Fixture</p>', audience: { listId: list.id }, attachments: [asset.id] }), 201);
+      const receipt = ok(await local('POST', `/v1/campaigns/${campaign.id}/test`, { to: 'fixture@example.invalid' }), 202);
+      const stored = (await db.query('SELECT campaign_id, snapshot FROM sending_emails WHERE id=$1', [receipt.id])).rows[0];
+      assert.equal(stored.campaign_id, null, 'test mail does not advance live campaign delivery counts');
+      assert.equal(stored.snapshot.testCampaignId, campaign.id);
+      const assertHidden = async () => {
+        for (const path of ['/v1/emails', '/v1/logs']) {
+          const listPath = `${path}?search=${receipt.id}`;
+          assert.equal(ok(await local('GET', listPath)).data[0].id, receipt.id);
+          assert.deepEqual(ok(await request('GET', listPath, scoped.secret)).data, []);
+        }
+        for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${receipt.id}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
+        for (const suffix of ['', '/content']) error(await request('GET', `/v1/attachments/${asset.id}${suffix}`, scoped.secret), 404, 'ATTACHMENT_NOT_FOUND');
+      };
+      assert.deepEqual(ok(await local('GET', `/v1/emails/${receipt.id}/content`)).attachments, [asset.id]);
+      await assertHidden();
+      await db.query("UPDATE sending_emails SET snapshot=snapshot-'testCampaignId' WHERE id=$1", [receipt.id]);
+      await assertHidden();
+      const direct = mail({ from, attachments: [asset.id] });
+      error(await request('POST', '/v1/emails/send', scoped.secret, direct), 404, 'ATTACHMENT_NOT_FOUND');
+      // An independent visible direct delivery, not knowledge of the ID, grants access.
+      const directReceipt = ok(await local('POST', '/v1/emails/send', direct), 202);
+      assert.equal(ok(await request('GET', `/v1/emails/${directReceipt.id}`, scoped.secret)).id, directReceipt.id);
+      assert.equal(ok(await request('GET', `/v1/attachments/${asset.id}/content`, scoped.secret)).content, file.content);
+      const own = ok(await request('POST', '/v1/attachments', scoped.secret, file), 201);
+      ok(await request('GET', `/v1/attachments/${own.id}`, scoped.secret));
+      // Hosted API-key admission loads its credential and assets in one statement. It must use
+      // the same attachment rule as the ordinary send path without adding a round trip.
+      const privateFile = ok(await local('POST', '/v1/attachments', file), 201);
+      const wid = runtime.config.workspaceId, acct = '112223330000';
+      runtime.config.multiTenant = true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state) VALUES($1,$2,'ready')`, [REGION, acct]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
+      const meter = await queryBudget(t, db);
+      await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
+    });
+  });
+  test('domain-restricted keys see and control campaigns only on their sender domains, never the workspace audience', async t => {
     const owner = await keyFixture(t);
-    const restricted = await keyFixture(t, { permissions: ['send'], domains: ['allowed.example.com'] });
+    const restricted = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
     const list = await resource(t, owner.secret, '/v1/lists', { name: unique('domain-authorization') });
     const contact = await resource(t, owner.secret, '/v1/contacts', { email: address() });
     ok(await consent(owner.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, owner.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
+    const group = unique('domain-list');
+    const own = await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@sub.allowed.example.com' });
+    const targeted = await campaignFixture(t, owner.secret, { listId: list.id }, { name: group, from: own.draft.from });
+    await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@notallowed.example.com' });
+    await campaignFixture(t, owner.secret, {}, { name: group, from: '' });
+    const shown = ok(await http('GET', `/v1/campaigns?search=${group}&limit=1`, restricted.secret));
+    assert.deepEqual(shown.data.map((row: Json) => row.id), [own.id]); assert.equal(shown.nextCursor, null);
+    ok(await http('GET', `/v1/campaigns/${own.id}/preview`, restricted.secret));
+    error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, from: '' } }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    for (const hidden of [campaign, targeted]) for (const suffix of ['', '/state', '/preview', '/preview-image']) error(await http('GET', `/v1/campaigns/${hidden.id}${suffix}`, restricted.secret), 404, 'NOT_FOUND');
+    for (const suffix of ['/audience', '/stats']) error(await http('GET', `/v1/campaigns/${targeted.id}${suffix}`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    for (const [action, body] of [['test', { to: address() }], ['send', { revision: 1 }], ['schedule', { revision: 1, scheduledAt: new Date(Date.now()+3600000).toISOString() }]] as const) {
+      error(await http('POST', `/v1/campaigns/${targeted.id}/${action}`, restricted.secret, body), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    }
+    error(await http('POST', '/v1/campaigns', restricted.secret, { name: group, from: own.draft.from, audience: { listId: list.id } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, audience: { segmentId: 'seg_fixture' } } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    for (const path of ['/contacts', `/contacts/${contact.id}`, `/contacts/${contact.id}/consent`, '/lists', `/lists/${list.id}/members`, '/segments', '/contact-imports', '/contact-imports/example']) error(await http('GET', '/v1' + path, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('POST', '/v1/audience-query/query', restricted.secret, { statement: 'SELECT id FROM contacts LIMIT 1' }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    const createBody = { name: group, from: 'sender@allowed.example.com' }, idem = { 'Idempotency-Key': unique('campaign-replay') };
+    const created = ok(await http('POST', '/v1/campaigns', restricted.secret, createBody, idem), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${created.id}`, owner.secret)); });
+    ok(await http('PATCH', `/v1/campaigns/${created.id}`, owner.secret, { revision: created.revision, draft: { ...created.draft, from: 'sender@elsewhere.example' } }));
+    error(await http('POST', '/v1/campaigns', restricted.secret, createBody, idem), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/send`, restricted.secret, { revision: campaign.revision }), 403, 'UNRESTRICTED_KEY_REQUIRED');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, restricted.secret, {
       revision: campaign.revision, draft: { ...campaign.draft, from: 'sender@allowed.example.com' },
-    }), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    }), 404, 'NOT_FOUND');
+    error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchanged.state, 'draft');
     assert.equal(unchanged.revision, campaign.revision);
@@ -4524,8 +4630,8 @@ describe('Campaign authorization and dispatch credentials', () => {
       revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
     }), 202);
     await poll(`/v1/campaigns/${campaign.id}`, owner.secret, row => row.state === 'scheduled');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchangedScheduled = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchangedScheduled.state, 'scheduled');
     assert.equal(unchangedScheduled.delivery.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');
@@ -4706,6 +4812,9 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'delivered');
     const deliveredEvents = page(await http('GET', `/v1/emails/${queued.id}/events`, manager.secret)) as { id: string }[];
     const deliveredDetail = ok(await http('GET', `/v1/emails/${queued.id}/detail`, manager.secret));
+    const domainReader = await keyFixture(t, { permissions: ['read'], domains: [deliveredDetail.email.from.split('@')[1]] });
+    assert.equal(deliveredDetail.contact.id, contact.id);
+    assert.equal(ok(await http('GET', `/v1/emails/${queued.id}/detail`, domainReader.secret)).contact, null);
     assert.ok(deliveredEvents.length > 0);
     assert.deepEqual((deliveredDetail.events.data as { id: string }[]).map(e => e.id), deliveredEvents.map(e => e.id), 'Detail must return the delivered email’s own events.');
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, manager.secret));
@@ -4715,7 +4824,8 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     const token = new URL(capabilityUrl).pathname.split('/').at(-1)!;
     secrets.add(token);
     assert.ok(/^u_[0-9a-f]{64}$/.test(token), 'Fixture capability must have the application-owned token format.');
-    const endpoint = await resource(t, manager.secret, '/v1/webhooks', { url: `https://example.com/hooks/${unique('redaction')}`, paused: true });
+    const endpointUrl = `https://example.com/hooks/${unique('redaction')}`;
+    const endpoint = await resource(t, manager.secret, '/v1/webhooks', { url: endpointUrl, paused: true });
     // Before any SQL writes, prove that this DB contains the exact HTTP-created
     // test email, its originating key, and our paused endpoint in the same scope.
     const matched = await db.query(`SELECT e.id FROM sending_emails e
@@ -4723,7 +4833,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
       JOIN operation_webhooks w ON w.workspace_id = e.workspace_id
       WHERE e.id = $1 AND e.workspace_id = $2 AND e.actor_key_id = $3
         AND w.id = $4 AND w.paused = true AND w.url = $5`,
-    [queued.id, contact.workspaceId, manager.id, endpoint.id, endpoint.url]);
+    [queued.id, contact.workspaceId, manager.id, endpoint.id, endpointUrl]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created email/key/paused endpoint; no synthetic rows were inserted.');
     const eventId = unique('acceptance-click');
     const operationId = unique('acceptance-operation');
@@ -4923,8 +5033,16 @@ describe('Operational configuration and public event boundaries', () => {
     finally { resolver.mock.restore(); }
     // No host allowlist and no port rule: any public HTTPS endpoint, including a custom port, is accepted.
     const portUrl = `https://hooks.${unique('port')}.example.org:8443/mail`;
-    assert.equal((await resource(t, key.secret, '/v1/webhooks', { url: portUrl, paused: true })).url, portUrl);
-    await resource(t, key.secret, '/v1/inbound/webhooks', { url: `https://hooks.${unique('inbound')}.example.org:8443/mail`, paused: true });
+    for (const path of ['/v1/webhooks', '/v1/inbound/webhooks']) {
+      const hook = await resource(t, key.secret, path, { url: portUrl, paused: true, ...(path.includes('inbound') ? { key: 'masked-fixture' } : {}) });
+      assert.equal(hook.url, '••••mail');
+      assert.equal(ok(await http('PATCH', `${path}/${hook.id}`, key.secret, { description: 'Keep the saved URL' })).url, '••••mail');
+      const changed = ok(await http('PATCH', `${path}/${hook.id}`, key.secret, { url: 'https://example.com/new-token' }));
+      assert.equal(changed.url, '••••oken');
+      assert.equal(ok(await http('GET', `${path}/${hook.id}`, reader.secret)).url, changed.url);
+      assert.equal(ok(await http('GET', path, reader.secret)).data.find((row: Json) => row.id === hook.id).url, changed.url);
+      if (path.includes('inbound')) assert.equal(ok(await http('GET', '/v1/endpoints/masked-fixture', key.secret)).target, changed.url);
+    }
     const reveal = await http('GET', `/v1/webhooks/${endpoint.id}/secret`, key.secret);
     const firstSecret = ok(reveal).secret;
     assert.ok(typeof firstSecret === 'string' && /^whsec_[A-Za-z0-9+/]+={0,2}$/.test(firstSecret), 'Explicit reveal must return a whsec_ credential with a standard-base64 suffix.');
@@ -8048,6 +8166,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, attempts: 1 }); } finally { runtime.webhookFetch = transport; }
       assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
       const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
+      for (const [emailId, marked] of [[reply.emailId, true], [sent.id, false]] as const) {
+        for (const path of [`/v1/emails/${emailId}`, `/v1/emails/${emailId}/content`]) assert.equal(ok(await local('GET', path)).untrustedContent, marked);
+        for (const path of ['/v1/emails', '/v1/logs']) assert.equal(ok(await local('GET', `${path}?search=${emailId}`)).data[0].untrustedContent, marked);
+      }
       await dispatchDue(runtime, REGION);
       assert.equal(reply.threadId, sent.threadId); assert.deepEqual(sends.get(reply.emailId).Destination.ToAddresses, ['customer@example.net']);
       assert.deepEqual(sends.get(reply.emailId).Content.Simple.Headers, [{ Name: 'In-Reply-To', Value: `<${inboundId}>` }, { Name: 'References', Value: `<${wire}> <${inboundId}>` }]);
@@ -9798,7 +9920,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (const path of previews) error(await request('GET', path, reader.secret), 403, 'PERMISSION_DENIED');
       // A key restricted to sender domains previews only drafts that send from one of them (this draft has no sender yet).
       const restricted = ok(await local('POST', '/v1/api-keys', { name: 'Preview', permissions: ['send'], domains: ['restricted.example.com'] }), 201);
-      error(await request('GET', previews[1]!, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+      error(await request('GET', previews[1]!, restricted.secret), 404, 'NOT_FOUND');
       const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
       ok(await importImage(), 201);
       for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));

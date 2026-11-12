@@ -100,6 +100,7 @@ async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[
 // Keyset-paging the live audience across transactions would not be a review snapshot.
 // The audience's lists and segments, locked for share when the caller snapshots, and the matching conditions over contacts.
 async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean) {
+  if (identity.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Reading the workspace audience requires an unrestricted credential.');
   const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
   const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
   const listQuery = db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id));

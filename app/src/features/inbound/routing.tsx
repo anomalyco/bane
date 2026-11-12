@@ -10,11 +10,10 @@ import '../settings/settings.css'
 import './inbound.css'
 
 type Destination = { id: string; name: string; detail: string; kind: 'inbox' | 'webhook'; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook }
-const hostOf = (url: string) => { try { return new URL(url).host } catch { return url } }
 function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[]): Destination[] {
   return [
     ...addresses.map(a => ({ id: a.id, name: a.displayName || a.address, detail: a.address, kind: 'inbox' as const, paused: false, routeOnly: false, href: `/receiving/addresses/${a.id}` })),
-    ...webhooks.map(h => ({ id: h.id, name: h.name || h.description || hostOf(h.url), detail: hostOf(h.url), kind: 'webhook' as const, paused: h.paused, routeOnly: !h.eventTypes.length, href: `/receiving/webhooks/${h.id}`, webhook: h })),
+    ...webhooks.map(h => ({ id: h.id, name: h.name || h.description || h.url, detail: h.url, kind: 'webhook' as const, paused: h.paused, routeOnly: !h.eventTypes.length, href: `/receiving/webhooks/${h.id}`, webhook: h })),
   ]
 }
 

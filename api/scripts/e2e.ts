@@ -570,6 +570,7 @@ async function webhook() {
   const path = { id: item.id };
   defer(`delete webhook ${item.id}`, async () => check((await api('deleteWebhook', { path })).deleted, 'webhook not deleted'));
   const created = await api('getWebhook', { path });
+  check(item.url === '••••' + webhookUrl.slice(-4) && created.url === item.url, 'outbound webhook URL is not masked');
   check(item.paused && created.paused, 'test endpoint must remain paused');
   check(created.headers?.length === 1 && created.headers[0].name === 'Authorization' && created.headers[0].hint?.endsWith(bearer.slice(-4)) && !JSON.stringify(created).includes(bearer), 'custom header missing, unmasked or leaked on read');
   await api('updateWebhook', { path, body: { description: subject, paused: true } });
@@ -651,6 +652,7 @@ async function inboundWebhook(addressId: string, threadId: string) {
   const path = { id: item.id };
   defer(`delete inbound webhook ${path.id}`, async () => check((await api('deleteInboundWebhook', { path })).ok, 'inbound webhook not deleted'));
   const stored = await api('getInboundWebhook', { path });
+  check(item.url === '••••' + webhookUrl.slice(-4) && stored.url === item.url, 'inbound webhook URL is not masked');
   check(stored.paused && stored.addressIds?.length === 1 && stored.addressIds[0] === addressId && stored.eventTypes.join() === 'thread.updated', 'unsafe inbound webhook subscription');
   check(hasId(await api('listInboundWebhooks', {}), path.id), 'inbound webhook not listed');
   const rotated = await api('rotateInboundWebhookSecret', { path });

@@ -22,24 +22,26 @@ const eventInfo: Partial<Record<MailboxEventType, string>> = {
 // routeOnly is form state: a webhook that subscribes to no events and only gets mail a route sends to it.
 type Draft = InboundWebhookInput & { routeOnly: boolean }
 const blank: Draft = { url: '', description: '', eventTypes: ['message.received'], addressIds: null, format: 'bane', routeOnly: false }
-const draftOf = (webhook: InboundWebhook): Draft => ({ url: webhook.url, description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'bane', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
+const draftOf = (webhook: InboundWebhook): Draft => ({ url: '', description: webhook.description, eventTypes: [...webhook.eventTypes].sort(), addressIds: webhook.addressIds, format: webhook.format ?? 'bane', junk: webhook.junk, routeOnly: !webhook.eventTypes.length })
 const payloadOf = ({ routeOnly, ...input }: Draft): InboundWebhookInput => ({ ...input, url: input.url.trim(), description: input.description.trim(), eventTypes: routeOnly ? [] : input.eventTypes })
 // The inbound.new payload describes received mail only.
 const receivedOnly = (types: MailboxEventType[]) => types.filter(type => type === 'message.received' || type === 'message.junk')
-function validate(input: Draft) {
+function validate(input: Draft, editing = false) {
   const errors: Record<string, string> = {}
-  try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
+  if (!editing || input.url.trim()) {
+    try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
+  }
   if (!input.routeOnly && !input.eventTypes.length) errors.eventTypes = 'Choose at least one event.'
   if (input.addressIds && !input.addressIds.length) errors.addressIds = 'Choose at least one address, or send events for every address.'
   return errors
 }
 const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => !webhook.eventTypes.length ? 'Routed mail only' : webhook.addressIds ? webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id).join(', ') : 'All addresses'
 
-function WebhookFields({ input, onChange, addresses, errors, apiError, disabled, headers }: { input: Draft; onChange: (input: Draft) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, disabled, headers }: { input: Draft; urlHint?: string; onChange: (input: Draft) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   return <div className="stack">
     <div className="form-grid">
       <Field label="Description" htmlFor="mailbox-webhook-description"><Input id="mailbox-webhook-description" value={input.description} onChange={event => onChange({ ...input, description: event.target.value })} disabled={disabled} placeholder="Support agent runtime" /></Field>
-      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint="A public HTTPS URL. Signed with Standard Webhooks headers."><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder="https://agents.acme.com/hooks/mail" /></Field>
+      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint={urlHint ? 'Leave blank to keep the saved URL, or enter a replacement.' : 'A public HTTPS URL. Signed with Standard Webhooks headers.'}><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
     </div>
     <div className="form-grid">
       <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.routeOnly ? <>Add it to a route on the <Link to="/receiving/routing">Routing</Link> page.</> : input.addressIds === null ? 'Includes addresses created later.' : undefined}>
@@ -92,7 +94,7 @@ function WebhooksList() {
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
       empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
-        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${row.id}`}>{row.description || new URL(row.url).host}</Link><span className="muted settings-break">{row.url}</span></div> },
+        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${row.id}`}>{row.description || row.url}</Link>{row.description && <span className="muted settings-break">{row.url}</span>}</div> },
         { key: 'addresses', label: 'Addresses', width: '20%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
         { key: 'events', label: 'Events', width: '14%', render: row => <span title={row.eventTypes.join(', ')}>{!row.eventTypes.length ? <span className="muted">None</span> : row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span> },
         { key: 'headers', label: 'Headers', width: '16%', render: row => <HeaderNames headers={row.headers} /> },
@@ -130,12 +132,13 @@ function WebhookDetail() {
   const dirty = !!current && !!input && (headersChanged(headers, currentHeaders) || JSON.stringify(draftOf(current)) !== JSON.stringify({ ...input, eventTypes: [...input.eventTypes].sort() }))
   async function submit(event: FormEvent) {
     event.preventDefault(); if (!input) return
-    const next = { ...validate(input), ...headerDraftErrors(headers) }; setErrors(next)
+    const next = { ...validate(input, true), ...headerDraftErrors(headers) }; setErrors(next)
     if (Object.keys(next).length) return
-    try { await save.mutateAsync({ ...payloadOf(input), headers: headerPayload(headers, currentHeaders) }); setHeaders(null) } catch { /* Shown in the form. */ }
+    const { url, ...patch } = payloadOf(input)
+    try { const saved = await save.mutateAsync({ ...patch, ...(url ? { url } : {}), headers: headerPayload(headers, currentHeaders) }); setInput(draftOf(saved)); setHeaders(null) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? current.description || new URL(current.url).host : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
+    <PageHeader title={current ? current.description || current.url : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
       <Button onClick={() => void save.mutateAsync({ paused: !current.paused }).catch(() => undefined)} loading={save.isPending && !dirty}>{current.paused ? 'Resume' : 'Pause'}</Button>
       <Button onClick={() => setConfirm('rotate')}>Rotate secret</Button>
       <Button variant="danger" onClick={() => setConfirm('delete')}>Delete</Button>
@@ -161,7 +164,7 @@ function WebhookDetail() {
         <SectionHeader title="Settings" />
         {!input ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
-          <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
+          <WebhookFields input={input} urlHint={save.data?.url ?? current.url} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
           <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setHeaders(null); setErrors({}) }}>Discard</Button>}</div>
         </form>}
       </section>
@@ -171,4 +174,3 @@ function WebhookDetail() {
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }
-

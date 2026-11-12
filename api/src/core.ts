@@ -159,6 +159,8 @@ export function senderDomainAllowed(allowed: readonly string[], candidate: strin
   const domain = candidate.toLowerCase();
   return !allowed.length || allowed.some(value => { const parent = value.toLowerCase(); return domain === parent || domain.endsWith(`.${parent}`); });
 }
+export const webhookUrlHint = (url: string) => '••••' + url.slice(-4);
+export const WebhookUrlHint = z.string().describe('Write-only HTTPS endpoint. Only the last four characters are shown; omit url on update to keep the saved URL.');
 export function region(runtime: Runtime, value: string) {
   if (!runtime.config.regions.includes(value)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested region is not configured for this deployment.', 'region');
   return value;
