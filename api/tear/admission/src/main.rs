@@ -67,6 +67,9 @@
 //! - [x] r.replay / r.replay-race: held envelopes for an unrouted host (`stash`) replay through
 //!   the same route statement, also while a normal reopen of the message is in flight; both take
 //!   the window row before the receipt.
+//! - [x] r.legacy-fail: the previous Worker's terminal failure write (`legacy-fail`, no claim, no
+//!   recipient fence) reaches a pending receipt, also one reopened after that Worker's lease was
+//!   retired: the settle fence drops it.
 //! - [x] r.release-fair: a release that finds a workspace's rows locked moves the hold ten seconds
 //!   back instead of retrying it first on every pass.
 //!
@@ -115,7 +118,9 @@
 //!   what an older Worker's refund amounts to); the tombstone left by the reservation's end queues
 //!   the object's deletion a day later (`day` runs the hourly cleanup) unless an attachment
 //!   holds it. u.reconcile: an object no record owns (its put landed after the tombstone was
-//!   spent) is found by listing storage and deleted once it is a day old.
+//!   spent) is found by listing storage and deleted once it is a day old. u.foreign: objects of
+//!   other key families in the bucket (`foreign`: a workspace named `attachments`'s kept mail, a
+//!   mail attachment, a template asset), a day old and unowned, survive reconciliation and purge.
 //!
 //! ## Out of reach, and why
 //! - [-] Clock skew and boundaries inside a transaction: admission uses the transaction's now(),
@@ -342,6 +347,22 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
             "release",
         ],
     ),
+    // Recheck 2. A previous Worker whose lease was retired failed the receipt its reopen had
+    // expanded, with its unfenced statement; the settle fence now drops it.
+    (
+        "recv",
+        0,
+        &[
+            "accept m1 a",
+            "claim A m1",
+            "accept m1 ac",
+            "lose A m1",
+            "legacy-fail A m1",
+        ],
+    ),
+    // Recheck 2. Reconciliation took a workspace named `attachments`'s kept mail
+    // (k/attachments/msg_*.eml) for an upload of workspace `k` and deleted it.
+    ("upload", 0, &["foreign", "day", "purge"]),
     // Recheck R5. A put landing after its tombstone was spent left an object no record owned;
     // storage reconciliation deletes it a day later.
     (
@@ -848,6 +869,15 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
             }
             if words[0] == "day" {
                 seen.push(vec!["day".into()]);
+                if view["foreign"].as_i64() > Some(0) {
+                    seen.push(vec!["foreign-aged".into()]);
+                }
+            }
+            if words[0] == "purge"
+                && view["foreign"].as_i64() == Some(3)
+                && seen.iter().any(|w| w[0] == "foreign-aged")
+            {
+                add("u.foreign");
             }
             // `day` runs the hourly cleanup too.
             if (words[0] == "sweep" || words[0] == "day")
@@ -1105,6 +1135,12 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                 }
                 if verb == "claim" && v == &json!(0) {
                     add("r.claim-race");
+                }
+                if verb == "legacy-fail" {
+                    let x = if w[1] == "A" { 0 } else { 1 };
+                    if prev[["A", "B"][x]]["receipts"][w[2].as_str()][0] == "pending" {
+                        add("r.legacy-fail");
+                    }
                 }
                 if verb == "recover" && v.as_i64().unwrap_or(0) > 0 {
                     for x in 0..2 {
@@ -1503,6 +1539,7 @@ const CHECKLIST: &[&str] = &[
     "r.replay",
     "r.replay-race",
     "r.release-fair",
+    "r.legacy-fail",
     "r.huge",
     "r.empty",
     "r.abort",
@@ -1550,6 +1587,7 @@ const CHECKLIST: &[&str] = &[
     "u.crash",
     "u.tombstone",
     "u.reconcile",
+    "u.foreign",
 ];
 fn checklist(runs: &[Value]) -> Value {
     let mut hits: BTreeMap<String, u64> = BTreeMap::new();

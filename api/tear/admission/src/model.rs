@@ -661,6 +661,13 @@ impl Recv {
                     && !self.held("A", &format!("turns:{}", WS[x]))
                     && !(pending && self.held("A", &format!("receipt:{k}")))
             }
+            // The previous Worker's terminal failure write: it waits on a receipt another statement
+            // holds, so run it only when none does.
+            "legacy-fail" => {
+                let x = ws(words[1]);
+                self.ws[x].receipts.contains_key(words[2])
+                    && !self.held("A", &format!("receipt:{}", key(x, words[2])))
+            }
             "recover" | "hour" | "days" => !open,
             _ => false,
         }
@@ -720,6 +727,10 @@ impl Recv {
                 }
             }
             "done" | "fail" | "lose" => self.end_job(ws(words[1]), words[2], words[0]),
+            // A previous Worker's attempt, current or long retired, fails the receipt with its old
+            // unfenced statement (status='pending' only). It names no claim, so the settle fence
+            // drops it: such a receipt stays pending until a current Worker settles it.
+            "legacy-fail" => json!(0),
             "recover" => {
                 // recoverMailReceipts: pending receipts that lost their ingest job, in order; each
                 // queues one again through the same job insert, or fails after three passes.
@@ -1391,9 +1402,10 @@ pub struct USlot {
 /// refunded (with a deletion of its object) when the upload does not finish. The sweeper deletes
 /// expired reservations and queues their objects' deletion. Every reservation that ends without
 /// its attachment leaves a durable tombstone; a day later the sweeper queues the object's deletion
-/// again unless an attachment holds it. Storage itself is reconciled too: any object that has had
-/// no attachment and no reservation for a day is deleted, however late its put landed (a Worker
-/// that died before its refund, an older Worker, a put that outlived every record).
+/// again unless an attachment holds it. Storage itself is reconciled too: any upload object that
+/// has had no attachment and no reservation for a day is deleted, however late its put landed (a
+/// Worker that died before its refund, an older Worker, a put that outlived every record). Objects
+/// of other key families in the same bucket are never deleted.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Upload {
     pub room: i64,
@@ -1406,6 +1418,9 @@ pub struct Upload {
     pub idem: BTreeMap<String, (String, bool)>,
     /// Stored objects and their age in days.
     pub objects: BTreeMap<String, i64>,
+    /// Objects of other key families in the same bucket (a workspace named `attachments`'s kept
+    /// mail under workspace `k`, a mail attachment, a template asset): nothing here ever deletes them.
+    pub foreign: i64,
     pub deletes: BTreeSet<String>,
     /// Cleanup obligations: object -> due (a day after its reservation ended).
     pub tombstones: BTreeMap<String, bool>,
@@ -1423,6 +1438,7 @@ impl Upload {
             attachments: BTreeMap::new(),
             idem: BTreeMap::new(),
             objects: BTreeMap::new(),
+            foreign: 0,
             deletes: BTreeSet::new(),
             tombstones: BTreeMap::new(),
             next_obj: 1,
@@ -1448,6 +1464,7 @@ impl Upload {
             (Some(s), "upload" | "upload-other") => !self.slots.contains_key(s),
             (Some(s), "ok" | "fail" | "crash") => self.slots.contains_key(s),
             (None, "expire" | "sweep" | "purge" | "day") => true,
+            (None, "foreign") => self.foreign == 0,
             (None, "delete") => self.attachments.contains_key(words[1]),
             _ => false,
         }
@@ -1577,6 +1594,10 @@ impl Upload {
                 }
                 json!("ok")
             }
+            (None, "foreign") => {
+                self.foreign = 3;
+                json!("ok")
+            }
             (None, "delete") => {
                 let obj = self.attachments.remove(words[1]).unwrap();
                 self.used -= 1;
@@ -1588,7 +1609,7 @@ impl Upload {
     }
     pub fn view(&self) -> Value {
         json!({"used": self.used, "reservations": self.reservations.len(), "attachments": self.attachments.keys().collect::<Vec<_>>(),
-            "deletes": self.deletes.len(), "tombstones": self.tombstones.len(), "objects": self.objects.len()})
+            "deletes": self.deletes.len(), "tombstones": self.tombstones.len(), "objects": self.objects.len(), "foreign": self.foreign})
     }
 }
 
@@ -1662,7 +1683,7 @@ pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
             out.push(format!("{s} fail"));
             out.push(format!("{s} crash"));
         }
-        out.extend(["expire", "sweep", "purge", "day"].map(String::from));
+        out.extend(["expire", "sweep", "purge", "day", "foreign"].map(String::from));
         for a in 1..=if core { 2 } else { 4 } {
             out.push(format!("delete a{a}"));
         }
@@ -1705,8 +1726,13 @@ pub fn alphabet(profile: &str, core: bool) -> Vec<String> {
                 out.push(format!("stash {m} {r}"));
             }
             for x in WS {
-                for v in ["claim", "done", "fail", "lose"] {
-                    if !core || v != "lose" {
+                for v in ["claim", "done", "fail", "lose", "legacy-fail"] {
+                    if !core
+                        || v == "claim"
+                        || v == "done"
+                        || v == "fail"
+                        || (v == "legacy-fail" && x == "A")
+                    {
                         out.push(format!("{v} {x} {m}"));
                     }
                 }

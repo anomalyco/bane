@@ -255,7 +255,7 @@ const slots: Record<string, Slot> = {};
 for (const n of SLOTS) slots[n] = { db: await client() };
 // Objects stored and not deleted, labelled o1, o2, ... in the order their uploads reserved, with
 // the day they landed (`day` moves every object a day into the past).
-const written = new Map<string, number>(), objectLabel = new Map<string, string>();
+const written = new Map<string, number>(), objectLabel = new Map<string, string>(), foreignKeys = new Map<string, string>();
 let today = 0;
 // What the hourly cleanup and the job runner see of storage: a listing, and their deletions.
 const listing = { put: async () => {}, get: async () => null, delete: async (key: string) => { written.delete(key); },
@@ -267,7 +267,7 @@ let attachments: Record<string, string> = {};
 async function resetUpload() {
   const w = 'tear_adm_' + hex(12); ws = [w];
   Object.assign(runtime.config, structuredClone(baseConfig), { workspaceId: w, multiTenant: false });
-  written.clear(); objectLabel.clear(); attachments = {}; today = 0;
+  written.clear(); objectLabel.clear(); foreignKeys.clear(); attachments = {}; today = 0;
   const c = auto.client, token = 'bane_' + hex(64);
   keys['1'] = token; keyIds['1'] = `key1_${hex(12)}`;
   await c.query('BEGIN');
@@ -482,6 +482,13 @@ async function autoAct(words: string[]): Promise<unknown> {
       await auto.client.query(`UPDATE jobs SET status=$2 WHERE id=$1`, [job.id, verb === 'fail' ? 'failed' : 'completed']);
       return failed;
     });
+    case 'legacy-fail': return autoTxn(async () => {
+      // The previous Worker's terminal failure write, exactly as bane/dev's mailbox-ingest.ts issues
+      // it: no claim, no recipient fence. An old invocation keeps running after its lease is retired.
+      const w = wsOf(a), mid = sesId(b);
+      return (await auto.client.query(`update "mail_receipts" set "status" = $1, "error" = $2, "processed_at" = $3 where ("mail_receipts"."workspace_id" = $4 and "mail_receipts"."ses_message_id" = $5 and "mail_receipts"."status" = $6)`,
+        ['failed', 'MAILBOX_INGEST_FAILED', new Date().toISOString(), w, mid, 'pending'])).rowCount;
+    });
     case 'recover': {
       // Half an hour passes for pending receipts, then the real lost-receipt recovery runs.
       await auto.client.query("UPDATE mail_receipts SET last_recovered_at=now()-interval '31 minutes' WHERE workspace_id=ANY($1) AND status='pending'", [ws]);
@@ -543,6 +550,14 @@ async function autoAct(words: string[]): Promise<unknown> {
       today++;
       await cleanup({ ...runtime, storage: listing } as Json, 5_000);
       await reconcileUploads({ ...runtime, storage: listing } as Json);
+      return 'ok';
+    }
+    case 'foreign': {
+      // Objects of other key families in the same bucket: the kept mail of a workspace named
+      // `attachments` (stored under the mail class `k`), a mail attachment and a template asset.
+      for (const k of [`k/attachments/msg_${hex(32)}.eml`, `a/${ws[0]}/msg_${hex(32)}/b1/att_1`, `${ws[0]}/templates/assets/tasset_${hex(32)}`]) {
+        written.set(k, today); foreignKeys.set(k, `f${foreignKeys.size + 1}`);
+      }
       return 'ok';
     }
     case 'expire': await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '1 hour' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]); return 'ok';
@@ -607,9 +622,11 @@ async function view(safety: string[]) {
     // Every stored object has an owner or a durable deletion obligation (a queued job or a tombstone).
     const keysKept = new Set<string>([...v.reserved, ...v.stored.map((x: Json) => x[1]), ...v.deletes, ...v.tombstones]);
     // An object younger than a day may be unowned: reconciliation is due a day after it landed.
-    for (const [k, day] of written) if (!keysKept.has(k) && today - day >= 1) safety.push(`stored object ${objectLabel.get(k)} has had no attachment, reservation, pending deletion or tombstone for a day`);
+    for (const [k, label] of foreignKeys) if (!written.has(k)) safety.push(`foreign object ${label} was deleted`);
+    for (const [k, day] of written) if (!foreignKeys.has(k) && !keysKept.has(k) && today - day >= 1) safety.push(`stored object ${objectLabel.get(k)} has had no attachment, reservation, pending deletion or tombstone for a day`);
     const byId = Object.fromEntries(Object.entries(attachments).map(([l, id]) => [id, l]));
-    return { used: (usage - seed) / SIZE, reservations: v.reserved.length, attachments: v.stored.map((x: Json) => byId[x[0]] ?? '?').sort(), deletes: new Set(v.deletes).size, tombstones: v.tombstones.length, objects: written.size };
+    return { used: (usage - seed) / SIZE, reservations: v.reserved.length, attachments: v.stored.map((x: Json) => byId[x[0]] ?? '?').sort(), deletes: new Set(v.deletes).size, tombstones: v.tombstones.length,
+      objects: [...written.keys()].filter(k => !foreignKeys.has(k)).length, foreign: [...foreignKeys.keys()].filter(k => written.has(k)).length };
   }
   const { rows: [v] } = await checker.client.query(`SELECT
     (SELECT coalesce(jsonb_object_agg(workspace_id,u),'{}') FROM (SELECT workspace_id,jsonb_object_agg(round(extract(epoch FROM hour-date_trunc('hour',now()))/3600)::int,recipients) u FROM hosted_usage_hourly WHERE workspace_id=ANY($1) AND recipients<>0 GROUP BY 1) h) AS usage,
