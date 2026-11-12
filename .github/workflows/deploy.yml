@@ -470,6 +470,9 @@ jobs:
 
       - *stage-tip
 
+      # Also syncs the mail gateway's key with the committed bane:mailGatewayEnabled in
+      # infra/pulumi/Pulumi.<stage>.yaml: enabled reads bane/<stage>/MAILGW_API_TOKEN with
+      # this job's role inside this step only (never $GITHUB_ENV), and disabled removes it.
       - name: Deploy the Worker
         working-directory: api
         env:
