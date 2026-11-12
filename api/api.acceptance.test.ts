@@ -355,6 +355,50 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
+  if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1,connectionTimeoutMillis:1000});
+  t.after(()=>pool.end());
+  const wid=unique('smtp'),bid=unique('mbx'),kid='app_'+randomUUID(),from=`box@${wid}.invalid`,key=randomUUID();
+  const rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid,mailGatewayToken:key}};
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await ensureRegionSettings(rt.db,rt.config);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[bid,wid,from.split('@')[1],REGION]);
+  await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'local:','fixture')",[wid,REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'inbox','forever')",[bid,wid,from]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,from,bid]);
+  await db.query('INSERT INTO inbox_state(inbox_id,workspace_id,protocol_passwords) VALUES($1,$2,1)',[bid,wid]);
+  await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['smtp'])",[kid,bid]);
+  const path='/internal/v1/mail',app=(await import('./src/app.js')).createApp();
+  async function submit(mime:string){
+    const body=JSON.stringify({op:'submit',kid,from,to:['sink@example.invalid'],content:Buffer.from(`From: ${from}\r\n${mime}`).toString('base64')});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(body);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',body,headers}),rt);
+  }
+  for(const [label,mime] of [
+    ['plain','Subject: plain\r\n\r\nHello\r\n'],
+    ['attachment','Content-Type: application/octet-stream; name="bytes.bin"\r\nContent-Disposition: attachment; filename="bytes.bin"\r\nContent-Transfer-Encoding: base64\r\n\r\nYnl0ZXM=\r\n'],
+    ['large text','Content-Type: text/plain\r\n\r\n'+('t'.repeat(998)+'\r\n').repeat(600)],
+  ] as const) await t.test(label,async()=>{
+    const res=await submit(mime),body=await res.json() as Json;assert.equal(res.status,200,JSON.stringify(body));
+    await (await import('./src/dispatcher.js')).dispatchDue(rt,REGION);
+    // The full harness also has a runner: it may already hold this message's lease.
+    for(const until=Date.now()+5000;;){
+      const {rows:[mail]}=await db.query('SELECT attempt_started_at,error_code FROM sending_emails WHERE id=$1 AND actor_key_id=$2',[body.id,kid]);
+      if(mail?.attempt_started_at)break;
+      assert.ok(!mail?.error_code && Date.now()<until,mail?.error_code??'no dispatch attempt');
+      await new Promise(resolve=>setTimeout(resolve,25));
+    }
+  });
+  await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
+  const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
+  assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
+  await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
+  assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
+  assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,3);
+});
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});

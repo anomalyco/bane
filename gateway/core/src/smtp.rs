@@ -14,6 +14,8 @@ pub enum SubmitError {
     Cap,
     #[error("451 4.3.0 Submission unavailable")]
     Unavailable,
+    #[error("552 5.3.4 Message exceeds submission size limits")]
+    TooLarge,
     #[error("550 5.7.1 Rejected")]
     Rejected,
 }
@@ -184,7 +186,7 @@ impl Smtp {
                             date,
                         };
                         match submit.submit(s) {
-                            Ok(()) => Reply::one("250 2.0.0 Accepted by sink"),
+                            Ok(()) => Reply::one("250 2.0.0 Submission accepted"),
                             Err(e) => Reply::one(&e.to_string()),
                         }
                     };

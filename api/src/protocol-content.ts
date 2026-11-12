@@ -33,11 +33,14 @@ function scrub(input: Uint8Array) {
 export async function contentWrite(c: Ctx, p: Content) {
   const rt = c.env;
   const auth = principal(rt, 'smtp', sql`p.id=${p.kid}`);
-  const who = (await rt.db.execute<{ w: string; b: string }>(auth)).rows[0];
+  const ownership = sql`ARRAY(SELECT lower(address) FROM mailbox_addresses WHERE workspace_id=a.w AND mailbox_id=a.b)`;
+  const who = (await rt.db.execute<{ w: string; b: string; domain: string; owned: string[] }>(
+    sql`WITH a AS (${auth}) SELECT a.*,b.domain_id AS domain,${ownership} AS owned FROM a JOIN mailboxes b ON b.id=a.b`,
+  )).rows[0];
   if (!who) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
-  const input = Buffer.from(p.content, 'base64'),
-    raw = scrub(input);
+  const input = Buffer.from(p.content, 'base64');
   if (input.length > SMTP_WIRE_LIMIT) throw new ApiError(413, 'MESSAGE_SIZE', 'Message is too large.');
+  const raw = scrub(input);
   const m = await parseInboundMime(raw,'submission');
   if (!m) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
   const mid = id('msg'),
@@ -45,6 +48,22 @@ export async function contentWrite(c: Ctx, p: Content) {
   if (!bucket) throw new ApiError(503, 'MAIL_STORE_UNAVAILABLE', 'Kept mail storage unavailable.');
   const key = mailKey(who.w, 'kept', who.b, mid),
     index = mimeIndex(raw);
+  const sender = m.from?.address?.toLowerCase();
+  const origins = m.headers.filter(h => h.key === 'from'), senders = m.headers.filter(h => h.key === 'sender');
+  const required = [sender, p.from.toLowerCase(), ...(senders.length ? [m.sender?.address?.toLowerCase()] : [])];
+  const ownsSenders = (addresses: string[]) => required.every(a => a && addresses.includes(a));
+  const denied = () => new ApiError(403, 'SENDER_NOT_OWNED', 'Use an address owned by this inbox.');
+  if (!sender || origins.length !== 1 || senders.length > 1 || !ownsSenders(who.owned)) throw denied();
+  // The shared SES path cannot represent signed or encrypted MIME without breaking it.
+  if (/^content-type:\s*(application\/(?:pkcs7|pgp)|multipart\/(?:signed|encrypted))/im.test(raw.subarray(0, 65536).toString('latin1')))
+    throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'This MIME submission cannot be represented by the sending adapter.');
+  // Uploads reserve quota and commit immutable objects using their own transactions.
+  // Never ask for a second connection while the Worker holds its only one.
+  const attachments = await resolveAttachments(rt, {id:who.b, workspaceId:who.w, domainId:who.domain}, m.attachments.map(f => ({
+    filename: f.filename ?? 'attachment', contentType: f.mimeType,
+    content: Buffer.from(new Uint8Array(f.content as ArrayBuffer)).toString('base64'),
+    disposition: f.disposition === 'inline' ? 'inline' : 'attachment', contentId: f.contentId?.replace(/^<|>$/g, ''),
+  })), sender);
   const cap = await protocolScoreCap(rt, who.w);
   const persist = () => withMailObjects(rt, who.w, '', bucket, (objects) => objects.put(key, raw, 'message/rfc822'));
   // An uncertain transaction outcome must not remove a committed object. Orphan cleanup
@@ -60,29 +79,18 @@ export async function contentWrite(c: Ctx, p: Content) {
     // Acquire the issuer/revoker's fence BEFORE taking the statement snapshot used to authorize.
     await tx.execute(sql`SELECT FROM inbox_state WHERE workspace_id=${who.w} AND inbox_id=${who.b} FOR UPDATE`);
     const active = (
-      await tx.execute<{ w: string; b: string; daily: number; monthly: number }>(
-        sql`WITH a AS (${auth}) SELECT a.*,s.protocol_daily daily,s.protocol_monthly monthly FROM a JOIN inbox_state s ON s.inbox_id=a.b FOR UPDATE OF s`,
+      await tx.execute<{ owned: string[]; suppressed: boolean; daily: number; monthly: number }>(
+        sql`WITH a AS (${auth}) SELECT ${ownership} AS owned,s.protocol_daily daily,s.protocol_monthly monthly,
+          EXISTS(SELECT FROM audience_contacts WHERE workspace_id=a.w AND email=ANY(${sql.param(p.to.map(v=>v.toLowerCase()))}::text[]) AND suppressed) AS suppressed
+          FROM a JOIN inbox_state s ON s.inbox_id=a.b FOR UPDATE OF s`,
       )
     ).rows[0];
     if (!box || !active) throw new ApiError(403, 'CREDENTIAL_REVOKED', 'Protocol access denied.');
+    if (!ownsSenders(active.owned)) throw denied();
+    // SMTP submissions have no reply-author suppression exemption. Don't acknowledge
+    // known undeliverable mail; dispatch still rechecks for changes after this commit.
+    if (active.suppressed) throw new ApiError(422, 'RECIPIENT_INELIGIBLE', 'Recipient is not eligible for delivery.');
     const stamp = m?.messageId?.trim() ?? null;
-    const owned = (
-      await tx.execute<{ address: string }>(
-        sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${who.w} AND mailbox_id=${who.b}`,
-      )
-    ).rows.map((a) => a.address.toLowerCase());
-    const sender = m.from?.address?.toLowerCase();
-    const origins = m.headers.filter((h) => h.key === 'from');
-    const senders = m.headers.filter((h) => h.key === 'sender');
-    if (
-      !sender ||
-      !owned.includes(sender) ||
-      !owned.includes(p.from.toLowerCase()) ||
-      origins.length !== 1 ||
-      senders.length > 1 ||
-      (senders.length && (!m.sender?.address || !owned.includes(m.sender.address.toLowerCase())))
-    )
-      throw new ApiError(403, 'SENDER_NOT_OWNED', 'Use an address owned by this inbox.');
     const used = (
       await tx.execute<{ day: number; month: number }>(
         sql`SELECT coalesce(sum(accepted) FILTER(WHERE day=(now() AT TIME ZONE 'UTC')::date),0)::int AS day,coalesce(sum(accepted),0)::int AS month FROM inbox_protocol_sends WHERE inbox_id=${who.b} AND day>=date_trunc('month',now() AT TIME ZONE 'UTC')::date`,
@@ -90,30 +98,6 @@ export async function contentWrite(c: Ctx, p: Content) {
     ).rows[0]!;
     if (used.day + p.to.length > Math.min(active.daily, cap) || used.month + p.to.length > active.monthly)
       throw new ApiError(429, 'INBOX_SEND_LIMIT', 'Inbox send cap reached.');
-    // Do not silently drop attachments or break MIME signatures on shared SES: use
-    // the structured sending path, refusing types not representable by this adapter.
-    if (
-      /^content-type:\s*(application\/(?:pkcs7|pgp)|multipart\/(?:signed|encrypted))/im.test(
-        raw.subarray(0, 65536).toString('latin1'),
-      )
-    )
-      throw new ApiError(
-        422,
-        'UNSUPPORTED_MESSAGE',
-        'This MIME submission cannot be represented by the sending adapter.',
-      );
-    const attachments = await resolveAttachments(
-      rt,
-      box,
-      m.attachments.map((f) => ({
-        filename: f.filename ?? 'attachment',
-        contentType: f.mimeType,
-        content: Buffer.from(new Uint8Array(f.content as ArrayBuffer)).toString('base64'),
-        disposition: f.disposition === 'inline' ? 'inline' : 'attachment',
-        contentId: f.contentId?.replace(/^<|>$/g, ''),
-      })),
-      sender,
-    );
     const actor: Actor = { workspaceId: who.w, keyId: p.kid, domains: [], permissions: ['send'] };
     c.set('actor', actor);
     const hdrTo = new Set(m.to?.map((x) => x.address?.toLowerCase())),
