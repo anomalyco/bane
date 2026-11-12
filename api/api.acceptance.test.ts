@@ -9846,6 +9846,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const input=async(mid:string)=>(await runtime.db.execute<{input:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS input`)).rows[0]!.input;
       // m1's job is claimed with one recipient (its final attempt); m2 takes the other backlog slot.
       assert.equal(await notify('m1',['a']),1);
+      await db.query("UPDATE mail_receipts SET created_at=now()-interval '49 hours' WHERE workspace_id=$1 AND ses_message_id='m1'",[wid]); // Past the outage window: a final 503 settles.
       const claimed=await input('m1'),job=(await db.query("UPDATE jobs SET status='running',attempts=$3 WHERE workspace_id=$1 AND payload->>'sesMessageId'=$2 RETURNING id",[wid,'m1',MAX_ATTEMPTS])).rows[0].id;
       assert.equal(await notify('m2',['a']),1);
       // A reopen while the job runs waits for it, recipients merged.
@@ -10033,6 +10034,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const input=async(mid:string)=>(await runtime.db.execute<{input:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS input`)).rows[0]!.input as import('./src/mailbox-ingest-input.js').IngestInput;
       // A previous Worker claims m1's job for its last attempt; its lease runs out while it still works.
       assert.equal(await notify('m1',['a']),1);
+      await db.query("UPDATE mail_receipts SET created_at=now()-interval '49 hours' WHERE workspace_id=$1 AND ses_message_id='m1'",[wid]); // Past the outage window: a final 503 settles.
       const old=(await db.query("UPDATE jobs SET status='running',attempts=$2,lease_until=now()-interval '1 second' WHERE workspace_id=$1 AND payload->>'sesMessageId'='m1' RETURNING id",[wid,MAX_ATTEMPTS])).rows[0].id;
       assert.equal(await notify('m1',['a','b']),0);
       assert.deepEqual(await state('m1'),{status:'held',error:'MAILBOX_RECEIVE_BACKLOG',n:2,active:1,jobs:1});
