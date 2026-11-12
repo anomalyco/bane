@@ -427,8 +427,10 @@ async function act(label: string) {
     case 'jobs': await drainJobs(runtime, 20, 1, 15_000, 'work'); break;
     case 'drain': {
       const gate = gates.get('runner') ?? initialGate(); gates.set('runner', gate);
-      // Count the run's leases and claimed rows: a run never leases more than once per row it
-      // claimed, plus the lease that finds nothing, a wrap and a quota recheck.
+      const tried = new Map([...mails.values()].map(m => [m.id, m.calls]));
+      // Count the run's leases and claimed rows: a run leases at most once per claimed row, plus a
+      // blind first page, the page after the allowance is known, and the lease that finds nothing.
+      // A spin is unbounded leases with nothing claimed.
       const counts = { leases: 0, claimed: 0 }, dialect = (db as any).dialect;
       const counted = new Proxy(db, { get(target, prop, receiver) {
         if (prop === 'execute') return (query: any) => {
@@ -444,10 +446,12 @@ async function act(label: string) {
       // regression shows as a non-idle report instead of a hung host.
       const report = await ctx.run({}, () => runDispatcher({ ...runtime, db: counted }, { region: R, lanes: 1, batchSize: config.drainBatch, gate, schedulePartialFlush: () => () => {}, ...(config.quota >= 0 && !config.invariants ? { until: vnow() + 1000 } : {}) }));
       if (counts.leases > counts.claimed + 3) safety.push(`spin:${counts.leases} leases for ${counts.claimed} claimed rows`);
-      // Due mail left behind needs a wake: unfinished work (not idle) or a retry deadline.
-      const [due] = await q<{ n: number }>(sql`SELECT count(*)::int AS n FROM sending_emails WHERE ${owned()} AND region=${R} AND status='queued'
-        AND (scheduled_at IS NULL OR scheduled_at <= now()) AND (lease_until IS NULL OR lease_until < now())`);
-      if (due!.n && report.idle && report.quotaRetryAt === undefined && report.paceRetryAt === undefined) safety.push(`asleep-with-mail-due:${due!.n}`);
+      // Due mail the run left without trying needs a wake: unfinished work (not idle) or a retry
+      // deadline. A row it tried and requeued (a throttle's backoff) is woken by the scheduler's
+      // minute ping by design, so only untried rows count.
+      const due = (await q<{ id: string }>(sql`SELECT id FROM sending_emails WHERE ${owned()} AND region=${R} AND status='queued'
+        AND (scheduled_at IS NULL OR scheduled_at <= now()) AND (lease_until IS NULL OR lease_until < now())`)).filter(r => (mails.get(r.id)?.calls ?? 0) === (tried.get(r.id) ?? 0));
+      if (due.length && report.idle && report.quotaRetryAt === undefined && report.paceRetryAt === undefined) safety.push(`asleep-with-mail-due:${due.map(r => nameOf(r.id)).join(',')}`);
       if (config.quota >= 0 && !config.invariants) result = report.idle;
       break;
     }
