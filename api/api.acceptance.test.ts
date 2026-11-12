@@ -5477,6 +5477,43 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   } catch (cause) { if (cause !== rollback) throw cause; }
 }
 
+// Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
+// node-postgres lets query parameters redirect it, and never established that the database was
+// disposable. tear/disposable.ts is the rule every tear host shares.
+test('a tear host refuses redirecting URLs, databases not marked disposable and databases holding foreign data', async t => {
+  const { disposableUrl, assertDisposable, DISPOSABLE } = await import('./tear/disposable.js');
+  const { execFile } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
+  for (const url of ['postgresql://tear:x@127.0.0.1/tear?host=192.0.2.1&port=5432', 'postgresql://tear:x@127.0.0.1:1/tear?hostaddr=192.0.2.1',
+    'postgresql://tear:x@127.0.0.1/tear?options=-c%20search_path%3Dpublic', 'postgresql://tear:x@127.0.0.1/tear?', 'postgresql://tear:x@192.0.2.1:5432/tear',
+    'postgresql://tear:x@localhost.example.com/tear', 'mysql://tear:x@127.0.0.1/tear', 'not a url', undefined]) assert.throws(() => disposableUrl(url), /^Error: tear host:/, String(url));
+  for (const url of ['postgresql://tear:x@127.0.0.1:5432/tear', 'postgres://tear:x@localhost/tear', 'postgresql://tear:x@[::1]:5432/tear']) assert.equal(disposableUrl(url), url);
+  const client = new pg.Client({ connectionString: FIXTURE_DATABASE_URL });
+  await client.connect(); cleanup(t, () => client.end());
+  const check = () => assertDisposable(text => client.query(text));
+  // The acceptance database is shared by every scenario and carries no marker.
+  await assert.rejects(check(), /not marked disposable/);
+  // Marked, but holding a workspace tear did not create: still refused. Rolled back.
+  await client.query('BEGIN');
+  try {
+    await client.query(`DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), '${DISPOSABLE}'); END $$`);
+    await client.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [unique('foreign')]);
+    await assert.rejects(check(), /holds [1-9]\d* workspaces/);
+  } finally { await client.query('ROLLBACK'); }
+  // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
+  const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
+    const child = execFile('node', ['--import', 'tsx', 'tear/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
+      (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
+    child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
+  });
+  const unmarked = await host(FIXTURE_DATABASE_URL!);
+  assert.equal(unmarked.code, 1, unmarked.stderr); assert.match(unmarked.stderr, /not marked disposable/); assert.equal(unmarked.stdout, '');
+  assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
+  const redirected = new URL(FIXTURE_DATABASE_URL!); redirected.search = `host=${redirected.hostname}&port=${redirected.port || 5432}`; redirected.port = '1';
+  const refused = await host(redirected.toString());
+  assert.equal(refused.code, 1); assert.match(refused.stderr, /query parameters/); assert.equal(refused.stdout, '');
+});
+
 test('MX deployment variables remain fallbacks and BANE variables take precedence',async()=>{
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
   const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};

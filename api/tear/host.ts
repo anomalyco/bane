@@ -3,8 +3,8 @@
 // One long-lived process serves every trace: the Rust runner maps tear's per-trace
 // open/close to the `reset` and `end` actions, so the API modules load once. It drives
 // the real code (admission, campaign controls and run job, runDispatcher, the
-// interrupted-attempt sweep) against an isolated, migrated PostgreSQL database.
-// Never point TEAR_DATABASE_URL at anything but a throwaway local database.
+// interrupted-attempt sweep) against a dedicated, migrated PostgreSQL database that its creator
+// marked disposable (tear/disposable.ts: the rule every tear host shares).
 //
 // Determinism:
 // - Time is virtual. PostgreSQL's now(), clock_timestamp() and statement_timestamp() are
@@ -46,9 +46,23 @@ class VirtualDate extends RealDate {
 }
 globalThis.Date = VirtualDate as DateConstructor;
 
-const url = process.env.TEAR_DATABASE_URL;
-if (!url || !/^postgres(?:ql)?:\/\/[^@]*@(?:127\.0\.0\.1|localhost)[:/]/.test(url)) throw new Error('TEAR_DATABASE_URL must name an isolated local PostgreSQL database.');
-const withClock = url + (url.includes('?') ? '&' : '?') + 'options=' + encodeURIComponent('-c search_path=tear_clock,pg_catalog,public');
+// Before any module that connects: a loopback URL nothing can redirect, then the marker and
+// the data check, before the first write. Refusals exit 1 with the reason on stderr.
+const { disposableUrl, assertDisposable } = await import('./disposable.js');
+const url = await (async () => {
+  try {
+    const checked = disposableUrl(process.env.TEAR_DATABASE_URL);
+    const { default: pg } = await import('pg');
+    const client = new pg.Client({ connectionString: checked });
+    await client.connect();
+    try { await assertDisposable(text => client.query(text)); } finally { await client.end(); }
+    return checked;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
+})();
+const withClock = `${url}?options=${encodeURIComponent('-c search_path=tear_clock,pg_catalog,public')}`;
 
 const env = {
   DATABASE_URL: withClock, BETTER_AUTH_SECRET: 'tear-'.repeat(8), GOOGLE_CLIENT_ID: 'tear', GOOGLE_CLIENT_SECRET: 'tear',
@@ -132,6 +146,7 @@ const letters = (n: number) => { let s = ''; do { s = String.fromCharCode(97 + n
 const regionName = (n: number) => `te-${letters(process.pid)}-${letters(n)}-1`;
 
 async function reset(cfg: Partial<Config>) {
+  await assertDisposable(text => db.execute(sql.raw(text)) as Promise<{ rows: Record<string, unknown>[] }>);
   trace++;
   config = { quota: cfg.quota ?? -1, pace: cfg.pace ?? null, seed: cfg.seed ?? 0, recipients: cfg.recipients ?? ['ok', 'thr'], shards: cfg.shards ?? false, invariants: cfg.invariants ?? false };
   // Each trace starts on a fresh hour, after everything the previous trace wrote.

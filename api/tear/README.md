@@ -4,14 +4,23 @@ A [tear](https://github.com/anomalyco/tear) model check of admission, campaigns 
 
 ## Database
 
-Use a throwaway local database, never a shared or production one. The host shadows `now()`, `clock_timestamp()` and `statement_timestamp()` with a virtual clock and rewrites column defaults to use it.
+The host rewrites column defaults (to a virtual clock that shadows `now()`, `clock_timestamp()` and `statement_timestamp()`) and changes rows freely, so it runs only on a dedicated database. `disposable.ts` holds the rule every tear host shares:
+
+- `TEAR_DATABASE_URL` must be a plain loopback URL. Query parameters are refused, because node-postgres lets them redirect the host or port.
+- The database must carry the marker below.
+- The database must hold no workspace or user that tear did not create.
+
+The host checks the marker and data before its first write and again before every trace. The fake SES and storage keep the host away from AWS. They do not make a database safe to use.
+
+Create and migrate a database of its own, then mark it once as its owner. tear never sets the marker:
 
 ```sh
-createdb tear && DATABASE_URL=postgresql://…/tear BETTER_AUTH_SECRET=… PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts   # from api/
-export TEAR_DATABASE_URL=postgresql://…/tear
+createdb tear && DATABASE_URL=postgresql://…@127.0.0.1/tear BETTER_AUTH_SECRET=… PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts   # from api/
+psql postgresql://…@127.0.0.1/tear -c "DO \$\$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'bane-tear: disposable test database, every row may be changed or deleted'); END \$\$"
+export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear
 ```
 
-Turn off `fsync` and `synchronous_commit` on that cluster: commit stalls otherwise push an action past its one-second budget.
+Turn off `fsync` and `synchronous_commit` on that cluster. Commit stalls otherwise push an action past its one-second budget.
 
 ## Pull-request run (about 30 s after the build)
 
