@@ -2,7 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { ApiError, lazyModule, log, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { sesSettings } from './db/ses-regions.js';
-import { enqueue } from './jobs.js';
+import { enqueue, retryDatabaseFailures } from './jobs.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
 const THRESHOLDS = { bounceRate: { warning: 0.05, risk: 0.1 }, complaintRate: { warning: 0.001, risk: 0.005 } } as const;
@@ -118,4 +118,5 @@ const deliver: JobHandler = async (runtime, payload) => {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(10000) });
   if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the reputation alert with HTTP ${response.status}.`, undefined, true);
 };
-export const reputationAlertJobs = { [JOB]: deliver };
+// A storage hiccup or a timed-out post retries like other background work instead of losing the alert on its first failure.
+export const reputationAlertJobs = { [JOB]: retryDatabaseFailures(deliver) };
