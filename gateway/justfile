@@ -1,0 +1,8 @@
+e2e:
+    cargo test --locked
+    python3 e2e.py --real
+
+check:
+    cargo fmt --all --check
+    cargo clippy --all-targets --locked -- -D warnings
+    cargo test --locked

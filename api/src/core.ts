@@ -33,6 +33,7 @@ export interface Config {
   apiRateLimitPerMinute: number;
   workspaceId: string;
   authSecret: string;
+  mailGatewayToken?:string;
   previousAuthSecret?: string;
   googleClientId?: string;
   googleClientSecret?: string;
@@ -164,13 +165,14 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
 // enforces a guard and the MCP listing that must agree with it call the same predicate.
 /** mailboxAuth: inbox keys, or a workspace credential through actorMailAccess. */
 export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$)/.test(path);
+const appPasswordRoute = (path: string) => /^\/v1\/inboxes\/[^/]+\/app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>
-  /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
+  appPasswordRoute(path) || /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
 /** notMember: workspace members are refused these areas whatever their scopes. */
 export const ownerRoute = (method: string, path: string) => {
   const verb = method.toUpperCase();
-  return /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
+  return appPasswordRoute(path) || /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
     || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|pause|resume|pacing|cancel)$/.test(path));
 };
 // Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read

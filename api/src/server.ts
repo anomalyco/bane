@@ -1,3 +1,4 @@
+import {gatewayLane} from './protocol-admission.js';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { getPath } from 'hono/utils/url';
@@ -64,13 +65,17 @@ try {
     });
   } });
   // Coarse per-process admission guard; trusted proxy/WAF controls remain necessary for distributed abuse.
-  const peers = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
+  const peers = new Map<string, number>(), protocol = new Map<string,number>(); let minute = Math.floor(Date.now() / 60000);
   const server = serve({ fetch: async (request, connection) => {
     const current = Math.floor(Date.now() / 60000);
-    if (current !== minute) { peers.clear(); minute = current; }
+    if (current !== minute) { peers.clear(); protocol.clear(); minute = current; }
     const address = admissionPeer(connection.incoming.socket.remoteAddress ?? 'unknown');
-    if (!(getPath(request)==='/v1/events/ses' && request.method==='POST') && (peers.has(address) || peers.size < 1024)) {
-      const count = (peers.get(address) ?? 0) + 1; peers.set(address, count);
+    const lane = gatewayLane(request.method,getPath(request),request.headers,runtime.config.mailGatewayToken);
+    const buckets = lane ? protocol : peers;
+    if (!(getPath(request)==='/v1/events/ses' && request.method==='POST')) {
+      const key = lane ?? address;
+      const bucket = buckets.size < 1024 || buckets.has(key) ? key : 'overflow';
+      const count = (buckets.get(bucket) ?? 0) + 1; buckets.set(bucket, count);
       if (count > 6000) return admissionDenied();
     }
     const headers = new Headers(request.headers);

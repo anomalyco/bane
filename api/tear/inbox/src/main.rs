@@ -113,6 +113,7 @@ const PROPERTY: &str = "bane.inbox.phase2";
 
 /// Shortest witnesses of bugs this model found, replayed on every `ci` run: (quota of A, actions).
 const REGRESSIONS: &[(Option<i64>, &[&str])] = &[
+    (Some(1), &["W delete A", "V subscribe A", "W commit"]),
     // A flag change waiting on the inbox row behind DELETE /v1/inboxes/{id} changed the deleted inbox.
     (
         Some(1),
