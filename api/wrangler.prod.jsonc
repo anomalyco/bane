@@ -43,7 +43,9 @@
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "bane-prod-work",
     "WEBHOOK_QUEUE_NAME": "bane-prod-webhooks",
-    "FEEDBACK_QUEUE_NAME": "bane-prod-feedback"
+    "FEEDBACK_QUEUE_NAME": "bane-prod-feedback-v2",
+    // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
+    "LEGACY_FEEDBACK_QUEUE_NAME": "bane-prod-feedback"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
@@ -59,13 +61,15 @@
       { "binding": "WAKE_QUEUE", "queue": "bane-prod-work" },
       { "binding": "WEBHOOK_QUEUE", "queue": "bane-prod-webhooks" },
       { "binding": "FEEDBACK_DLQ", "queue": "bane-prod-feedback-dlq" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback" }
+      { "binding": "FEEDBACK_QUEUE", "queue": "bane-prod-feedback-v2" }
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
       { "queue": "bane-prod-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Each wake opens up to six delivery slots. Don't merge a burst of wake hints into one drain.
       { "queue": "bane-prod-webhooks", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 12 },
+      { "queue": "bane-prod-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" },
+      // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
       { "queue": "bane-prod-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-prod-feedback-dlq" }
     ]
   },

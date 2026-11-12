@@ -74,8 +74,8 @@ test('mail gateway: private admission binds the credential lane and append metad
   const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
   assert.equal(response.status,403);
 });
-test('feedback queue: the consumer ingests only items tagged by this installation, so a foreign producer on the shared queue cannot inject feedback',async()=>{
-  const {authenticFeedback,feedbackMac,feedbackSink,settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
+test('feedback queue: the tagged lane ingests only items this installation tagged, bad items are dead-lettered one by one, and the legacy lane loses nothing',async()=>{
+  const {authenticFeedback,feedbackMac,feedbackSink,settleFeedbackBatch,settleFeedbackMessage}=await import('./src/adapters/feedback-queue.js');
   type Item=import('./src/core.js').FeedbackItem;
   const secret=randomUUID(),previous=randomUUID(),sent:{body:Item}[]=[];
   const queue={send:async()=>{},sendBatch:async(messages:{body:Item}[])=>{sent.push(...messages);}} as unknown as Queue<Item>;
@@ -90,12 +90,46 @@ test('feedback queue: the consumer ingests only items tagged by this installatio
   assert.equal(authenticFeedback({authSecret:previous,previousAuthSecret:secret},queued),true,'a rotation keeps in-flight items valid');
   assert.equal(authenticFeedback({authSecret:previous},queued),false);
   assert.equal(authenticFeedback({authSecret:secret},structuredClone(sent[1]!.body)),true,'a caller-supplied tag is replaced, never trusted');
-  const forged:Item[]=[item,{...queued,message:{...queued.message,bounce:{bounceType:'Transient'}}},{...queued,topicArn:queued.topicArn+'x'},{...queued,region:'us-east-1'},
-    {...queued,topicKind:'byo'},{...queued,messageId:randomUUID()},{...queued,mac:feedbackMac(previous,item)},{...queued,mac:''},{...queued,mac:'x'.repeat(43)}];
-  for(const candidate of forged) assert.equal(authenticFeedback({authSecret:secret},candidate),false);
-  // Unauthenticated items are retired at once: never retried, never dead-lettered.
+  // Total over anything a foreign producer can put on the queue: wrong, altered, malformed, non-ASCII, non-string,
+  // unserializable (BigInt survives structured clone, JSON.stringify throws) and non-object bodies never throw.
+  const forged:unknown[]=[item,{...queued,message:{...queued.message,bounce:{bounceType:'Transient'}}},{...queued,topicArn:queued.topicArn+'x'},{...queued,region:'us-east-1'},
+    {...queued,topicKind:'byo'},{...queued,messageId:randomUUID()},{...queued,mac:feedbackMac(previous,item)},{...queued,mac:''},{...queued,mac:'x'.repeat(43)},{...queued,mac:'é'.repeat(43)},
+    {...queued,mac:'\u0000'.repeat(43)},{...queued,mac:queued.mac+'='},{...queued,mac:42},{...queued,mac:[queued.mac]},{...queued,message:{n:1n}},{...queued,message:{n:1n},mac:undefined},null,undefined,'string',42,[queued]];
+  for(const candidate of forged) assert.equal(authenticFeedback({authSecret:secret},candidate),false,JSON.stringify(candidate,(_k,v)=>typeof v==='bigint'?'1n':v));
+  // The consumer: one batch, every verdict per message. Only the valid item reaches ingestion; each bad item is
+  // dead-lettered on its own and acknowledged, so a poison message neither fails the batch nor retries.
+  type Settled={attempts:number;ack:()=>void;retry:()=>void;body:unknown;acked:number;retried:number};
+  const message=(body:unknown):Settled=>{const m:Settled={attempts:1,body,acked:0,retried:0,ack(){m.acked++;},retry(){m.retried++;}};return m;};
+  const poisoned={...queued,mac:'é'.repeat(43)},untagged={...item,messageId:randomUUID()},tampered={...queued,message:{...queued.message,bounce:{bounceType:'Transient'}}},bigint={...queued,message:{n:1n}};
+  const tagged=[message(queued),message(poisoned),message(untagged),message(tampered),message(bigint),message('text')];
+  const deadLetters:unknown[]=[];let ingested:Item[]=[];
+  const run=(lane:'tagged'|'legacy',messages:Settled[],fail?:(body:unknown)=>boolean)=>settleFeedbackBatch({secrets:{authSecret:secret},lane,messages,
+    ingest:async items=>{ingested=items;return items.map(()=>({ok:true}));},deadLetter:async body=>{if(fail?.(body))throw new Error('queue unavailable');deadLetters.push(body);}});
+  const settled=await run('tagged',tagged);
+  assert.deepEqual(ingested,[queued]);
+  assert.deepEqual([settled.unauthenticated,settled.deadLettered,settled.held,settled.failed,settled.retiredUnmatched],[5,5,0,0,0]);
+  assert.deepEqual(tagged.map(m=>[m.acked,m.retried]),[[1,0],[1,0],[1,0],[1,0],[1,0],[1,0]]);
+  assert.deepEqual(deadLetters,[poisoned,untagged,tampered,bigint,'text']);
+  assert.deepEqual(settled.outcomes.map(o=>o.ok),[true,false,false,false,false,false]);
+  // A dead-letter send that fails keeps that message for a later attempt and settles the rest normally.
+  const held=[message(queued),message(poisoned)];
+  const partial=await run('tagged',held,body=>body===poisoned);
+  assert.deepEqual([partial.deadLettered,partial.held,held[0]!.acked,held[1]!.acked,held[1]!.retried],[0,1,1,0,1]);
+  // The legacy lane (the queue the previous version wrote to) still ingests its untagged items, verifies tagged
+  // ones, and dead-letters only tagged items that fail, so nothing queued before the change is lost.
+  deadLetters.length=0;
+  const legacy=[message(untagged),message(queued),message(tampered),message(poisoned)];
+  const drained=await run('legacy',legacy);
+  assert.deepEqual(ingested,[untagged,queued]);
+  assert.deepEqual([drained.unauthenticated,drained.deadLettered],[2,2]);
+  assert.deepEqual(deadLetters,[tampered,poisoned]);
+  assert.deepEqual(legacy.map(m=>[m.acked,m.retried]),[[1,0],[1,0],[1,0],[1,0]]);
+  // Ingestion verdicts for accepted items keep their existing settlement (retry on a transient failure).
+  const transient=[message(queued)];
+  const result=await settleFeedbackBatch({secrets:{authSecret:secret},lane:'tagged',messages:transient,ingest:async()=>[{ok:false,error:'FEEDBACK_PERSIST_FAILED'}],deadLetter:async()=>{}});
+  assert.deepEqual([result.failed,transient[0]!.acked,transient[0]!.retried],[1,0,1]);
   let acked=0,retried=0;
-  settleFeedbackMessage({attempts:1,ack:()=>{acked++;},retry:()=>{retried++;},body:item},{ok:false,error:'FEEDBACK_UNAUTHENTICATED'});
+  settleFeedbackMessage({attempts:1,ack:()=>{acked++;},retry:()=>{retried++;},body:item},{ok:true});
   assert.deepEqual([acked,retried],[1,0]);
 });
 test('Cloudflare routing: every API route reaches the Worker before static assets',async()=>{

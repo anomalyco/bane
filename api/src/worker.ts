@@ -26,8 +26,8 @@ function initRuntimeDeps() {
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { authenticFeedback, feedbackSink, settleFeedbackMessage, workWake }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, authenticFeedback, feedbackSink, settleFeedbackMessage, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, workWake }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, workWake,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -71,7 +71,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -191,25 +191,22 @@ export default {
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core, authenticFeedback, settleFeedbackMessage } = await loadRuntimeDeps();
+    const { jobConcurrency, followDueJobs, core, settleFeedbackBatch } = await loadRuntimeDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
-    if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback')) {
+    const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy' : undefined;
+    if (feedbackLane) {
       const { ingestFeedbackBatch } = await core.wrapModuleLoad(() => import('./operations.js'));
       // Each message is one verified callback; acknowledge and retry individually so one bad
-      // payload never blocks a batch of routine deliveries.
+      // payload never blocks a batch of routine deliveries. On the tagged lane only items this
+      // installation tagged at /v1/events/ses are ingested; the rest are dead-lettered one by one.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
-        // Only items this installation tagged on the way in are ingested; anything else on the
-        // queue was not verified at /v1/events/ses and is retired without touching the database.
-        const authentic = messages.map(message => authenticFeedback(runtime.config, message.body));
-        const ingested = await ingestFeedbackBatch(runtime, messages.filter((_, index) => authentic[index]).map(message => message.body));
-        const outcomes = authentic.map(ok => ok ? ingested.shift()! : { ok: false, error: 'FEEDBACK_UNAUTHENTICATED' });
-        let retiredUnmatched=0;
-        for (const [index, message] of messages.entries()) if(settleFeedbackMessage(message, outcomes[index])==='retired_unmatched') retiredUnmatched++;
-        const unauthenticated = authentic.filter(ok => !ok).length;
-        const failed=outcomes.filter(outcome=>!outcome.ok).length-retiredUnmatched, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
-        core.log(failed || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', size: messages.length, failed, retiredUnmatched, unauthenticated, oldestMs });
+        const settled = await settleFeedbackBatch({ secrets: runtime.config, lane: feedbackLane, messages,
+          ingest: items => ingestFeedbackBatch(runtime, items), deadLetter: async body => { await env.FEEDBACK_DLQ.send(body); } });
+        const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
+        core.log(counts.failed || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
       return;
     }
