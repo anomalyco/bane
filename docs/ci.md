@@ -2,6 +2,16 @@
 
 Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev E2E passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
 
+## Merging into `dev`: the merge queue
+
+`dev` requires the merge queue. When a PR's own checks pass, add it to the queue (`gh pr merge <n>`, or "Merge when ready"). Only the accounts allowed to push `dev` can. The queue merges the PR onto the latest `dev` and every entry ahead of it, runs the required checks (`build`, `acceptance`) on exactly that commit (the `merge_group` event), and merges only if they pass. A PR no longer has to be up to date with `dev` first, so nobody re-runs CI because another PR landed.
+
+- **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
+- **Cost:** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
+- **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
+- **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
+
 ## What runs where
 
 | When | Job | What it proves | Time |

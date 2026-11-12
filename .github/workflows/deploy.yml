@@ -55,6 +55,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       stage: ${{ steps.stage.outputs.stage }}
       sha: ${{ steps.pin.outputs.sha }}
@@ -62,22 +63,40 @@ jobs:
     steps:
       # A dev deploy can also run as a workflow_run, whose triggering_actor is
       # the pusher of the upstream CI run. A rerun keeps the rerunner as
-      # github.triggering_actor, so both are checked.
+      # github.triggering_actor, so both are checked. The merge queue pushes
+      # dev as github-merge-queue[bot] on behalf of whoever added the pull
+      # request to it (its merged_by; only users allowed to push dev can), so
+      # for that pusher the pull request merged at exactly this commit must
+      # have been merged by an authorized actor.
       - name: Require an authorized actor
         env:
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.triggering_actor }}
           UPSTREAM_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           allowed='^(thdxr|R44VC0RP)$'
-          if [[ ! $ACTOR =~ $allowed ]]; then
-            echo "::error::Only thdxr and R44VC0RP may deploy (actor: $ACTOR)."
+          enqueued_by() {
+            [[ $SHA =~ ^[0-9a-f]{40}$ ]] || return 0
+            local pr
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" | jq -r --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '[.[] | select(.merged_at and .base.ref == "dev" and .base.repo.full_name == $repo and .merge_commit_sha == $sha) | .number][0] // empty')
+            [[ $pr =~ ^[0-9]+$ ]] || return 0
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.merged_by.login // empty'
+          }
+          require() {
+            [[ $2 =~ $allowed ]] && return 0
+            if [[ $EVENT == workflow_run && $2 == 'github-merge-queue[bot]' ]]; then
+              by=$(enqueued_by)
+              if [[ $by =~ $allowed ]]; then echo "The merge queue pushed $SHA for $by."; return 0; fi
+              echo "::error::Only thdxr and R44VC0RP may deploy (the merge queue pushed $SHA for ${by:-an unknown pull request})."
+              exit 1
+            fi
+            echo "::error::Only thdxr and R44VC0RP may deploy ($1: $2)."
             exit 1
-          fi
-          if [[ $EVENT == workflow_run && ! $UPSTREAM_ACTOR =~ $allowed ]]; then
-            echo "::error::Only thdxr and R44VC0RP may deploy (upstream actor: $UPSTREAM_ACTOR)."
-            exit 1
-          fi
+          }
+          require actor "$ACTOR"
+          if [[ $EVENT == workflow_run ]]; then require 'upstream actor' "$UPSTREAM_ACTOR"; fi
 
       - id: stage
         name: Pick the stage from the branch
