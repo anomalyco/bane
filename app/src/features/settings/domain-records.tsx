@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Copy } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -89,15 +89,33 @@ export function zoneLines(records: DnsRecord[]) {
   }).join('\n')
 }
 
+// On a phone each record is a card: name and value on one line each, and Copy in the row's action sheet. A copy
+// button inside a card's 20 px line would clip it and the wrapped value under it.
 export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
+  const toast = useToast()
+  const copy = async (value: string, what: string) => {
+    try { await navigator.clipboard.writeText(value); toast(`Copied ${what}`, 'success') }
+    catch { toast('Couldn’t copy to clipboard.', 'error') }
+  }
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
     { ...settingsColumns.dns[0], render: record => record.type },
-    { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
-    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—' },
-    { key: 'status', label: 'Status', width: 112, render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
+    { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: record => <code>{relativeHost(record.name, domain)}</code> },
+    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{record.value}</code> : '—' },
+    { key: 'status', label: 'Status', width: 112, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
+    { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
+      { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'name') },
+      { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'value') },
+    ]} /> },
   ]} />
 }
 
+// What the two alignments mean together: DMARC passes when either one aligns, so one "not aligned" is often fine.
+function dmarcVerdict(dkim: boolean, spf: boolean) {
+  if (dkim && spf) return 'Both align, so mail from this domain passes DMARC. Nothing to do.'
+  if (dkim) return 'DMARC passes through DKIM, so this is fine. To align SPF as well, set a custom MAIL FROM domain under Advanced.'
+  if (spf) return 'DMARC passes through SPF. Publish the DKIM records above to align DKIM as well.'
+  return 'Neither aligns, so DMARC fails: publish the DKIM records above, then check again.'
+}
 function DmarcRecords({ domain }: { domain: Domain }) {
   const policy = domain.dmarc, recommendation = recordsFor(domain, 'dmarc')[0]
   if (!policy && !recommendation) return null // Nothing to show until the first background check.
@@ -108,7 +126,8 @@ function DmarcRecords({ domain }: { domain: Domain }) {
   const row: DnsRecord = recommendation ?? { id: 'policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked' }
   return <div className="stack domain-group">
     <div className="ui-section-header"><div className="domain-group-title"><h3>DMARC <span className="muted">· {policy?.status ?? 'not checked'}</span></h3>
-      <p className="muted dmarc-alignment"><span>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p></div></div>
+      <p className="muted dmarc-alignment"><span title={policy ? `${mode(policy.adkim)}: ${policy.adkim === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span title={policy ? `${mode(policy.aspf)}: ${policy.aspf === 's' ? 'only this exact domain counts' : 'subdomains of this domain count too'}` : undefined}>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p>
+      {policy && <p className="muted">{dmarcVerdict(policy.alignment.dkim, policy.alignment.spf)}</p>}</div></div>
     <DnsRecordTable domain={domain.name} records={[row]} status={recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'} />
   </div>
 }
@@ -173,6 +192,20 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
   </div>
 }
 
+/**
+ * Where the domain receives and why, from the receiving MX record the API chose (onboarding and the domain page say
+ * the same thing). Bane receives on a free subdomain such as reply.<domain> unless the domain's own MX already points
+ * to Bane, so publishing the record never moves mail that goes elsewhere today, unless someone chose the root.
+ */
+export function receivingHostCopy(domain: string, receiving: DnsRecord[]) {
+  const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
+  if (!host) return `Receive mail at ${domain}.`
+  if (host !== domain) return `Mail to addresses on ${host}, such as support@${host}, comes to Bane. Mail to ${domain} itself keeps going wherever it goes today: Bane uses a subdomain so your current mailboxes keep working.`
+  return receiving.every(record => record.status === 'verified')
+    ? `Every address at ${domain} receives here: its MX record already points to Bane.`
+    : `This MX record sends all mail for ${domain} to Bane, including mailboxes you have elsewhere today. To keep them, receive on a subdomain such as reply.${domain} instead.`
+}
+
 // The domain page adds its receiving actions (choose the root or a subdomain, Check MX now) to the receiving group.
 export type ReceivingView = { actions?: ReactNode }
 
@@ -190,8 +223,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const all = guided ? sending : [...sending, ...receiving]
   const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
   const alert = issue && <ReceivingIssueAlert issue={issue} />
-  const subdomain = receiving.some(record => record.name !== domain.name)
-  const receivingCopy = subdomain ? `Receive at addresses on ${receiving[0]?.name}. Mail to ${domain.name} itself keeps going wherever it goes today.` : `Receive mail for every address at ${domain.name}.`
+  const receivingCopy = receivingHostCopy(domain.name, receiving)
   async function copyAll() {
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} ${guided ? 'sending ' : ''}records`, 'success') }
     catch { toast('Couldn’t copy to clipboard.', 'error') }

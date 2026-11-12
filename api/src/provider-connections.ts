@@ -139,7 +139,7 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
       receiveFailure=e;
       // A simultaneous outbound failure can be the one that escapes this run.
       // Keep the receiving resource/operator action visible independently.
-      if (e instanceof ApiError && e.code==='POOL_RECEIVING_DRIFT') log('warn',{operation:'shared-receiving-setup',region,code:e.code,message:e.message});
+      if (e instanceof ApiError && e.code==='POOL_RECEIVING_DRIFT') log('warn',{operation:'shared-receiving-setup',region,code:e.code});
     }
     if (!result.rows[0]!.sending) {
       const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
@@ -370,7 +370,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
         try { await ensureTenant(runtime, row.workspace_id, row.id); }
         catch (e) { if (e instanceof ModuleLoadError) throw e; log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
       }
-    } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code, ...(error.code==='POOL_SENDING_DRIFT'?{message:error.message}:{}) }); }
+    } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code }); }
   }
 }
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {

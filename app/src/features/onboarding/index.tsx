@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
@@ -35,7 +36,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
   const client = useQueryClient()
   const sync = useConnectionCache()
   const workspaceId = useSession()?.identity?.workspaceId
-  return useMutation({
+  return useGuardedMutation({
     gcTime: 0,
     mutationFn: write,
     onSuccess: connection => {
@@ -233,6 +234,7 @@ function connectionError(error: unknown) {
 }
 
 function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) => void; error: unknown }) {
+  // Fixed copy, so the choice never re-wraps when a request lands; the exact steps are in Settings → Plan & usage.
   return <div className="onboarding onboarding--choice">
     <div className="onboarding-intro onboarding-intro--center onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Where should your email send from?</h1>
@@ -242,13 +244,13 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through Bane’s Amazon SES. No AWS account needed; you add a few DNS records.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">New senders start with a daily limit</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-body">Send through Bane’s account on Amazon SES, Amazon’s email-sending service. No AWS account needed; you add a few DNS records. It starts with a small daily limit that rises on its own as your mail proves healthy.</span>
+        <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit to start</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Send through SES in your own account. A short AWS setup connects it.</span>
+        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account. A guided setup creates one CloudFormation stack there.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
@@ -427,7 +429,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
     <div className="onb-rise" style={rise(2)}><DnsWaitNote domain={current} /></div>
     <div className="onboarding-actions">
-      <p className="muted">{verified ? 'All set.' : 'Records can take a few minutes to show up.'}</p>
+      <p className="muted">{verified ? 'All set.' : 'Checking automatically.'}</p>
       <Button variant="primary" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
     </div>
   </div>
@@ -456,7 +458,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   }
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
-  const prompt = agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  const prompt = origin ? agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true }) : null
   const scopes = [
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },

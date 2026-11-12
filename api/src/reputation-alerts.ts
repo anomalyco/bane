@@ -2,7 +2,7 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { ApiError, lazyModule, log, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { sesSettings } from './db/ses-regions.js';
-import { enqueue } from './jobs.js';
+import { enqueue, retryDatabaseFailures } from './jobs.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
 const THRESHOLDS = { bounceRate: { warning: 0.05, risk: 0.1 }, complaintRate: { warning: 0.001, risk: 0.005 } } as const;
@@ -132,4 +132,5 @@ export function exemptAlertText(p: Record<string, unknown>, publicUrl: string) {
     + `${n(p.bounces)} hard bounces and ${n(p.complaints)} complaints on ${n(p.sends)} sends; ${n(p.rejected)} of ${n(p.screened)} screened rejected. `
     + `Bane did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${publicUrl}|Bane>`;
 }
-export const reputationAlertJobs = { [JOB]: deliver };
+// A storage hiccup or a timed-out post retries like other background work instead of losing the alert on its first failure.
+export const reputationAlertJobs = { [JOB]: retryDatabaseFailures(deliver) };

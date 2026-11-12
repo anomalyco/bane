@@ -1,5 +1,6 @@
 import { connectionApi } from './connections'
 import type { InboundThreadView, BaneApi, LogDirection, PageRequest, Stream, TimeRange } from './types'
+import { usageApi } from './usage'
 import { workspaceApi } from './workspaces'
 
 // The first-screen queries of the sidebar pages, defined once: a page reads them through useApiDef and
@@ -38,6 +39,7 @@ export const queries = {
   mailboxKeys: (showRevoked: boolean) => def(['mailbox-keys', showRevoked], (api, signal) => api.mailboxes.keys(showRevoked, signal)),
   webhooks: (cursor?: string) => def(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor)),
   connection: () => def(['connection'], (_api, signal) => connectionApi.get(signal)),
+  usage: () => def(['usage'], (_api, signal) => usageApi.get(signal)),
   workspaceMembers: () => def(['workspace-members'], (_api, signal) => workspaceApi.members(signal)),
   workspaceInvitations: () => def(['workspace-invitations'], (_api, signal) => workspaceApi.invitations(signal)),
 }

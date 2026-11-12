@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Download } from 'lucide-react'
-import { Field, SectionHeader, Select, Tabs } from '../../components/ui'
+import { Field, SectionHeader, Select } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { usePublicOrigin } from '../../data/context'
 import type { Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
+import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
+import { McpClientSetup, mcpAccess, useMcpUrl, type McpAccess } from './connect-agent'
 import './developer.css'
 
 // The canonical public origin from /v1/me; the page origin stands in for demo mode.
@@ -20,7 +21,7 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
     'Set up Bane email in this project.',
     '',
     `- API base URL: ${origin}`,
-    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (full API reference).`,
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
     `- Install the TypeScript SDK: npm i @banemx/sdk. Create the client with createClient from '@banemx/sdk/client' (baseUrl ${origin}) and call it from server code only.`,
     '- Auth: bearer API key from the BANE_API_KEY environment variable. Never hardcode it or ship it to a browser.',
   ]
@@ -64,54 +65,21 @@ export function AgentPrompt({ prompt }: { prompt: string | null }) {
   </section>
 }
 
-const accessOptions = [
-  { value: 'read', label: 'Read only', scope: 'bane:read offline_access', hint: 'Read data without sending email.' },
-  { value: 'manage', label: 'Full access', scope: 'bane:read bane:send bane:manage offline_access', hint: 'Includes sending email and changing configuration.' },
-]
-const clients = [{ value: 'opencode', label: 'OpenCode' }, { value: 'claude', label: 'Claude Code' }, { value: 'cursor', label: 'Cursor' }]
-
-// The hosted MCP server and per-client setup. Without chooseAccess, OpenCode requests full access.
+// The hosted MCP server, set up with OAuth: the same snippets as Connect an agent in the dashboard (connect-agent.tsx).
 export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
-  const [client, setClient] = useState('opencode')
-  const [access, setAccess] = useState(chooseAccess ? 'read' : 'manage')
-  const selected = accessOptions.find(option => option.value === access) ?? accessOptions[0]
-  const serverUrl = new URL('/mcp', usePublicOrigin()).href
-  const snippets: Record<string, string> = {
-    claude: `claude mcp add --transport http bane ${serverUrl}`,
-    cursor: JSON.stringify({ mcpServers: { bane: { url: serverUrl } } }, null, 2),
-    opencode: JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { bane: { type: 'remote', url: serverUrl, oauth: { scope: selected.scope } } } } }, null, 2),
-  }
-  const snippet = snippets[client]
-  const label = clients.find(item => item.value === client)!.label
+  const [client, setClient] = useState<McpClient>('opencode')
+  const [access, setAccess] = useState<McpAccess>(chooseAccess ? 'read' : 'manage')
+  const selected = mcpAccess.find(option => option.value === access)!
+  const serverUrl = useMcpUrl()
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
-    <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
-    <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s Google login; no API key or local MCP process is needed.</p>
-    <div className="developer-client-bar">
-      <Tabs label="MCP client" value={client} onValueChange={setClient} items={clients} />
-      <CopyAction key={`${client}-${access}`} value={snippet} label={`Copy ${label} setup`} variant="ghost" size="sm" compact className="developer-copy-icon" />
-    </div>
-    {/* Every client's setup is laid out in one cell, so switching tabs never changes the section's height. */}
-    <div className="developer-client-panels">{clients.map(({ value, label: name }) => <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client}>
-      {value === 'opencode' && chooseAccess && <div className="developer-access">
-        <Field label="Requested access" htmlFor="developer-mcp-access" hint={selected.hint}>
-          <Select id="developer-mcp-access" value={access} onValueChange={setAccess} options={accessOptions} />
-        </Field>
-      </div>}
-      <pre className={value === 'claude' ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${name} setup`}><code>{snippets[value]}</code></pre>
-      {value === 'opencode' ? <ol className="developer-steps">
-        <li>Merge this entry into your project or global <code>opencode.json</code>. Keep your existing servers and settings.</li>
-        <li>Open <code>/mcps</code>, select <strong>bane</strong>, then choose <strong>Sign in</strong>.</li>
-        <li>Approve the requested access in your browser. A dashboard session in that browser profile skips Google sign-in.</li>
-      </ol> : value === 'claude' ? <ol className="developer-steps">
-        <li>Run this in your project’s terminal.</li>
-        <li>In Claude Code, run <code>/mcp</code>, select <strong>bane</strong>, then choose <strong>Authenticate</strong>.</li>
-      </ol> : <ol className="developer-steps">
-        <li>Merge this into <code>.cursor/mcp.json</code> in your project, or <code>~/.cursor/mcp.json</code> for every project.</li>
-        <li>In Cursor Settings, open <strong>MCP</strong> and sign in to <strong>bane</strong>.</li>
-      </ol>}
-      {value !== 'opencode' && <p className="muted developer-copy">{name} signs in with read access. Your code sends with the SDK and API key.</p>}
-      {value === 'opencode' && chooseAccess && <p className="muted developer-copy">Changing access only updates the configuration above; reconnect and authorize again to apply it.</p>}
-    </div>)}</div>
+    <div className="developer-url"><code>{serverUrl ?? ''}</code>{serverUrl && <CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" />}</div>
+    <p className="muted developer-copy">Add this URL as a remote (HTTP) server in your MCP client. There are two ways to sign in. <strong>As you</strong>: the client opens your browser, you sign in with your dashboard’s Google account and approve what it may do; no key to copy. <strong>One agent inbox</strong>: an inbox key in the config limits the agent to that inbox; create it in the dashboard with Connect an agent (API keys, or any agent inbox).</p>
+    {chooseAccess && <div className="developer-access">
+      <Field label="Access it asks for" htmlFor="developer-mcp-access" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
+        <Select id="developer-mcp-access" value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
+      </Field>
+    </div>}
+    <McpClientSetup client={client} onClient={setClient} url={serverUrl} auth={{ scope: selected.scope }} />
   </section>
 }

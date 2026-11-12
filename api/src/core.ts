@@ -87,7 +87,7 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared' };
+export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown>; topicKind?:'byo'|'shared'; mac?: string };
 export interface Runtime {
   mailR2?: { bucket: R2Bucket; name: string; write: boolean };
   db: Database; storage: Storage; config: Config;
@@ -115,10 +115,14 @@ export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+  /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
+  /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
+  principal?: { type: string; workspace?: string } } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
+export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */
   leaseFence?: string;
@@ -128,6 +132,8 @@ export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, jo
 export class ApiError extends Error {
   /** Structured detail for errors that have several parts, such as ritual compile diagnostics. */
   details?: Record<string, unknown>[];
+  /** The field names a log line may name: the schema's own, never a key the caller sent (app.ts invalidFields). */
+  logField?: string;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 export class ModuleLoadError extends ApiError {
@@ -159,6 +165,20 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/** A (created_at, id) page cursor, bound to its resource and filters; microseconds survive the round trip. */
+export function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
+  if (!value) return null;
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    // ISO 8601 allows offsets up to ±23:59; Postgres refuses past ±15:59 (22009), so an edited cursor would be a 500.
+    const tuple = z.tuple([z.string().datetime({ offset: true }).regex(/(?:Z|[+-](?:0\d|1[0-5]):[0-5]\d)$/), z.string().min(1).max(120), z.literal(binding)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+    return { at: tuple[0], id: tuple[1] };
+  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
+}
+export function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
+  const last = rows[limit - 1];
+  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+}
 /**
  * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts
  * with a workspace ID or a mail class, and no workspace may be named `uploads` (migration 158).
@@ -284,25 +304,172 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
 // node-postgres throws plain errors when a socket drops. Drizzle wraps all of them, so read the cause chain.
 const TRANSIENT_SQLSTATES = new Set(['58000', '53300', '57P01', '57P02', '57P03']);
 const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE']);
-const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|Server connection attempt failed: .+)$/;
-const errorChain = (error: unknown) => { const chain: Error[] = []; for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); return chain; };
-/** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs. */
-export const databaseCodeOf = (error: unknown) => errorChain(error).map(e => (e as { code?: unknown }).code).find((code): code is string => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code));
+// node-postgres's pool checkout timeout is the same condition as Hyperdrive's "Failed to acquire a connection".
+const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|timeout exceeded when trying to connect|Server connection attempt failed: .+)$/;
+const errorChain = (error: unknown) => { const chain: Error[] = []; try { for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); } catch { /* A throwing cause getter or proxy ends the chain. */ } return chain; };
+/** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs: a five-character string or nothing. */
+export const databaseCodeOf = (error: unknown) => {
+  for (const e of errorChain(error)) {
+    let code: unknown;
+    try { code = (e as { code?: unknown }).code; } catch { continue; }
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return undefined;
+};
 export function transientDatabaseError(error: unknown) {
-  if (error instanceof ApiError) return false;
-  return errorChain(error).some(e => {
-    const code = (e as { code?: unknown }).code;
-    return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || TRANSIENT_DRIVER_MESSAGE.test(e.message);
-  });
+  try {
+    if (error instanceof ApiError) return false;
+    return errorChain(error).some(e => {
+      try {
+        const code: unknown = (e as { code?: unknown }).code, message: unknown = e.message;
+        return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || typeof message === 'string' && TRANSIENT_DRIVER_MESSAGE.test(message);
+      } catch { return false; }
+    });
+  } catch { return false; } // A hostile proxy is not a database error.
 }
+/** A transaction Postgres rolled back to break a deadlock (40P01) or a serialization conflict (40001): nothing it wrote
+ * was kept, so the same request or job can safely run again. */
+export const databaseConflict = (error: unknown) => !(error instanceof ApiError) && ['40P01', '40001'].includes(databaseCodeOf(error) ?? '');
 /** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
+// Structured logs: one JSON object per line. The Worker's lines go to Workers Logs, the Node API and runner's to
+// stdout (CloudWatch on Fargate); the mail gateway writes the same fields. Every request writes one `event: 'request'`
+// line (app.ts) and every unexpected failure one `logError` line with its stack. docs/ci.md describes the fields and the
+// nightly report that reads them.
+const logContext: { service?: string; deploy?: string } = {};
+/** Which process is logging and the commit it runs, stamped on every line. */
+export function setLogContext(context: { service: string; deploy?: unknown }) {
+  logContext.service = context.service;
+  logContext.deploy = typeof context.deploy === 'string' && /^[0-9a-f]{7,40}$/.test(context.deploy) ? context.deploy.slice(0, 12) : undefined;
+}
+const ROUTINE_CODES = new Set(['JOB_COMPLETED', 'QUEUE_WAKE', 'QUEUE_WAKE_COALESCED', 'JOB_DEFERRED']);
+// Sample routine successes at the source, NOT whole invocations: a sampled-out request still logs every failure, and
+// a kept line carries its `sampleRate` so counts are estimated as 1/sampleRate lines each.
+function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
+  if (level !== 'info') return 1;
+  if (typeof fields.code === 'string' && ROUTINE_CODES.has(fields.code)) return 0.01;
+  return typeof fields.status === 'number' && fields.status < 400 ? 0.1 : 1;
+}
+// Defense in depth: callers log operations, IDs and codes, never bodies, headers, addresses or tokens. A string that
+// slips through anyway loses addresses and long credential-like runs: secrets are a prefix and 64 hex digits, while
+// IDs carry 32 and error codes are upper case (some are 40 characters long).
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+const CREDENTIAL = /[A-Za-z0-9_]{40,}/g;
+const credentialLike = (run: string) => /[a-z]/.test(run) && /[0-9]/.test(run) ? '[redacted]' : run;
+// Only strings, numbers, booleans, plain objects and arrays are written, and every object or array in a line is one
+// scrub built itself: no method of the input is called (not slice, map or entries, which an array or proxy can
+// override) and no getter runs. An array is read by index up to 50 elements, an object by its own enumerable data
+// properties up to 50 keys, each read inside try. Anything else (an error, a class instance, an accessor, a proxy that
+// throws, anything nested deeper than three levels) becomes '[object]', so no toString or toJSON is ever reached.
+const SCRUB_ITEMS = 50;
+function scrub(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return value.replace(EMAIL, '[email]').replace(CREDENTIAL, credentialLike).slice(0, 2000);
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return value;
+  if (typeof value !== 'object') return typeof value === 'bigint' ? String(value) : undefined; // Functions and symbols.
+  try {
+    if (depth > 2) return '[object]';
+    const prototype = Object.getPrototypeOf(value);
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) return '[object]';
+      const length: unknown = Reflect.get(value, 'length');
+      const items: unknown[] = [];
+      for (let index = 0; index < (typeof length === 'number' && length > 0 ? Math.min(Math.floor(length), SCRUB_ITEMS) : 0); index++) {
+        let item: unknown;
+        try { const descriptor = Reflect.getOwnPropertyDescriptor(value, String(index)); item = descriptor && 'value' in descriptor ? scrub(descriptor.value, depth + 1) : descriptor ? '[object]' : undefined; }
+        catch { item = '[object]'; }
+        items[index] = item === undefined ? null : item;
+      }
+      return items;
+    }
+    if (prototype !== Object.prototype && prototype !== null) return '[object]';
+    const entries: Record<string, unknown> = Object.create(null);
+    let kept = 0;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') continue;
+      if (kept++ >= SCRUB_ITEMS) break;
+      try {
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+        if (descriptor?.enumerable) entries[key] = 'value' in descriptor ? scrub(descriptor.value, depth + 1) : '[object]';
+      } catch { entries[key] = '[object]'; }
+    }
+    return entries;
+  } catch { return '[object]'; } // A proxy that throws from getPrototypeOf, ownKeys or a revoked proxy.
+}
+/** What `log` writes when a line cannot be built: logging never throws into a request. */
+const LOG_FALLBACK = '{"level":"error","code":"LOG_SERIALIZE_FAILED"}';
+function logFallback() { try { console.error(LOG_FALLBACK); } catch { /* Nothing left to write with. */ } }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
-  // Sample routine successes at the source, NOT whole invocations. A sampled-out
-  // request can still emit every error and the minute and batch metrics stay exact.
-  if(level==='info' && (fields.status===200 || fields.status===202 || ['JOB_COMPLETED','QUEUE_WAKE','QUEUE_WAKE_COALESCED','JOB_DEFERRED'].includes(String(fields.code))) && Math.random()>=0.01)return;
-  // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
-  console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
+  let line: string, write: 'info' | 'warn' | 'error' = 'error';
+  try {
+    write = level === 'info' || level === 'warn' ? level : 'error';
+    const rate = sampleRate(write, fields);
+    if (rate < 1 && Math.random() >= rate) return;
+    const clean = scrub(fields);
+    if (clean === null || typeof clean !== 'object' || Array.isArray(clean)) throw new TypeError('fields are not a plain object');
+    line = JSON.stringify({ level: write, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...clean, ...(rate < 1 ? { sampleRate: rate } : {}) });
+  } catch { return logFallback(); }
+  try { console[write](line); } catch { logFallback(); }
+}
+// A V8 stack is a header and then "    at <function> (<location>)" frames. The header is the error's name and message
+// (`${name}: ${message}`, or whichever is not empty), and either can span lines that look exactly like frames: a
+// database error quotes its SQL parameters, and a name is just a property (PR #131 review). So neither is trusted and
+// no line is counted: the stack must start with that exact header text, character for character, and frames are read
+// only after it (V8 formats the header from the current name and message on first access). Every line after it must be
+// a frame; only frames in Bane's own code (the Worker bundle, or src/ or dist/ outside node_modules) are kept, rebuilt
+// from the function name and file:line:column. Anything else fails closed: no frames. The one case this cannot see is
+// code that shortens a message after something already read the stack; no request can do that.
+const FRAME = /^ {4}at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;
+const OWN_CODE = /(?:^|\/)(worker\.js|(?:src|dist)\/[\w./-]{1,200}\.(?:ts|js))$/;
+export function stackFrames(error: unknown, limit = 12) {
+  let stack: unknown, name: unknown, message: unknown;
+  try {
+    if (!(error instanceof Error)) return undefined;
+    stack = error.stack; name = error.name; message = error.message;
+  } catch { return undefined; } // A throwing getter or proxy trap, or a revoked proxy.
+  // Each read once; anything but a string (an object with its own toString) fails closed.
+  if (name === undefined) name = 'Error';
+  if (message === undefined) message = '';
+  if (typeof stack !== 'string' || typeof name !== 'string' || typeof message !== 'string') return undefined;
+  const header = !name ? message : !message ? name : `${name}: ${message}`;
+  if (!stack.startsWith(`${header}\n`)) return undefined;
+  const frames: string[] = [];
+  for (const line of stack.slice(header.length + 1).split('\n')) {
+    if (!/^ {4}at /.test(line)) return undefined; // Not a stack after all.
+    const match = FRAME.exec(line);
+    if (!match) continue; // A native, eval or anonymous-location frame.
+    const [, fn, location, row, column] = match;
+    const file = location!.includes('node_modules') ? undefined : OWN_CODE.exec(location!)?.[1];
+    if (file && frames.length < limit) frames.push(`${fn ?? '<anonymous>'} (${file}:${row}:${column})`);
+  }
+  return frames.join('\n') || undefined;
+}
+/**
+ * An error's class name (`TypeError`, `DrizzleQueryError`) as a string, or `Error`. `name` is read once and used only
+ * when it is a string that looks like a class name: an object with its own toString would be serialized whole.
+ */
+const CLASS_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+export function errorTypeOf(error: unknown): string {
+  try {
+    if (!(error instanceof Error)) return error === null ? 'null' : typeof error;
+    const name: unknown = error.name;
+    return typeof name === 'string' && CLASS_NAME.test(name) ? name : 'Error';
+  } catch { return 'Error'; }
+}
+/**
+ * One line for an unexpected failure: its code, error class, SQLSTATE and Bane's own stack frames. Never a message:
+ * neither the error's nor an ApiError's, whose text can quote request data (a template variable, a filename).
+ */
+/** An error code for a log line: an upper-case code string (`INTERNAL_ERROR`, `MCP_HTTP_405`), or `UNKNOWN_ERROR`. */
+export const errorCodeOf = (value: unknown) => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : 'UNKNOWN_ERROR';
+export function logError(error: unknown, fields: Record<string, unknown> & { code: string; message?: never }, level: 'error' | 'warn' = 'error') {
+  let entry: Record<string, unknown>;
+  try {
+    let known = false;
+    try { known = error instanceof ApiError; } catch { /* A proxy: treat as unexpected. */ }
+    // `code` usually comes from an ApiError; it is logged only as an error-code-shaped string.
+    entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
+  } catch { return logFallback(); }
+  log(level, entry);
 }
 export const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
@@ -344,6 +511,15 @@ export function admissionPeer(address: string): string {
     return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
   } catch { return 'unknown'; }
 }
+// Cloudflare gives every cross-zone Worker subrequest the same client address and names the calling
+// zone in CF-Worker, so callers on Workers (OpenCode Console among them) would otherwise share one
+// admission bucket and one failure budget with every other Worker on the Internet. Only that egress
+// address may choose a bucket this way; any other client keeps its own address.
+const WORKER_EGRESS = admissionPeer('2a06:98c0:3600::103');
+export function admissionKey(address: string, worker: string | null) {
+  const zone = worker?.trim().toLowerCase();
+  return address === WORKER_EGRESS && zone && /^[a-z0-9.-]{1,253}$/.test(zone) ? `worker:${zone}` : address;
+}
 
 // Identity entry has a request budget; authenticated API routes have a failure
 // budget. Check completed failures before dispatch, never charge concurrency.
@@ -375,15 +551,22 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
   }
   return response;
 }
-// All credentials and image-producing routes share one atomic workspace counter.
-export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
-  const limit = 30;
-  const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${workspaceId}, 'render:images', date_trunc('minute', now()), 1)
+/**
+ * One atomic per-minute counter in api_request_budgets, named by `key` within a workspace: true while this minute's
+ * charges, this one included, stay within `limit`. A window stored in the future (an operator's or a test's hold) stays.
+ */
+export async function chargeBudget(runtime: Pick<Runtime, 'db'>, workspaceId: string, key: string, limit: number) {
+  const { rows: [row] } = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+    VALUES (${workspaceId}, ${key}, date_trunc('minute', now()), 1)
     ON CONFLICT (workspace_id, key_id) DO UPDATE SET
       used = CASE WHEN excluded.window_start > api_request_budgets.window_start THEN 1 ELSE least(api_request_budgets.used + 1, ${limit + 1}) END,
       window_start = greatest(api_request_budgets.window_start, excluded.window_start) RETURNING used`);
-  if (budget.rows[0]!.used > limit) {
+  return row!.used <= limit;
+}
+// All credentials and image-producing routes share one atomic workspace counter.
+export async function chargeRenderBudget(c: Ctx, workspaceId: string) {
+  const limit = 30;
+  if (!await chargeBudget(c.env, workspaceId, 'render:images', limit)) {
     c.header('Retry-After', '60');
     throw new ApiError(429, 'RENDER_RATE_LIMITED', `This workspace allows ${limit} image previews and imports per minute. Retry after the window resets.`, undefined, true);
   }

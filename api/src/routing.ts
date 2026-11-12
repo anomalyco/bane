@@ -294,7 +294,7 @@ async function save(
   await tx.execute(
     sql`INSERT INTO mail_routes(id,workspace_id,key,domain_id,match,destinations,subaddresses,enabled,note,created_at) SELECT id,${w},key,domain,match,"to",subaddresses,enabled,note,"createdAt" FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(id text,key text,domain text,match text,"to" jsonb,subaddresses boolean,enabled boolean,note text,"createdAt" timestamptz)`,
   );
-  const who = c.get('actor');if(who.grantId){const {ownReceiving}=await import('./rituals.js');for(const r of rows)await ownReceiving(tx,c,'route',r.id)}
+  const who = c.get('actor');if(who.grantId&&rows.length)await (await import('./rituals.js')).ownReceiving(tx,c,'route',rows.map(r=>r.id));
   await tx.execute(sql`INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note)
     VALUES(${w},${next},ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(after.map(r=>r.id).sort())}::jsonb)),ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(diff.map(d=>(d.before??d.after)!.id).sort())}::jsonb)),${who.credential??'apiKey'},${who.keyId},${note||null})`);
   // At most one retired manifest on a normal write; its audit rows share the same transaction.
@@ -356,8 +356,10 @@ const addressesOf = (list: MimeAddress[] | undefined): string[] =>
 export function registerRouting(app: App) {
   const path = '/v1/routing',
     meta = { security, tags: ['Routing'] };
-  const workspace = (c: Ctx) => {
-    const a=actor(c,c.get('actor')?.receivingConsent&&(c.req.method==='GET'||c.req.path.endsWith('/test'))?'read':'manage');
+  // Each operation says whether it only reads. With receiving consent, reads and the dry run need
+  // read; every change needs manage.
+  const workspace = (c: Ctx, read = c.req.method === 'GET') => {
+    const a=actor(c,c.get('actor')?.receivingConsent&&read?'read':'manage');
     if (a.domains.length || a.role === 'member')
       throw fail(
         403,
@@ -371,11 +373,13 @@ export function registerRouting(app: App) {
     change: (routes: Route[], tx: DbExecutor, version: number) => Route[] | Promise<Route[]>,
     options: Parameters<typeof save>[6] = {},
   ) => {
-    const w = workspace(c);
+    const w = workspace(c, false);
     if (c.get('actor').credential==='agentToken'||(c.get('actor').grantId&&!c.get('actor').receivingConsent))
       throw fail(403, 'ADMIN_REQUIRED', 'MCP and agent credentials can read and test routing, not change it. Change routes in the dashboard or with an API key.');
     const result = await c.env.db.transaction(async (tx) => {
       await lockMailboxLane(tx, w, 'address');
+      // Hold the approval before any route row: a removal disables an approval's routes after it has taken the approval.
+      if (c.get('actor').grantId) await (await import('./rituals.js')).holdReceiving(tx, c);
       const version = await currentVersion(tx, w),
         expected = c.req.header('if-match')?.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
       if (expected !== undefined && expected !== '*' && expected !== String(version))
@@ -580,10 +584,12 @@ export function registerRouting(app: App) {
     async (c) => {
       const w = workspace(c),
         q = c.req.valid('query');
+      // The cursor is a version number; anything else (1.5, 1e10) reached an integer comparison as a 500.
+      if (q.cursor !== undefined && !/^\d{1,9}$/.test(q.cursor)) throw fail(422, 'INVALID_CURSOR', 'Use the nextCursor a previous page returned.', 'cursor');
       const rows = (
         await c.env.db.execute<z.infer<typeof RoutingVersion>>(
           sql`SELECT version,created_at::text AS "createdAt",jsonb_build_object('type',actor_type,'id',actor_id) AS actor,cardinality(changed_ids) AS changes,note FROM mail_routing_versions
-            WHERE workspace_id=${w} AND created_at>=now()-interval '1 year' ${q.cursor ? sql`AND version<${Number(q.cursor) || 0}` : sql``} ORDER BY version DESC LIMIT ${q.limit + 1}`,
+            WHERE workspace_id=${w} AND created_at>=now()-interval '1 year' ${q.cursor ? sql`AND version<${Number(q.cursor)}` : sql``} ORDER BY version DESC LIMIT ${q.limit + 1}`,
         )
       ).rows;
       return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? String(rows[q.limit - 1]!.version) : null }, 200);
@@ -648,7 +654,7 @@ export function registerRouting(app: App) {
       responses: { 200: response(RoutingTestResult), ...errors },
     }),
     async (c) => {
-      const w = workspace(c),
+      const w = workspace(c, true),
         input = c.req.valid('json');
       if(input.config){if(input.config.routes.length>1000)throw fail(422,'TEST_CONFIG_LIMIT','A preview accepts up to 1,000 routes.');checkReferenceBudget(input.config.routes);}
       if (input.messageId && input.raw) throw fail(422, 'INVALID_TEST', 'Supply messageId or raw, not both.', 'raw');

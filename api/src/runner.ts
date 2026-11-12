@@ -4,20 +4,20 @@ import { nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain,drainJobs } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
-import { cleanup, reconcileUploads } from './maintenance.js';
-import { checkReputationAlerts } from './reputation-alerts.js';
+import { hourlyUpkeep } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
-import { mailboxHourly } from './mailbox-ingest.js';
 import { publicStatsTick } from './public-stats.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
-import { ApiError, log } from './core.js';
+import { ApiError, log, logError, setLogContext } from './core.js';
+setLogContext({ service: 'runner', deploy: process.env.DEPLOY_SHA });
 try {
   const { runtime, close } = nodeRuntime(process.env);
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   let publicStats: Promise<void> | undefined, lastPublicStats = 0;
+  let hourly: Promise<unknown> | undefined;
   // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
@@ -51,11 +51,11 @@ try {
           lastPublicStats = Date.now();
           publicStats = publicStatsTick(runtime).finally(() => { publicStats = undefined; });
         }
-        if (Date.now() - lastCleanup > 3600000) {
-          await cleanup(runtime); lastCleanup = Date.now();
-          await reconcileUploads(runtime);
-          try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
-          await mailboxHourly(runtime);
+        // In the background, like shared setup: retention can take minutes, and a step that keeps failing used to throw
+        // here before drain() on every pass, so no job ran and no mail was dispatched until it succeeded.
+        if (!hourly && Date.now() - lastCleanup > 3600000) {
+          lastCleanup = Date.now();
+          hourly = hourlyUpkeep(runtime).finally(() => { hourly = undefined; });
         }
         if (Date.now() - lastOutboundSync > 15000) {
           lastOutboundSync = Date.now();
@@ -66,12 +66,12 @@ try {
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
-        log('error', { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED', message: error instanceof ApiError ? error.message : 'Job polling failed. Check database connectivity and migrations.' });
+        logError(error, { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED' }); // Job polling failed: check database connectivity and migrations.
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await hooks;await sharedSetup;await publicStats; await listener?.end(); await close(); }
+  } finally { stopped=true;await hooks;await sharedSetup;await publicStats;await hourly; await listener?.end(); await close(); }
 } catch (error) {
-  log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
+  logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;
 }

@@ -38,12 +38,13 @@
     "@smithy/fetch-http-handler": "^5.8.0",
     "acorn": "^8",
     "better-auth": "1.7.20",
+    "devalue": "6.0.3",
     "drizzle-orm": "^0.45.2",
     "hono": "4.13.17",
     "parse5": "^8.0.1",
     "pg": "^8.23.0",
     "postal-mime": "4.2.1",
-    "re2js": "^2.10.0",
+    "re2js": "2.10.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

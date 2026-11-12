@@ -62,6 +62,8 @@ struct Snapshot {
     more: Option<u32>,
 }
 type WakeCache = HashMap<(String, Option<String>, u64), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
+/// Credentials tracked at once: every open session's, and those seen in the last minute.
+const GATES: usize = 8192;
 struct Gate {
     lanes: crate::admission::Lanes,
     bytes: Arc<Mutex<crate::admission::Bucket>>,
@@ -100,6 +102,8 @@ pub struct Api {
     views: Arc<tokio::sync::Semaphore>,
     heavy: Arc<tokio::sync::Semaphore>,
     pub online: std::sync::atomic::AtomicBool,
+    /// Sessions one workspace, and one sponsoring account, may hold open on this task.
+    pub tenant_sessions: std::sync::atomic::AtomicUsize,
     wakes: Mutex<WakeCache>,
     client: reqwest::Client,
     url: String,
@@ -119,6 +123,7 @@ impl Api {
         Ok(Self {
             revoked: Default::default(),
             online: false.into(),
+            tenant_sessions: 256.into(),
             gates: Mutex::default(),
             views: Arc::new(tokio::sync::Semaphore::new(192 * 1024)),
             heavy: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -395,25 +400,42 @@ impl Store {
     pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
         let cached = p.cached;
+        let tenant = api
+            .tenant_sessions
+            .load(std::sync::atomic::Ordering::Relaxed);
         let (lanes, upload_rate) = {
             let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
-            gates.retain(|_, v| {
-                Arc::strong_count(&v.lanes.0[0]) > 1 || v.last.elapsed() < Duration::from_secs(60)
-            });
+            let open = |v: &Gate| Arc::strong_count(&v.lanes.0[0]) > 1;
+            gates.retain(|_, v| open(v) || v.last.elapsed() < Duration::from_secs(60));
+            if gates.len() >= GATES && !gates.contains_key(&p.kid) {
+                // Open sessions are bounded by the task's connections. A credential without
+                // one holds only its rate state, which gives way to the next login.
+                gates.retain(|_, v| open(v));
+            }
             ensure!(
-                gates.len() < 8192 || gates.contains_key(&p.kid),
+                gates.len() < GATES || gates.contains_key(&p.kid),
                 "credential admission full"
             );
             let account_share = gates
                 .values()
                 .find(|g| g.account == p.account)
                 .map(|g| g.lanes.0[3].clone())
-                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(4, 2, 4, 144)));
+                .unwrap_or_else(|| {
+                    let share = crate::admission::Shares::new(4, 2, 4, 144);
+                    // The fallback lane is no one's account: its workspaces keep only their own share.
+                    Arc::new(if p.account.starts_with("sponsor:") {
+                        share.with_sessions(tenant)
+                    } else {
+                        share
+                    })
+                });
             let workspace_share = gates
                 .values()
                 .find(|g| g.workspace == p.workspace)
                 .map(|g| g.lanes.0[2].clone())
-                .unwrap_or_else(|| Arc::new(crate::admission::Shares::new(4, 2, 4, 144)));
+                .unwrap_or_else(|| {
+                    Arc::new(crate::admission::Shares::new(4, 2, 4, 144).with_sessions(tenant))
+                });
             let inbox_share = gates
                 .values()
                 .find(|g| g.inbox == p.inbox)
@@ -550,11 +572,28 @@ impl Store {
         let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
             w.eq_ignore_ascii_case(b"SELECT") || w.eq_ignore_ascii_case(b"EXAMINE")
         });
-        if !selects && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240)) {
-            self.refresh()?;
+        // IDLE's continuation and LOGOUT only finish protocol state. In particular,
+        // answering DONE must neither acquire a read permit nor mark the view fresh.
+        let local = core.idling()
+            || bytes
+                .splitn(2, |b| *b == b' ')
+                .nth(1)
+                .is_some_and(|body| body.eq_ignore_ascii_case(b"LOGOUT\r\n"));
+        if !local
+            && !selects
+            && (*stale || self.dirty || self.stamp.elapsed() > Duration::from_secs(240))
+        {
+            if let Err(e) = self.refresh() {
+                self.dirty = true;
+                self.finish_command();
+                let Ok(cmd) = mailgw_core::wire::imap(bytes) else {
+                    return Err(e);
+                };
+                return Ok(Reply::one(&format!("{} NO {e}", cmd.tag.inner())));
+            }
             *stale = false
         }
-        if selects {
+        if !local && selects {
             *stale = false;
         }
         let reply = core.step(bytes, identity, self, now);
@@ -1069,7 +1108,13 @@ fn batch_ticket(t: &Value, i: usize) -> Value {
 }
 impl Submitter for Store {
     fn submit(&mut self, s: Submission<'_>) -> Result<(), SubmitError> {
-        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|s|match s{429|402=>SubmitError::Cap,400..500=>SubmitError::Rejected,_=>SubmitError::Unavailable})
+        self.api.call(json!({"op":"submit","kid":self.principal.kid,"from":s.sender,"to":s.recipients,"content":STANDARD.encode(s.raw)})).map(drop).map_err(|status| match status {
+            413 => SubmitError::TooLarge,
+            507 => SubmitError::InboxFull,
+            429 | 402 => SubmitError::Cap,
+            400..500 => SubmitError::Rejected,
+            _ => SubmitError::Unavailable,
+        })
     }
 }
 pub struct Offline;
@@ -1130,6 +1175,44 @@ pub async fn listen(
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    /// A credential keeps its rate state for a minute after its last session. When the
+    /// table is full that state gives way to the next login; a credential with an open
+    /// session keeps its place and its lanes.
+    #[test]
+    fn a_full_credential_table_admits_the_next_login_and_keeps_open_sessions() {
+        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
+        let login = |n: usize| {
+            Store::new(
+                api.clone(),
+                Principal {
+                    workspace: "w".into(),
+                    account: "owner".into(),
+                    inbox: "inbox".into(),
+                    kid: format!("app{n}"),
+                    addresses: vec![],
+                    folders: vec![],
+                    started: None,
+                    cached: false,
+                },
+            )
+        };
+        let tracked = || api.gates.lock().unwrap().len();
+        let open: Vec<_> = (0..3).map(|n| login(n).unwrap()).collect();
+        for n in 3..GATES {
+            drop(login(n).unwrap());
+        }
+        assert_eq!(tracked(), GATES);
+        let returning = login(GATES - 1).unwrap();
+        assert_eq!(tracked(), GATES);
+        let next = login(GATES).unwrap();
+        assert_eq!(tracked(), 5);
+        let gates = api.gates.lock().unwrap();
+        for session in open.iter().chain([&returning, &next]) {
+            let gate = &gates[&session.principal.kid];
+            assert!(Arc::ptr_eq(&gate.lanes.0[0], &session.lanes.0[0]));
+            assert!(Arc::ptr_eq(&gate.lanes.0[2], &open[0].lanes.0[2]));
+        }
+    }
     #[tokio::test]
     async fn account_and_workspace_capacity_is_shared_and_waiters_are_fifo() {
         use crate::admission::{Reservation, Shares};
@@ -1204,6 +1287,67 @@ mod auth_tests {
                 assert!(second.await.is_some());
             }
         }
+    }
+    /// Open sessions count against the workspace and the account that sponsors it, next to
+    /// the per-inbox limit. A full share refuses its own logins, keeps nothing for a login
+    /// it refused, and leaves other accounts alone.
+    #[test]
+    fn open_sessions_are_shared_by_a_workspace_and_its_sponsoring_account() {
+        let api = Arc::new(Api::new("http://localhost".into(), "x".repeat(32)).unwrap());
+        assert_eq!(
+            api.tenant_sessions
+                .swap(3, std::sync::atomic::Ordering::Relaxed),
+            256
+        );
+        let login = |inbox: &str, w: &str, account: &str| {
+            let store = Store::new(
+                api.clone(),
+                Principal {
+                    workspace: w.into(),
+                    account: account.into(),
+                    inbox: inbox.into(),
+                    kid: format!("app_{inbox}"),
+                    addresses: vec![],
+                    folders: vec![],
+                    started: None,
+                    cached: false,
+                },
+            )
+            .unwrap();
+            store.lanes.session().map(|held| (store, held))
+        };
+        let free = |s: &Store, lane: usize| {
+            s.lanes.0[lane]
+                .sessions
+                .as_ref()
+                .map(|s| s.available_permits())
+        };
+        let mut open: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|inbox| login(inbox, "w", "sponsor:u").unwrap())
+            .collect();
+        assert_eq!(open[0].1.len(), 2);
+        assert_eq!([0, 1].map(|lane| free(&open[0].0, lane)), [None, None]);
+        assert!(login("d", "w", "sponsor:u").is_none());
+        assert!(login("a", "w", "sponsor:u").is_none());
+        assert!(login("e", "w2", "sponsor:u").is_none());
+        let other = login("f", "x", "sponsor:v").unwrap();
+        drop(open.pop());
+        let second_workspace = login("e", "w2", "sponsor:u").unwrap();
+        assert!(login("d", "w", "sponsor:u").is_none());
+        assert_eq!(
+            [2, 3].map(|lane| free(&open[0].0, lane)),
+            [Some(1), Some(0)]
+        );
+        drop(second_workspace);
+        assert!(login("d", "w", "sponsor:u").is_some());
+        let solo: Vec<_> = (0..3)
+            .map(|n| login(&format!("g{n}"), "solo", "unsponsored").unwrap())
+            .collect();
+        assert_eq!(solo[0].1.len(), 1);
+        assert!(login("g3", "solo", "unsponsored").is_none());
+        assert!(login("h", "solo2", "unsponsored").is_some());
+        drop((other, solo));
     }
     #[test]
     fn revoke_fences_only_the_inflight_login_for_that_inbox() {
@@ -1468,6 +1612,22 @@ mod tests {
         let before = script.snapshots.load(Ordering::SeqCst);
         assert_eq!(run(&mut store, b"d NOOP\r\n"), "d OK Completed\r\n");
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
+
+        // An old view only blocks commands that need it. DONE gets the IDLE tag
+        // even with the API down; NOOP retries the refresh on the same connection.
+        assert_eq!(run(&mut store, b"e IDLE\r\n"), "+ idling\r\n");
+        store.stamp -= Duration::from_secs(241);
+        script.down.store(true, Ordering::SeqCst);
+        let before = script.snapshots.load(Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"DONE\r\n"), "e OK IDLE ended\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before);
+        assert_eq!(
+            run(&mut store, b"f NOOP\r\n"),
+            "f NO [UNAVAILABLE] Backend unavailable\r\n"
+        );
+        script.down.store(false, Ordering::SeqCst);
+        assert_eq!(run(&mut store, b"g NOOP\r\n"), "g OK Completed\r\n");
+        assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 2);
     }
 
     /// Large STORE/COPY/EXPUNGE sets run in 1,000-UID batches inside one command, each its own

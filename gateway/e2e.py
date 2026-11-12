@@ -7,6 +7,8 @@ import hmac
 import urllib.request
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
+from email.message import EmailMessage
+from email.policy import SMTP
 import imaplib
 import os
 from pathlib import Path
@@ -150,11 +152,13 @@ def real_services():
             GOOGLE_CLIENT_ID='fixture',
             GOOGLE_CLIENT_SECRET='fixture',
         )
+        sql("CREATE ROLE bane_mailgw_listen LOGIN CONNECTION LIMIT 2; GRANT CONNECT ON DATABASE fixture TO bane_mailgw_listen")
         run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)
+        assert sql("SELECT rolconnlimit FROM pg_roles WHERE rolname='bane_mailgw_listen'") == "4"
         prk = hmac.digest(bytes(32), secret.encode(), "sha256")
         pepper = hmac.digest(prk, b"bane:protocol-password:v1\x01", "sha256")
         digest = hmac.new(pepper, PASS.encode(), "sha256").hexdigest()
-        sql(f"""CREATE EXTENSION pg_stat_statements; CREATE ROLE fixture_observer SUPERUSER LOGIN; CREATE ROLE fixture_listener LOGIN; GRANT CONNECT ON DATABASE fixture TO fixture_listener;
+        sql(f"""CREATE EXTENSION pg_stat_statements; CREATE ROLE fixture_observer SUPERUSER LOGIN;
         INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES('fixture','default','fixture','example.invalid','us-east-1','active','store');
         INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES('default','us-east-1','mailgw','fixture');
         INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES('mbx_fixture','default','fixture','{USER}','inbox','forever');
@@ -200,14 +204,14 @@ def real_services():
         REAL.update(
             MAILGW_API_TOKEN=key,
             MAILGW_API_URL=url,
-            DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
+            DATABASE_URL=db.replace("postgres@", "bane_mailgw_listen@"),
             MAILGW_HEALTH_PORT="0",
         )
         def acceptance():
             tap=run(['node','--import','tsx','--test','--test-reporter=tap','--test-name-pattern=^mail gateway:|agent inbox contracts and storage budgets','api.acceptance.test.ts'],cwd=api,env=env)
             for test in ['folder entries keep independent UIDs and shared flags, not shared state across inboxes','mail gateway: preview migration yields to writers and validates in a separate transaction']:
                 assert re.search(r'^\s*ok \d+ - '+re.escape(test)+r'\s*$',tap,re.M),f'Acceptance test did not run: {test}'
-        yield acceptance
+        yield acceptance, lambda p: delivery(p, env, pepper, log)
         REAL.clear()
 
 
@@ -336,6 +340,50 @@ def mail(p):
             # Pad the epilogue, not the base64 payload.
             raw=prefix+row*count+suffix[:-2]+b' '*extra+b'\r\n';assert len(raw)==size
             c.rcpt('reader@example.invalid');reply=c.data(raw);assert reply[0]==250,reply
+
+
+def delivery(p, env, pepper, log):
+    """A 250 must survive the real dispatch claim, not just create a Sent copy."""
+    dest = 'sink@example.invalid'
+    data = bytes(range(256)) * 8192  # 2 MiB, including non-text octets
+    attachment = EmailMessage(policy=SMTP)
+    attachment['From'], attachment['To'], attachment['Subject'] = ALIAS, dest, 'delivery-file'
+    attachment.set_content('See attachment.')
+    attachment.add_attachment(data, maintype='application', subtype='octet-stream', filename='bytes.bin')
+    def text(subject, body):
+        return f'From: {ALIAS}\r\nSubject: {subject}\r\n\r\n'.encode() + body
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=30) as c:
+        c.login(ALIAS, PASS)
+        for raw in [text('delivery-plain', b'Hello\r\n'), attachment.as_bytes(),
+                    text('delivery-text', (b'x'*766 + b'\r\n')*8192)]:
+            assert not c.sendmail(ALIAS, [dest], raw)
+
+    # Revoke a second password after 250 but before the runner can claim it.
+    password = secrets.token_hex(16)
+    digest = hmac.new(pepper, password.encode(), 'sha256').hexdigest()
+    sql(f"INSERT INTO inbox_app_passwords VALUES('app_delivery','mbx_fixture','fixture','{digest}',ARRAY['smtp']); UPDATE inbox_state SET protocol_passwords=protocol_passwords+1 WHERE inbox_id='mbx_fixture'")
+    with smtplib.SMTP_SSL('localhost', p['SMTPS'], context=CTX, timeout=10) as c:
+        c.login(ALIAS, password)
+        assert not c.sendmail(ALIAS, [dest], text('delivery-revoked', b'Do not send\r\n'))
+    sql("SELECT inbox_revoke_password('default','mbx_fixture','app_delivery')")
+
+    # Start the simulated runner only for this gate: the later query-count tests
+    # require an idle database. No live SES or credentials are inherited.
+    proc = sp.Popen(['node','--import','tsx','src/runner.ts'], cwd=ROOT.parent/'api',
+                    env={**env, 'AWS_EC2_METADATA_DISABLED':'true'}, stdout=log, stderr=log)
+    try:
+        end = time.monotonic() + 30
+        expected = ['delivery-file:delivered','delivery-plain:delivered','delivery-revoked:canceled','delivery-text:delivered']
+        while True:
+            states = sql("SELECT subject||':'||status FROM sending_emails WHERE workspace_id='default' AND subject LIKE 'delivery-%' AND simulated ORDER BY subject").splitlines()
+            if states == expected: break
+            assert proc.poll() is None and time.monotonic() < end, states
+            time.sleep(.1)
+        assert sql("SELECT error_code FROM sending_emails WHERE actor_key_id='app_delivery' AND attempt_started_at IS NULL") == 'ORIGIN_KEY_REVOKED'
+        assert sql("SELECT a.checksum FROM sending_emails e JOIN sending_attachments a ON a.id=e.snapshot->'attachments'->>0 WHERE e.subject='delivery-file'") == hashlib.sha256(data).hexdigest()
+        assert sql("SELECT length(replace(replace(snapshot->>'text',chr(13),''),chr(10),'')) FROM sending_emails WHERE subject='delivery-text'") == str(766*8192)
+    finally:
+        proc.terminate(); proc.wait(timeout=15)
 
 
 def client_flow(port):
@@ -731,22 +779,36 @@ set certificate_file="{tmp / "cert.pem"}"
             assert ok(c.search(None, "SUBJECT", subject))[0]
 
 
-def memory(tmp):
+def memory(tmp, *, aged=False):
     with (
-        gateway(tmp, MAILGW_LOGIN_LIMIT="300") as (p, pid),
+        gateway(tmp, MAILGW_LOGIN_LIMIT="300", MAILGW_TENANT_SESSIONS="300") as (p, pid),
         contextlib.ExitStack() as stack,
     ):
         rss = lambda: int(run(["ps", "-o", "rss=", "-p", str(pid)]).strip())
         base = 0
-        for i in range(272):
+        clients = []
+        for i in range(200 if aged else 272):
             time.sleep(.11) # stay inside the production per-IP accept budget
             c = connect(p["IMAPS"])
             stack.callback(c.shutdown)
             ok(c.select("INBOX"))
             c.send(b"i IDLE\r\n")
             assert c.readline().startswith(b"+")
+            if aged:
+                clients.append(c)
             if i == 15:
                 base = rss()
+        if aged:
+            time.sleep(245)  # Real wall time: cross both heartbeat and snapshot TTL.
+            for c in clients:
+                c.send(b"DONE\r\n")
+            for c in clients:
+                line = c.readline()
+                while line == b"* OK Still here\r\n":
+                    line = c.readline()
+                assert line == b"i OK IDLE ended\r\n", line
+            print(f"{len(clients)}/200 tagged DONE replies after 245 s", flush=True)
+            return
         final = rss()
         print(
             f"IDLE measured {(final - base) / 256:.1f} KiB/connection (process RSS {base} -> {final} KiB, 16 -> 272 TLS IDLE sockets; excludes kernel)",
@@ -786,6 +848,13 @@ def account_fairness(tmp):
             assert c.mail(addr)[0]==250 and c.rcpt('recipient@example.invalid')[0]==250
             return c.docmd('DATA')[0]
         assert [begin(i) for i in [0,1,1,2]]==[354,354,452,354]
+    # The same sponsor's workspaces share its open sessions on a task; the other sponsor logs in.
+    with gateway(tmp, MAILGW_TENANT_SESSIONS="2") as (ports,_),contextlib.ExitStack() as stack:
+        def auth(i):
+            wid=f'fair{i}';c=smtplib.SMTP_SSL('localhost',ports['SMTPS'],context=CTX,timeout=5)
+            stack.callback(c.close);c.ehlo()
+            return c.docmd('AUTH','PLAIN '+base64.b64encode(f'\0{wid}@example.invalid\0{PASS+wid}'.encode()).decode())[0]
+        assert [auth(i) for i in [0,1,1,0,2]]==[235,235,421,421,235]
 
 
 def large_folder(tmp):
@@ -979,6 +1048,9 @@ def quotas(tmp):
                     ok(c.append('Quota',None,None,RAW))
                 before=ok(c.search(None,'ALL'))
                 assert c.append('Quota',None,None,RAW)[0]=='NO'
+                with smtplib.SMTP_SSL('localhost',p['SMTPS'],context=CTX,timeout=10) as smtp:
+                    smtp.login(ALIAS,PASS); smtp.mail(ALIAS); smtp.rcpt('sink@example.invalid')
+                    assert smtp.data(RAW) == (552,b'5.2.2 Inbox storage quota exceeded')
                 assert ok(c.search(None,'ALL'))==before
                 sql(f"UPDATE mailboxes SET {column}=NULL WHERE id='mbx_fixture'")
         finally:
@@ -994,7 +1066,7 @@ def main():
     run(["cargo", "build", "--locked", "--bins", "--examples"], timeout=300)
     success = []
     failed = []
-    with real_services() as acceptance, tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
+    with real_services() as services, tempfile.TemporaryDirectory(prefix="bane-e2e-") as d:
         tmp = Path(d).resolve()
         run(
             [
@@ -1022,8 +1094,9 @@ def main():
         with gateway(tmp) as (p, _):
             for name, fn in [
                 ("TLS/STARTTLS", lambda: tls(p)),
-                *([('API acceptance',acceptance)] if acceptance else []),
+                *([('API acceptance',services[0])] if services else []),
                 ("submission", lambda: mail(p)),
+                *([('SMTP delivery',lambda: services[1](p))] if services else []),
                 ("admission", lambda: admission(tmp)),
                 ('shutdown',lambda:shutdown(tmp)),
                 ("differential", lambda: client_flow(p["IMAPS"]) == reference(tmp)),
@@ -1034,6 +1107,7 @@ def main():
                 ("imaptest scripts", lambda: imaptest_scripts(tmp)),
                 ("imaptest stress", lambda: imaptest(tmp, p, True)),
                 ("IDLE RSS", lambda: memory(tmp)),
+                *([('aged IDLE',lambda:memory(tmp, aged=True))] if REAL and 'aged IDLE' in sys.argv else []),
                 *([('account shares',lambda:account_fairness(tmp)),('quotas',lambda:quotas(tmp)),('long headers',lambda:long_headers(tmp)),("capacity",lambda:large_folder(tmp)),("DB budgets", lambda: budgets(tmp))] if REAL else []),
             ]:
                 if len(sys.argv) > 1 and name not in sys.argv[1:]:

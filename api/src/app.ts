@@ -5,7 +5,7 @@ import { allowMalformedSns } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseUnavailable, id, lazyModule, log, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { mailboxRoute, memberRefused, receivingConsentRoute, ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -22,7 +22,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
   if (pathname === '/v1/events/ses') return 'ops-events';
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
-  if (/^\/v1\/(?:settings|webhooks|metrics|sender-score)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
+  if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
   if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide)(?:\/|$)/.test(pathname)) return 'sending-other';
   if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
@@ -75,6 +75,38 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
   }).catch(error => { delete groupRegistrars[group]; throw error; });
 }
 
+// The route template that answered (`/v1/emails/:id`), never the raw path: paths carry IDs, addresses and capability
+// tokens. Middleware is registered before handlers, so the last match that is a handler names the route: a
+// method-specific route, or an `app.all` handler such as /mcp (a handler takes the context alone; middleware also
+// takes `next`). Wildcard prefixes (`/api/auth/*`) are the last resort, and a request that reached notFound is unmatched.
+function routeOf(c: Ctx) {
+  if (c.get('failure')?.unmatched) return 'unmatched';
+  const routes = c.req.matchedRoutes, exact = routes.filter(route => !route.path.endsWith('*'));
+  return (exact.findLast(route => route.method !== 'ALL') ?? exact.findLast(route => route.handler.length < 2)
+    ?? routes.findLast(route => route.method !== 'ALL'))?.path ?? 'unmatched';
+}
+function principalOf(c: Ctx, route: string) {
+  const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
+  if (route === '/internal/v1/mail') return 'gateway';
+  return c.get('principal')?.type ?? actor?.credential ?? (actor ? 'internal' : c.get('mailboxAccess') ? 'inboxKey' : 'anonymous');
+}
+// One line per request: what the nightly report (scripts/nightly-report.ts) counts. Successes are sampled (core.log).
+function logRequest(c: Ctx, durationMs: number) {
+  const status = c.res.status, route = routeOf(c), failure = c.get('failure');
+  const timings = c.get('serverTimings');
+  log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
+    event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs,
+    code: failure ? errorCodeOf(failure.code) : undefined, field: failure?.field, databaseCode: failure?.databaseCode,
+    workspace: c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId, principal: principalOf(c, route),
+    timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
+  });
+}
+
+// The first segment of each reported field (`to` of `to.0.email`), when it reads like a schema key.
+function schemaFields(field?: string) {
+  return [...new Set((field ?? '').split(', ').map(item => item.split('.')[0]!).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)))].join(', ') || undefined;
+}
+
 // Names the first invalid field and why, so a person can fix it. Zod messages carry types, limits and schema
 // options, never submitted values; unknown keys are quoted as field names, truncated.
 type Issue = { code: string; path: PropertyKey[]; message: string; keys?: string[] };
@@ -89,12 +121,15 @@ function invalidFields(issues: readonly Issue[]) {
     return { fields: [path], text: path ? `${path}: ${issue.message}` : issue.message };
   });
   const first = described[0];
-  return { message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
+  // For the log: top-level field names the schema defines. An unsupported key names its parent object instead, since
+  // the key itself is whatever the caller sent (an IP address, a token).
+  const logField = [...new Set(issues.map(issue => issue.path[0]).filter((key): key is string => typeof key === 'string'))].join(', ');
+  return { logField, message: first ? `Request fields are invalid: ${first.text}${described.length > 1 ? ` (and ${described.length - 1} more)` : ''}.` : 'Request fields are invalid.', field: [...new Set(described.flatMap(item => item.fields).filter(Boolean))].join(', ') };
 }
 
-function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
+function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createLlmsText: (doc: Record<string, any>) => string; createMarkdownDocs: (doc: Record<string, any>, operationId?: string) => string | null; createTagMarkdownDocs: (doc: Record<string, any>, slug: string) => string | null }>, registerOpenApi = false, allowPath?: (path: string) => boolean): App {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
-    if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field); }
+    if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw Object.assign(new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field), { logField: invalid.logField }); }
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
@@ -108,17 +143,16 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
-    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
     // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
-    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
-    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
+    if (!(c.req.path==='/v1/events/ses' && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
@@ -132,6 +166,11 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
+  });
+  // After the request line's middleware, so a refused request is logged like any other.
+  app.use('*', (c, next) => {
+    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
+    return next();
   });
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
@@ -200,13 +239,22 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
+    // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
+    const conflict = !known && !invalidJson && databaseConflict(error);
     // An MCP approval revoked while its request ran: the object it would own has no grant left.
     const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
+    // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
+    // date outside its range, such as year 0000 or a +16:00 offset, which ISO 8601 validation accepts (22007/22008/22009). A client error, not a 500.
+    const refused = known || invalidJson ? undefined : databaseCodeOf(error);
+    const nul = refused === '22021' || refused === '22P05', badDate = refused === '22007' || refused === '22008' || refused === '22009';
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
       : transient ? databaseUnavailable()
+      : nul ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: text cannot contain the NUL character (U+0000).')
+      : badDate ? new ApiError(422, 'VALIDATION_FAILED', 'Request fields are invalid: a date is out of range. Use a year from 0001 to 9999 and an offset within ±15:59.')
       : database.code==='BR001' ? new ApiError(422,'ROUTING_PLAN_TOO_LARGE','A host routing plan exceeds 256 KiB. Shorten or remove wildcard rules before enabling routing.')
+      : conflict ? new ApiError(503, 'DATABASE_CONFLICT', 'The request conflicted with a concurrent change and was rolled back. Retry it.', undefined, true)
       : grantRevoked ? new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was created.')
       : keyTaken ? new ApiError(409, 'KEY_TAKEN', `Another ${database.constraint === 'mailboxes_key' ? 'address' : 'webhook'} in this workspace already uses that key. Choose another.`, 'key')
       : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
@@ -214,30 +262,31 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       const peer=c.req.header('x-bane-client-ip')??'unknown';
       if(!allowMalformedSns(peer) || c.env.allowMalformedSns && !await c.env.allowMalformedSns(peer)) responseError=new ApiError(429,'PUBLIC_RATE_LIMITED','Too many malformed requests.',undefined,true);
     }
-    // Messages and even record-key validation paths can contain caller-supplied addresses.
-    const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
-    const unexpected = !known && responseError.status >= 500;
-    if (!invalidJson) log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
-      errorType: unexpected ? error.name : undefined, databaseCode: databaseCodeOf(error),
-      stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
+    // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
+    const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
+    // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
+    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
-    else if (transient) c.header('Retry-After', '1');
+    else if (transient || conflict) c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}) } }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant}));
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
+  app.get('/health', c => c.json({status:'ok',service:'bane',multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin}));
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
   app.get('/llms.txt', async c => { const { doc, createLlmsText } = await loadDocs(); return markdown(c, createLlmsText(doc)); });
   app.get('/docs.md', async c => { const { doc, createMarkdownDocs } = await loadDocs(); return markdown(c, createMarkdownDocs(doc)!); });
   app.get('/docs/operations/*', async c => { const { doc, createMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/operations/'.length); const operation = /^[A-Za-z][A-Za-z0-9_]{0,63}\.md$/.test(file) ? file.slice(0, -3) : ''; const value = operation ? createMarkdownDocs(doc, operation) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented operation not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.get('/docs/tags/*', async c => { const { doc, createTagMarkdownDocs } = await loadDocs(); const file = c.req.path.slice('/docs/tags/'.length); const value = /^[a-z0-9-]{1,64}\.md$/.test(file) ? createTagMarkdownDocs(doc, file.slice(0, -3)) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented tag not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   return app;
 }
 
 export async function createOpenApiApp(): Promise<App> {
-  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs }) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const full = createShell(lazyModule(() => import('./openapi-docs.js').then(({ createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   }))), true);
   const [
     { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
@@ -258,8 +307,8 @@ export type HttpApp = Pick<App, 'fetch'>;
 
 export function createApp(options: { fallback?: MiddlewareHandler<AppEnv> } = {}): HttpApp {
   const getFullApp = lazyModule(() => createOpenApiApp());
-  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs }]) => ({
-    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs,
+  const loadDocs = lazyModule(() => Promise.all([getFullApp(), import('./openapi-docs.js')]).then(([full, { createOpenApiDocument, createLlmsText, createMarkdownDocs, createTagMarkdownDocs }]) => ({
+    doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   })));
   let base: App | undefined;
   const getBase = () => {
@@ -294,7 +343,7 @@ export function createApp(options: { fallback?: MiddlewareHandler<AppEnv> } = {}
         if (!(error instanceof ModuleLoadError)) throw error;
         const requestId = id('req');
         // Log the route group, never the path: paths can carry bearer tokens (e.g. /unsubscribe/{token}).
-        log('error', { requestId, operation: `route-group:${group}`, code: error.code, status: 503, message: error.message });
+        logError(error.cause ?? error, { event: 'request', requestId, route: `group:${group}`, method: request.method, status: 503, code: error.code });
         return secureResponse(Response.json(
           { error: { code: error.code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } },
           { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } },
