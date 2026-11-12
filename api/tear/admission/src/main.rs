@@ -55,6 +55,20 @@
 //!   recipients routes nothing (`0`).
 //! - [x] r.abort: a statement rolled back (crash before commit) charges nothing.
 //!
+//! Every ingest job enters through one insert check (mail_ingest_admit): one active job per
+//! receipt, and at most `backlog` active jobs per workspace, whoever inserts it.
+//! - [x] r.drain: a job's end (`done`, `fail`, `lose`) admits the workspace's backlog holds in
+//!   queue order. r.stale-fail: a stale failure write finds the receipt held for its reopen and
+//!   changes nothing. r.claim-race: a claim skips a job another statement holds locked.
+//! - [x] r.recover / r.recover-full / r.recover-exhausted: lost-receipt recovery (`recover`)
+//!   re-queues a pending receipt with no job, holds it when the backlog is full, and fails it
+//!   after three passes.
+//! - [x] r.replay / r.replay-race: held envelopes for an unrouted host (`stash`) replay through
+//!   the same route statement, also while a normal reopen of the message is in flight; both take
+//!   the window row before the receipt.
+//! - [x] r.release-fair: a release that finds a workspace's rows locked moves the hold ten seconds
+//!   back instead of retrying it first on every pass.
+//!
 //! ## Send side: hosted admission (profile send)
 //! - [x] s.cap-exact / s.cap-over / s.cap-exceeds: the rolling 24-hour recipient cap reached
 //!   exactly, by one more, and by a single request above the whole cap (`send K 3 t`).
@@ -98,7 +112,9 @@
 //! - [x] u.delete: deleting an attachment frees its quota and queues its object's deletion.
 //! - [x] u.crash / u.tombstone: the put lands and the Worker dies before finish or refund (also
 //!   what an older Worker's refund amounts to); the tombstone left by the reservation's end queues
-//!   the object's deletion a day later (`day`, `sweep`) unless an attachment holds it.
+//!   the object's deletion a day later (`day` runs the hourly cleanup) unless an attachment
+//!   holds it. u.reconcile: an object no record owns (its put landed after the tombstone was
+//!   spent) is found by listing storage and deleted once it is a day old.
 //!
 //! ## Out of reach, and why
 //! - [-] Clock skew and boundaries inside a transaction: admission uses the transaction's now(),
@@ -284,6 +300,61 @@ const REGRESSIONS: &[(&str, usize, &[&str])] = &[
             "day",
             "sweep",
             "purge",
+        ],
+    ),
+    // Recheck R1. Lost-receipt recovery queued a job past the backlog (2 active, backlog 1).
+    (
+        "recv",
+        2,
+        &[
+            "accept m1 a",
+            "claim A m1",
+            "lose A m1",
+            "accept m2 a",
+            "recover",
+        ],
+    ),
+    // Recheck R2. A reopen behind a running job queued a second job; the running job's stale
+    // failure then failed the reopened receipt. Now the reopen is held and survives the failure.
+    (
+        "recv",
+        0,
+        &["accept m1 a", "claim A m1", "accept m1 ac", "fail A m1"],
+    ),
+    // Recheck R3. The held-envelope replay and a normal reopen locked receipt then window and
+    // window then receipt; every route statement now takes the window row first.
+    (
+        "recv",
+        0,
+        &["accept m3 a", "W accept m2 a", "X accept m3 ac"],
+    ),
+    // Recheck R4. A hold in a busy workspace stayed first in line (and uncounted) on every
+    // release; it now moves ten seconds back and counts as scanned.
+    (
+        "recv",
+        1,
+        &[
+            "accept m1 a",
+            "accept m2 a",
+            "hour",
+            "W accept m3 a",
+            "release",
+        ],
+    ),
+    // Recheck R5. A put landing after its tombstone was spent left an object no record owned;
+    // storage reconciliation deletes it a day later.
+    (
+        "upload",
+        0,
+        &[
+            "U1 upload",
+            "expire",
+            "sweep",
+            "purge",
+            "day",
+            "purge",
+            "U1 crash",
+            "day",
         ],
     ),
 ];
@@ -739,11 +810,22 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
             if words[0] == "day" {
                 seen.push(vec!["day".into()]);
             }
-            if words[0] == "sweep"
+            // `day` runs the hourly cleanup too.
+            if (words[0] == "sweep" || words[0] == "day")
                 && seen.iter().any(|w| w[0] == "day")
                 && seen.iter().any(|w| w[0] == "crashed")
             {
                 add("u.tombstone");
+            }
+            if words[0] == "day" && i > 0 {
+                // Storage reconciliation queued a deletion no record asked for.
+                let prev = &steps[i - 1]["observed"]["view"];
+                if prev["tombstones"].as_i64() == Some(0)
+                    && prev["reservations"].as_i64() == Some(0)
+                    && view["deletes"].as_i64().unwrap_or(0) > prev["deletes"].as_i64().unwrap_or(0)
+                {
+                    add("u.reconcile");
+                }
             }
             if words[0] == "sweep" {
                 seen.push(vec!["swept".into()]);
@@ -774,7 +856,7 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                     add("r.limit-exact");
                 }
                 for (_, r) in v["receipts"].as_object().into_iter().flatten() {
-                    match r[3].as_str() {
+                    match r[4].as_str() {
                         Some("MAILBOX_RECEIVE_BACKLOG") => add("r.reopen-backlog"),
                         Some("MAILBOX_BUDGET_HOLD_EXPIRED") => add("r.release-expired"),
                         _ => {}
@@ -944,6 +1026,78 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                 if verb == "done" && v == &json!(0) {
                     add("r.stale-claim");
                 }
+                let prev = if i > 0 {
+                    &steps[i - 1]["observed"]["view"]
+                } else {
+                    &Value::Null
+                };
+                let held_backlog = |vw: &Value, x: usize| -> Vec<String> {
+                    vw[["A", "B"][x]]["receipts"]
+                        .as_object()
+                        .map(|r| {
+                            r.iter()
+                                .filter(|(_, r)| {
+                                    r[0] == "held" && r[4] == "MAILBOX_RECEIVE_BACKLOG"
+                                })
+                                .map(|(m, _)| m.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                if ["done", "fail", "lose"].contains(&verb) {
+                    let x = if w[1] == "A" { 0 } else { 1 };
+                    if held_backlog(prev, x)
+                        .iter()
+                        .any(|m| wsv(x)["receipts"][m][0] == "pending")
+                    {
+                        add("r.drain");
+                    }
+                    if verb == "fail"
+                        && v == &json!(0)
+                        && wsv(x)["receipts"][w[2].as_str()][0] == "held"
+                    {
+                        add("r.stale-fail");
+                    }
+                }
+                if verb == "claim" && v == &json!(0) {
+                    add("r.claim-race");
+                }
+                if verb == "recover" && v.as_i64().unwrap_or(0) > 0 {
+                    for x in 0..2 {
+                        for (m, r) in wsv(x)["receipts"].as_object().into_iter().flatten() {
+                            if r[4] == "MAILBOX_RECOVERY_EXHAUSTED" {
+                                add("r.recover-exhausted");
+                            } else if r[4] == "MAILBOX_RECEIVE_BACKLOG"
+                                && !held_backlog(prev, x).contains(m)
+                            {
+                                add("r.recover-full");
+                            } else if r[0] == "pending"
+                                && wsv(x)["jobs"][m][0] == json!(1)
+                                && prev[["A", "B"][x]]["jobs"][m].is_null()
+                            {
+                                add("r.recover");
+                            }
+                        }
+                    }
+                }
+                if verb == "replay" && v.as_i64().unwrap_or(0) > 0 {
+                    add(if *woke { "r.replay-race" } else { "r.replay" });
+                }
+                if verb == "release" {
+                    // A hold the pass could not reach moved behind the others, still this hour.
+                    for x in 0..2 {
+                        for (m, r) in wsv(x)["receipts"].as_object().into_iter().flatten() {
+                            let before = &prev[["A", "B"][x]]["receipts"][m];
+                            if r[0] == "held"
+                                && r[3] == json!(false)
+                                && before[3] == json!(true)
+                                && r[2] == before[2]
+                            {
+                                add("r.release-fair");
+                            }
+                        }
+                    }
+                }
                 if verb != "accept" && verb != "legacy-accept" {
                     seen.push(w.clone());
                 }
@@ -957,7 +1111,7 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                     let rs = wsv(x)["receipts"].as_object().cloned().unwrap_or_default();
                     if seen.iter().any(|w| w[0] == "release")
                         && seen.iter().any(|w| w[0] == "days")
-                        && rs.values().any(|r| r[0] == "pending" && r[3].is_null())
+                        && rs.values().any(|r| r[0] == "pending" && r[4].is_null())
                         && time
                     {
                         add("r.release-boundary");
@@ -965,11 +1119,11 @@ fn reached(profile: &str, cfg: &Value, steps: &[Value]) -> Vec<&'static str> {
                     let prior = steps[..i].iter().any(|s| {
                         s["observed"]["view"][["A", "B"][x]]["receipts"]
                             .as_object()
-                            .is_some_and(|r| r.values().any(|r| r[3] == "MAILBOX_RECEIVE_BACKLOG"))
+                            .is_some_and(|r| r.values().any(|r| r[4] == "MAILBOX_RECEIVE_BACKLOG"))
                     });
                     if prior
                         && seen.iter().any(|w| w[0] == "release")
-                        && rs.values().any(|r| r[0] == "pending" && r[3].is_null())
+                        && rs.values().any(|r| r[0] == "pending" && r[4].is_null())
                     {
                         add("r.release-backlog");
                     }
@@ -1296,6 +1450,15 @@ const CHECKLIST: &[&str] = &[
     "r.reopen-running",
     "r.stale-claim",
     "r.legacy-reopen",
+    "r.drain",
+    "r.stale-fail",
+    "r.claim-race",
+    "r.recover",
+    "r.recover-full",
+    "r.recover-exhausted",
+    "r.replay",
+    "r.replay-race",
+    "r.release-fair",
     "r.huge",
     "r.empty",
     "r.abort",
@@ -1342,6 +1505,7 @@ const CHECKLIST: &[&str] = &[
     "u.delete",
     "u.crash",
     "u.tombstone",
+    "u.reconcile",
 ];
 fn checklist(runs: &[Value]) -> Value {
     let mut hits: BTreeMap<String, u64> = BTreeMap::new();

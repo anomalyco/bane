@@ -53,11 +53,12 @@ const DATABASE_URL = await (async () => {
   }
 })();
 
-const [{ createApp }, { nodeRuntime }, { acceptInboundNotification }, { setHostedLimits }, { setWorkspaceExemption }, { pauseHostedSending, resumeHostedSending }, { digest }, { cleanup }, { drainJobs }] = await Promise.all([
+const [{ createApp }, { nodeRuntime }, { acceptInboundNotification, recoverHeldReceipts }, { setHostedLimits }, { setWorkspaceExemption }, { pauseHostedSending, resumeHostedSending }, { digest }, { cleanup }, { drainJobs }] = await Promise.all([
   import('../../src/app.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-receipts.js'),
   import('../../scripts/set-hosted-limits.js'), import('../../scripts/set-workspace-exemption.js'), import('../../src/states.js'), import('../../src/core.js'), import('../../src/maintenance.js'),
   import('../../src/dispatch.js'),
 ]);
+const { recoverMailReceipts } = await import('../../src/mailbox-ingest.js');
 // No egress: object storage points at a closed loopback port and fetch refuses every call, so an
 // unmodelled job or adapter fails locally instead of reaching a real endpoint.
 globalThis.fetch = (async (input: unknown) => { throw new Error(`tear host: network access refused (${String(input)})`); }) as typeof fetch;
@@ -93,7 +94,7 @@ function legacySql(q: unknown): unknown {
   const patch = (text: string) => {
     if (!text.includes('INSERT INTO mail_receipts AS r')) return text;
     if (!text.includes(ROUTE_BOUND)) throw new Error('tear host: the route statement changed; update legacySql');
-    return text.replace(ROUTE_BOUND, 'jsonb_array_length(r.recipients||excluded.recipients)<=200').replace(/ ORDER BY g\.workspace_id/g, '').replace(/ ORDER BY workspace_id,ses_message_id/g, '');
+    return text.replace(ROUTE_BOUND, 'jsonb_array_length(r.recipients||excluded.recipients)<=200').replace(/ ORDER BY g\.workspace_id(,s\.mid)?/g, '').replace(/ ORDER BY workspace_id,ses_message_id/g, '');
   };
   if (typeof q === 'string') return patch(q);
   if (q && typeof q === 'object' && typeof (q as Json).text === 'string') return { ...(q as Json), text: patch((q as Json).text) };
@@ -122,8 +123,10 @@ async function abortAll() {
 async function realMinute() { return (await checker.client.query("SELECT date_trunc('minute',now())::text m")).rows[0].m as string; }
 async function guardClock() {
   // Stay clear of a real minute (and so hour) boundary for the length of one trace.
-  const ms = Date.now() % 60_000;
-  if (ms > 58_500) await new Promise(r => setTimeout(r, 60_000 - ms + 50));
+  // ... and of the hour by 15 s: a release moves a busy hold ten seconds ahead.
+  const ms = Date.now() % 60_000, hourMs = Date.now() % 3_600_000;
+  if (hourMs > 3_585_000) await new Promise(r => setTimeout(r, 3_600_000 - hourMs + 50));
+  else if (ms > 58_500) await new Promise(r => setTimeout(r, 60_000 - ms + 50));
   minute = await realMinute();
 }
 async function checkClock() { if (await realMinute() !== minute) throw new Error('tear host: the trace crossed a real minute boundary; rerun it'); }
@@ -142,7 +145,7 @@ async function dropWorkspaces() {
     'sending_upload_reservations', 'sending_upload_tombstones', 'sending_attachments', 'sending_asset_usage', 'provider_connections'];
   const existing = await tables_();
   await auto.client.query(['BEGIN', ...tables.filter(t => existing.has(t)).map(t => `DELETE FROM ${t} WHERE workspace_id IN (${list})`),
-    `DELETE FROM mail_ignored_staging WHERE ses_message_id LIKE '${ws[0]}%'`, `DELETE FROM workspaces WHERE id IN (${list})`, 'COMMIT'].join(';\n'));
+    `DELETE FROM mail_ignored_staging WHERE ses_message_id LIKE '${ws[0]}%'`, `DELETE FROM mail_receipt_holds WHERE ses_message_id LIKE '${ws[0]}%'`, `DELETE FROM workspaces WHERE id IN (${list})`, 'COMMIT'].join(';\n'));
   ws = [];
 }
 
@@ -250,13 +253,21 @@ const LIMIT = 1024 * 1024 * 1024, SIZE = 3, SLOTS = ['U1', 'U2', 'U3'];
 type Slot = { db: Awaited<ReturnType<typeof client>>; object?: string; put?: { resolve: () => void; reject: (e: Error) => void; reached: () => void }; atPut?: Promise<void>; response?: Promise<unknown> };
 const slots: Record<string, Slot> = {};
 for (const n of SLOTS) slots[n] = { db: await client() };
-// Objects stored and not deleted, labelled o1, o2, ... in the order their uploads reserved.
-const written = new Set<string>(), objectLabel = new Map<string, string>();
+// Objects stored and not deleted, labelled o1, o2, ... in the order their uploads reserved, with
+// the day they landed (`day` moves every object a day into the past).
+const written = new Map<string, number>(), objectLabel = new Map<string, string>();
+let today = 0;
+// What the hourly cleanup and the job runner see of storage: a listing, and their deletions.
+const listing = { put: async () => {}, get: async () => null, delete: async (key: string) => { written.delete(key); },
+  list: async (prefix: string, cursor?: string) => {
+    const keys = [...written.keys()].filter(k => k.startsWith(prefix)).sort().filter(k => !cursor || k > cursor).slice(0, 1000);
+    return { objects: keys.map(key => ({ key, uploaded: new Date(Date.now() - (today - written.get(key)!) * 86_400_000 - 60_000) })), cursor: keys.length === 1000 ? keys.at(-1) : undefined };
+  } };
 let attachments: Record<string, string> = {};
 async function resetUpload() {
   const w = 'tear_adm_' + hex(12); ws = [w];
   Object.assign(runtime.config, structuredClone(baseConfig), { workspaceId: w, multiTenant: false });
-  written.clear(); objectLabel.clear(); attachments = {};
+  written.clear(); objectLabel.clear(); attachments = {}; today = 0;
   const c = auto.client, token = 'bane_' + hex(64);
   keys['1'] = token; keyIds['1'] = `key1_${hex(12)}`;
   await c.query('BEGIN');
@@ -271,7 +282,7 @@ function slotRuntime(name: string) {
     put: (key: string) => new Promise<void>((resolve, reject) => {
       objectLabel.set(key, `o${objectLabel.size + 1}`); slot.object = objectLabel.get(key);
       slot.put!.reached();
-      slot.put = { ...slot.put!, resolve: () => { written.add(key); resolve(); }, reject };
+      slot.put = { ...slot.put!, resolve: () => { written.set(key, today); resolve(); }, reject };
     }),
     get: async () => null, delete: async () => {},
   };
@@ -302,7 +313,7 @@ async function upload(name: string, key?: string, other = false) {
 function crash(name: string) {
   const slot = slots[name]!;
   if (!slot.response || !slot.put) throw new Error(`tear host: ${name} is not at its put`);
-  for (const key of objectLabel.keys()) if (!written.has(key) && objectLabel.get(key) === slot.object) written.add(key);
+  for (const key of objectLabel.keys()) if (!written.has(key) && objectLabel.get(key) === slot.object) written.set(key, today);
   slot.response = undefined; slot.put = undefined;
   return 'crashed';
 }
@@ -407,6 +418,7 @@ function statement(words: string[], c: Awaited<ReturnType<typeof client>>): () =
   const verb = words[0]!;
   if (verb === 'accept' || verb === 'legacy-accept') return accept(c, words[1]!, words[2]!, verb === 'legacy-accept');
   if (verb === 'release') return async () => (await c.client.query('SELECT release_receive_budget_holds(NULL) n')).rows[0].n;
+  if (verb === 'replay') return async () => recoverHeldReceipts({ ...runtime, db: c.db } as Json);
   if (['send', 'batch', 'idem', 'idem-other'].includes(verb)) return sendStatement(words, c);
   if (['limits', 'exempt', 'pause', 'resume'].includes(verb)) return () => operator(words, c);
   throw new Error(`unknown statement ${words.join(' ')}`);
@@ -459,6 +471,31 @@ async function autoAct(words: string[]): Promise<unknown> {
       claims.set(rows[0].id, JSON.stringify(rows[0].recipients));
       return 1;
     });
+    case 'fail': case 'lose': return autoTxn(async () => {
+      // The oldest running job stops. fail: its final attempt failed permanently; the handler's
+      // terminal write (mailbox-ingest.ts) fails a still-pending receipt. lose: the job ended
+      // without touching its receipt (a dropped or crashed attempt).
+      const w = wsOf(a), mid = sesId(b);
+      const job = (await auto.client.query(`SELECT id FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2 AND status='running' ORDER BY created_at,id LIMIT 1`, [w, mid])).rows[0];
+      if (!job) return 'e:no-running-job';
+      const failed = verb === 'fail' ? (await auto.client.query("UPDATE mail_receipts SET status='failed',error='MAILBOX_INGEST_FAILED',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2 AND status='pending'", [w, mid])).rowCount : 0;
+      await auto.client.query(`UPDATE jobs SET status=$2 WHERE id=$1`, [job.id, verb === 'fail' ? 'failed' : 'completed']);
+      return failed;
+    });
+    case 'recover': {
+      // Half an hour passes for pending receipts, then the real lost-receipt recovery runs.
+      await auto.client.query("UPDATE mail_receipts SET last_recovered_at=now()-interval '31 minutes' WHERE workspace_id=ANY($1) AND status='pending'", [ws]);
+      await recoverMailReceipts(runtime);
+      return Number((await auto.client.query("SELECT count(*) n FROM mail_receipts WHERE workspace_id=ANY($1) AND last_recovered_at>now()-interval '1 minute'", [ws])).rows[0].n);
+    }
+    case 'stash': {
+      // An envelope held for a host that was not routable yet, due for replay now.
+      const to = recipients(b), owners = Object.fromEntries(to.map(addr => [addr, [wsOf(addr.includes(hosts[1]!) ? 'B' : 'A')]]));
+      await auto.client.query(`INSERT INTO mail_receipt_holds(bucket,ses_message_id,region,topic_arn,binding_workspace,owners,recipients,notification,received_at,expires_at,next_check,status)
+        VALUES($1,$2,$3,$4,NULL,$5,$6,'{}',now(),now()+interval '48 hours',now()-interval '1 second','held')`, [BUCKET, sesId(a), REGION, TOPIC, JSON.stringify(owners), JSON.stringify(to)]);
+      return 'ok';
+    }
+    case 'replay': return autoTxn(statement(words, auto));
     case 'done': return autoTxn(async () => {
       // The oldest running job finishes: it settles the receipt only if it is still pending with the
       // recipients this job claimed (the store's fence), then completes.
@@ -498,17 +535,18 @@ async function autoAct(words: string[]): Promise<unknown> {
       return (await auto.client.query(`UPDATE sending_emails SET ${set} WHERE id=$1 AND status='queued'`, [id])).rowCount;
     });
     case 'day': {
-      // A day passes for reservations and cleanup obligations.
+      // A day passes for reservations, cleanup obligations and stored objects; the hourly cleanup runs.
       await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '24 hours' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]);
       if ((await tables_()).has('sending_upload_tombstones')) await auto.client.query("UPDATE sending_upload_tombstones SET delete_after=delete_after-interval '24 hours' WHERE workspace_id=$1", [ws[0]]);
+      today++;
+      await cleanup({ ...runtime, storage: listing } as Json, 5_000);
       return 'ok';
     }
     case 'expire': await auto.client.query("UPDATE sending_upload_reservations SET expires_at=expires_at-interval '1 hour' WHERE workspace_id=$1 AND storage_key<>'tear-seed'", [ws[0]]); return 'ok';
-    case 'sweep': await cleanup(runtime, 5_000); return 'ok';
+    case 'sweep': await cleanup({ ...runtime, storage: listing } as Json, 5_000); return 'ok';
     case 'purge': {
       // Run the queued object deletions through the real job handler.
-      const storage = { put: async () => {}, get: async () => null, delete: async (key: string) => { written.delete(key); } };
-      await drainJobs({ ...runtime, storage } as Json, 50, 1, 10_000);
+      await drainJobs({ ...runtime, storage: listing } as Json, 50, 1, 10_000);
       return 'ok';
     }
     case 'delete': {
@@ -534,21 +572,22 @@ async function view(safety: string[]) {
       const x = i ? 'B' : 'A', [limit, backlog] = cfg.limits[i];
       const { rows: [v] } = await checker.client.query(`SELECT
         (SELECT jsonb_build_array(extract(epoch FROM window_at-date_trunc('hour',now()))/3600,messages) FROM mail_receive_windows WHERE workspace_id=$1) AS window,
-        (SELECT coalesce(jsonb_object_agg(ses_message_id,jsonb_build_array(status,jsonb_array_length(recipients),extract(epoch FROM budget_retry_at-date_trunc('hour',now()))/3600,error)),'{}') FROM mail_receipts WHERE workspace_id=$1) AS receipts,
+        (SELECT coalesce(jsonb_object_agg(ses_message_id,jsonb_build_array(status,jsonb_array_length(recipients),floor(extract(epoch FROM budget_retry_at-date_trunc('hour',now()))/3600),budget_retry_at<=now(),error)),'{}') FROM mail_receipts WHERE workspace_id=$1) AS receipts,
         (SELECT active FROM mail_ingest_turns WHERE workspace_id=$1) AS active,
         (SELECT coalesce(jsonb_object_agg(m,n),'{}') FROM (SELECT payload->>'sesMessageId' m,jsonb_build_array(count(*) FILTER (WHERE status='pending'),count(*) FILTER (WHERE status='running')) n
           FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND status IN ('pending','running') GROUP BY 1) j) AS jobs`, [w]);
       const label = (id: string) => id.slice(ws[0]!.length + 1);
       const window = v.window ? [hourIndex(v.window[0]), Number(v.window[1])] : null;
-      const receipts = Object.fromEntries(Object.entries(v.receipts).map(([k, [st, n, retry, e]]: Json) => [label(k), [st, n, hourIndex(retry), e]]));
+      const receipts = Object.fromEntries(Object.entries(v.receipts).map(([k, [st, n, retry, due, e]]: Json) => [label(k), [st, n, hourIndex(retry), due, e]]));
       const jobs = Object.fromEntries(Object.entries(v.jobs).map(([k, n]) => [label(k), n]));
       const active = Number(v.active ?? 0), recount = Object.values(jobs).reduce((t: number, n: Json) => t + n[0] + n[1], 0);
       if (active !== recount) safety.push(`${x}: backlog counter ${active} != ${recount} active ingest jobs`);
       if (active > Math.max(backlog, 0)) safety.push(`${x}: ${active} active ingest jobs above the backlog of ${backlog}`);
-      for (const [m, n] of Object.entries(jobs) as [string, number[]][]) if (n[0]! > 1) safety.push(`${x}: ${n[0]} pending ingest jobs for ${m}`);
+      for (const [m, n] of Object.entries(jobs) as [string, number[]][]) if (n[0]! + n[1]! > 1) safety.push(`${x}: ${n[0]! + n[1]!} active ingest jobs for ${m}`);
       if (window && window[0] === hours && window[1]! > Math.max(limit, 0)) safety.push(`${x}: window ${window[1]} above the ${limit}-message limit`);
       out[x] = { window: window && window[0] === hours ? window[1] : 0, receipts, active, jobs };
     }
+    out.stash = (await checker.client.query("SELECT coalesce(jsonb_agg(substr(ses_message_id,length($1)+2) ORDER BY ses_message_id),'[]') s FROM mail_receipt_holds WHERE ses_message_id LIKE $1||'\\_%' AND status='held'", [ws[0]])).rows[0].s;
     return out;
   }
   if (profile === 'upload') {
@@ -564,7 +603,8 @@ async function view(safety: string[]) {
     if (usage > LIMIT) safety.push(`asset usage ${usage} above the ${LIMIT}-byte quota`);
     // Every stored object has an owner or a durable deletion obligation (a queued job or a tombstone).
     const keysKept = new Set<string>([...v.reserved, ...v.stored.map((x: Json) => x[1]), ...v.deletes, ...v.tombstones]);
-    for (const k of written) if (!keysKept.has(k)) safety.push(`stored object ${objectLabel.get(k)} has no attachment, reservation, pending deletion or tombstone`);
+    // An object younger than a day may be unowned: reconciliation is due a day after it landed.
+    for (const [k, day] of written) if (!keysKept.has(k) && today - day >= 1) safety.push(`stored object ${objectLabel.get(k)} has had no attachment, reservation, pending deletion or tombstone for a day`);
     const byId = Object.fromEntries(Object.entries(attachments).map(([l, id]) => [id, l]));
     return { used: (usage - seed) / SIZE, reservations: v.reserved.length, attachments: v.stored.map((x: Json) => byId[x[0]] ?? '?').sort(), deletes: new Set(v.deletes).size, tombstones: v.tombstones.length, objects: written.size };
   }
