@@ -1267,4 +1267,40 @@ mod tests {
         assert_eq!(script.snapshots.load(Ordering::SeqCst), before + 1);
         assert_eq!(store.folder("Archive").unwrap().next, 2);
     }
+
+    /// Found by gateway/tear (witness with one credential: B append Work, A append Work,
+    /// A append INBOX), and fixed upstream in 20222d4 (finish_command): a refused APPEND kept
+    /// its spool and upload reservation, so the credential's next APPEND could not get one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_append_releases_its_upload() {
+        let api = Arc::new(Api::new("http://127.0.0.1:9".into(), "k".repeat(32)).unwrap());
+        let mut store = Store::new(api, principal()).unwrap();
+        let global = Arc::new(tokio::sync::Semaphore::new(8));
+        let lanes = store.lanes.pools(|s| &s.uploads);
+        let free = lanes.each_ref().map(|l| l.available_permits());
+        let reservation =
+            crate::admission::Reservation::take(global.clone(), Some(lanes.clone()), 1)
+                .await
+                .unwrap();
+        store.upload = Some(crate::upload::Upload::new(5, reservation).unwrap());
+        assert_eq!(lanes[0].available_permits(), free[0] - 1);
+        let mut core = Imap::new(true);
+        core.authenticated = true;
+        let account =
+            mailgw_core::session::Account::new("box_test".into(), vec![], "x".into(), true);
+        let r = tokio::task::block_in_place(|| {
+            store.imap(
+                &mut core,
+                b"a APPEND Nowhere {0+}\r\n\r\n",
+                &account,
+                &mut false,
+                store::Date::default(),
+            )
+        })
+        .unwrap();
+        assert!(r.bytes.starts_with(b"a NO [TRYCREATE]"));
+        assert!(store.upload.is_none());
+        assert_eq!(lanes.each_ref().map(|l| l.available_permits()), free);
+        assert_eq!(global.available_permits(), 8);
+    }
 }
