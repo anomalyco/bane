@@ -100,12 +100,17 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .logs-table .ui-table td:last-child svg { display: block; }
 .logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: var(--color-hover); }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
-/* Every mailbox address (PrivateAddress): blurred after two characters until hovered or its row or link is focused.
-   Only a filter changes, so blurred and revealed are the same width. */
+/* Every mailbox address (PrivateAddress): its first two characters, then a blurred run where the rest will be. The rest
+   is not in the page until the address is hovered or focused; the run is drawn from filler, never from the address.
+   The box is given the whole address's width up front (kerning and ligatures off, so the width is the sum of its
+   characters') and keeps it once the text arrives, so revealing moves nothing. */
 .private-address { display: inline-flex; max-width: 100%; white-space: nowrap; }
-.private-address__rest { filter: blur(4px); transition: filter var(--motion-duration); }
-.private-address:hover .private-address__rest, :is(a, button, [tabindex], .ui-table__clickable):focus-visible .private-address__rest, :is(.ui-table__linked, .ui-card):has(.ui-row-link:focus-visible) .private-address__rest { filter: blur(0); }
-@media (hover: none) { .private-address:hover .private-address__rest { filter: blur(4px); } }
+.private-address__value { display: flex; flex: none; font-kerning: none; font-variant-ligatures: none; }
+.private-address[data-revealed] > .private-address__value { display: block; }
+/* A filtered box paints above a card's link, which covers the card: let a press through to it. */
+.private-address__rest { flex: 1 1 0; min-width: 0; filter: blur(.31em); pointer-events: none; }
+.private-address__rest::before { content: 'mnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetax'; display: block; overflow: hidden; }
+.private-address[tabindex] { border-radius: 2px; cursor: default; }
 /* Direction: a quiet mono tag, Out for sent mail and In for received mail. */
 .log-direction { font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); }
 .log-direction[data-direction='received'] { color: var(--color-text); }
@@ -204,7 +209,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
   .ui-page-header { gap: var(--space-12); margin-bottom: var(--space-16); }
   .ui-page-header > .cluster:first-child { flex-wrap: nowrap; min-width: 0; max-width: 100%; }
   .ui-page-header h1 { min-width: 0; font-size: 20px; line-height: 28px; overflow-wrap: anywhere; }
-  .ui-page-header h1 .private-address, dd .private-address, .email-metadata .private-address { display: inline; white-space: normal; }
+  /* Here the box never runs past its line: masked, the run is cut there; revealed, a longer address wraps inside it. */
+  :is(.ui-page-header h1, dd, .email-metadata) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  :is(.ui-page-header h1, dd, .email-metadata) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
   .ui-page-header > .cluster:last-child { flex-wrap: wrap; }
   .data-toolbar > .cluster { width: 100%; }
   .data-toolbar .ui-select-trigger { flex: 1 1 0; width: auto; min-width: 0; max-width: none; }

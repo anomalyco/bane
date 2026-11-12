@@ -2,7 +2,7 @@
 // each condition lights up true or false, omen answers fill in, then the actions and where the mail ends up.
 // Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves the page.
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { Alert, Button, EmptyState, ErrorState, Field, Input, PageHeader, SkeletonText, Tabs, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery } from '../../data/context'
@@ -210,7 +210,8 @@ export function useDryRun() {
 export function TracePage() {
   const [params] = useSearchParams()
   const options = useApiDef(queries.inboundAddressOptions())
-  const preferred = params.get('to') ?? undefined
+  // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
+  const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
   const overview = useOverview({ limit: 100 })
   const saved = useApiQuery(['ritual-config'], (_api, signal) => request<{ config: { rituals: { key: string; source: string }[] } }>('/v1/rituals', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)

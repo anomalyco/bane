@@ -10,7 +10,8 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, cleanName, full, idempotencyFor, nameOf, when } from './shared'
+import { addressName, cleanName, full, idempotencyFor, Sender, senderLabel, when } from './shared'
+import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
@@ -62,7 +63,7 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
-        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : nameOf(message.from)}</bdi></strong><bdi className="muted"><PrivateAddress value={message.from.address} /></bdi></span>
+        <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : <Sender value={message.from} />}</bdi></strong>{(outbound || nameParts(message.from.name, message.from.address)) && <bdi className="muted"><PrivateAddress value={message.from.address} /></bdi>}</span>
         <span className="mailbox-message__meta">
           {unread && <StatusBadge status="New" tone="info" />}
           {outbound && <StatusBadge status={label(message.status)} tone={statusTone(message.status)} />}
@@ -70,16 +71,16 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         </span>
       </button>
       <p className="mailbox-message__context">
-        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) || !person.name ? <PrivateAddress value={person.address} /> : person.name}</span>) : '—'}</span>
+        <span>to {recipients.length ? recipients.map((person, i) => <span key={`${i}:${person.address}`}>{i > 0 && ', '}{own.has(person.address.toLowerCase()) ? <PrivateAddress value={person.address} /> : <Sender value={person} />}</span>) : '—'}</span>
         {showAddresses && <span>via <AddressList values={message.addressIds.map(id => addressName(addresses, id))} /></span>}
-        {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</span>
+        {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' ? 'your message' : <Sender value={parent.from} />}</a> · {when(parent.receivedAt)}</span>
           : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}
       </p>
       {expanded ? <>
         {detail.error && <Alert tone="danger">{detail.error instanceof Error ? detail.error.message : 'The full message could not be loaded.'}</Alert>}
         {loaded ? loaded.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full.</Alert>
           : message.bodyTruncated && <Alert tone="info">This is a preview of a long message. <Button variant="ghost" size="sm" loading={pending && wanted === 'full'} onClick={() => setWanted('full')}>Show the full message</Button></Alert>}
-        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />
+        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${senderLabel(message.from)}`} className="mailbox-message__html" />
           : <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
         {loaded && wanted === 'formatted' && !loaded.html && <p className="mailbox-message__attachments-note muted">This message has no formatted version.</p>}
         <div className="cluster mailbox-message__toggles">
@@ -150,7 +151,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
       <IconButton variant="ghost" className="mailbox-back" label="Back to conversations" onClick={onBack}><ArrowLeft size={16} /></IconButton>
       <div className="mailbox-conversation__title">
         <h2>{thread.subject || '(no subject)'}</h2>
-        <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && ` · with ${people.map(nameOf).join(', ')}`}</p>
+        <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && <> · with {people.map((person, i) => <span key={person.address}>{i > 0 && ', '}<Sender value={person} /></span>)}</>}</p>
         {(!addressId || (flags && flags.labels.length > 0)) && <span className="mailbox-labels">
           {!addressId && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
           {flags?.labels.map(item => <span key={item} className="mailbox-label">{item}</span>)}
@@ -217,7 +218,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
   const changed = send.error instanceof ApiError && send.error.code === 'INBOUND_RECIPIENTS_CHANGED'
   return <form className="mailbox-composer" data-filled={text ? true : undefined} onSubmit={submit}>
     <div className="inbound-composer__target">
-      <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${nameOf(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
+      <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${senderLabel(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
       {explicit && <IconButton variant="ghost" size="sm" label="Reply to the newest message instead" onClick={onClearTarget}><X size={14} /></IconButton>}
     </div>
     {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="This message reached more than one of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>
