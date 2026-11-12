@@ -1,0 +1,8 @@
+# Synthetic, Remote store (run with --remote). B deletes the folder A has selected; A's
+# snapshot still lists it, so A's COPY runs, and the refresh after it reveals the deletion.
+# Before "Close the session after a command whose update finds the folder gone", the client
+# got "* BYE", then "OK", and the connection stayed open.
+B: b1 CREATE Work
+A: a1 SELECT Work
+B: b2 DELETE Work
+A: a2 COPY 1 Archive

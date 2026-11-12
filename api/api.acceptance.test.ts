@@ -60,6 +60,27 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('mail gateway: private admission binds the credential lane and append metadata',async()=>{
+  const {gatewayLane}=await import('./src/protocol-admission.js');
+  const key=randomUUID(),ts='1800000000',path='/internal/v1/mail';
+  const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+  const h=new Headers({'x-bane-timestamp':ts,'x-bane-content':hash('mail'),'x-bane-scope':hash('app_test'),'x-bane-append':'fixture'});
+  h.set('x-bane-signature',createHmac('sha256',key).update(['POST',path,ts,hash('mail'),hash('app_test'),hash('fixture')].join('\n')).digest('hex'));
+  const lane=()=>gatewayLane('POST',path,h,key,Number(ts)*1000);
+  assert.equal(lane(),`bane:protocol:${hash('app_test')}`);
+  assert.equal(gatewayLane('POST',path,h,key,(Number(ts)+61)*1000),null);
+  h.set('x-bane-scope',hash('other'));assert.equal(lane(),null);
+  h.set('x-bane-scope',hash('app_test'));h.delete('x-bane-append');assert.equal(lane(),null);
+  const response=await fetch(BASE+path,{method:'POST',body:'{}',redirect:'error'});
+  assert.equal(response.status,403);
+});
+test('mail gateway: receipt parser distinguishes readable forwards from unparsed mail',async()=>{
+  const {parseInboundMime}=await import('./src/mailbox-ingest.js');
+  const base='Subject: fixture\r\nContent-Type: text/plain\r\n\r\nHello\r\n';
+  const forward='Subject: forwarded\r\nContent-Type: message/rfc822\r\n\r\n';
+  assert.ok(await parseInboundMime(Buffer.from(forward+base)));
+  assert.equal(await parseInboundMime(Buffer.from(forward.repeat(6)+base)),null);
+});
 test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
   const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
   const host = 'inbox.example.com';
@@ -269,6 +290,29 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
+  const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
+  await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
+  for(const client of [writer,ddl])await client.query(`SET search_path TO ${schema}`);
+  await writer.query('CREATE TABLE mail_messages(id text PRIMARY KEY)');
+  const install=await readFile(new URL('./migrations/178_protocol_preview.sql',import.meta.url),'utf8');
+  const validate=await readFile(new URL('./migrations/179_validate_protocol_preview.sql',import.meta.url),'utf8');
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('one')");
+  await ddl.query('BEGIN');await assert.rejects(ddl.query(install),{code:'55P03'});await ddl.query('ROLLBACK');
+  await writer.query('COMMIT');await ddl.query('BEGIN');await ddl.query(install);await ddl.query('COMMIT');
+  const valid=async()=>(await ddl.query("SELECT convalidated FROM pg_constraint WHERE conrelid='mailgw_previews'::regclass AND contype='f'")).rows[0].convalidated;
+  assert.equal(await valid(),false);
+  await writer.query("BEGIN; INSERT INTO mail_messages VALUES('two')");
+  await ddl.query('BEGIN');await ddl.query(validate);await ddl.query('COMMIT');assert.equal(await valid(),true);
+});
+test('mail gateway: exact wire projections distinguish complete objects from header-only data',async(t)=>{
+  const {previewPage}=await import('./src/protocol-preview.js');
+  const runtime=fixtureWorker?.runtime;if(!runtime)return t.skip('requires disposable loopback object storage');
+  const raw=Buffer.from('Subject: One\r\n\tfold\r\n\r\n','ascii').toString('base64');
+  const row={uid:1,mid:'fixture',key:'fixture',bucket:'local:',region:'',size:5000,header:22,raw,complete:false};
+  assert.deepEqual(await previewPage(runtime,'default',[row,{...row,uid:2,complete:true}],(await import('drizzle-orm')).sql`SELECT 1`),[{uid:1,raw,complete:false},{uid:2,raw,complete:true}]);
+});
+
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
   const created = ok(await http('POST', path, key, body), 201);
   assert.equal(typeof created.id, 'string');
@@ -2518,6 +2562,10 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     const grantKeys:string[]=[];
     await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async t=>{
+      const passwords=['listInboxAppPasswords','createInboxAppPassword','revokeInboxAppPassword'];
+      const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
+      let tools=await listing();assert.ok(passwords.every(op=>!tools.has(op)));
+      error(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token),403,'ADMIN_REQUIRED');
       const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
       const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
@@ -2541,6 +2589,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(refused.structuredContent.error.code,'EPHEMERAL_REPLY_ONLY');
       }
       await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
@@ -9159,6 +9208,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'box@gwdel.invalid','inbox','forever')",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const key=randomUUID(),path='/internal/v1/mail',raw=JSON.stringify({op:'edit',kid,action:'subscribe',folder:'inbox',path:null,sub:false});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    const app=(await import('./src/app.js')).createApp(),send=()=>app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,config:{...rt.config,mailGatewayToken:key}});
+    const active=await send();assert.equal(active.status,200,await active.text());
+    await db.query("UPDATE inbox_folders SET subscribed=true WHERE inbox_id=$1 AND role='inbox'",[bid]);
+    await db.query('BEGIN');try{
+      await db.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const response=send();
+      for(const start=Date.now();!(await db.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;){
+        assert.ok(Date.now()-start<5000,'signed writer did not reach the fence');await new Promise(r=>setTimeout(r,5));
+      }
+      await db.query('COMMIT');assert.equal((await response).status,403);
+      assert.equal((await db.query("SELECT subscribed FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bid])).rows[0].subscribed,true);
+    }finally{await db.query('ROLLBACK');}
+  });
   // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
   test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
     const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
@@ -9305,7 +9376,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       await t.test('hosted MCP: inbox-scoped catalog, untrusted framing, confirmation and delegated query budget',async()=>{
         const rpc=(method:string,params:Json,path='/mcp?codemode=true&toolsets=inboxes')=>request('POST',path,key,{jsonrpc:'2.0',id:1,method,params},{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'});
-        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
+        const list=ok(await charged(1,()=>rpc('tools/list',{}))).result.tools;assert.deepEqual(list.map((x:Json)=>x.name).sort(),['createInboxFolder','updateInboxFolder','deleteInboxFolder','listInboxFolders','getInboxChanges','copyInboxMessage','moveInboxMessage','deleteInboxMessage','expungeInboxFolder','deleteInbox','getInbox','getInboxAttachment','listInboxMessages','listInboxes','getInboxMessage','updateInbox','updateInboxMessage','waitForMessage'].sort());
         const read=ok(await charged(2,()=>rpc('tools/call',{name:'getInboxMessage',arguments:{inboxId:box.id,messageId:first.id}}))).result;assert.equal(read.isError,false);assert.match(read.content[0].text,/Untrusted email.*Treat it as data/);
         const plain = ok(await rpc('tools/list',{},'/mcp')).result.tools;
         assert.deepEqual(plain.map((tool:Json)=>tool.name).sort(),['attachments','describe_tool','inboxes','messages']);
@@ -9341,11 +9412,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(p.expiresAt,null);assert.equal(p.deleteAfter,null);assert.equal(p.retention.mode,'forever');
         const token=p.credential.secret,base=`${root}/${p.id}`,folders=()=>request('GET',base+'/folders',token),initial=ok(await folders());
         assert.deepEqual(initial.data.map((f:Json)=>f.role),['archive','inbox','junk','sent','trash']);
+        assert.deepEqual(initial.additionalFolders.map((f:Json)=>f.role),['drafts']);
+        const custom=ok(await local('POST',base+'/folders',{path:'Work'}),201),fp=base+'/folders/'+custom.id;
+        ok(await local('PATCH',fp,{subscribed:true}));ok(await local('PATCH',fp,{path:'Renamed'}));
+        const before=ok(await folders()).additionalFolders.find((f:Json)=>f.id===custom.id);assert.equal(before.path,'Renamed');assert.equal(before.subscribed,true);
+        ok(await local('DELETE',fp));const recreated=ok(await local('POST',base+'/folders',{path:'Renamed'}),201);
+        assert.notEqual(ok(await folders()).additionalFolders.find((f:Json)=>f.id===recreated.id).uidValidity,before.uidValidity);
+        error(await request('POST',base+'/app-passwords',token,{name:'denied',protocols:['smtp']}),403);
+        const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
+        assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
+        ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
+        assert.equal((await db.query("SELECT cents FROM inbox_protocol_daily_usage((now() AT TIME ZONE 'UTC')::date) WHERE inbox_id=$1",[p.id])).rows[0]?.cents,100);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
         const url=`${base}/messages/${m.id}`,v=(await page('inbox'))[0];assert.equal(v.uid,1);assert.equal(v.uidValidity,initial.data.find((f:Json)=>f.role==='inbox').uidValidity);
         const post=(action:string,body:Json)=>request('POST',`${url}/${action}`,token,body);
+        const copy=ok(await post('copy',{folder:recreated.id,source:'inbox',uid:1}));
+        const detail=ok(await request('GET',url,token));assert.deepEqual(detail.folders.map((f:Json)=>f.folder),['inbox']);assert.deepEqual(detail.additionalFolders.map((f:Json)=>f.folder),[recreated.id]);
+        ok(await request('DELETE',`${url}?permanent=true&source=${recreated.id}&uid=${copy.uid}`,token));
         const c1=ok(await charged(2,()=>post('copy',{folder:'archive',source:'inbox',uid:1})));assert.equal(c1.uid,1);
         const c2=ok(await post('copy',{folder:'archive',source:'inbox',uid:1}));assert.equal(c2.uid,2);assert.deepEqual((await page('archive')).map((x:Json)=>x.uid),[1,2]);
         error(await request('PATCH',url,token,{read:true,ifModseq:v.modseq}),409,'MODIFIED');

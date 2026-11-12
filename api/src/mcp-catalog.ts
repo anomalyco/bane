@@ -195,6 +195,7 @@ const TAG_TOOLSET: Record<string, Toolset> = {
 };
 const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'listLogs', 'testRouting', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
 const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
+  createInboxFolder:'modify',updateInboxFolder:'modify',deleteInboxFolder:'modify',
   listInboxFolders:'read',getInboxChanges:'read',moveInboxMessage:'modify',copyInboxMessage:'modify',deleteInboxMessage:'modify',expungeInboxFolder:'modify',
   createInbox: 'create', listInboxes: 'read', getInbox: 'read', updateInbox: 'modify', deleteInbox: 'modify', listInboxMessages: 'read', getInboxMessage: 'read', updateInboxMessage: 'modify', getInboxAttachment: 'read', replyToInboundThread: 'send', createInboundThread: 'send',
 };

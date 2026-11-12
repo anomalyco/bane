@@ -139,7 +139,9 @@ function InboxDetail({ id }: { id: string }) {
   const [selected, setSelected] = useState<string | null>(null)
   const pagination = useCursorPagination()
   const inbox = useApiQuery(['agent-inbox', id], (api, signal) => api.inboxes.get(id, signal), { interval: 15_000 })
-  const messages = useApiQuery(['agent-inbox-messages', id, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor }, signal), { interval: 15_000, keepPrevious: true })
+  const [folder,setFolder]=useState('')
+  const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
+  const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
   const keys = useApiQuery(['agent-inbox-keys', id], async (api, signal) => (await api.mailboxes.keys(false, signal)).filter(key => key.addressIds?.length === 1 && key.addressIds[0] === id), { enabled: canAdminister })
   const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted')
   const b: Inbox | undefined = inbox.data
@@ -168,6 +170,7 @@ function InboxDetail({ id }: { id: string }) {
     </>}
     <section className="section stack" aria-labelledby="agent-inbox-messages">
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} />
+      {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder"><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
         <DataTable loading={messages.isPending} skeletonRows={3} minRows={1} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? `Mail sent to ${b.address} shows up here within seconds.` : undefined} />}

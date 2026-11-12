@@ -136,6 +136,8 @@ export function referencesHeader(ids: string[]) {
 }
 
 export type OutgoingMessage = {
+  /** Set only by the credential-fenced internal protocol submission route. */
+  protocolArchive?:{mid:string;key:string;bucket:string;bytes:number;mime:ReturnType<typeof mimeIndex>;clientId:string|null};
   mailbox: MailboxRow; actor: Actor; scope: Scope; from: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[];
   subject: string; text?: string; html?: string; attachments: ResolvedAttachment[];
   fromName?: string; region?: string; tracking?: boolean; screen?: boolean;
@@ -155,11 +157,13 @@ async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
     FROM mail_messages WHERE sender_mailbox_id = ${message.mailbox.id} AND direction = 'outbound' AND created_at > now() - interval '1 day'`);
   const { hour, day } = counts.rows[0]!;
   if (hour >= limits.perHour) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perHour} messages per hour.`, undefined, true);
-  if (day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
+  if (!message.protocolArchive && day >= limits.perDay) throw new ApiError(429, 'MAILBOX_SEND_LIMIT', `This mailbox reached its limit of ${limits.perDay} messages per day.`, undefined, true);
   const recipients = [...message.to, ...message.cc, ...message.bcc];
   const { recent,thread }=counts.rows[0]!;
+  if (message.protocolArchive && recent.reduce((n,row)=>n+row.length,0)+recipients.length>limits.perHour)
+    throw new ApiError(429,'MAILBOX_SEND_LIMIT','This mailbox reached its hourly recipient limit.',undefined,true);
   for (const recipient of recipients) {
-    const sent = recent.filter(row=>row.includes(recipient)).length;
+    const sent = recent.filter(row=>row.some(address=>address.toLowerCase()===recipient.toLowerCase())).length;
     if (sent >= limits.perRecipientPerHour) throw new ApiError(429, 'RECIPIENT_SEND_LIMIT', `This mailbox already sent ${sent} messages to ${recipient} in the last hour. This guards against reply loops.`, undefined, true);
   }
   if (message.threadId) {
@@ -186,7 +190,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (!current) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
-  if(current.kind==='inbox'){
+  if(current.kind==='inbox'&&!message.protocolArchive){
     if(!message.threadId)throw new ApiError(422,'EPHEMERAL_REPLY_ONLY','An ephemeral inbox cannot start a thread.');
     if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
     if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
@@ -204,7 +208,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
   if (!regionalSending(runtime) && message.region && domain.region !== message.region) throw new ApiError(422, 'MAILBOX_REGION_MISMATCH', 'Tracked mail must use the mailbox region.', 'region');
-  const messageRowId = id('msg');
+  const messageRowId = message.protocolArchive?.mid??id('msg');
   const sendingIds=message.attachments.map(f=>f.id);
   const files=await Promise.all(message.attachments.map(async(file,index)=>{
     const attachmentId=`matt_${(await digest(`${messageRowId}:${index}`)).slice(0,32)}`;
@@ -219,14 +223,14 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   ];
   const fromName = message.fromName ?? message.mailbox.displayName;
   const { queueMailboxEmail } = await wrapModuleLoad(() => import('./sending.js'));
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
+  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { protocolEnvelope:!!message.protocolArchive,from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: regionalSending(runtime)?message.region:domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen, sealed: message.sealed }, locked.replyAuthors);
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
   await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${now}::timestamptz)` }).where(eq(mailThreads.id, threadId));
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
-    lifecycle,rawBucket:current.kind==='inbox'?domain.bucket:null,
+    lifecycle,rawBucket:message.protocolArchive?.bucket??(current.kind==='inbox'?domain.bucket:null),...(message.protocolArchive?{rawKey:message.protocolArchive.key,sizeBytes:message.protocolArchive.bytes,mime:message.protocolArchive.mime,messageId:message.protocolArchive.clientId}:{}),
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
     inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
@@ -238,7 +242,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     await tx.insert(attachmentLinks).values(files.map(f=>({...message.scope,attachmentId:f.sourceId,ownerType:'mailbox' as const,ownerId:f.id})));
   }
   await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
-  if(current.kind==='inbox')await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
+  if(current.kind==='inbox'&&(!message.protocolArchive||files.length))await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${'archive:'+messageRowId},'mail.archiveSent',${message.scope.workspaceId},jsonb_build_object('messageId',${messageRowId}::text))`);
   const queued = await recordEvents(tx, message.scope.workspaceId, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
 }
