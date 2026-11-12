@@ -3,14 +3,18 @@ import type { DbExecutor, Runtime } from './core.js';
 import { readMailBytes, withMailObjects } from './mail-objects.js';
 
 // Store a complete small object or an exact root header block. Never present a prefix as a full header.
-export async function savePreview(db: DbExecutor, mid: string, key: string, source: Uint8Array, size: number) {
+export function wirePreview(source: Uint8Array, size: number) {
   const b = Buffer.from(source.buffer, source.byteOffset, Math.min(source.byteLength, 2048));
   const complete = size === b.length,
     cut = b.indexOf('\r\n\r\n');
   const length = complete ? size : b[0] === 13 && b[1] === 10 ? 2 : cut >= 0 ? cut + 4 : 0;
   if (!length) return;
+  return {prefix:b.subarray(0,length).toString('base64'),complete};
+}
+export async function savePreview(db: DbExecutor, mid: string, key: string, source: Uint8Array, size: number) {
+  const preview=wirePreview(source,size);if(!preview)return;
   await db.execute(
-    sql`INSERT INTO mailgw_previews(mid,object_key,prefix,complete) SELECT id,raw_key,${b.subarray(0, length).toString('base64')},${complete} FROM mail_messages WHERE id=${mid} AND raw_key=${key} ON CONFLICT(mid) DO NOTHING`,
+    sql`INSERT INTO mailgw_previews(mid,object_key,prefix,complete) SELECT id,raw_key,${preview.prefix},${preview.complete} FROM mail_messages WHERE id=${mid} AND raw_key=${key} ON CONFLICT(mid) DO NOTHING`,
   );
 }
 

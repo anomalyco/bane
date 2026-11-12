@@ -193,7 +193,7 @@ def real_services():
             DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
             MAILGW_HEALTH_PORT="0",
         )
-        yield lambda:run(['node','--import','tsx','--test','--test-name-pattern=^mail gateway:', 'api.acceptance.test.ts'],cwd=api,env=env)
+        yield lambda:run(['node','--import','tsx','--test','--test-name-pattern=^mail gateway:|agent inbox contracts and storage budgets', 'api.acceptance.test.ts'],cwd=api,env=env)
         REAL.clear()
 
 

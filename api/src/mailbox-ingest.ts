@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { receivedMailStore, withMailObjects } from './mail-objects.js';
 import {mimeIndex} from './mailbox-mime-index.js';
-import {savePreview} from './protocol-preview.js';
+import {wirePreview} from './protocol-preview.js';
 import { copyWorkspaceRaw, PARSE_LIMIT } from './mailbox-mime.js';
 import { matchRouting, plusBase } from './routing-match.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
@@ -537,8 +537,8 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
       Object.assign(message,{rawKey:keptStore.rawKey,rawBucket:keptStore.bucket,lifecycle:'kept'});
     }
   } finally { s3.destroy(); }
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null);
-  if(message.lifecycle==='kept'&&!copied.large)await savePreview(runtime.db,messageRowId,store.rawKey,raw,sizeBytes);
+  const preview=message.lifecycle==='kept'?wirePreview(raw,sizeBytes):undefined;
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHost(runtime.config.publicUrl) : null,preview);
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
