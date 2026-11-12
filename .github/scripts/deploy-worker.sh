@@ -68,8 +68,6 @@ else
   fi
 fi
 args+=(--secrets-file "$secrets_file")
-if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
-if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi
 WRANGLER_LOG=error "$wrangler" "${args[@]}"
 if bound; then state=true; else state=false; fi
 [[ $state == "$gateway" ]] || { echo "::error::Worker MAILGW_API_TOKEN bound=$state, but bane:mailGatewayEnabled=$gateway"; exit 1; }

@@ -1791,7 +1791,7 @@ export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: S
     JOIN bane_oidc_identities i ON i.user_id=u.id AND i.issuer=${c.accountIssuer}
     WHERE m.workspace_id=${workspaceId} AND m.user_id=${userId} AND u.email_verified
     AND (m.role IN ('owner','admin') OR (${c.multiTenant} AND m.role='member' AND ${direct}))
-    AND (${c.multiTenant} OR ${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email)) LIMIT 1 FOR SHARE OF m,u,i`;
+    AND (${c.multiTenant} OR ${JSON.stringify(c.allowedSubjects)}::jsonb ? i.subject) LIMIT 1 FOR SHARE OF m,u,i`;
 }
 export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; actorKeyId: string; campaignId?: string | null; snapshot: Pick<EmailSnapshot, 'from'> }) {
   // Session-origin jobs retain the OIDC principal, not a browser session or bootstrap credential.

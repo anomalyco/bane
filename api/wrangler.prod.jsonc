@@ -20,6 +20,8 @@
     "PUBLIC_URL": "https://bane.mx",
     "ACCOUNT_ISSUER": "https://account.anoma.ly",
     "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",
+    // Staff sign-up: the sign-in's provider identity is a Google Workspace account in this domain (never an address).
+    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
     "ACCOUNT_CLIENT_ID": "bane-production",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "009882681002",

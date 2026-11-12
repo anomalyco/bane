@@ -2,7 +2,7 @@ import {sql,type SQLWrapper} from 'drizzle-orm';
 import type {ReadyConnection} from './provider-credentials.js';
 import type {Config} from './core.js';
 
-export const receivingPolicy=(c:Config)=>JSON.stringify({resource:new URL('/mcp',c.publicUrl).href,issuer:c.accountIssuer,hosted:c.multiTenant,emails:c.allowedEmails});
+export const receivingPolicy=(c:Config)=>JSON.stringify({resource:new URL('/mcp',c.publicUrl).href,issuer:c.accountIssuer,hosted:c.multiTenant,subjects:c.allowedSubjects});
 
 export function storageBinding(wid:string|SQLWrapper,region:string|SQLWrapper,bucket:string|SQLWrapper) {
   return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (

@@ -19,7 +19,7 @@ ALTER ROLE fixture SET lock_timeout = '15s';
 SQL
 export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:$PGPORT/fixture
 export HOST=127.0.0.1
-export AUTH_ALLOWED_EMAILS=operator@example.com ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
+export AUTH_ALLOWED_SUBJECTS=acceptance-operator ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
 BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture

@@ -4,7 +4,7 @@ import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, respo
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
-import { signupApproved } from './config.js';
+import { accountSessionPolicy } from './account-login.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -130,11 +130,12 @@ export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
     description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
-    const a = dashboardSession(c), { name } = c.req.valid('json');
+    const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
-      const [user] = await db.select({email:baneUsers.email}).from(baneUsers).where(and(eq(baneUsers.id,a.userId),eq(baneUsers.emailVerified,true))).for('update');
-      const allowed = user && signupApproved(c.env.config, user.email);
+      const [user] = await db.select({id:baneUsers.id}).from(baneUsers).where(eq(baneUsers.id,a.userId)).for('update');
+      // Decided by the sign-in, never by an address: hosted staff (the provider identity), or a self-hosted allowed subject.
+      const allowed = user && (c.env.config.multiTenant ? policy?.staff === true : !!policy && c.env.config.allowedSubjects.includes(policy.subject));
       if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
       if (row) return row;

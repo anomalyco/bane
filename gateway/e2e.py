@@ -147,8 +147,7 @@ def real_services():
             S3_SECRET_ACCESS_KEY=pw,
             MAILGW_API_TOKEN=key,
             API_BASE_URL=url,
-            AUTH_ALLOWED_EMAILS='operator@example.com',
-            AUTH_ALLOWED_DOMAINS='example.com',
+            AUTH_ALLOWED_SUBJECTS='gateway-operator',
             ACCOUNT_CLIENT_ID='fixture',
             ACCOUNT_CLIENT_PRIVATE_KEY='fixture',
         )

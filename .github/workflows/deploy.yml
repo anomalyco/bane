@@ -423,13 +423,10 @@ jobs:
 
       - uses: ./.github/actions/build-release
 
-      # The environment picks the stage and its variables. No variable or secret
-      # name carries a stage prefix: both stages set AUTH_ALLOWED_*, and each
-      # reads the same keys from its own bane/<stage>/ folder below.
+      # The environment picks the stage. No variable or secret name carries a
+      # stage prefix: each stage reads the same keys from its own bane/<stage>/
+      # folder below. Sign-in policy is committed in wrangler.<stage>.jsonc.
       - name: Configure the stage
-        env:
-          AUTH_ALLOWED_EMAILS: ${{ vars.AUTH_ALLOWED_EMAILS }}
-          AUTH_ALLOWED_DOMAINS: ${{ vars.AUTH_ALLOWED_DOMAINS }}
         run: |
           case "$STAGE" in
             dev) public_url=https://dev.bane.mx; wrangler_config=wrangler.dev.jsonc ;;
@@ -439,8 +436,6 @@ jobs:
           {
             echo "PUBLIC_URL=$public_url"
             echo "WRANGLER_CONFIG=$wrangler_config"
-            echo "AUTH_ALLOWED_EMAILS=$AUTH_ALLOWED_EMAILS"
-            echo "AUTH_ALLOWED_DOMAINS=$AUTH_ALLOWED_DOMAINS"
           } >> "$GITHUB_ENV"
 
       # The deploy secrets live in AWS Secrets Manager as bane/<stage>/* and are
@@ -509,8 +504,6 @@ jobs:
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
-          AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
-          AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check

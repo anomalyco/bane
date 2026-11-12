@@ -4,11 +4,12 @@ import { z } from 'zod';
 import { ApiError, digest, log, type Actor, type Ctx, type Runtime } from './core.js';
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
-import { signupApproved } from './config.js';
+import { isStaffSignIn, providerIdentity, type ProviderIdentity } from './account-policy.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
+class NotAdmitted extends Error { constructor(readonly reason: string) { super(reason); } }
 
 function loginIssue(error: unknown, requiredAcr?: string) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
@@ -58,6 +59,17 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   return { url:url.href, binding };
 }
 
+// A refused, otherwise verified sign-in: one row per subject for the operator (scripts/list-signin-attempts.ts),
+// who may then admit that subject explicitly. The address and name are shown, never trusted.
+async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string) {
+  const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
+  log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
+  await runtime.db.execute(sql`INSERT INTO bane_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome)
+    VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome})
+    ON CONFLICT(issuer,subject) DO UPDATE SET acr=excluded.acr,provider=excluded.provider,provider_hd=excluded.provider_hd,email=excluded.email,
+      name=excluded.name,outcome=excluded.outcome,attempts=bane_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
+}
+
 export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string) {
   const state = url.searchParams.get('state');
   if (!state || state.length > 256 || !binding || binding.length > 256) throw loginFailed();
@@ -72,61 +84,68 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
   const requiredAcr = runtime.config.accountClient?.requiredAcr;
-  if (requiredAcr && claims.acr !== requiredAcr) throw new AuthenticationMethodRequired();
-  const profile = (claims.email === undefined || claims.email_verified === undefined) && metadata.userinfo_endpoint
+  const needUserInfo = (claims.email === undefined || claims.email_verified === undefined || !providerIdentity(claims)) && !!metadata.userinfo_endpoint;
+  const profile = needUserInfo
     ? await oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, options))
     : claims;
   const address = verifiedEmail.safeParse(profile.email).data ?? null;
   const emailAtLogin = profile.email_verified === true ? address : null;
+  const upstream = providerIdentity(claims) ?? providerIdentity(profile as Record<string, unknown>);
+  if (requiredAcr && claims.acr !== requiredAcr) {
+    await recordAttempt(runtime, claims, upstream, address, 'method_required');
+    throw new AuthenticationMethodRequired();
+  }
   const returnUrl = new URL(flow.return_url);
   if (returnUrl.origin !== new URL(runtime.config.publicUrl).origin) throw loginFailed();
   const invitation = returnUrl.pathname === '/' ? returnUrl.searchParams.get('invitation') : null;
+  // Identity is (issuer, subject). An email address is display and contact data only: it never admits a person
+  // and never links a subject to an existing user.
+  const staff = isStaffSignIn(runtime.config, claims.acr, upstream);
   const session = oidc.generateRandomState();
-  await runtime.db.transaction(async db => {
-    await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
-    const existing = await db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub} FOR SHARE`);
-    let userId: string | undefined = existing.rows[0]?.user_id;
-    if (!userId) {
-      if (!emailAtLogin) throw loginFailed();
-      const email = emailAtLogin;
-      // Pre-approved users only: an operator claim (self-host upgrades) or the cutover bootstrap (migration 277).
-      const migrated = await db.execute<{id:string|null}>(sql`SELECT claim_bane_legacy_user(${claims.iss},${claims.sub},${email},true,${typeof claims.acr === 'string' ? claims.acr : null}) AS id`);
-      userId = migrated.rows[0]?.id ?? undefined;
-      if (userId) log('info', { code: 'SIGN_IN_LEGACY_CLAIMED', userId });
+  try {
+    await runtime.db.transaction(async db => {
+      await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
+      const existing = await db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub} FOR SHARE`);
+      let userId: string | undefined = existing.rows[0]?.user_id;
       if (!userId) {
-        // Staff domains need the configured authentication context (Google in hosted mode), checked above.
-        const allowed = signupApproved(runtime.config, email, claims.acr);
-        if (!allowed && (!runtime.config.multiTenant || !invitation || !await pendingInvitation(db,email,invitation))) {
-          log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: invitation ? 'invitation' : 'not_allowlisted' });
-          throw loginFailed();
-        }
+        // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
+        // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
+        // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a bane_oidc_identities row).
+        if (!emailAtLogin) throw new NotAdmitted('unverified_email');
+        const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
+        const invited = runtime.config.multiTenant && !staff && !!invitation && await pendingInvitation(db, emailAtLogin, invitation);
+        if (!staff && !invited && !selfHosted) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
         userId = crypto.randomUUID();
-        const name = typeof claims.name === 'string' ? claims.name.slice(0,200) : email;
-        // A colliding legacy email is reserved; only the reviewed claim above can adopt it.
-        const inserted = await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) SELECT ${userId},${name},${email},true
-          WHERE NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${email})) ON CONFLICT DO NOTHING RETURNING id`);
-        if (!inserted.rowCount) { log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: 'address_reserved' }); throw loginFailed(); }
-        log('info', { code: 'SIGN_IN_USER_CREATED', userId });
+        const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : emailAtLogin;
+        await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
+        // Verified addresses stay unique for display; a taken one is stored unverified rather than refusing the subject.
+        await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${emailAtLogin},
+          NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${emailAtLogin})))`);
         await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
+        log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: staff ? 'staff' : invited ? 'invitation' : 'subject' });
         if (runtime.config.multiTenant) {
-          if (!await onboardNewUser(db,{id:userId,email,name},allowed,runtime.config.regions[0]!,invitation)) throw loginFailed();
-        } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(email.toLowerCase())) {
+          if (!await onboardNewUser(db,{id:userId,email:emailAtLogin,name},staff,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
+        } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
           await db.execute(sql`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES(${crypto.randomUUID()},${userId},'default','owner')`);
         }
       }
-    }
-    // Serialize email ownership changes separately from the stable subject. A
-    // conflicting address must never transfer somebody else's user or memberships.
-    if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
-    const updated = await db.execute(sql`WITH observed AS (
-      SELECT ${address}::text AS email, (${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE id<>${userId}
-        AND email_verified AND lower(email)=lower(${address}))) AS verified
-    ) UPDATE bane_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
-      WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
-    if(updated.rowCount) await db.execute(sql`DELETE FROM bane_sessions WHERE user_id=${userId}`);
-    await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES
-      (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},now()+interval '7 days')`);
-  });
+      // Serialize email ownership changes separately from the stable subject. A
+      // conflicting address must never transfer somebody else's user or memberships.
+      if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
+      const updated = await db.execute(sql`WITH observed AS (
+        SELECT ${address}::text AS email, (${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE id<>${userId}
+          AND email_verified AND lower(email)=lower(${address}))) AS verified
+      ) UPDATE bane_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
+        WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
+      if(updated.rowCount) await db.execute(sql`DELETE FROM bane_sessions WHERE user_id=${userId}`);
+      await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
+        (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${staff},now()+interval '7 days')`);
+    });
+  } catch (error) {
+    if (!(error instanceof NotAdmitted)) throw error;
+    await recordAttempt(runtime, claims, upstream, address, error.reason);
+    throw loginFailed();
+  }
   return {session, returnUrl:returnUrl.href};
 }
 
@@ -151,6 +170,15 @@ export async function accountSessionUser(runtime: Runtime, headers: Headers, req
   return user ?? null;
 }
 
+/** The current dashboard session's subject and hosted staff status (decided at sign-in from the provider identity). */
+export async function accountSessionPolicy(runtime: Runtime, headers: Headers) {
+  const hash = await currentSession(runtime, headers);
+  if (!hash) return null;
+  const {rows:[row]} = await runtime.db.execute<{subject:string;staff:boolean}>(sql`SELECT subject,staff FROM bane_sessions
+    WHERE token_hash=${hash} AND issuer=${runtime.config.accountIssuer} AND expires_at>now()`);
+  return row ?? null;
+}
+
 export async function accountSessionActor(runtime: Runtime, headers: Headers): Promise<Actor|null> {
   const hash = await currentSession(runtime, headers);
   if (!hash) return null;
@@ -159,7 +187,7 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
     WITH member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM bane_sessions s JOIN bane_users u ON s.user_id=u.id
       JOIN workspace_members m ON m.user_id=u.id WHERE s.token_hash=${hash} AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()
       AND u.email_verified AND m.role IN ('owner','admin','member')
-      ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedEmails)}::jsonb ? lower(u.email)`}
+      ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? s.subject`}
       ${selected && runtime.config.multiTenant ? sql`AND m.workspace_id=${selected}` : sql``}
       ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1
     ), selected AS (UPDATE bane_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)

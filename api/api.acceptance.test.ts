@@ -297,6 +297,8 @@ const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an H
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
 const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-bane.session_token' : 'bane.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
+// The operator's issuer subject (= its user ID). Self-hosted access is by subject: AUTH_ALLOWED_SUBJECTS lists it.
+const AUTH_SUBJECT = process.env.AUTH_TEST_SUBJECT ?? 'acceptance-operator';
 const AUTH_DOMAIN = 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
@@ -392,8 +394,8 @@ type SessionFixture = { userId: string; sessionId: string; token: string; cookie
 let authDb: pg.Client | undefined;
 let manager: SessionFixture | undefined;
 let fixtureWorker: ReturnType<typeof import('./src/adapters/node.js').nodeRuntime> | undefined;
-async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean } = {}): Promise<SessionFixture> {
-  const userId = unique('acceptance-user');
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string } = {}): Promise<SessionFixture> {
+  const userId = options.userId ?? unique('acceptance-user');
   const sessionId = unique('acceptance-session');
   const token = createHash('sha256').update(randomUUID()).digest('base64url');
   const email = options.email ?? `${unique('acceptance-oidc')}@${AUTH_DOMAIN}`;
@@ -425,7 +427,7 @@ async function sessionFixture(t: TestContext, options: Parameters<typeof seedSes
 before(async () => {
   authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
   await authDb.connect();
-  manager = await seedSession(authDb, { email: AUTH_EMAIL, hostedDomain: null });
+  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null });
   const identity = ok(await http('GET', '/v1/me', MANAGER));
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
@@ -445,7 +447,7 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
-test('OIDC migration preserves connected subjects and requires a verified, approved legacy claim', async t => {
+test('OIDC migration links only connected subjects; nobody is adopted by email', async t => {
   const db = await fixtureDatabase(t);
   const schema = 'oidc_' + randomUUID().replaceAll('-', '');
   await db.query('BEGIN');
@@ -462,31 +464,11 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
     assert.deepEqual((await db.query('SELECT * FROM bane_oidc_identities')).rows, [
       {issuer:'https://id.example.org', subject:'A', user_id:'connected'},
     ]);
-    const claim = async (verified: boolean, issuer = 'https://id.example.org') =>
-      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,$4) AS id', [issuer, 'B', 'lee@example.org', verified])).rows[0].id;
-    assert.equal(await claim(true), null);
-    await db.query("INSERT INTO bane_legacy_claims VALUES ('legacy','https://id.example.org','lee@example.org')");
-    assert.equal(await claim(false), null);
-    assert.equal(await claim(true, 'https://other.example.org'), null);
-    assert.equal(await claim(true), 'legacy');
-    assert.equal(await claim(true), null);
-    assert.equal((await db.query('SELECT count(*) FROM auth_account')).rows[0].count, '2');
-    // 277: no bulk carry-over; a bootstrap claim pins the issuer and the Google context, is used once and audited.
-    await db.query(`INSERT INTO auth_user(id,name,email,email_verified) VALUES ('google','Gia','gia@example.org',true);
-      INSERT INTO bane_users(id,name,email,email_verified) SELECT id,name,email,email_verified FROM auth_user WHERE id='google';
-      INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES ('g1','456','google','google')`);
-    for (const file of ['274_current_email','277_legacy_google_claims']) await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
-    assert.equal((await db.query('SELECT FROM bane_legacy_claims')).rowCount,0,'Nobody is carried over without a claim');
-    await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source,required_acr) VALUES('google','https://id.example.org','gia@example.org','bootstrap','urn:anomaly:acr:google')");
-    const google = async (email: string, acr: string | null, subject = 'G', issuer = 'https://id.example.org') =>
-      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,true,$4) AS id', [issuer, subject, email, acr])).rows[0].id;
-    assert.equal(await google('gia@example.org','urn:anomaly:acr:passkey'), null, 'The claim needs the Google context');
-    assert.equal(await google('gia@example.org',null), null);
-    assert.equal(await google('Gia@example.org','urn:anomaly:acr:google'), null, 'The verified address must match exactly');
-    assert.equal(await google('gia@example.org','urn:anomaly:acr:google','G','https://other.example.org'), null, 'The issuer is pinned');
-    assert.equal(await google('gia@example.org','urn:anomaly:acr:google'), 'google');
-    assert.equal(await google('gia@example.org','urn:anomaly:acr:google','H'), null, 'A claim is consumed once');
-    assert.deepEqual((await db.query('SELECT user_id,issuer,subject,source FROM bane_legacy_claim_audit')).rows,[{user_id:'google',issuer:'https://id.example.org',subject:'G',source:'bootstrap'}]);
+    // Identity is (issuer, subject). The legacy Google user with the same verified address is not linked, and
+    // there is no claim-by-email path at all: an operator binds a subject explicitly.
+    assert.equal((await db.query("SELECT to_regclass('bane_legacy_claims') AS t")).rows[0].t, null);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM pg_proc WHERE proname='claim_bane_legacy_user'")).rows[0].n, 0);
+    assert.deepEqual((await db.query("SELECT id FROM bane_users ORDER BY id")).rows, [{id:'connected'},{id:'legacy'}]);
   } finally {
     await db.query('ROLLBACK');
   }
@@ -501,13 +483,17 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const approved = `${randomUUID()}@example.org`, keys = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
   const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
-    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_ALLOWED_EMAILS:approved}),
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
   let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
+  // The provider identity behind the sign-in (Google Workspace domain); email never admits anyone.
+  let providerName = 'google', providerHd: string | null = 'example.org';
+  const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:true,hd:providerHd}} : {};
   // The first half exercises an installation without a required context; hosted config always sets one.
   runtime.config.accountClient!.requiredAcr=undefined;
   const googleAcr = 'urn:anomaly:acr:google';
-  let tokenAcr: string | undefined, peer = 0, pushed: URLSearchParams | undefined;
+  let tokenAcr: string | undefined = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
@@ -521,11 +507,11 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
         return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
       }
-      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr});
+      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
-        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified})}]
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
         return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
@@ -549,9 +535,18 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   }
   const subjects=[subject];
   cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
+  const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM bane_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
   verified=false;assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
-  verified=true;email='someoneelse@example.org';assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
-  email=approved;const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  verified=true;
+  // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
+  // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
+  for (const [name,hd] of [['google',null],['github','example.org'],['google','other.example']] as const) {
+    providerName=name;providerHd=hd;
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}`);
+    assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
+  }
+  providerName='google';providerHd='example.org';
+  const result=await login();assert.equal(result.headers.get('location'),origin+'/');
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string};
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
@@ -588,26 +583,25 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
   assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
   assert.equal((await request('/v1/me','GET',session)).status,401);
-  // Bootstrap claim (migration 277, scripts/cutover-fresh-start.ts): the pre-assigned person's first Google sign-in
-  // adopts the prepared user ID, so its workspace and role are as assigned; the claim is used once and audited.
-  const legacyId=randomUUID(), legacyEmail=`legacy-${randomUUID()}@example.org`;
-  cleanup(t,async()=>{await db.query('DELETE FROM auth_user WHERE id=$1',[legacyId]);});
-  await db.query("INSERT INTO auth_user(id,name,email,email_verified) VALUES($1,'Legacy',$2,true)",[legacyId,legacyEmail]);
-  await db.query("INSERT INTO auth_account(id,account_id,provider_id,user_id) VALUES($1,$2,'google',$3)",[randomUUID(),randomUUID(),legacyId]);
-  await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),legacyId,me.workspaceId]);
-  await db.query("INSERT INTO bane_legacy_claims(user_id,issuer,email,source,required_acr) VALUES($1,$2,$3,'bootstrap','urn:anomaly:acr:google')",[legacyId,issuer,legacyEmail]);
-  subject=randomUUID();subjects.push(subject);email=legacyEmail;useUserInfo=false;
-  tokenAcr='urn:anomaly:acr:passkey';
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=google_required');
-  tokenAcr=googleAcr;
-  const carried=await login();assert.equal(carried.headers.get('location'),origin+'/');
-  const carriedSession=carried.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
-  const carriedMe=await (await request('/v1/me','GET',carriedSession)).json() as {id:string;workspaceId:string;role:string};
-  assert.deepEqual([carriedMe.id,carriedMe.workspaceId,carriedMe.role],[legacyId,me.workspaceId,'admin']);
-  assert.equal((await db.query('SELECT FROM bane_legacy_claims WHERE user_id=$1',[legacyId])).rowCount,0);
-  assert.deepEqual((await db.query('SELECT subject,source FROM bane_legacy_claim_audit WHERE user_id=$1',[legacyId])).rows,[{subject,source:'bootstrap'}]);
+  // A seat bound by subject (scripts/cutover-fresh-start.ts --owner-sub): a refused subject the operator bound to a
+  // user lands in that user's workspace with its role. Addresses never decide: the same address under another
+  // subject gets nothing.
+  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerHd=null;
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
+  const seatId=randomUUID();
+  await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
+  await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
+  await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
+  const seated=await login();assert.equal(seated.headers.get('location'),origin+'/');
+  const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
+  assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
   subject=randomUUID();subjects.push(subject);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=error','A second subject cannot claim the same address');
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
+  // Workspace creation follows the sign-in's staff status, not the address.
+  const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
+  assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
 });
 
 test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
@@ -616,7 +610,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
   const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
   const db = await fixtureDatabase(t);
   const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
-  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_EMAILS:AUTH_EMAIL, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_SUBJECTS:`subject,${AUTH_SUBJECT}`, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
     storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
   const signer = generateKeyPairSync('ec', {namedCurve:'P-256'}), holder = generateKeyPairSync('ec', {namedCurve:'P-256'});
   const jwk = holder.publicKey.export({format:'jwk'});
@@ -699,7 +693,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
     await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
-    const otherDashboard={...dashboard,config:{...dashboard.config,allowedEmails:[...dashboard.config.allowedEmails,`${otherUser}@example.org`]}};
+    const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
     assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
     assert.equal((await bind(multiId,{workspaceId:'default',receiving:true},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can bind it');
     assert.equal((await run(multi())).status,403);
@@ -1295,7 +1289,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
         await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
         const org={id:'ws_'+randomUUID().replaceAll('-',''),name:'Fixture organization',slug:unique('slug')};
-        if(own){runtime.config.allowedEmails.push(email);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
+        if(own){await pool.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[f.userId]);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
         return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
       }
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
@@ -2698,7 +2692,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
       // The policy the server passes (receivingPolicy): this shard is self-hosted, so the address must be allowlisted.
-      const grantPolicy={hosted:false,emails:(process.env.AUTH_ALLOWED_EMAILS??'').split(',').map(e=>e.trim().toLowerCase())};
+      const grantPolicy={hosted:false,subjects:(process.env.AUTH_ALLOWED_SUBJECTS??'').split(',').map(e=>e.trim())};
       const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)||$2::jsonb) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId,JSON.stringify(grantPolicy)])).rows[0].ok;
       assert.equal(await live(),true);
       await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
@@ -2999,7 +2993,7 @@ describe('Hosted MCP OAuth and tools', () => {
     // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.
     const db = await fixtureDatabase(t);
     const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
@@ -3195,7 +3189,7 @@ describe('Hosted MCP OAuth and tools', () => {
     // the webhook; the owner's URL resumes it with a secret the rotation never saw.
     const db = await fixtureDatabase(t);
     const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const app = createApp(), runtime = instance.runtime;
@@ -3550,7 +3544,7 @@ describe('DB region catalog and explicit SES setup', () => {
     ]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
-      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'true',
       S3_BUCKET: 'synthetic-ses-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5036,7 +5030,7 @@ describe('Dashboard API capabilities', () => {
       const burst = await read();
       assert.deepEqual([burst.target, burst.score, burst.grade, factor(burst, 'complaints').score, factor(burst, 'bounces').score, factor(burst, 'consistency').score], [41.9, 60.6, 'D', 0, 0, 0]);
       // Hosted and screened: content and volume-weighted authentication are measured from stored results only.
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [], hostedScreen: true, screen: { apiKey: 'synthetic', endpoint: 'https://screen.invalid', model: 'synthetic', mode: 'reject', threshold: 0.7 } });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], hostedScreen: true, screen: { apiKey: 'synthetic', endpoint: 'https://screen.invalid', model: 'synthetic', mode: 'reject', threshold: 0.7 } });
       const connection = unique('conn'), signed = unique('score') + '.example', loose = unique('score') + '.example';
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')", [connection, wid, REGION]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,identity) VALUES
@@ -5098,7 +5092,7 @@ describe('Dashboard API capabilities', () => {
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
       // A dashboard member (hosted workspaces have members) reads mail on live addresses only, without delivery details or the spam verdict.
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
       const member = await list('limit=10');
@@ -5674,7 +5668,7 @@ describe('Operational configuration and public event boundaries', () => {
     const [{ nodeRuntime }, { operationJobs }] = await Promise.all([import('./src/adapters/node.js'), import('./src/operations.js')]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
-      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-validation-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5991,7 +5985,7 @@ describe('Operational configuration and public event boundaries', () => {
     });
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
-      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -6164,7 +6158,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
-    ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
     PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
@@ -6487,7 +6481,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -7123,7 +7117,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
       topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
-    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -7239,7 +7233,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
     const env={MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
     const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
-      AUTH_ALLOWED_DOMAINS:'example.com',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+      ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
     cleanup(t,async()=>{
@@ -7660,7 +7654,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -8437,6 +8431,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.hostedSendCaps.firstWeek=2;
       const set=(state:string,reason:string)=>setWorkspaceExemption(db,[wid,state,'--reason',reason]);
       await assert.rejects(set('on',''),/Usage:/); await assert.rejects(set('on','No connection'),/No Hosted connection/);
+      // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
+      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[manager!.userId]);
       const other=ok(await local('POST','/v1/workspaces',{name:'Other synthetic workspace'}),201).id;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
       for (const [workspace,host] of [[wid,domain],[other,'ordinary.example']]) {
@@ -14400,7 +14396,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const { createApp } = await import('./src/app.js');
     const { loadConfig } = await import('./src/config.js');
     const encodedRuntime = {
-      config: loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', DEFAULT_SES_REGION: REGION, OLD_FIXTURE_CLIENT_ID: 'id', OLD_FIXTURE_CLIENT_SECRET: 'secret', AUTH_ALLOWED_DOMAINS: AUTH_DOMAIN }),
+      config: loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', DEFAULT_SES_REGION: REGION, OLD_FIXTURE_CLIENT_ID: 'id', OLD_FIXTURE_CLIENT_SECRET: 'secret' }),
       db: {} as import('./src/core.js').Database,
       storage: { put: async () => {}, get: async () => null, delete: async () => {} },
     };

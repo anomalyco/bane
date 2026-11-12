@@ -77,6 +77,12 @@ Below 640 px every `DataTable` renders its rows as cards from each column's `car
 
 **Fix:** set `card` to `'title'`, `'aside'`, `'line'`, `'inline'`, `'field'`, `'end'` or `'hide'` (see `Column` in `app/src/components/ui/primitives.tsx`).
 
+### Identity
+
+Identity is `(issuer, subject)`. An issuer can assert a verified address that the sign-in method never vouched for (a GitHub-made account that links a personal Google account signs in with `acr=google` and its GitHub-verified work address), so no code may admit, link or authorize a person by email. **Fails when** `api/src`, `api/scripts` or a migration from 270 on names one of the removed email paths (`claim_bane_legacy_user`, `bane_legacy_claims`, `AUTH_ALLOWED_EMAILS`, `AUTH_ALLOWED_DOMAINS`, `allowedEmails`, `allowedDomains`, `signupApproved`, `google_hosted_domain`).
+
+**Fix:** decide by subject: the sign-in's provider identity for hosted staff (`api/src/account-policy.ts`), an invitation link, `AUTH_ALLOWED_SUBJECTS` when self-hosted, or an operator binding a subject (`scripts/list-signin-attempts.ts`). A line that must name a removed setting, such as the startup refusal, carries `premerge-identity: allowed`.
+
 ## Deadlock guard (`acceptance`)
 
 Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two endpoints locking the same rows (the workspace's settings row, a domain claim, a receipt or its window) in opposite orders. Each request then failed with a 500 after `deadlock_timeout`. The acceptance job now:

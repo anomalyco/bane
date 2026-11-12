@@ -52,7 +52,7 @@ globalThis.fetch=async(input,init)=>{
 };
 const env: Record<string, string> = {
   DATABASE_URL: url, BANE_ROOT_SECRET: process.env.BANE_ROOT_SECRET ?? 'bane-tear: fixed secret for disposable test databases only', PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
-  MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ACCOUNT_ISSUER:fixtureIssuer, ACCOUNT_CLIENT_ID:'tear', ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: '',
+  MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ACCOUNT_ISSUER:fixtureIssuer, ACCOUNT_CLIENT_ID:'tear', ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', 
   ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear', S3_ENDPOINT: 'http://127.0.0.1:9',
   API_RATE_LIMIT_PER_MINUTE: '100000', DEFAULT_SES_REGION: 'us-east-1', SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
 };

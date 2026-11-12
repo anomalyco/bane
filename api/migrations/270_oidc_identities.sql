@@ -37,27 +37,6 @@ END $$;
 INSERT INTO bane_oidc_identities (issuer, subject, user_id)
 SELECT account_id::jsonb->>0, account_id::jsonb->>1, user_id FROM auth_account WHERE provider_id = 'account';
 
--- An operator reviews mailbox reassignments before approving individual legacy
--- claims. Each approval pins the expected issuer, user and exact verified email.
-CREATE TABLE bane_legacy_claims (
-  user_id text PRIMARY KEY REFERENCES bane_users(id) ON DELETE CASCADE,
-  issuer text COLLATE "C" NOT NULL,
-  email text COLLATE "C" NOT NULL,
-  UNIQUE (issuer, email)
-);
-
--- Called only after ID-token verification. The DELETE serializes two subjects
--- racing for the same legacy user; a conflicting insert rolls the delete back.
-CREATE FUNCTION claim_bane_legacy_user(p_issuer text, p_subject text, p_email text, p_verified boolean)
-RETURNS text LANGUAGE sql VOLATILE AS $$
-  WITH claimed AS (
-    DELETE FROM bane_legacy_claims a USING bane_users u
-    WHERE p_verified IS TRUE AND a.issuer = p_issuer AND a.email = p_email
-      AND u.id = a.user_id AND u.email_verified AND u.email COLLATE "C" = a.email
-      AND NOT EXISTS (SELECT FROM bane_oidc_identities i WHERE i.user_id = a.user_id)
-    RETURNING a.user_id
-  ), linked AS (
-    INSERT INTO bane_oidc_identities (issuer, subject, user_id)
-    SELECT p_issuer, p_subject, user_id FROM claimed RETURNING user_id
-  ) SELECT user_id FROM linked;
-$$;
+-- Identity is (issuer, subject) only. No legacy user is adopted by email: an address is display and
+-- contact data, and an issuer can assert a verified address that the sign-in method never vouched for.
+-- Operators link a subject to an existing user explicitly (scripts/list-signin-attempts.ts).

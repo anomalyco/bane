@@ -6,6 +6,7 @@ import type { Config } from './core.js';
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
 const accountId = z.string().regex(/^\d{12}$/);
 export const GOOGLE_ACR = 'urn:anomaly:acr:google';
+const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
 const values = z.object({
   BANE_ROOT_SECRET: z.string().min(32),
   MAILGW_API_TOKEN: optional(z.string().min(32)),
@@ -16,9 +17,12 @@ const values = z.object({
   ACCOUNT_ID_TOKEN_ALG: z.enum(['ES256', 'RS256']).default('ES256'),
   // Kept distinct from a missing value: self-hosted installations opt out with an explicit empty value.
   ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(256).regex(/^\S+$/)]).optional(),
-  AUTH_ALLOWED_EMAILS: z.string().default(''),
-  AUTH_ALLOWED_DOMAINS: z.string().default(''),
+  // Self-hosted access: exact issuer subjects (never addresses). Find them with scripts/list-signin-attempts.ts.
+  AUTH_ALLOWED_SUBJECTS: z.string().default(''),
+  // Self-hosted: subjects that become owners of 'default' at their first sign-in, or * for every allowed subject.
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
+  // Hosted staff: Google Workspace domains (the provider identity's hd claim) that may sign up and create workspaces.
+  AUTH_STAFF_GOOGLE_DOMAINS: z.string().default(''),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
@@ -88,12 +92,6 @@ const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
-/** Sign-up approval: an exact allowlisted address, or a verified address at an allowlisted domain when the
- * required authentication context is configured (and, at sign-in, was asserted). Callers pass verified emails only. */
-export function signupApproved(config: Pick<Config,'allowedEmails'|'allowedDomains'|'accountRequiredAcr'>, email: string, acr: unknown = config.accountRequiredAcr) {
-  const address = email.toLowerCase(), domain = address.slice(address.lastIndexOf('@') + 1);
-  return config.allowedEmails.includes(address) || (!!config.accountRequiredAcr && acr === config.accountRequiredAcr && config.allowedDomains.includes(domain));
-}
 export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
@@ -121,13 +119,15 @@ export function loadConfig(input: Record<string, unknown>): Config {
     } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
   }
   if (v.PREVIOUS_BANE_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BANE_ROOT_SECRET.');
-  const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
-  const allowedDomains = list(v.AUTH_ALLOWED_DOMAINS).map(d => d.toLowerCase());
-  if (allowedDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact domain names in AUTH_ALLOWED_DOMAINS, without wildcards or URLs.');
-  if (allowedDomains.length && !requiredAcr) throw new ApiError(503, 'CONFIG_INVALID', 'AUTH_ALLOWED_DOMAINS needs ACCOUNT_REQUIRED_ACR: a domain alone does not prove who signed in.');
-  const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
-  if (defaultWorkspaceOwners !== '*' && defaultWorkspaceOwners.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Set DEFAULT_WORKSPACE_OWNERS to exact email addresses or a single *.');
-  if (allowedEmails.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact email addresses in AUTH_ALLOWED_EMAILS.');
+  // Email allowlists were removed: an issuer can assert a verified address its sign-in method never vouched for.
+  // A self-hosted installation that still sets one would silently lose its access policy, so refuse to start.
+  if (v.MULTI_TENANT !== 'true' && REMOVED_ALLOWLISTS.some(key => typeof input[key] === 'string' && (input[key] as string).trim()))
+    throw new ApiError(503, 'CONFIG_INVALID', `${REMOVED_ALLOWLISTS.join(' and ')} were removed. List issuer subjects in AUTH_ALLOWED_SUBJECTS (scripts/list-signin-attempts.ts shows them).`);
+  const allowedSubjects = list(v.AUTH_ALLOWED_SUBJECTS);
+  const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS);
+  const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
+  if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
+  if (staffGoogleDomains.length && requiredAcr !== GOOGLE_ACR) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
   const regions = [v.DEFAULT_SES_REGION];
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
@@ -146,7 +146,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
-    allowedEmails, allowedDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr,
+    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly',
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
     encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
