@@ -10,7 +10,7 @@ import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
-import { AddressList } from '../../components/PrivateAddress'
+import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 
 type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
 type ConnectedRow = { kind: 'token'; item: AgentTokenSummary } | { kind: 'mcp'; item: McpConnection }
@@ -80,7 +80,7 @@ export function ApiKeysPage() {
         </div>
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id} columns={[
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
-            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
+            ? <TwoLines first={row.item.name || 'MCP client'} second={<PrivateAddress value={row.item.userEmail} />} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
             cardRender: row => row.kind === 'mcp' ? row.item.name || 'MCP client' : row.item.purpose },
           { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'
@@ -107,6 +107,6 @@ export function ApiKeysPage() {
   </div>
 }
 
-function TwoLines({ first, second }: { first: ReactNode; second: string }) {
-  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={second}>{second}</span></div>
+function TwoLines({ first, second }: { first: ReactNode; second: ReactNode }) {
+  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={typeof second === 'string' ? second : undefined}>{second}</span></div>
 }
