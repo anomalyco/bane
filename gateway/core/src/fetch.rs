@@ -98,9 +98,12 @@ fn envelope(m: Option<&Message<'_>>) -> String {
 // The full parser stores parts/messages in flat arenas. Limits apply inside its
 // parser, not to a second classifier or just to the rendering traversal.
 fn index(raw: &[u8]) -> Option<mime_index::Message<'_>> {
+    bounded_index(raw, 16, 200)
+}
+fn bounded_index(raw: &[u8], depth: usize, parts: usize) -> Option<mime_index::Message<'_>> {
     let m = mime_index::MessageParser::new()
-        .max_depth(16)
-        .max_parts(200)
+        .max_depth(depth)
+        .max_parts(parts)
         .max_encoded_nesting(2)
         .parse(raw)?;
     let limited = m
@@ -342,7 +345,7 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
                     } else {
                         &data
                     };
-                    if out.len() + slice.len() > 48 << 20 {
+                    if out.len() + slice.len() > (16 << 20) + 4096 {
                         return Err(Error::Limit);
                     }
                     out.extend(format!(" {{{}}}\r\n", slice.len()).bytes());
@@ -354,6 +357,9 @@ pub fn render(out: &mut Vec<u8>, seq: usize, e: &Entry, items: &[Item<'_>]) -> R
             }
             _ => return Err(Error::Unsupported),
         };
+        if out.len() + text.len() > 16 << 20 {
+            return Err(Error::Limit);
+        }
         out.extend(text.bytes());
     }
     out.extend(b")\r\n");
@@ -371,13 +377,7 @@ mod tests {
     fn nesting_policy() {
         let raw = include_bytes!("../../fixtures/forwarded.eml");
         assert!(inspect_structure(raw).is_some());
-        let m = mime_index::MessageParser::new()
-            .max_depth(1)
-            .parse(raw)
-            .unwrap();
-        assert!(
-            m.parts()
-                .any(|p| p.flags().contains(mime_index::PartFlags::LIMIT_REACHED))
-        );
+        assert!(bounded_index(raw, 1, 200).is_none());
+        assert!(bounded_index(raw, 16, 1).is_none());
     }
 }
