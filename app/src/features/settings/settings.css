@@ -173,3 +173,16 @@
 .settings-ses .settings-report { display: flex; flex-direction: column; gap: var(--space-24); margin-top: var(--space-12); }
 .settings-ses .settings-report > * + * { border-top: 1px solid var(--color-border-muted); padding-top: var(--space-24); }
 .settings-ses .settings-report > .settings-aws-details { padding-top: var(--space-16); }
+
+/* A section or page that is for owners and admins, as a member sees it. */
+.admin-only { display: flex; align-items: flex-start; gap: var(--space-12); max-width: 560px; padding: var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); }
+.admin-only__icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--color-layer-2); color: var(--color-muted); }
+.admin-only__text { display: flex; flex-direction: column; gap: var(--space-4); }
+.admin-only__text h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.admin-only__text p { font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+
+/* The roles in one line each, under the members table and in the invite dialog. */
+.settings-role-guide { display: grid; gap: var(--space-4); margin: 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
+.settings-role-guide > div { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: var(--space-8); }
+.settings-role-guide dt { font-weight: var(--font-weight-bold); }
+.settings-role-guide dd { margin: 0; }

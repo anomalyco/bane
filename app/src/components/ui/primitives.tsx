@@ -7,6 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, Search, X } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
+import { permissionCodes } from '../../data/types';
 import { SkeletonText, PaginationSkeleton } from './skeleton';
 
 const cx = (...values: (string | false | null | undefined)[]) => values.filter(Boolean).join(' ');
@@ -170,7 +171,10 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
   if (error instanceof Error && 'text' in error && 'reference' in error) return <><span>{String(error.text)}</span><span className="ui-error-reference">{String(error.reference)}</span></>;
   return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
 }
+// A role that can't open something isn't a failure: a calm note with who can, and no retry that would fail again.
+const permissionError = (error: unknown) => error instanceof Error && 'code' in error && permissionCodes.has(String(error.code));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof Error && 'text' in error ? String(error.text) : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
   return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
 }
 type ToastTone = 'success' | 'error' | 'info';

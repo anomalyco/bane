@@ -191,7 +191,13 @@ export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionId
 export interface ImportRow { email: string; name?: string; country?: string; subscribed?: boolean }
 export interface ImportResult { created: number; matched: number; skipped: number; issues: { row: number; message: string }[] }
 // Plain-language copy with a next step for errors a new workspace can meet. The server's message stays in `detail`.
+// A dashboard session that meets these is a member: say who can do it instead of the key jargon behind the code.
+const ownersOnly = 'Only workspace owners and admins can do this. Ask one of them to do it for you, or to make you an admin.'
+export const permissionCodes = new Set(['PERMISSION_DENIED', 'ADMIN_REQUIRED', 'OWNER_REQUIRED'])
 const friendlyErrors: Record<string, (detail: string) => string> = {
+  PERMISSION_DENIED: detail => /permission|owner or admin|administration|principal/i.test(detail) ? ownersOnly : detail,
+  ADMIN_REQUIRED: () => ownersOnly,
+  OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
   TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. This usually takes a minute or two, so try again shortly.',
   HOSTED_SENDING_PAUSED: detail => `Sending is paused for this workspace while its reputation is reviewed${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,

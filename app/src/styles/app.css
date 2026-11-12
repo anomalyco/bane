@@ -12,6 +12,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a { min-height: 32px; display: flex; align-items: center; padding-inline: var(--space-12); border-radius: 4px; font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-muted); text-decoration: none; transition: color var(--motion-duration), background var(--motion-duration); }
 .main-navigation a:hover { color: var(--color-text); background: var(--color-hover); }
 .main-navigation a.active { color: var(--color-text); background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
+.main-navigation a[data-locked] { justify-content: space-between; }
+.main-navigation a[data-locked] svg { color: var(--color-faint); }
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-16); margin-top: auto; padding-inline: var(--space-12); }
 /* The sender score card spans the sidebar's inner width and always holds 56px. */
 .sidebar-score-slot { height: 56px; margin-inline: calc(-1 * var(--space-12)); }

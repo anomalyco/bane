@@ -8,6 +8,7 @@ import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
+import { AdminOnlyPage } from './admin-only'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
@@ -171,5 +172,6 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
 
 export function WebhookDetailPage() {
   const { id } = useParams()
+  if (!useWorkspaceAccess().canAdminister) return <AdminOnlyPage title={!id || id === 'new' ? 'Add webhook' : 'Webhook'} backTo="/settings#webhooks" action="add webhooks for email events and see their deliveries" />
   return !id || id === 'new' ? <NewWebhook /> : <ExistingWebhook key={id} id={id} />
 }

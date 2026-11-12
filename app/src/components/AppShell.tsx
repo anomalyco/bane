@@ -1,5 +1,6 @@
 import { Suspense, useEffect, useLayoutEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
+import { Lock } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchQueries, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -137,7 +138,8 @@ export function AppShell() {
         {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
-      <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>
+      {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
+      <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => { const locked = !access.canAdminister && adminOnly.has(path); return <NavLink key={path} to={path} end={path === '/'} {...locked ? { title: 'Owners and admins only', 'data-locked': true } : intent(path)}>{title}{locked && <Lock size={12} aria-label="Owners and admins only" />}</NavLink> })}</nav>
       <div className="sidebar-footer">
         {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
         {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}

@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from 'react'
 import { Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
-import { useApiMutation, useApiDef } from '../../data/context'
+import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { AgentTokenSummary, ApiKey, MailboxKey, McpConnection } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { SecretDialog } from './shared'
+import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
 import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
 import { settingsColumns } from './skeletons'
@@ -18,6 +19,9 @@ const lastUsed = (value: string | null) => value ? date(value) : 'Never'
 const tokenInactive = (token: AgentTokenSummary) => token.revokedAt !== null || Date.parse(token.expiresAt) <= Date.now()
 
 export function ApiKeysPage() {
+  return useWorkspaceAccess().canAdminister ? <ApiKeys /> : <AdminOnlyPage title="API keys" button="Create key" action="create, list and revoke API keys and see connected agents" />
+}
+function ApiKeys() {
   const [showRevoked, setShowRevoked] = useState(false)
   const pagination = useCursorPagination()
   const cursor = pagination.cursor

@@ -60,11 +60,16 @@ function WorkspaceRows() {
   const id = session?.identity?.workspaceId
   const current = session?.identity?.workspaces?.find(workspace => workspace.id === id)
   return <div className="settings-rows">
-    <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
+    <Row title="Name" hint={canAdminister ? undefined : 'Owners and admins can rename it'}>{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
 }
 function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
+  // Members read the name as text: an input that ignores typing looks broken.
+  if (!canEdit) return <span className="settings-readonly" title="Only owners and admins can rename the workspace">{initial}</span>
+  return <EditableName initial={initial} />
+}
+function EditableName({ initial }: { initial: string }) {
   const [name, setName] = useState(initial)
   const memberships = useMembershipCache()
   const save = useApiMutation(async (_api, value: string) => { const renamed = await workspaceApi.rename(value); memberships.renamed(renamed); return renamed }, 'Saved')
@@ -72,8 +77,8 @@ function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
   const changed = name.trim() !== initial && name.trim() !== ''
   // Save keeps its place whether or not it is shown, so typing never moves the field.
   return <form className="settings-name" onSubmit={submit}>
-    <Input aria-label="Workspace name" className="settings-name-input" maxLength={120} value={name} onChange={event => setName(event.target.value)} readOnly={!canEdit} disabled={save.isPending} />
-    {canEdit && <Button type="submit" variant="primary" loading={save.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined}>Save</Button>}
+    <Input aria-label="Workspace name" className="settings-name-input" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} />
+    <Button type="submit" variant="primary" loading={save.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined}>Save</Button>
     {save.error ? <div className="settings-name-error"><MutationError error={save.error} /></div> : null}
   </form>
 }
@@ -114,8 +119,9 @@ function AccountRows() {
   const access = useWorkspaceAccess()
   if (!session?.identity) return null
   return <div className="settings-rows">
+    <Row title="Name" hint="From your Google account">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
-    <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
+    <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
   </div>
 }
