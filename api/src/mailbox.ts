@@ -11,6 +11,7 @@ import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, w
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkRuleCapacity, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
+import { webhookUrlHint, WebhookUrlHint } from './core.js';
 import { JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
 import {registerRituals,ownReceiving} from './rituals.js';
@@ -124,7 +125,7 @@ const hookOptions={key:RoutingKey.nullable(),name:z.string().max(120).nullable()
   include:z.array(z.enum(['message','raw'])).max(2).describe('bane format: also embed the message (text and HTML up to 256 KiB, attachment metadata) and raw MIME in message events. The signed JSON is capped at 512 KiB; fetch omitted content by URL.'),
   timeoutSeconds:z.number().int().min(1).max(30).describe('Seconds to wait for a 2xx response. Default 5.'),
   retryAttempts:z.number().int().min(0).max(10).describe('Retries after a failed attempt, backing off from 15 seconds to 12 hours. Default 9 for bane, 3 for inbound.')};
-const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).extend(hookOptions).openapi('InboundWebhook');
+const InboundWebhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).extend(hookOptions).openapi('InboundWebhook');
 const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed','paused']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
@@ -189,7 +190,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
 }
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
-const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({key:row.key,name:row.name,format:row.format,junk:row.junk,include:row.include,timeoutSeconds:row.timeoutSeconds,retryAttempts:row.retryAttempts, id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({key:row.key,name:row.name,format:row.format,junk:row.junk,include:row.include,timeoutSeconds:row.timeoutSeconds,retryAttempts:row.retryAttempts, id: row.id, url: webhookUrlHint(row.url), description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
   await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
 }

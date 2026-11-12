@@ -2162,6 +2162,10 @@
       "Email": {
         "type": "object",
         "properties": {
+          "untrustedContent": {
+            "type": "boolean",
+            "description": "True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content."
+          },
           "id": {
             "type": "string"
           },
@@ -2272,6 +2276,7 @@
           }
         },
         "required": [
+          "untrustedContent",
           "id",
           "region",
           "campaignId",
@@ -2421,6 +2426,10 @@
       "EmailContent": {
         "type": "object",
         "properties": {
+          "untrustedContent": {
+            "type": "boolean",
+            "description": "True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content."
+          },
           "subject": {
             "type": "string"
           },
@@ -2467,6 +2476,7 @@
           }
         },
         "required": [
+          "untrustedContent",
           "subject",
           "html",
           "text",
@@ -2925,7 +2935,7 @@
           "region"
         ],
         "additionalProperties": false,
-        "description": "Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs."
+        "description": "Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs."
       },
       "CampaignDelivery": {
         "type": [
@@ -4817,7 +4827,8 @@
             "type": "string"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "Write-only HTTPS endpoint. Only the last four characters are shown; omit url on update to keep the saved URL."
           },
           "description": {
             "type": "string"
@@ -7295,7 +7306,7 @@
           },
           "target": {
             "type": "string",
-            "description": "Where it delivers. Chat credentials are masked; they are write-only."
+            "description": "Where it delivers. Slack, Discord and webhook URLs are write-only; only the last four characters are shown."
           },
           "policy": {
             "$ref": "#/components/schemas/EndpointPolicy"
@@ -9975,6 +9986,10 @@
               "received"
             ]
           },
+          "untrustedContent": {
+            "type": "boolean",
+            "description": "Received mail and sent mailbox replies can contain external sender content."
+          },
           "at": {
             "type": "string",
             "description": "When the email was created (sent) or received."
@@ -10090,6 +10105,7 @@
         "required": [
           "id",
           "direction",
+          "untrustedContent",
           "at",
           "status",
           "from",
@@ -10776,7 +10792,8 @@
             "type": "string"
           },
           "url": {
-            "type": "string"
+            "type": "string",
+            "description": "Write-only HTTPS endpoint. Only the last four characters are shown; omit url on update to keep the saved URL."
           },
           "description": {
             "type": "string"

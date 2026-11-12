@@ -5,7 +5,7 @@ import { actor, ApiError, errors, PageQuery, region, response, security, type Ac
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { accessibleMessages, readsDelivery, visibleAddresses } from './inbound-threads.js';
-import { listedSubject, literalSearch, pageBinding, scope, senderDomainWhere, Status } from './sending.js';
+import { listedSubject, literalSearch, mailWhere, pageBinding, sentUntrustedContent, Status } from './sending.js';
 
 // Logs: sent and received mail in one list, newest first, from one SQL statement. Each side keeps its own index
 // (sending_emails_created_page, mail_messages_tenant_page) and limit; the outer query merges the two pages. The cursor
@@ -21,6 +21,7 @@ const Address = z.object({ name: z.string().nullable(), address: z.string() });
 const LogEntry = z.object({
   id: z.string().describe('Email ID for sent mail (getEmail); message ID for received mail (getInboundMessage).'),
   direction: z.enum(['sent', 'received']),
+  untrustedContent: z.boolean().describe('Received mail and sent mailbox replies can contain external sender content.'),
   at: z.string().describe('When the email was created (sent) or received.'),
   status: z.string().describe('Sent: the email status. Received: received, or spam when flagged (spam is shown to administrators only).'),
   from: Address,
@@ -60,7 +61,7 @@ function readCursor(value: string | undefined, binding: string) {
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
 }
 
-type Row = { direction: 'sent' | 'received'; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null };
+type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null };
 
 export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',
@@ -73,10 +74,10 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const binding = await pageBinding(a, 'logs', q), after = readCursor(q.cursor, binding), n = q.limit + 1;
     const sent = q.direction !== 'received', received = q.direction !== 'sent' && !!access && !(q.status || q.kind || q.campaignId);
 
-    const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,
+    const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${sentUntrustedContent} AS untrusted, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,
         ${emails.from} AS from_address, ${emails.snapshot}->>'fromName' AS from_name, ${emails.to} AS "to", ${emails.subject} AS subject, ${emails.snapshot}->>'kind' AS stream,
         ${emails.campaignId} AS campaign_id, ${emails.simulated} AS simulated, NULL::int AS attachment_count, NULL::text AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to
-      FROM ${emails} WHERE ${and(scope(emails, a), senderDomainWhere(emails.from, a.domains),
+      FROM ${emails} WHERE ${and(mailWhere(a),
         after ? after.direction === 'sent' ? sql`(${emails.createdAt}, ${emails.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${emails.createdAt} < ${after.at}::timestamptz` : undefined,
         q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.status ? sql`${emails.status} = ${q.status}` : undefined,
         q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined, q.region ? sql`${emails.region} = ${q.region}` : undefined,
@@ -85,7 +86,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
 
     // Which messages: every retained one for administrators. Delivery details: only where getInboundMessage gives them.
     const delivery = !!access && readsDelivery(a, access);
-    const receivedPage = received && access ? sql`(SELECT 'received'::text AS direction, ${messages.id} AS id, ${messages.receivedAt} AS sort_at, ${precise(messages.receivedAt)} AS at,
+    const receivedPage = received && access ? sql`(SELECT 'received'::text AS direction, true AS untrusted, ${messages.id} AS id, ${messages.receivedAt} AS sort_at, ${precise(messages.receivedAt)} AS at,
         ${delivery ? sql`CASE WHEN ${messages.spam} THEN 'spam' ELSE ${messages.status} END` : messages.status} AS status,
         ${messages.fromAddress} AS from_address, ${messages.fromName} AS from_name, coalesce((SELECT jsonb_agg(t->>'address') FROM jsonb_array_elements(${messages.to}) t), '[]'::jsonb) AS "to",
         ${messages.subject} AS subject, NULL::text AS stream, NULL::text AS campaign_id, false AS simulated, ${messages.attachmentCount} AS attachment_count, ${messages.threadId} AS thread_id,
@@ -101,7 +102,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const last = rows.length > q.limit ? rows[q.limit - 1] : undefined;
     return c.json({
       data: rows.slice(0, q.limit).map(row => ({
-        id: row.id, direction: row.direction, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
+        id: row.id, direction: row.direction, untrustedContent: row.untrusted, at: new Date(row.at).toISOString(), status: row.status, from: { name: row.from_name, address: row.from_address },
         to: (row.to ?? []).map(String), subject: listedSubject(a, row).subject, stream: row.stream, campaignId: row.campaign_id, simulated: row.simulated, attachmentCount: row.attachment_count,
         threadId: row.thread_id, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to,
       })),

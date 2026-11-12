@@ -1,5 +1,5 @@
 import { and, eq, sql } from 'drizzle-orm';
-import { ApiError, digest, type Ctx } from './core.js';
+import { ApiError, digest, webhookUrlHint, type Ctx } from './core.js';
 import { sendingIdempotency } from './db/sending.js';
 
 /**
@@ -61,6 +61,10 @@ function idempotentCreates(paths: RegExp[]) {
       }
       if (stored.withheld) throw new ApiError(409, 'IDEMPOTENT_SECRET_WITHHELD', `This Idempotency-Key already created ${stored.id ?? 'the resource'}. Its secret was shown once and is not stored; revoke it and create another if it was lost.`);
       c.header('Idempotent-Replayed', 'true');
+      // Receipts created before URL masking contain the full outbound webhook URL.
+      if (c.req.path === '/v1/webhooks' && stored.body && typeof stored.body === 'object' && 'url' in stored.body && typeof stored.body.url === 'string') {
+        return c.json({ ...stored.body, url: webhookUrlHint(stored.body.url) }, stored.status as 201);
+      }
       return c.json(stored.body as object, stored.status as 200);
     }
     // Release only the winning request's reservation on handler failure. Once the

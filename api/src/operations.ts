@@ -12,7 +12,7 @@ import { claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatab
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { SuppressionEventData } from './core.js';
+import { SuppressionEventData, webhookUrlHint, WebhookUrlHint } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -52,7 +52,7 @@ export const WebhookHeaders = z.array(z.object({
   if (headers.reduce((size, h) => size + h.name.length + Buffer.byteLength(h.value), 0) > 8192) ctx.addIssue({ code: 'custom', message: 'Header names and values exceed 8 KiB.' });
 }).describe('Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.');
 export const WebhookHeaderViews = z.array(z.object({ name: z.string(), hint: z.string().optional(), updatedAt: z.string().datetime().optional() })).describe('Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.');
-const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
+const webhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
 const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
 const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
@@ -97,7 +97,7 @@ async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIde
 }
 async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
   const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, ...value } = row;
-  return { ...value, headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
+  return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
 }
 
 // The single endpoint rule for sending and inbound webhooks: public HTTPS DNS names only, never

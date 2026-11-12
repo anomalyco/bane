@@ -140,8 +140,19 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     }
     await next();
   });
-  // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
+  // Audience records have no sender domain. Guard mutations as well: their responses can contain the saved record.
+  for (const area of ['contacts', 'lists', 'segments', 'contact-imports', 'audience-query']) app.use(`/v1/${area}/*`, (c, next) => {
+    if (c.get('actor').domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
+    return next();
+  });
+  // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience.
+  // Check before idempotency: recorded launch responses also contain audience counts.
+  app.use('/v1/campaigns/:id/:action', (c, next) => {
+    if (c.get('actor').domains.length && !['state', 'preview', 'preview-image', 'archive'].includes(c.req.param('action'))) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Campaign audience and delivery operations require an unrestricted credential.');
+    return next();
+  });
   for (const path of ['/v1/routing/*','/v1/rituals/*','/v1/endpoints/*','/v1/inbox-connections','/v1/domains/:id/receiving-host']) app.use(path,requireReceivingConsent);
+  // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
   app.use('/v1/*', (c, next) => /^\/v1\/(?:inboxes|inbound)(?:\/|$)/.test(c.req.path) ? next() : authenticatedCreates(c, next));
   // These areas have read or send routes as well as manage routes. An MX member's
   // read/send scopes do not confer access to infrastructure or campaign delivery controls.

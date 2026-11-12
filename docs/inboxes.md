@@ -75,6 +75,8 @@ flowchart LR
 
 ## Lifecycle
 
+An inbox key with `read` can see the `junk` flag and SPF, DKIM and DMARC verdicts for mail delivered to **its own inbox**. Agents can use those verdicts to check a sender; they do not make the message content trustworthy. This does not grant access to workspace-wide spam or delivery details in Logs or the inbound API.
+
 ```mermaid
 stateDiagram-v2
   direction LR
@@ -99,7 +101,7 @@ stateDiagram-v2
 
 - **Create**: one statement checks the idempotency key (`clientId`), the rate and the cap, picks a random unguessable local part, and inserts the inbox, its address and its optional key. Only a workspace admin on REST may choose `localPart`. For inbound keys, MCP and agent tokens, a generated address may not fall under an existing wildcard rule or the domain’s auto-create catch-all, so on a domain whose catch-all creates addresses only an admin can create inboxes. Role names (`postmaster`, `abuse`, …) are never leased.
 - **Erase**: the hourly sweep removes the inbox’s deliveries, then any message nothing else references, its threads and its R2 objects (`mail.deleteObjects`). A message another address also received is kept for that address. An admin can release a reserved sandbox address early with `DELETE /v1/inbound/retired/{address}`.
-- **Held mail is never dropped**: it stays readable until the inbox is erased.
+- **Held mail stays readable**: quota and expiry holds stop normal delivery and waiting; they are not a privacy boundary. While its key is valid, an inbox reader may list its own held messages with `include=held` and read one directly with `getInboxMessage`. This does not expose held mail on other addresses.
 
 ## Demos
 
