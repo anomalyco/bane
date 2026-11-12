@@ -564,14 +564,23 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
 const recoveryPage='mailbox.recoverReceipts';
 export async function recoverMailReceipts(runtime: Runtime,continuation=false) {
   const jobFor=sql`j.workspace_id=r.workspace_id AND j.type='mailbox.ingest' AND j.payload->>'sesMessageId'=r.ses_message_id`;
-  const result=await runtime.db.execute<{n:number}>(sql`WITH due AS (SELECT r.workspace_id,r.ses_message_id,EXISTS(SELECT FROM jobs j WHERE ${jobFor} AND j.attempts>=${MAX_ATTEMPTS} AND (j.status='failed' OR (j.status='running' AND j.lease_until<now()))) AS exhausted
+  // An exhausted lease (its worker died or lost the database on the final attempt, so the deferral never committed) is an
+  // outage like any other while SES's staged copy lives: a receipt younger than the outage window gets a fresh job an hour
+  // out, at its final attempt again, and never the old job back. Past the window it fails as before. Every sweep still counts
+  // a recovery attempt: migration 164's settle fence lets the sweep fail a receipt only with that increment. The young path is
+  // bounded by the receipt's age, not by the count.
+  const result=await runtime.db.execute<{n:number}>(sql`WITH due AS (SELECT r.workspace_id,r.ses_message_id,EXISTS(SELECT FROM jobs j WHERE ${jobFor} AND j.attempts>=${MAX_ATTEMPTS} AND (j.status='failed' OR (j.status='running' AND j.lease_until<now()))) AS exhausted,
+      r.created_at>now()-${INGEST_OUTAGE_MS/1000}*interval '1 second' AS young
     FROM mail_receipts r WHERE r.status='pending' AND coalesce(r.last_recovered_at,r.created_at)<now()-interval '30 minutes'
     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE ${jobFor} AND (j.status='pending' OR (j.status='running' AND (j.lease_until>=now() OR j.attempts<${MAX_ATTEMPTS}))))
     ORDER BY coalesce(r.last_recovered_at,r.created_at),r.workspace_id,r.ses_message_id LIMIT 100 FOR UPDATE OF r SKIP LOCKED), recovered AS (
-    UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),status=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN 'failed' ELSE 'pending' END,
-      error=CASE WHEN d.exhausted THEN 'MAILBOX_INGEST_EXHAUSTED' WHEN r.recovery_attempts>=3 THEN 'MAILBOX_RECOVERY_EXHAUSTED' END,processed_at=CASE WHEN d.exhausted OR r.recovery_attempts>=3 THEN now() END
-    FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status),
-    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id) FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
+    UPDATE mail_receipts r SET recovery_attempts=r.recovery_attempts+1,last_recovered_at=now(),
+      status=CASE WHEN d.exhausted AND NOT d.young OR NOT d.exhausted AND r.recovery_attempts>=3 THEN 'failed' ELSE 'pending' END,
+      error=CASE WHEN d.exhausted AND NOT d.young THEN 'MAILBOX_INGEST_EXHAUSTED' WHEN NOT d.exhausted AND r.recovery_attempts>=3 THEN 'MAILBOX_RECOVERY_EXHAUSTED' END,
+      processed_at=CASE WHEN d.exhausted AND NOT d.young OR NOT d.exhausted AND r.recovery_attempts>=3 THEN now() END
+    FROM due d WHERE r.workspace_id=d.workspace_id AND r.ses_message_id=d.ses_message_id RETURNING r.workspace_id,r.ses_message_id,r.status,d.exhausted),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload,attempts,available_at) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',ses_message_id),
+      CASE WHEN exhausted THEN ${MAX_ATTEMPTS-1}::int ELSE 0 END,CASE WHEN exhausted THEN now()+interval '1 hour' ELSE now() END FROM recovered WHERE status='pending' ORDER BY workspace_id,ses_message_id)
     SELECT count(*)::int AS n FROM recovered`);
   if(result.rows[0]!.n===100){
     if(continuation) throw new JobDeferred(new Date().toISOString());
