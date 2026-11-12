@@ -149,20 +149,24 @@ a.ui-tab { text-decoration: none; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
 @keyframes ui-pulse { to { opacity: .5; } }
 @keyframes ui-appear { from { opacity: 0; } to { opacity: 1; } }
+@keyframes row-appear { from { opacity: .4; } }
 @keyframes ui-disappear { to { opacity: 0; } }
 /* Enter and exit motion: transform and opacity only, never layout. All of it stops under reduced motion (below). */
 .ui-popover { transform-origin: var(--radix-select-content-transform-origin, var(--radix-dropdown-menu-content-transform-origin, top center)); animation: popover-in 160ms var(--ease-out-strong); }
 .ui-popover[data-state='closed'] { animation: popover-out 120ms ease-out forwards; }
 .ui-dialog { animation: dialog-in 200ms var(--ease-out-strong); }
 .ui-dialog[data-state='closed'] { animation: dialog-out 140ms ease-out forwards; }
-.ui-table tbody tr:not(.ui-table-spacer) { animation: ui-appear 180ms ease-out; }
+/* Rows settle in from 40% opacity, not 0: an element that fades in from fully transparent is not counted as painted
+   (Largest Contentful Paint) until its fade ends, which reported every table page ~180 ms late. */
+.ui-table tbody tr:not(.ui-table-spacer) { animation: row-appear 180ms ease-out; }
 @keyframes popover-in { from { opacity: 0; transform: translateY(-2px) scale(.97); } }
 @keyframes popover-out { to { opacity: 0; transform: scale(.98); } }
 @keyframes dialog-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.97); } }
 @keyframes dialog-out { to { opacity: 0; transform: translate(-50%, -50%) scale(.98); } }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
 @keyframes row-enter { from { opacity: 0; transform: translateY(4px); } }
-@keyframes section-enter { from { opacity: 0; transform: translateY(4px); } }
+/* From 40%, not 0: the skeleton a page replaces never blinks to an empty frame, and the page counts as painted at once. */
+@keyframes section-enter { from { opacity: .4; transform: translateY(4px); } }
 @media (max-width: 900px) {
   .data-toolbar > .cluster { flex-wrap: wrap; }
 }

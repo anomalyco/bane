@@ -2,6 +2,9 @@ import { ChevronRight, Paperclip } from 'lucide-react'
 import { StatusBadge, type Column, type SkeletonColumn } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import type { LogEntry } from '../../data/types'
+import { useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
+import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { date, label } from '../../lib/format'
 
 // One log row, shared by Logs and Overview's latest emails: the same columns, masking and click-through in both.
@@ -15,6 +18,12 @@ export const logTimestamp = (value: string) => date(value, { month: 'short', day
 // Sent and received mail open at /logs/:id; received message IDs start with msg_.
 export const logHref = (row: Pick<LogEntry, 'id'>) => `/logs/${encodeURIComponent(row.id)}`
 export const isReceivedId = (id: string) => id.startsWith('msg_')
+// A row about to be opened: warm its detail read (and the Logs code, from Overview).
+export function useLogRowIntent() {
+  const warm = usePrefetchQueries()
+  const { canAdminister } = useWorkspaceAccess()
+  return (row: Pick<LogEntry, 'id'>) => { void routeChunks['/logs']?.().catch(() => {}); void warm([isReceivedId(row.id) ? queries.receivedEmail(row.id, canAdminister) : queries.email(row.id)]) }
+}
 
 // The receiving address mail arrived at is ours and shows in full; the header To may name other people, so it is masked.
 function ReceivedTo({ row }: { row: LogEntry }) {

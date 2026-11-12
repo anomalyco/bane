@@ -2,7 +2,8 @@ import { useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { Check } from 'lucide-react'
-import { useApi, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import type { Identity, SendingLimit } from '../../data/types'
 import { date, number } from '../../lib/format'
@@ -14,8 +15,9 @@ export function useSendingLimit() {
   const api = useApi()
   const identity = useSession()?.identity
   const hosted = identity?.multiTenant === true && identity.connection?.kind === 'shared'
+  // Seeded with the session's own /v1/me, so opening Overview doesn't ask again; it refreshes each minute.
   const live = useQuery({ queryKey: ['bane', api.mode, 'sending-limit', identity?.workspaceId], enabled: hosted && api.mode === 'live', refetchInterval: 60_000, refetchIntervalInBackground: false,
-    queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
+    initialData: identity ?? undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
   return hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null
 }
 
@@ -43,8 +45,8 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
-  const domains = useApiQuery(['domains', 'setup-card'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal), { enabled })
-  const keys = useApiQuery(['keys', 'setup-card'], (api, signal) => api.keys.list(signal, undefined, false), { enabled })
+  const domains = useApiDef(queries.domainSummary(), { enabled })
+  const keys = useApiDef(queries.keys(undefined, false), { enabled }) // the API keys page's own first screen
   const emails = useApiQuery(['emails', 'setup-card'], (api, signal) => api.emails.list({ page: 1, pageSize: 1 }, signal), { enabled })
   // A test sent from the steps keeps them up, with its result, until the next visit.
   const [testId, setTestId] = useState<string | null>(null)

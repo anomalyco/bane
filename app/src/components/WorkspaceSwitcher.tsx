@@ -24,9 +24,11 @@ export function WorkspaceSwitcher() {
     try { await session?.switchWorkspace(id, path) }
     catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false); void workspaces.refetch() }
   }
+  // Until the list arrives the trigger stays blank (no flash of placeholder text); a failed list says so.
+  const known = workspaces.data?.some(workspace => workspace.id === session?.identity?.workspaceId) ?? false
   const options = [...(workspaces.data ?? []).map(workspace => ({ value: workspace.id, label: workspace.name })), ...(workspaces.data ? [{ value: createValue, label: 'New workspace…' }] : [])]
   return <>
-    <Select id="sidebar-workspace" aria-label="Workspace" value={session?.identity?.workspaceId ?? ''} onValueChange={id => { if (id === createValue) setCreating(true); else void changeWorkspace(id) }} options={options} disabled={switching || workspaces.isPending} placeholder={workspaces.isPending ? 'Loading workspaces…' : 'Workspace'} />
+    <Select id="sidebar-workspace" aria-label="Workspace" value={known ? session?.identity?.workspaceId ?? '' : ''} onValueChange={id => { if (id === createValue) setCreating(true); else void changeWorkspace(id) }} options={options} disabled={switching || !workspaces.data} placeholder={workspaces.isError ? 'Couldn’t load workspaces' : workspaces.isPending ? '' : 'Workspace'} />
     {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus()) }} onCreated={id => void changeWorkspace(id, '/')} />}
   </>
 }

@@ -9,7 +9,7 @@ import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton } from './skeletons'
-import { isReceivedId, logColumns, logCsvRows, logHref } from './rows'
+import { isReceivedId, logColumns, logCsvRows, logHref, useLogRowIntent } from './rows'
 import { useAdaptivePageSize } from '../../lib/pagination'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
@@ -35,6 +35,7 @@ export function LogsHeader({ regionId, direction, onDirection, locked }: { regio
 }
 function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
   const [searchParams, setSearchParams] = useSearchParams()
+  const rowIntent = useLogRowIntent()
   // A campaign sends from one region, so its filter replaces the region selector; it lists sent mail only.
   const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
   const clearCampaign = () => { const next = new URLSearchParams(searchParams); next.delete('campaign'); setSearchParams(next) }
@@ -52,6 +53,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const received = direction === 'received'
   const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search, status: received || status === 'all' ? undefined : status, stream: received || stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiDef(queries.logs(params), { interval: 30_000, enabled: measured, keepPrevious: true })
+  const filtered = Boolean(search || campaignId || (!received && (status !== 'all' || stream !== 'all')))
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={received ? 'all' : status} disabled={received} onValueChange={value => { setStatus(value); setPage(1) }} options={statuses} />
@@ -59,8 +61,9 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} columns={logColumns}
-        empty={<EmptyState title="No mail found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />} />
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} onRowIntent={rowIntent} columns={logColumns}
+        empty={filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />
+          : <EmptyState title={received ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description="Every email you send or receive appears here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/docs">Send your first email</Link>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
   </div>
@@ -79,7 +82,7 @@ export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
   // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.
   const { canAdminister } = useWorkspaceAccess()
-  const query = useApiQuery(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister))
+  const query = useApiDef(queries.receivedEmail(id, canAdminister))
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Received email" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return <ReceivedEmailDetailView email={query.data} />
@@ -125,7 +128,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
 const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['email', id], (api, signal) => api.emails.get(id, signal), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
+  const query = useApiDef(queries.email(id), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return query.data ? <EmailDetail email={query.data} /> : null
@@ -151,7 +154,7 @@ function EmailDetail({ email }: { email: Email }) {
     {['deferred', 'delayed'].includes(email.status) && <Alert tone="warning">Delivery delayed.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'html', label: 'HTML' }, { value: 'plain', label: 'Plain text' }]} />
       {view === 'preview' ? hasHtml ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} remoteImages /> : hasPlainText ? <pre className="plain-text-preview">{plainText}</pre> : <EmptyState title="No message snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html || 'No HTML snapshot available.' : hasPlainText ? plainText : 'No plain-text snapshot available.'}</pre>}
-    </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} /><ol>{events.map(event => <li key={event.id}><span className={`timeline-dot ui-tone--${eventTone(event.type)}`} /><div><div className="cluster between"><span>{eventLabel(event.type)}</span><time className="muted">{time(event.at)}</time></div><p className="muted">{event.description}</p>{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Could not load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>
+    </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} />{!events.length && !cursor && <p className="muted">No delivery events yet.</p>}<ol>{events.map(event => <li key={event.id}><span className={`timeline-dot ui-tone--${eventTone(event.type)}`} /><div><div className="cluster between"><span>{eventLabel(event.type)}</span><time className="muted">{time(event.at)}</time></div><p className="muted">{event.description}</p>{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Couldn’t load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>
     <div className="message-identifiers"><span className="cluster">Email ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy email ID" /></span><span>Created {date(email.sentAt)} · {time(email.sentAt)} UTC</span>{!multiTenant && <span>SES · {email.regionId}</span>}</div>
   </div>
 }

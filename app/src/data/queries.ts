@@ -18,12 +18,19 @@ export const queries = {
   receivingAddresses: (search: string, cursor: string | undefined) => def(['inbound-addresses', 'address', search, cursor ?? null], (api, signal) => api.inbound.addresses({ kind: 'address', search: search || undefined, cursor }, signal)),
   inboundAddressOptions: () => def(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal)),
   inboundThreads: (addressId: string | undefined, view: InboundThreadView, q: string, cursor: string | undefined) => def(['inbound-threads', addressId ?? null, view, q, cursor ?? null], (api, signal) => api.inbound.threads({ addressId, view, q: q || undefined, cursor }, signal)),
+  email: (id: string) => def(['email', id], (api, signal) => api.emails.get(id, signal)),
+  receivedEmail: (id: string, canAdminister: boolean) => def(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister)),
+  campaign: (id: string) => def(['campaign', id], (api, signal) => api.campaigns.get(id, signal)),
+  template: (id: string) => def(['template', id], (api, signal) => api.templates.get(id, signal)),
+  domain: (id: string) => def(['domain', id], (api, signal) => api.domains.get(id, signal)),
   campaigns: (request: PageRequest & { archived?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),
   contacts: (params: PageRequest) => def(['contacts', params], (api, signal) => api.contacts.list(params, signal)),
   audienceLists: (search = '', cursor?: string) => def(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {
     const page = await api.lists.list({ pageSize: 100, search, cursor, counts: false }, signal)
     return Object.assign(page.items, { nextCursor: page.nextCursor ?? null })
   }),
+  // Overview's setup steps and next steps read the same cheap first page (no SES refresh): one request for both.
+  domainSummary: () => def(['domains', 'summary'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal)),
   domains: (regionId: string, page: number) => def(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal)),
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
   agentTokens: (showRevoked: boolean) => def(['agent-tokens', showRevoked], (api, signal) => api.credentials.agentTokens(showRevoked, signal)),

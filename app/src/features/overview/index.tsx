@@ -11,7 +11,9 @@ import { useTween } from '../../components/motion'
 import { date, label, number, percent, time } from '../../lib/format'
 import { NextSteps, ReportCard, useNextSteps, useSenderScore } from '../score'
 import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
-import { logColumns, logHref } from '../logs/rows'
+import { logColumns, logHref, useLogRowIntent } from '../logs/rows'
+import { usePrefetchQueries } from '../../data/prefetch'
+import { composer } from '../campaigns/composer-chunk'
 import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
 
 // Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
@@ -26,9 +28,9 @@ export function OverviewPage() {
   const stream = requested === 'transactional' || requested === 'marketing' ? requested : 'all'
   // Each refresh runs one created-cohort aggregation; a minute is fresh enough, and a hidden tab stays quiet.
   const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
-  const regions = useRegionCatalog()
-  const current = regions.data?.data.find(region => region.region === regionId)
   const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const regions = useRegionCatalog({ enabled: !multiTenant })
+  const current = regions.data?.data.find(region => region.region === regionId)
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
   const controls = <div className="cluster ov-controls">
     {!multiTenant && <><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></>}
@@ -101,15 +103,17 @@ function Chart({ data, range, live }: { data: Overview; range: TimeRange; live: 
 // always reserved so loading, short and full lists are the same height.
 function LatestEmails() {
   const navigate = useNavigate()
-  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
+  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
+  const rowIntent = useLogRowIntent()
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {
   const navigate = useNavigate()
+  const warm = usePrefetchQueries()
   return <section className="ov-latest"><SectionHeader title="Campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>All <ArrowUpRight size={16} /></Button>} />
-    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <span>{row.name}<span className="muted"> · {['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', align: 'right' }]} />
+    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }} columns={[{ ...recentCampaignColumns[0], render: row => <span>{row.name}<span className="muted"> · {['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', align: 'right' }]} />
   </section>
 }
 

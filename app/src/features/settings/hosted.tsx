@@ -59,7 +59,7 @@ function WorkspaceRows() {
   const current = workspaces.data?.find(workspace => workspace.id === session?.identity?.workspaceId)
   const id = session?.identity?.workspaceId
   return <div className="settings-rows">
-    <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <Input aria-label="Workspace name" className="settings-name-input" disabled placeholder="Loading…" />}</Row>
+    <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : workspaces.isError ? <span className="cluster settings-inline"><span className="text-danger">Couldn’t load the name.</span><Button variant="ghost" size="sm" onClick={() => void workspaces.refetch()}>Try again</Button></span> : <Input aria-label="Workspace name" className="settings-name-input" disabled placeholder="Loading…" />}</Row>
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
 }
