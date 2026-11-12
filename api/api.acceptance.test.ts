@@ -7123,6 +7123,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
     });
   });
+  test('an inbound webhook test to a receiver that times out or refuses the connection reports it, not a 500', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const hook = ok(await local('POST', '/v1/inbound/webhooks', { url: `https://${unique('down')}.example.org/hook`, eventTypes: ['message.received'] }), 201);
+      const transport = runtime.webhookFetch;
+      try {
+        for (const [failure, message] of [
+          [new DOMException('The operation was aborted due to timeout', 'TimeoutError'), /did not answer within 5 seconds/],
+          [Object.assign(new Error('connect ECONNREFUSED 203.0.113.9:443'), { code: 'ECONNREFUSED' }), /could not be reached/],
+        ] as const) {
+          runtime.webhookFetch = async () => { throw failure; };
+          const body = error(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {}), 503, 'WEBHOOK_UNREACHABLE');
+          assert.match(body.message, message); assert.equal(body.retryable, true);
+        }
+        runtime.webhookFetch = async () => ({ status: 204 });
+        assert.deepEqual(ok(await local('POST', `/v1/inbound/webhooks/${hook.id}/test`, {})), { statusCode: 204 });
+      } finally { runtime.webhookFetch = transport; }
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];

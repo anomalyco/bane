@@ -816,7 +816,10 @@ function registerInboundWebhooks(app: App) {
     try { return c.json({ statusCode: (await sendTestWebhook(c.env, row, input)).status }, 200); }
     catch (error) {
       if (error instanceof JobDeferred) throw new ApiError(503, 'WEBHOOK_COOLING_DOWN', `This endpoint timed out three times in a row; Bane tries it again after ${error.availableAt}.`, undefined, true);
-      throw error;
+      if (error instanceof ApiError) throw error;
+      // The receiver timed out, refused the connection or failed its TLS handshake: the test's result, not a server failure (a 500).
+      const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+      throw new ApiError(503, 'WEBHOOK_UNREACHABLE', timedOut ? `The endpoint did not answer within ${row.timeoutSeconds} seconds.` : 'The endpoint could not be reached.', undefined, true);
     }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/inbound/messages/{messageId}/redeliver', operationId: 'redeliverInboundMessage', security, tags, summary: 'Redeliver a message to its route webhooks',
