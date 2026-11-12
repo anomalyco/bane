@@ -121,7 +121,8 @@ export function registerOperator(app: App) {
     // domain (never an address), and screen rejections with their spam score and subject. No message bodies.
     const { rows } = await c.env.db.execute<z.infer<typeof TimelineItem>>(sql`SELECT * FROM (
       SELECT at::text AS at,CASE kind WHEN 'step' THEN 'standing' ELSE kind END AS kind,
-        CASE kind WHEN 'step' THEN coalesce(from_step,'?')||' → '||to_step WHEN 'limit' THEN 'Daily limit '||(details->>'from')||' → '||(details->>'to') ELSE kind||' ('||(actor->>'kind')||')' END AS title,
+        CASE WHEN from_step IS DISTINCT FROM to_step THEN coalesce(from_step,'?')||' → '||to_step WHEN kind='limit' AND details ? 'from' THEN 'Daily limit '||(details->>'from')||' → '||(details->>'to')
+          WHEN kind='limit' THEN 'Limit override changed' ELSE kind||' ('||(actor->>'kind')||')' END AS title,
         jsonb_build_object('reasons',reasons,'actor',actor,'details',details,'sequence',sequence) AS detail FROM standing_events WHERE workspace_id=${wid} AND at<${before}::timestamptz
       UNION ALL SELECT at::text,'audit',action,jsonb_build_object('operatorId',operator_id,'via',via,'reason',coalesce(reason,details->>'reason'),'ticketRef',ticket_ref,'before',before,'after',after)
         FROM hosted_operator_audit WHERE workspace_id=${wid} AND at<${before}::timestamptz
@@ -158,7 +159,8 @@ export function registerOperator(app: App) {
     const body = c.req.valid('json'), wid = c.req.valid('param').id;
     return c.json(await change(c, wid, body, 'operator-pause', current => {
       if (current.paused) throw new ApiError(409, 'ALREADY_PAUSED', 'This workspace is already paused.');
-      return { kind: 'operator', step: 'pause', pauseKind: 'full', pause: { message: `Hosted sending paused by Bane after a review: ${body.reason}` }, reasons: operatorReason('OPERATOR_PAUSE', body.reason) };
+      // The reason is for the audit and the operator timeline; customers see that Bane paused it after a review.
+      return { kind: 'operator', step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused by Bane after a review. Ask for a review from the dashboard for details.' }, reasons: operatorReason('OPERATOR_PAUSE', 'Bane paused sending after a review.') };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/workspaces/{id}/resume', operationId: 'operatorResumeWorkspace',
@@ -175,7 +177,7 @@ export function registerOperator(app: App) {
     responses: { 200: response(done), ...errors } }), async c => {
     const body = c.req.valid('json'), wid = c.req.valid('param').id;
     return c.json(await change(c, wid, body, body.held ? 'operator-hold-marketing' : 'operator-release-marketing', current => body.held
-      ? { kind: 'operator', marketingHold: true, step: current.step === 'pause' ? 'pause' : 'restrict', reasons: current.step === 'pause' ? undefined : [{ ...operatorReason('OPERATOR_HOLD', body.reason)[0]!, step: 'restrict' }] }
+      ? { kind: 'operator', marketingHold: true, step: current.step === 'pause' ? 'pause' : 'restrict', reasons: current.step === 'pause' ? undefined : [{ ...operatorReason('OPERATOR_HOLD', 'Bane holds marketing after a review.')[0]!, step: 'restrict' }] }
       : { kind: 'operator', marketingHold: false, step: current.step === 'restrict' ? 'warn' : current.step as Change['step'] }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/limit', operationId: 'operatorSetLimit',

@@ -9101,6 +9101,222 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await gradedSender(db, wid, 2000);
+      // Not an operator: no role on /v1/me, and every operator route refuses, API keys included.
+      assert.equal(ok(await local('GET', '/v1/me')).operator, null);
+      error(await local('GET', '/v1/operator/workspaces'), 403, 'OPERATOR_REQUIRED');
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      error(await request('GET', '/v1/operator/workspaces', key.secret), 403, 'OPERATOR_REQUIRED');
+      // The role is granted only by the script (audited), never by a workspace role.
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await assert.rejects(setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'short']), /Usage/);
+      await assert.rejects(setOperator(db, ['nobody@example.net', 'operator', '--reason', 'Synthetic operator grant']), /No user/);
+      await setOperator(db, [AUTH_EMAIL, 'operator:read', '--reason', 'Synthetic support helper']);
+      assert.equal(ok(await local('GET', '/v1/me')).operator, 'operator:read');
+      assert.deepEqual(ok(await local('GET', '/v1/operator/workspaces')).data.filter((w: Json) => w.workspaceId === wid), [], 'A workspace in good standing is not in the queue.');
+      assert.equal(ok(await local('GET', `/v1/operator/workspaces?q=${wid}`)).data[0].workspaceId, wid);
+      error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }), 403, 'OPERATOR_REQUIRED');
+      await setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+      const page = ok(await local('GET', base));
+      assert.deepEqual([page.standing.step, page.score.limit.daily, page.connection.paused, page.members[0].email], ['ok', 2000, false, AUTH_EMAIL]);
+      const version = page.standing.version;
+      // A reason is required; a stale If-Match is refused; an Idempotency-Key replays.
+      error(await local('POST', `${base}/pause`, { reason: 'too short' }), 422, 'VALIDATION_FAILED');
+      error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }, 'live', { 'If-Match': String(version + 5) }), 412, 'STANDING_VERSION_CHANGED');
+      const pause = () => local('POST', `${base}/pause`, { reason: 'Confirmed abuse report', ticketRef: 'T-1' }, 'live', { 'If-Match': String(version), 'Idempotency-Key': 'pause-1' });
+      const paused = ok(await pause());
+      assert.deepEqual([paused.step, paused.version], ['pause', version + 1]);
+      assert.deepEqual(ok(await pause()), paused, 'The same key returns the first result.');
+      error(await local('POST', `${base}/pause`, { reason: 'A different reason entirely' }, 'live', { 'Idempotency-Key': 'pause-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+      error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }), 409, 'ALREADY_PAUSED');
+      assert.match(ok(await local('GET', '/v1/me')).connection.sendingPause.reason, /paused by Bane after a review\./);
+      assert.ok(!ok(await local('GET', '/v1/me')).connection.sendingPause.reason.includes('Confirmed abuse'), 'The operator\'s reason stays in the audit.');
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${wid}`])).rows[0].status, 'pending');
+      const [audit] = (await db.query(`SELECT operator_id,via,reason,ticket_ref,before,after,request_id FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-pause'`, [wid])).rows;
+      assert.deepEqual([audit.operator_id, audit.via, audit.reason, audit.ticket_ref, audit.before.step, audit.after.step, audit.before.paused, audit.after.paused], [manager!.userId, 'console', 'Confirmed abuse report', 'T-1', 'ok', 'pause', false, true]);
+      assert.match(audit.request_id, /^req_/);
+      assert.equal(ok(await local('GET', '/v1/operator/workspaces')).data.find((w: Json) => w.workspaceId === wid).step, 'pause');
+      // Resume at half the limit; hold and release marketing by hand; an override with an expiry.
+      ok(await local('POST', `${base}/resume`, { reason: 'Customer removed the list', restore: 50 }));
+      const resumed = ok(await local('GET', '/v1/me')).connection;
+      assert.deepEqual([resumed.sendingPause, resumed.sendingLimit.cap, resumed.standing], [null, 1000, { step: 'warn', marketingHeld: false }]);
+      ok(await local('PUT', `${base}/marketing`, { held: true, reason: 'Holding marketing for review' }));
+      assert.deepEqual(ok(await local('GET', '/v1/me')).connection.standing, { step: 'restrict', marketingHeld: true });
+      ok(await local('PUT', `${base}/marketing`, { held: false, reason: 'Review finished, releasing' }));
+      assert.deepEqual(ok(await local('GET', '/v1/me')).connection.standing, { step: 'warn', marketingHeld: false });
+      error(await local('PUT', `${base}/limit`, { daily: 25000, expiresAt: new Date(Date.now() - 1000).toISOString(), reason: 'Approved migration volume' }), 422, 'INVALID_EXPIRY');
+      ok(await local('PUT', `${base}/limit`, { daily: 25000, expiresAt: new Date(Date.now() + 86_400_000).toISOString(), reason: 'Approved migration volume' }));
+      assert.equal(ok(await local('GET', '/v1/me')).connection.sendingLimit.cap, 25000);
+      ok(await local('PUT', `${base}/limit`, { daily: null, reason: 'Back to the score limit' }));
+      // One evidence stream and one audit log.
+      const timeline = ok(await local('GET', `${base}/timeline`)).data;
+      assert.ok(timeline.some((e: Json) => e.title === 'ok → pause' && e.detail.actor.kind === 'operator'));
+      assert.ok(timeline.some((e: Json) => e.kind === 'audit' && e.title === 'operator-set-limit' && e.detail.reason === 'Approved migration volume'));
+      assert.ok(!JSON.stringify(timeline).includes(AUTH_EMAIL), 'No addresses on the timeline.');
+      assert.deepEqual(ok(await local('GET', `/v1/operator/actions?workspaceId=${wid}`)).data.map((a: Json) => a.action).sort(),
+        ['operator-hold-marketing', 'operator-pause', 'operator-release-marketing', 'operator-resume', 'operator-set-limit', 'operator-set-limit'].sort());
+      // Customers get each step change on account.standing.changed, without operator identity or reason.
+      const published = (await db.query(`SELECT payload->'event'->'data' AS d FROM jobs WHERE workspace_id=$1 AND type='operation.publish' AND payload->'event'->>'type'='account.standing.changed'`, [wid])).rows
+        .map(r => r.d).sort((a: Json, b: Json) => a.sequence - b.sequence);
+      assert.deepEqual(published.map((d: Json) => [d.previousStep, d.step, d.actor.kind]), [['ok', 'pause', 'operator'], ['pause', 'warn', 'operator'], ['warn', 'restrict', 'operator'], ['restrict', 'warn', 'operator']]);
+      assert.ok(!JSON.stringify(published).includes(manager!.userId) && !JSON.stringify(published).includes('Confirmed abuse'));
+      await setOperator(db, [AUTH_EMAIL, 'off', '--reason', 'Synthetic offboarding']);
+      error(await local('GET', '/v1/operator/workspaces'), 403, 'OPERATOR_REQUIRED');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE action='set-operator' AND operator_id=$1`, [manager!.userId])).rows[0].n, 3);
+    });
+  });
+
+  test('owner self-service: a restrict releases after 24 hours at half the marketing allowance; a bounce-only pause resumes once; anything else needs a review', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', release = (body: Json = { checklist: { bouncedRemoved: true, listSourceConfirmed: true } }) => local('POST', '/v1/sender-score/release', body);
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await gradedSender(db, wid, 2000);
+      error(await release(), 409, 'STANDING_REVIEW_REQUIRED');
+      const restrict = (since: string) => db.query(`UPDATE sender_standing SET step='restrict',since=now()-$2::interval,release_until=NULL,release_percent=NULL,reasons='[{"code":"MARKETING_BOUNCES_RESTRICT","metric":"marketing_bounces","value":0.05,"count":30,"threshold":0.04,"minimum":25,"window":"24h","step":"restrict","message":"30 of 600 marketing emails hard-bounced in 24 hours (5%)."}]' WHERE workspace_id=$1`, [wid, since]);
+      await restrict('1 hour');
+      const early = error(await release(), 409, 'STANDING_REVIEW_REQUIRED');
+      assert.match(early.message, /24 hours after it started/); assert.ok(Date.parse(early.resetAt) > Date.now());
+      error(await release({ checklist: { bouncedRemoved: true } }), 422, 'VALIDATION_FAILED');
+      await restrict('25 hours');
+      // Still over the warn line in the last 24 hours: not yet.
+      await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints,marketing_accepted,marketing_bounces) VALUES($1,'-infinity',date_trunc('hour',now()),600,30,0,600,30)`, [wid]);
+      error(await release(), 409, 'STANDING_STILL_ABOVE_LINE');
+      await db.query(`DELETE FROM hosted_health_hourly WHERE workspace_id=$1`, [wid]);
+      const released = ok(await release());
+      assert.deepEqual([released.standing.step, released.standing.marketingHeld, released.standing.marketingRelease.percent], ['warn', false, 50]);
+      assert.ok(Math.abs(Date.parse(released.standing.marketingRelease.until) - Date.now() - 48 * 3600_000) < 120_000);
+      const allowance = ok(await local('GET', '/v1/me')).connection;
+      assert.deepEqual(allowance.standing, { step: 'warn', marketingHeld: false });
+      const [event] = (await db.query(`SELECT kind,actor,details FROM standing_events WHERE workspace_id=$1 AND kind='release'`, [wid])).rows;
+      assert.deepEqual([event.actor.kind, event.actor.id, event.details.action], ['owner', manager!.userId, 'release_marketing']);
+      await restrict('25 hours');
+      assert.match(error(await release(), 409, 'STANDING_REVIEW_REQUIRED').message, /once every 14 days/);
+      // A pause caused only by transactional bounces: an owner resumes it once in 30 days (50% for 48 h, marketing held 24 h).
+      await db.query(`UPDATE sender_standing SET step='pause',pause_kind='full',since=now()-interval '2 hours' WHERE workspace_id=$1`, [wid]);
+      await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='Hosted sending paused: high spam-complaint rate.' WHERE workspace_id=$1`, [wid]);
+      assert.match(error(await release(), 409, 'STANDING_REVIEW_REQUIRED').message, /needs a review/);
+      await db.query(`UPDATE sender_standing SET pause_kind='bounce' WHERE workspace_id=$1`, [wid]);
+      const resumed = ok(await release());
+      assert.deepEqual([resumed.standing.step, resumed.standing.marketingHeld, resumed.limit.restore.percent, resumed.limit.daily], ['warn', true, 50, 1000]);
+      const me = ok(await local('GET', '/v1/me')).connection;
+      assert.deepEqual([me.sendingPause, me.standing.marketingHeld], [null, true]);
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${wid}`])).rows[0].status, 'pending', 'The resume re-enables the SES tenants.');
+      // The job lifts the marketing hold when its 24 hours end.
+      await db.query(`UPDATE sender_standing SET release_until=now()-interval '1 second' WHERE workspace_id=$1`, [wid]);
+      await (await import('./src/standing.js')).refreshStanding(runtime, { only: wid });
+      assert.equal(ok(await local('GET', '/v1/me')).connection.standing.marketingHeld, false);
+    });
+  });
+
+  test('campaign list probe: the first recipients go out, release waits for their feedback, and a bad probe quarantines the campaign', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'probe.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      await gradedSender(db, wid, 10000);
+      const { probeSize } = await import('./src/sending.js');
+      assert.deepEqual([50, 120, 1000, 3000, 10000].map(probeSize), [50, 100, 100, 300, 500]);
+      const list = ok(await local('POST', '/v1/lists', { name: unique('probe') }), 201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'reader-'||n||'@example.net','subscribed' FROM generate_series(1,150)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'Probe newsletter', from, subject: 'Probe', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201), path = `/v1/campaigns/${c.id}`;
+      ok(await local('POST', `${path}/send`, { revision: c.revision }), 202);
+      const view = async () => ok(await local('GET', path));
+      await run('campaign.run');
+      assert.equal((await view()).delivery.expanded, 100, 'Only the probe is released.');
+      await run('campaign.run');
+      assert.equal((await view()).delivery.expanded, 100, 'Release waits while the probe is still queued.');
+      // The probe went out: 4 of 100 bounced (4%, over the 3% line).
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+      await run('campaign.run');
+      const waiting = await view();
+      assert.deepEqual([waiting.delivery.expanded, waiting.delivery.waiting.reason], [100, 'list_probe']);
+      assert.ok(Math.abs(Date.parse(waiting.delivery.waiting.until) - Date.now() - 10 * 60_000) < 60_000);
+      await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+      await run('campaign.run');
+      const quarantined = await view();
+      assert.deepEqual([quarantined.state, quarantined.delivery.pauseReason.code, quarantined.delivery.expanded], ['paused', 'LIST_QUALITY', 100]);
+      assert.match(quarantined.delivery.pauseReason.message, /4 hard bounces \(4\.00%; the line is 3%\)/);
+      const [event] = (await db.query(`SELECT kind,details FROM standing_events WHERE workspace_id=$1 AND kind='quarantine'`, [wid])).rows;
+      assert.deepEqual([event.details.campaignId, event.details.code], [c.id, 'LIST_QUALITY']);
+      assert.deepEqual((await db.query(`SELECT type FROM jobs WHERE workspace_id=$1 AND type IN ('standing.notify','operation.publish') ORDER BY type`, [wid])).rows.map(r => r.type), ['operation.publish', 'standing.notify']);
+      // The owner resumes once; the rest is released.
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.equal((await view()).delivery.expanded, 150);
+      // A second list-quality quarantine needs an operator.
+      await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE_HIGH","message":"x"}',quarantines=2 WHERE id=$1`, [c.id]);
+      error(await local('POST', `${path}/resume`, {}), 409, 'QUARANTINE_REVIEW_REQUIRED');
+      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+      ok(await local('POST', `/v1/operator/campaigns/${c.id}/release`, { reason: 'Reviewed the list source with the customer' }));
+      assert.equal((await view()).state, 'sending');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-release-campaign'`, [wid])).rows[0].n, 1);
+    });
+  });
+
+  test('AWS tenant status: an AWS or policy pause of a workspace tenant pauses the workspace; Bane\'s own switch and enables are timeline only', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223333', topicArn = `arn:aws:sns:${REGION}:${pool}:bane-feedback`;
+      const { ingestFeedbackBatch } = await import('./src/operations.js');
+      Object.assign(runtime.config, { multiTenant: true });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, topicArn]);
+      // Real names are bane-probation-ws_<32 hex>; the fixture workspace ID is longer than SES allows in a tenant name.
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','bane-probation-fixture')`, [wid, REGION, pool]);
+      const arn = `arn:aws:ses:${REGION}:${pool}:tenant/bane-probation-fixture/tn-1`;
+      const item = (status: string, origin: string, cause: string, account = pool) => ({ region: REGION, topicArn, messageId: unique('sns'), message: { version: '0', id: unique('eb'), 'detail-type': status === 'ENABLED' ? 'Sending Status Enabled' : 'Sending Status Disabled',
+        source: 'aws.ses', account, time: new Date().toISOString(), region: REGION, resources: [arn], detail: { version: '1.0.0', data: { origin, record: { status, cause } } } } });
+      const pause = async () => ok(await local('GET', '/v1/me')).connection.sendingPause;
+      assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'x', '999999999999')]), [{ ok: false, error: 'SES_ACCOUNT_MISMATCH' }]);
+      assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'CUSTOMER_MANAGED', 'Status manually updated.')]), [{ ok: true }]);
+      assert.equal(await pause(), null, 'Bane\'s own switch is not an AWS pause.');
+      assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'Trust and Safety review.')]), [{ ok: true }]);
+      assert.match((await pause()).reason, /AWS paused this workspace’s SES tenant/);
+      const standing = (await db.query(`SELECT step,pause_kind,reasons FROM sender_standing WHERE workspace_id=$1`, [wid])).rows[0];
+      assert.deepEqual([standing.step, standing.pause_kind, standing.reasons[0].code], ['pause', 'full', 'SES_TENANT_PAUSED']);
+      await ingestFeedbackBatch(runtime, [item('REINSTATED', 'AWS_SES', 'Reinstated.')]);
+      assert.notEqual(await pause(), null, 'Only an operator resumes it.');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1 AND kind='tenant'`, [wid])).rows[0].n, 3);
+    });
+  });
+
+  test('owner notices: a standing change emails owners and admins once, from the platform workspace, in plain text with no recipient data', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, platform = unique('platform'), pool = '111122223333';
+      const { applyChange, notifyJob, noticeText } = await import('./src/standing.js');
+      Object.assign(runtime.config, { multiTenant: true, platformDomainWorkspace: platform, notifyFrom: 'notices@platform.example' });
+      await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      for (const id of [wid, platform]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('platform.example',$1,$1,'verified')`, [platform]);
+      const reasons = [{ code: 'COMPLAINTS_WARN', metric: 'complaints' as const, value: 0.002, count: 2, threshold: 0.0005, minimum: 2, window: '24h' as const, step: 'warn' as const, message: '2 of 1,000 accepted emails were marked as spam in 24 hours (0.2%; the warn line is 0.05% and 2).' }];
+      const change = await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
+      const job = (await db.query(`SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='standing.notify'`, [wid])).rows;
+      assert.equal(job.length, 1); assert.equal(job[0].payload.eventId, change!.eventId);
+      for (let i = 0; i < 2; i++) await notifyJob(runtime, job[0].payload, { id: job[0].id, attempts: 1, workspaceId: wid });
+      const sent = (await db.query(`SELECT from_address,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1`, [platform])).rows;
+      assert.deepEqual(sent.map(r => [r.from_address, r.to_addresses, r.kind]), [['notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
+      assert.match(sent[0].subject, /is warned$/);
+      for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Bane did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
+      // No second email for the same step within a day.
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'ok', reasons: [] }));
+      await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='standing.notify'`, [wid])).rows[0].n, 1);
+      assert.match(noticeText({ workspace: 'W', step: 'pause', reasons, quarantine: null, dashboard: 'https://bane.example', marketingHeld: false }).text, /Queued mail is held for 72 hours/);
+    });
+  });
+
   test('security admission: signature and key checks precede DB lookup and body reads respectively',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local})=>{
       const {createApp}=await import('./src/app.js'),app=createApp();
