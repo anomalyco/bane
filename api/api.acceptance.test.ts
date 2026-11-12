@@ -9519,6 +9519,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           // A reopen of that receipt with a new recipient routes only the new recipient.
           await receive('once-2',[box.address,'once@receive.example','once+tag@receive.example']);
           assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
+          // Reopening the first receipt keeps the recipients the second one added (tear/delivery witness:
+          // rituals slack, ingest m1 a, ingest d1 b, ingest m1 a+z, ingest d1 b+z).
+          await receive('once-1',[box.address,'once@receive.example','once+two@receive.example']);
+          assert.deepEqual((await db.query("SELECT envelope_to FROM mail_messages WHERE workspace_id=$1 AND message_id='once@example.org'",[wid])).rows.map(r=>[...r.envelope_to].sort()),[[box.address,'once@receive.example','once+tag@receive.example','once+two@receive.example'].sort()]);
+          assert.deepEqual(await queued(),{'once-a':2,'once-b':1});
         }finally{await call('PUT','/v1/rituals',{});for(const id of Object.values(ids))await call('DELETE',`/v1/inbound/webhooks/${id}?detach=true`);}
       });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
