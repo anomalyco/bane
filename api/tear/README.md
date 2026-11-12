@@ -3,6 +3,7 @@
 A model checker for the API's idempotency reservations, grant revocation and ownership, and MCP listings versus REST authorization. It uses [tear](https://github.com/anomalyco/tear) (`statecheck`, pinned by git rev).
 
 - `src/model.rs` has the edge-case checklist and an independent reference model written from the documented contract.
+- `src/rest.rs` is REST's authorization for every MCP catalog operation, written from the handlers and route guards. Each actor's full listing must equal it, and `probe <actor> audit` checks it against real REST for every GET. A new route must be added there.
 - `host.ts` drives the real API in-process (Bun) over an isolated PostgreSQL. It owns the frozen clock, the two request slots, crashes and lost commit acknowledgements.
 - `src/main.rs` is the runner. It does random walks, breadth-first edge coverage, trace replay, witness reduction and checklist coverage.
 
