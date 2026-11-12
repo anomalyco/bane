@@ -400,7 +400,10 @@ impl Gateway {
                     } else {
                         self.slots.clone()
                     };
-                    let Ok(permit) = slots.try_acquire_owned() else {
+                    let shared = backend
+                        .as_ref()
+                        .map_or_else(|| Some(Vec::new()), |s| s.lanes.session());
+                    let Some(permit) = slots.try_acquire_owned().ok().zip(shared) else {
                         write(
                             &mut stream,
                             match port.protocol {
@@ -547,6 +550,14 @@ async fn main() -> Result<()> {
         "fixture must stay on loopback"
     );
     let limit = setting("MAILGW_LOGIN_LIMIT", 10)?;
+    if let Some(api) = &api {
+        use std::sync::atomic::Ordering::Relaxed;
+        let open = &api.tenant_sessions;
+        open.store(
+            setting("MAILGW_TENANT_SESSIONS", open.load(Relaxed))?,
+            Relaxed,
+        );
+    }
     let gw = Arc::new(Gateway {
         api: api.clone(),
         events: Arc::default(),

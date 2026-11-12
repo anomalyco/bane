@@ -118,7 +118,7 @@ export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: strin
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null };
+export type ClaimedWebhook = { routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
   /** The claim's lease (lease_until as claimed): the job is still this runner's while it matches. Absent when a handler is called directly. */
   leaseFence?: string;
@@ -357,6 +357,15 @@ export function admissionPeer(address: string): string {
     const a = left ? left.split(':') : [], b = right ? right.split(':') : [];
     return [...a, ...Array(8-a.length-b.length).fill('0'), ...b].slice(0,4).join(':') + '::';
   } catch { return 'unknown'; }
+}
+// Cloudflare gives every cross-zone Worker subrequest the same client address and names the calling
+// zone in CF-Worker, so callers on Workers (OpenCode Console among them) would otherwise share one
+// admission bucket and one failure budget with every other Worker on the Internet. Only that egress
+// address may choose a bucket this way; any other client keeps its own address.
+const WORKER_EGRESS = admissionPeer('2a06:98c0:3600::103');
+export function admissionKey(address: string, worker: string | null) {
+  const zone = worker?.trim().toLowerCase();
+  return address === WORKER_EGRESS && zone && /^[a-z0-9.-]{1,253}$/.test(zone) ? `worker:${zone}` : address;
 }
 
 // Identity entry has a request budget; authenticated API routes have a failure

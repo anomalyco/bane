@@ -14,7 +14,7 @@ import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, Web
 import { webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
 import { chargeManualDelivery, JobDeferred } from './jobs.js';
 import { detachDestination, enableRouting, registerRouting, RoutingKey } from './routing.js';
-import {registerRituals,ownReceiving} from './rituals.js';
+import {registerRituals,ownReceiving,resumeNeedsUrl} from './rituals.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -777,7 +777,11 @@ function registerInboundWebhooks(app: App) {
       const access = manageHook(c);
       // Same lock order as endpoint writes: the address lane before the webhook row.
       if (input.key) await lockMailboxLane(tx, access.workspaceId, 'address');
+      // The approval is held before the webhook row is locked, the order a removal takes them in. The row stays
+      // locked until the update, so a removal that lands meanwhile holds the webhook again afterwards.
+      await ownReceiving(tx,c,'endpoint',webhookId);
       const { row } = await getWebhook(c, webhookId, access, tx);
+      if (row.paused && row.reconfirm && input.paused === false && !input.url) throw resumeNeedsUrl();
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)], types = eventTypes ?? row.eventTypes;
       const format = input.format ?? row.format, junk = input.junk ?? (format !== row.format ? defaultJunk(format) : row.junk);
       checkScope(input.addressIds === undefined ? row.mailboxIds : input.addressIds, types, format);
@@ -789,7 +793,7 @@ function registerInboundWebhooks(app: App) {
       }
       const url = input.url ? webhookUrl(c.env, input.url) : undefined;
       if (input.key && input.key !== row.key) await (await import('./ritual-endpoints.js')).assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
-      await ownReceiving(tx,c,'endpoint',webhookId);const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
+      const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, reconfirm: url ? false : undefined, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });
@@ -805,6 +809,8 @@ function registerInboundWebhooks(app: App) {
     description: 'Posts a synthetic message.received for an example message, in the webhook\'s format or the one given, and returns the response status. overrideUrl sends it elsewhere, signed with a throwaway secret and without the webhook\'s custom headers.',
     request: { params: IdParam, body: json(z.object({ format: hookOptions.format.optional(), overrideUrl: z.string().max(2048).optional() }).strict().openapi('TestInboundWebhook')) }, responses: { 200: response(z.object({ statusCode: z.number().int() }).openapi('InboundWebhookTestResult')), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id), input = c.req.valid('json');
+    // Nothing is posted to a held webhook's saved URL, a test included; a test to another URL is not affected.
+    if (row.paused && row.reconfirm && !input.overrideUrl) throw resumeNeedsUrl();
     await chargeManual(c.env.db,row.workspaceId,1);
     const { sendTestWebhook } = await import('./inbound-webhook.js');
     try { return c.json({ statusCode: (await sendTestWebhook(c.env, row, input)).status }, 200); }
@@ -827,8 +833,8 @@ function registerInboundWebhooks(app: App) {
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string(), verificationToken: z.string().optional().describe('inbound format: the new X-Webhook-Verification-Token, which changes with the secret.') }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
     const access=manageHook(c), secret=webhookSecret();
     const row=await c.env.db.transaction(async tx=>{
+      await ownReceiving(tx,c,'endpoint',c.req.valid('param').id);
       const {row}=await getWebhook(c,c.req.valid('param').id,access,tx);
-      await ownReceiving(tx,c,'endpoint',row.id);
       await tx.update(mailboxWebhooks).set({encryptedSecret:await encrypt(c.env,secret,webhookSecretBinding(access.workspaceId,row.id)),updatedAt:new Date().toISOString()}).where(eq(mailboxWebhooks.id,row.id));
       return row;
     });
