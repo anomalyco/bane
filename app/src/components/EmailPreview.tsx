@@ -137,6 +137,9 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
   }, [html, sources, fontFaces, respectStyles, remoteImages, inline]);
-  return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
+  // Changing srcdoc on a mounted iframe navigates it, and Chrome adds that navigation to the tab's
+  // history: Back then steps the preview instead of leaving the page. A new iframe per document
+  // (keyed on its content) loads without a history entry.
+  return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe key={srcDoc} title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;

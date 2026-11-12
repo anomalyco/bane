@@ -13,7 +13,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
-import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
+import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { checkRoute, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
 import { dmarcView } from './dmarc.js';
@@ -643,7 +643,7 @@ function interpolate(source: string | undefined, values: Record<string, unknown>
   let result = ''; let offset = 0;
   for (const match of source.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)) {
     const key = match[1]!;
-    if (!Object.hasOwn(values, key) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `A value is required for ${key}.`, key);
+    if (!Object.hasOwn(values, key) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `This email uses {{${key}}} but has no value for it. Add a fallback value for ${key} (defaults.${key}).`, key);
     const value = html ? escaped(String(values[key])) : String(values[key]);
     const prefix = source.slice(offset, match.index);
     if (result.length + prefix.length + value.length > MAX_BODY) throw new ApiError(413, 'RENDERED_CONTENT_TOO_LARGE', 'A personalized body part exceeds 512 KiB characters. Reduce the content or repeated substitutions.');
@@ -1036,6 +1036,7 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
   const { renderBlockHtml, renderBlockText } = await loadCampaignBlocks();
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
+const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
@@ -1051,7 +1052,11 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
     return snapshot;
   } catch (error) {
     // Add only a contact identifier to known local validation failures; never rewrite database/provider errors.
-    if (error instanceof ApiError && ['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE'].includes(error.code)) throw new ApiError(error.status, error.code, `Contact ${contact.id}: ${error.message}`, 'contactId', error.retryable);
+    if (error instanceof ApiError && RECIPIENT_CONTENT_ERRORS.has(error.code)) {
+      // A test has no contact: name the sample data that fills the gap instead of an internal recipient id.
+      if (test && error.code === 'MISSING_TEMPLATE_VARIABLE') throw new ApiError(error.status, error.code, `This email uses {{${error.field}}} but the test has no value for it. Add a fallback value for ${error.field} (defaults.${error.field}) or a sample value (data.${error.field}).`, `data.${error.field}`, error.retryable);
+      throw new ApiError(error.status, error.code, test ? error.message : `Contact ${contact.id}: ${error.message}`, test ? error.field : 'contactId', error.retryable);
+    }
     throw error;
   }
 }
@@ -1329,11 +1334,12 @@ export function registerSending(app: App) {
   });
   // Paced delivery controls. Pausing stops releasing new recipients; mail already queued (a few seconds of
   // the send rate) still dispatches. Resume continues from the same frozen position.
-  const control = async (c: Ctx, change: (db: DbExecutor, a: Actor, campaign: typeof campaigns.$inferSelect) => Promise<void>) => {
+  const sendingOnly = (campaign: typeof campaigns.$inferSelect) => { if (!(CAMPAIGN_ACTIVE as readonly string[]).includes(campaign.state) && !campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a preparing, scheduled, sending or paused campaign can be paused, resumed or paced.'); };
+  const control = async (c: Ctx, change: (db: DbExecutor, a: Actor, campaign: typeof campaigns.$inferSelect) => Promise<void>, allowed = sendingOnly) => {
     const a = actor(c, 'send'), campaignId = c.req.param('id')!;
     await c.env.db.transaction(async db => {
       const campaign = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, campaign.draft);
-      if (!(CAMPAIGN_ACTIVE as readonly string[]).includes(campaign.state) && !campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a preparing, scheduled, sending or paused campaign can be paused, resumed or paced.');
+      allowed(campaign);
       await change(db, a, campaign);
     });
     const row = await findCampaign(c.env.db, a, campaignId);
@@ -1364,6 +1370,26 @@ export function registerSending(app: App) {
     // A release waiting for the next window or quota rechecks now under the new settings.
     if (campaign.state === 'sending') { await db.execute(wakeCampaignRun(ref)); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
   }));
+  // A schedule that has not released anyone yet can go back to an editable draft or move to another time.
+  const unreleasedSchedule = (campaign: typeof campaigns.$inferSelect) => {
+    if (!campaign.scheduledAt || campaign.expanded > 0 || !['preparing', 'scheduled', 'paused'].includes(campaign.state)) throw new ApiError(409, 'CAMPAIGN_NOT_SCHEDULED', 'Only a scheduled campaign that has not started sending can be unscheduled or rescheduled. Pause or cancel a campaign that is sending.');
+  };
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/unschedule', operationId: 'unscheduleCampaign', description: 'Return a scheduled campaign that has not started sending to an editable draft, for example to fix a typo. Nobody was emailed; the frozen audience is released and captured again when you schedule or send it.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
+    const ref = campaignRef(a, campaign.id);
+    if (!(await db.execute(unscheduleCampaign(ref))).rows.length) throw new ApiError(409, 'CAMPAIGN_NOT_SCHEDULED', 'This campaign started sending; pause or cancel it instead.');
+    await db.execute(retireCampaignRun(ref, 'CAMPAIGN_UNSCHEDULED'));
+  }, unreleasedSchedule));
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reschedule', operationId: 'rescheduleCampaign', description: 'Move the send time of a scheduled campaign that has not started sending. The frozen audience and content stay as they are; unschedule it to edit them.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ scheduledAt: CampaignSchedule.shape.scheduledAt }).strict().openapi('CampaignRescheduleInput')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
+    if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can schedule campaigns.');
+    const at = Date.parse(c.req.valid('json').scheduledAt);
+    if (at <= Date.now() || at > Date.now() + 365 * 86400000) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.', 'scheduledAt');
+    const ref = campaignRef(a, campaign.id);
+    if (!(await db.execute(rescheduleCampaign(ref, new Date(at).toISOString()))).rows.length) throw new ApiError(409, 'CAMPAIGN_NOT_SCHEDULED', 'This campaign started sending; it can no longer be rescheduled.');
+    // Requeue the run with a fresh token in this transaction: a worker that already decided to wait for the old time
+    // (or to start sending at it) can no longer settle its deferral, so an earlier time is never missed. Only waiting
+    // runs: a paused campaign has none, and resume queues one.
+    if (campaign.state !== 'paused') { await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {})); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
+  }, unreleasedSchedule));
 }
 
 const campaignRef = (a: Pick<Actor, 'workspaceId'>, campaignId: string) => ({ workspaceId: a.workspaceId, id: campaignId });
@@ -1425,6 +1451,10 @@ async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, 
 }
 function backgroundFailure(error: unknown) {
   const code = error instanceof ApiError ? error.code : 'CAMPAIGN_DEPENDENCY_FAILED';
+  // A missing placeholder value says what fixes it. Never name the contact: campaign errors are shown to everyone who can
+  // see the campaign, so other content errors stay the sanitized summary.
+  const placeholder = error instanceof ApiError && code === 'MISSING_TEMPLATE_VARIABLE' ? /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/.exec(error.message)?.[1] : undefined;
+  if (placeholder) return { code, message: `A recipient has no value for {{${placeholder}}} (${code}). Add a fallback value for ${placeholder} and send again.` };
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and send again, or cancel the campaign.` };
 }
 // Send and schedule: freeze the audience and content now, reserve the recipients, and hand the one run job the rest.
@@ -2036,7 +2066,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
       if (row.state === 'preparing') await prepareStep(runtime, a, row, job.id);
       else if (row.state === 'scheduled') {
         if (row.scheduledAt && Date.parse(row.scheduledAt) > Date.now()) throw new JobDeferred(row.scheduledAt, payload);
-        await runtime.db.execute(startSending(ref));
+        await runtime.db.execute(startSending(ref, { scheduledAt: row.scheduledAt, reviewId: row.reviewId }));
       } else if (await releaseStep(runtime, a, row, payload) === 'done') return;
       if (Date.now() - started >= RUN_BUDGET_MS) throw new JobDeferred(now(), payload);
     }
