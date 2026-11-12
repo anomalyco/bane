@@ -8296,10 +8296,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('MX: an operator lifts a bounce suppression in Bane and in the SES tenant list, so a fixed sign-in address gets mail again', async t => {
+  test('MX: an operator lifts a bounce suppression in Bane and SES, scoped, audited and fenced, so a fixed sign-in address gets mail again', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const {liftSuppression}=await import('./scripts/lift-suppression.js'),{runDispatcher}=await import('./src/dispatcher.js');
       const wid=runtime.config.workspaceId, account='111122223333', domain='lift.example', to='New.Hire@Example.net';
+      const second=REGION==='us-east-2'?'us-east-1':'us-east-2', trusted=`bane-trusted-${wid}`;
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
@@ -8309,31 +8310,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
         assert.ok(cmd instanceof SendEmailCommand); tenants.push(String(cmd.input.TenantName)); return {MessageId:unique('fake-ses')};
       });
-      const send=async()=>{
-        const queued=ok(await local('POST','/v1/emails/send',mail({from:`no-reply@${domain}`,to,subject:'Verify your email'})),202);
+      const send=async(rcpt:string)=>{
+        const queued=ok(await local('POST','/v1/emails/send',mail({from:`no-reply@${domain}`,to:rcpt,subject:'Verify your email'})),202);
         await runDispatcher(runtime,{region:REGION,accountId:account});
         return ok(await local('GET',`/v1/emails/${queued.id}`)).status;
       };
-      // What a hard bounce of an earlier sign-in email leaves behind: no public API lifts it (contact edits, consent,
-      // delete and re-create all keep it), so every later sign-in email to the address is suppressed.
-      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES($1,$2,$3,true,'hard_bounce',now())`,[unique('con'),wid,to.toLowerCase()]);
-      assert.equal(await send(),'suppressed');
-      const removed:string[]=[];let caller=account;
-      const ses=(region:string)=>({account:async()=>caller,remove:async(address:string,tenant:string)=>{removed.push(`${region}/${tenant}/${address}`);return address===to;}});
-      const lift=()=>liftSuppression(db,[wid,to,'--reason','The mailbox exists now'],ses);
+      assert.equal(await send(address()),'accepted'); const tenant=tenants[0]!; // The tenant the dispatcher sends with.
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region,pool_tenant_name) VALUES($1,$2,$3)`,[wid,second,trusted]);
+      // SES model: each tenant's own list and the account-level list one account shares across every workspace.
+      const lists=new Map<string,Map<string,'BOUNCE'|'COMPLAINT'>>(),accounts:Record<string,string>={[REGION]:account,[second]:account},removals:string[]=[];
+      const list=(region:string,name?:string)=>{const k=`${region}|${name??'account'}`;if(!lists.has(k))lists.set(k,new Map());return lists.get(k)!;};
+      let failAt=0,during:(()=>Promise<unknown>)|undefined;
+      const ses=(region:string)=>({account:async()=>accounts[region]!,get:async(a:string,name?:string)=>list(region,name).get(a)??null,
+        remove:async(a:string,name?:string)=>{removals.push(`${region}|${name??'account'}|${a}`);const hook=during;during=undefined;await hook?.();
+          if(removals.length===failAt)throw Object.assign(new Error('denied'),{name:'AccessDeniedException'});return list(region,name).delete(a);}});
+      const lift=(rcpt=to,...flags:string[])=>liftSuppression(db,[wid,rcpt,'--reason','The mailbox exists now',...flags],ses);
+      const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='lift-suppression' ORDER BY at`,[wid])).rows.map(r=>r.details);
+      const suppressed=async(rcpt=to)=>(await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,rcpt.toLowerCase()])).rows[0];
+      const bounce=(rcpt:string)=>db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES($1,$2,$3,true,'hard_bounce',now())`,[unique('con'),wid,rcpt.toLowerCase()]);
+      // A hard bounce of an earlier sign-in email: Bane, both tenants and the shared account list all hold it.
+      await bounce(to); list(REGION,tenant).set(to,'BOUNCE'); list(second,trusted).set(to.toLowerCase(),'BOUNCE'); list(REGION).set(to,'BOUNCE');
+      assert.equal(await send(to),'suppressed');
       await assert.rejects(liftSuppression(db,[wid,to],ses),/Usage:/);
-      caller='999999999999'; await assert.rejects(lift(),/Nothing was changed/); caller=account;
-      assert.equal(await send(),'suppressed','A failed SES removal leaves Bane unchanged.');
-      const details=await lift();
-      // The tenant the dispatcher sent with; SES keeps the address's original case, Bane its lowercase.
-      assert.equal(tenants.length,0);
-      assert.equal(await send(),'accepted');
-      assert.deepEqual(removed,[`${REGION}/${tenants[0]}/${to}`,`${REGION}/${tenants[0]}/${to.toLowerCase()}`]);
-      assert.deepEqual(details.sesRemoved,[{region:REGION,tenant:tenants[0]}]);
-      assert.deepEqual((await db.query(`SELECT details->>'reason' reason,details->>'suppressionReason' was FROM hosted_operator_audit WHERE workspace_id=$1 AND action='lift-suppression'`,[wid])).rows,[{reason:'The mailbox exists now',was:'hard_bounce'}]);
-      await assert.rejects(lift(),/not suppressed/);
-      await db.query(`UPDATE audience_contacts SET suppressed=true,suppression_reason='complaint' WHERE workspace_id=$1 AND email=$2`,[wid,to.toLowerCase()]);
-      await assert.rejects(lift(),/complaint suppression is not lifted/);
+      // Preflight refusals change nothing anywhere: a later region's account, and the shared list without --account-level.
+      const later=[REGION,second].sort()[1]!; accounts[later]='999999999999';
+      await assert.rejects(lift(),/Nothing was changed/); accounts[later]=account;
+      await assert.rejects(lift(),/shared by every workspace.*--account-level/);
+      assert.deepEqual([removals,await audits(),await suppressed()],[[],[],{suppressed:true,suppression_reason:'hard_bounce'}]);
+      // A failure part-way is recorded with what was already removed, and Bane still suppresses the address.
+      failAt=3; await assert.rejects(lift(to,'--account-level'),/failed \(AccessDeniedException\); 2 earlier removal/); failAt=0;
+      const [started,failed]=await audits();
+      assert.deepEqual([started.status,started.plan.length,failed.status,failed.removed.length,failed.failed.error,failed.liftId===started.liftId],['started',3,'failed',2,'AccessDeniedException',true]);
+      assert.deepEqual(await suppressed(),{suppressed:true,suppression_reason:'hard_bounce'});
+      assert.equal(await send(to),'suppressed');
+      // Running it again finishes what is left; the account-level removal took only that one bounce entry.
+      const done=await lift(to,'--account-level');
+      assert.deepEqual([done.status,(done.removed as unknown[]).length,removals.length],['lifted',1,4]);
+      assert.ok([...lists.values()].every(m=>m.size===0),'every SES list entry for the address is gone');
+      assert.equal(await send(to),'accepted'); assert.equal(tenants.at(-1),tenant);
+      // A completed lift is not repeated: nothing more is read from or removed in SES, and nothing is recorded.
+      await assert.rejects(lift(),/not suppressed/); assert.equal(removals.length,4); assert.equal((await audits()).length,4);
+      // Complaints stay, whether Bane or SES (even on the shared list, with --account-level) recorded them.
+      const other=address(); await bounce(other); list(REGION).set(other,'COMPLAINT');
+      await assert.rejects(lift(other,'--account-level'),/complaint on the account-level list.*Nothing was changed/);
+      await db.query(`UPDATE audience_contacts SET suppression_reason='complaint' WHERE workspace_id=$1 AND email=$2`,[wid,other]);
+      await assert.rejects(lift(other),/complaint suppression is not lifted/);
+      // A bounce that arrives during the SES calls is kept, and the lift says so.
+      const racer=address(); await bounce(racer); list(REGION,tenant).set(racer,'BOUNCE');
+      during=()=>db.query(`UPDATE audience_contacts SET suppressed_at=clock_timestamp() WHERE workspace_id=$1 AND email=$2`,[wid,racer]);
+      await assert.rejects(lift(racer),/suppressed again while it was being lifted/);
+      assert.deepEqual(await suppressed(racer),{suppressed:true,suppression_reason:'hard_bounce'});
+      assert.deepEqual((await audits()).slice(-2).map(d=>d.status),['started','superseded']);
     });
   });
   test('MX: a queue redelivery suppresses after a recovery job stored the bounce and died before suppressing', async t => {
