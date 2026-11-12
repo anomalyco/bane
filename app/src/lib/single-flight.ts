@@ -41,15 +41,22 @@ export function useGuardedMutation<TData = unknown, TError = DefaultError, TVari
 }
 
 /**
- * An async handler that ignores calls while its previous call is still running: the same guard for a write sent with
- * request() rather than a mutation (Save in the ritual editor). The handler's own busy state disables its button a
- * render later; this covers the clicks before that render.
+ * The same guard for a write sent with request() from a handler (the ritual editor's saves, New endpoint, an inbox
+ * key): a repeat call with the same arguments while one is running isn't run again; it gets that run's promise, so the
+ * write and what it shows happen once and the caller still gets the result. The handler's busy state disables its
+ * button a render later; this covers the clicks (and ⌘S) before that render. Calls with other arguments still run.
  */
-export function useExclusive<A extends unknown[]>(run: (...args: A) => Promise<void>) {
-  const running = useRef(false)
-  return async (...args: A) => {
-    if (running.current) return
-    running.current = true
-    try { await run(...args) } finally { running.current = false }
+export function useSingleFlight<A extends unknown[], R>(run: (...args: A) => Promise<R>) {
+  const running = useRef(new Map<string, Promise<R>>())
+  return (...args: A): Promise<R> => {
+    let key: string
+    try { key = JSON.stringify(args) } catch { return run(...args) }
+    const current = running.current.get(key)
+    if (current) return current
+    const call = run(...args)
+    running.current.set(key, call)
+    const release = () => { running.current.delete(key) }
+    call.then(release, release)
+    return call
   }
 }

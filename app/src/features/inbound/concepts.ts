@@ -21,6 +21,22 @@ export const concepts = {
     title: 'Trace',
     line: 'Run an email through your routes and rituals to see what would happen. Nothing is sent or saved.',
   },
+  // Jev is the AI model behind omens. The API and its docs keep the name; the dashboard says what it does.
+  omens: {
+    title: 'Omens',
+    line: 'Questions a ritual asks Bane’s AI about an email. Each answer is a score from 0 to 1.',
+    example: 'omens(email, { refund: "Is the sender asking for a refund?" })',
+  },
+} as const
+
+// Where each concept is explained in full: the guides in Docs.
+export const guides = {
+  receiving: '/docs#guide-receiving',
+  rituals: '/docs#guide-rituals',
+  endpoints: '/docs#guide-endpoints',
+  inboxes: '/docs#guide-inboxes',
+  mcp: '/docs#guide-mcp',
+  keys: '/docs#guide-keys',
 } as const
 
 export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' | 'auto'

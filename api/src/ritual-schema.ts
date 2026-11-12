@@ -323,7 +323,7 @@ if (email.headers.has("list-unsubscribe") || email.flags.bulk) junk("newsletter"
   },
   {
     id: 'refund-omen', name: 'Label refund requests',
-    description: 'Ask Jev whether the sender wants a refund, then label it. Needs omens enabled for the domain.',
+    description: 'Ask Bane’s AI (an omen) whether the sender wants a refund, then label it. Needs omens enabled for the domain.',
     source: () => wrap(`
 const result = omens(email, { refund: "Is the sender asking for a refund?" })
 if (result.refund >= 0.7) label("refund")`),

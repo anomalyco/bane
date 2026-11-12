@@ -457,7 +457,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   }
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
-  const prompt = agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  const prompt = origin ? agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true }) : null
   const scopes = [
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },
