@@ -87,7 +87,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // until the user chooses one in Bane; an unbound approval (or one whose workspace was deleted) binds by
   // itself once one membership remains, without receiving: that consent named the old workspace. A bound approval
   // keeps its workspace when the user joins others.
-  await runtime.db.execute(sql`WITH existing AS (SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId}), memberships AS (
+  const { rows: [upserted] } = await runtime.db.execute<{created:boolean;workspace_id:string|null}>(sql`WITH existing AS (SELECT workspace_id FROM bane_resource_grants WHERE id=${keyId}), memberships AS (
     SELECT m.workspace_id, m.role FROM workspace_members m WHERE m.user_id=${userId} AND m.role IN ('owner','admin','member')
       AND (NOT EXISTS(SELECT FROM existing WHERE workspace_id IS NOT NULL) OR m.workspace_id=(SELECT workspace_id FROM existing)) LIMIT 2
   ), target AS (
@@ -102,7 +102,9 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
       receiving=bane_resource_grants.receiving AND bane_resource_grants.workspace_id IS NOT NULL
     WHERE NOT bane_resource_grants.revoked AND (bane_resource_grants.workspace_id IS NULL OR bane_resource_grants.workspace_id=excluded.workspace_id)
       AND (excluded.issued_at>bane_resource_grants.issued_at OR (excluded.issued_at=bane_resource_grants.issued_at AND
-        excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))`);
+        excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))
+    RETURNING (xmax=0) AS created, workspace_id`);
+  if (upserted?.created) log('info', { code: 'MCP_APPROVAL_CREATED', userId, client: String(claims.client_id).slice(0, 200), pending: upserted.workspace_id === null });
   const actor = await externalMcpGrant(runtime, keyId);
   if (!actor) {
     const { rows: [pending] } = await runtime.db.execute(sql`SELECT FROM bane_resource_grants WHERE id=${keyId} AND workspace_id IS NULL AND NOT revoked`);
