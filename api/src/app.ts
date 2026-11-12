@@ -200,10 +200,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const invalidJson = error instanceof SyntaxError || error instanceof HTTPException && error.status===400 && error.message==='Malformed JSON in request body';
     const database = ((error as { cause?: unknown }).cause ?? error) as { code?: string; constraint?: string };
     const keyTaken = database.code === '23505' && (database.constraint === 'mailboxes_key' || database.constraint === 'mailbox_webhooks_key');
-    // An MCP approval revoked while its request ran: the object it would own has no grant left.
-    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
     // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
     const conflict = !known && !invalidJson && databaseConflict(error);
+    // An MCP approval revoked while its request ran: the object it would own has no grant left.
+    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
     let responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.')
