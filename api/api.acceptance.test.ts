@@ -9464,6 +9464,26 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0].status,'delivered');
         }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
       });
+      await t.test("delivery: a ritual failing to junk for one recipient leaves another recipient's routed webhook delivery clean",async()=>{
+        // tear/delivery witness: rituals over, ingest m1 b+z, run K m1:V.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'clean-route',url:'https://hooks.example.org/clean-route'},201);
+        await route('clean@receive.example',['webhook:clean-route'],'clean-route');
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='clean-route'",[wid])).rows[0].id;
+        // 33 intents exceed the per-run action budget: the ritual fails and its recipient's copy is junk.
+        await call('PUT','/v1/rituals',{rituals:[{key:'overrun',source:`export default function route(email){${'label("l");'.repeat(33)}}`}],attachments:[{ritual:'overrun',target:box.id}]});
+        const prev=runtime.webhookFetch;let posts=0;
+        try{
+          const m=await ingest('junk-one',[box.address,'clean@receive.example']);
+          assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE mailbox_id=$1 AND message_id=$2',[box.id,m.id])).rows[0].labels.includes('ritual-error'));
+          const d=(await db.query("SELECT id,payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
+          assert.equal(d.payload.type,'message.received');assert.equal(d.payload.data.junk,false);
+          runtime.webhookFetch=async()=>{posts++;return {status:204}};
+          await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:'job_clean_route',workspaceId:wid,attempts:1});
+          assert.equal(posts,1);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0].status,'delivered');
+        }finally{runtime.webhookFetch=prev;await call('PUT','/v1/rituals',{});await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;

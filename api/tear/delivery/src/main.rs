@@ -123,6 +123,8 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     (1, &["rate W 1", "ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W"]),
     (1, &["rate W 1", "ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W", "tick", "run K m1:W", "reply K 503"]),
     (1, &["ingest m1 z", "run K m1:V", "reply K timeout", "ingest m2 z", "run K m2:V", "reply K timeout", "ingest m3 z", "run K m3:V", "reply K timeout", "run K m1:V"]),
+    // A ritual that failed to junk for box@ made z@'s routed webhook delivery junk: V refused it.
+    (1, &["rituals over", "ingest m1 b+z", "run K m1:V"]),
 ];
 
 fn model(v: &Value) -> R<Model> {
