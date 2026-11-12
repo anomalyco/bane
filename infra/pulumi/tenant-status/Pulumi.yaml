@@ -1,0 +1,4 @@
+name: bane-tenant-status
+description: Operator-owned SES tenant-status event intake (not run by the deploy workflow)
+runtime: bun
+main: index.ts
