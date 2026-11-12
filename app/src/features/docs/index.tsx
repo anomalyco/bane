@@ -132,7 +132,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
 }
 
 export function DocsPage() {
-  const query = useQuery<Document>({queryKey: ['public-openapi'], queryFn: async ({signal}) => { const response = await fetch('/openapi.json', {signal}); if (!response.ok) throw new Error('API definition could not be loaded.'); return response.json() }})
+  const query = useQuery<Document>({queryKey: ['public-openapi'], queryFn: async ({signal}) => { const response = await fetch('/openapi.json', {signal}); if (!response.ok) throw new Error('Couldn’t load the API definition.'); return response.json() }})
   const all = useMemo(() => operations(query.data), [query.data])
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(() => window.location.hash.slice(1))

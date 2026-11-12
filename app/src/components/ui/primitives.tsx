@@ -81,7 +81,7 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
   const working = pending || busy;
-  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'The action could not be completed. Try again.'); } finally { setBusy(false); } }
+  async function confirm() { setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { setBusy(false); } }
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
 }
 export function DropdownMenu({ items, label = 'More actions', trigger }: { items: { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean }[]; label?: string; trigger?: ReactNode }) {
@@ -150,7 +150,7 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
   return <>{error instanceof Error ? error.message : typeof error === 'string' ? error : fallback}</>;
 }
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  return <div className="ui-error-state"><Alert tone="danger" title="Could not load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
+  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
@@ -175,5 +175,5 @@ export function CopyButton({ value, label = 'Copy' }: { value: string; label?: s
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const toast = useContext(ToastContext);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Could not copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Could not copy to clipboard' : ''}</span></span>;
+  return <span className="cluster"><IconButton label={copied ? 'Copied' : label} onClick={async () => { try { await navigator.clipboard.writeText(value); setCopied(true); setError(false); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1800); } catch { setError(true); toast?.('Couldn’t copy to clipboard.', 'error'); } }}>{copied ? <Check size={14} /> : <Copy size={14} />}</IconButton><span className="sr-only" role="status">{copied ? 'Copied to clipboard' : error ? 'Couldn’t copy to clipboard' : ''}</span></span>;
 }

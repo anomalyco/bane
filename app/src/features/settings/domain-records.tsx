@@ -197,7 +197,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const receivingCopy = subdomain ? `Receive at addresses on ${receiving[0]?.name}. Mail to ${domain.name} itself keeps going wherever it goes today.` : `Receive mail for every address at ${domain.name}.`
   async function copyAll() {
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} ${guided ? 'sending ' : ''}records`, 'success') }
-    catch { toast('Could not copy to clipboard.', 'error') }
+    catch { toast('Couldn’t copy to clipboard.', 'error') }
   }
   const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
   const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'

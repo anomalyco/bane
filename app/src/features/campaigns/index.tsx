@@ -417,7 +417,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   }
   return <div className="stack campaign-review">
     <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
-    {stale && <Alert tone="warning">Could not refresh this campaign. Showing the last available counts.</Alert>}
+    {stale && <Alert tone="warning">Couldn’t refresh this campaign. Showing the last available counts.</Alert>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.delivery?.error && <Alert tone="danger">{campaign.delivery.error.message} [{campaign.delivery.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">

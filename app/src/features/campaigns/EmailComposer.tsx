@@ -156,7 +156,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
       setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
-    }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Inline images could not be loaded.'); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
+    }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Couldn’t load inline images.'); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
     return () => controller.abort()
   }, [attachmentApi, initialSnapshot])
 
@@ -214,7 +214,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setBusy(true)
     busyListener.current?.(true)
     try { return await prepareLocalImage(file) }
-    catch (cause) { const message = cause instanceof Error ? cause.message : 'Could not load this image.'; setError(message); throw new Error(message) }
+    catch (cause) { const message = cause instanceof Error ? cause.message : 'Couldn’t load this image.'; setError(message); throw new Error(message) }
     finally { uploads.current -= 1; if (!uploads.current) { setBusy(false); busyListener.current?.(false) } }
   }, [])
   async function insertImage(file?: File) {

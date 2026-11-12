@@ -55,7 +55,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   if (!response.ok) {
     const error = data?.error
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
-    const message = typeof error?.message === 'string' ? error.message : 'The request could not be completed.'
+    const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
     if (Array.isArray(error?.details)) failure.details = error.details

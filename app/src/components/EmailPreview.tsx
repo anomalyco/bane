@@ -95,7 +95,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split('\0') : [], needed, controller.signal).then(result => {
       if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
-      if (result.sources.size < needed.size) setError('Some inline images could not be resolved from this message’s attachments.');
+      if (result.sources.size < needed.size) setError('Couldn’t resolve some inline images from this message’s attachments.');
     }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
     return () => controller.abort();
   }, [html, attachmentKey, attachmentApi, needed]);
