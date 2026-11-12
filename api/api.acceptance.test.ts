@@ -7304,6 +7304,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await seen(renamed, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR' });
       const renamedLine = errorLine(renamed);
       assert.ok(renamedLine?.stack && ownFrames(renamedLine.stack) && renamedLine.errorType === 'Error', JSON.stringify(renamedLine));
+      // An object-valued name (its own toString, extra fields) is logged as the string `Error`, never serialized.
+      fault = Object.assign(new Error('boom'), { name: { toString: () => 'TypeError', secret: 'object-name-secret' } });
+      const objectNamed = await request('GET', '/v1/emails', reader.secret);
+      await seen(objectNamed, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR' });
+      assert.equal(errorLine(objectNamed)?.errorType, 'Error');
       // Unsupported keys are caller text: the line names no field rather than the key (an IP address, a code).
       const unsupported = await local('POST', '/v1/contacts', { email: address(), pr131_OAuthCode_123: 1, '192.0.2.131': 1 });
       await seen(unsupported, { route: '/v1/contacts', status: 422, code: 'VALIDATION_FAILED', field: undefined });
@@ -7329,15 +7334,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const refused = errorLine(nul);
       assert.ok(refused?.databaseCode === '22021' && (refused.stack === undefined || ownFrames(refused.stack)), JSON.stringify(refused));
       const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('='), 'injectedframe', 'pr131-confidential-subject',
-        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131', 'InjectedName'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
+        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131', 'InjectedName', 'object-name-secret'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
       assert.deepEqual(leaked, [], 'no address, body, token, session cookie or text a request smuggled into an error reaches a log line');
     });
   });
 
   // PR #131 recheck: an error's name and message are both caller-reachable text, and either can span lines that look
   // exactly like frames. stackFrames reads frames only after the exact header text, and keeps Bane's own.
-  test('stack frames: an error name or message that looks like frames is never logged as one', async () => {
-    const { stackFrames, errorTypeOf } = await import('./src/core.js');
+  test('stack frames: an error name or message that looks like frames is never logged as one, and error fields are logged only as allowlisted strings', async t => {
+    const { stackFrames, errorTypeOf, databaseCodeOf, logError, log } = await import('./src/core.js');
     const real = '    at realHandler (worker.js:5:5)\n    at async Pool.query (/app/node_modules/pg/lib/client.js:9:9)\n    at async handler (/app/dist/app.js:7:3)';
     const formatted = (name: string, message: string) => {
       const error = Object.assign(new Error(message), { name });
@@ -7367,6 +7372,31 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const headless = formatted('Error', 'boom'); headless.stack = real;
     const getter = Object.defineProperty(new Error('x'), 'name', { get() { throw new Error('no'); } });
     for (const error of [renamedLater, trailing, headless, getter, { stack: real }, 'Error\n    at realHandler (worker.js:5:5)']) assert.equal(stackFrames(error), undefined);
+
+    // PR #131 recheck: an object-valued name with its own toString was returned as errorType and serialized whole.
+    const objectName = { toString: () => 'TypeError', secret: 'object-name-secret' };
+    const named = Object.assign(new Error('boom'), { name: objectName });
+    assert.equal(typeof errorTypeOf(named), 'string');
+    assert.equal(stackFrames(named), undefined);
+    const throwingName = Object.defineProperty(new Error('x'), 'name', { get() { throw new Error('no'); } });
+    for (const [error, type] of [[named, 'Error'], [throwingName, 'Error'], [Object.assign(new Error('x'), { name: 'Bad Name' }), 'Error'], [Object.assign(new Error('x'), { name: 'X'.repeat(65) }), 'Error'],
+      [Object.assign(new Error('x'), { name: 'DrizzleQueryError' }), 'DrizzleQueryError'], [new TypeError('t'), 'TypeError'], ['text', 'string'], [null, 'null']] as const) assert.equal(errorTypeOf(error), type);
+    // The SQLSTATE is a five-character string along the cause chain, never an object; a throwing getter ends the chain.
+    assert.equal(databaseCodeOf(Object.assign(new Error('x'), { code: { toString: () => '40P01', secret: 'object-code-secret' } })), undefined);
+    assert.equal(databaseCodeOf(new Error('x', { cause: Object.assign(new Error('y'), { code: '40P01' }) })), '40P01');
+    assert.equal(databaseCodeOf(Object.defineProperty(new Error('x'), 'cause', { get() { throw new Error('no'); } })), undefined);
+    // logError and log write only primitives: object-valued names, codes, causes and fields never reach a line.
+    const lines: string[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+    const loaded = Object.assign(new Error('boom', { cause: { secret: 'object-cause-secret' } }),
+      { name: objectName, code: { toString: () => '40P01', secret: 'object-code-secret' }, errno: { secret: 'object-errno-secret' }, detail: 'object-detail-secret' });
+    logError(loaded, { code: { toString: () => 'INTERNAL_ERROR', secret: 'object-field-secret' } as unknown as string, requestId: 'req_fixture' });
+    log('warn', { code: 'LOG_OBJECT_FIXTURE', error: loaded, nested: { deeper: { deepest: { secret: 'deep-object-secret' } } }, instance: new URL('https://object.invalid/?secret=url-object-secret'), big: 10n });
+    t.mock.restoreAll();
+    const [errorEntry, warnEntry] = lines.map(line => JSON.parse(line) as Json);
+    assert.deepEqual([errorEntry.code, errorEntry.errorType, errorEntry.databaseCode, errorEntry.stack], ['UNKNOWN_ERROR', 'Error', undefined, undefined]);
+    assert.deepEqual([warnEntry.error, warnEntry.instance, warnEntry.nested.deeper.deepest, warnEntry.big], ['[object]', '[object]', '[object]', '10']);
+    assert.ok(!lines.some(line => /object-(?:name|code|cause|errno|field|detail)-secret|deep-object-secret|url-object-secret/.test(line)), lines.join('\n'));
   });
 
   test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{

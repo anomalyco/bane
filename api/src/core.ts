@@ -291,9 +291,16 @@ export async function getSes(runtime: Runtime, selectedRegion: string, connectio
 const TRANSIENT_SQLSTATES = new Set(['58000', '53300', '57P01', '57P02', '57P03']);
 const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE']);
 const TRANSIENT_DRIVER_MESSAGE = /^(?:Connection terminated(?: unexpectedly)?|Client has encountered a connection error and is not queryable|Failed to acquire a connection from the pool\.?|Server connection attempt failed: .+)$/;
-const errorChain = (error: unknown) => { const chain: Error[] = []; for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); return chain; };
-/** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs. */
-export const databaseCodeOf = (error: unknown) => errorChain(error).map(e => (e as { code?: unknown }).code).find((code): code is string => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code));
+const errorChain = (error: unknown) => { const chain: Error[] = []; try { for (let current = error; current instanceof Error && chain.length < 5; current = current.cause) chain.push(current); } catch { /* A throwing cause getter or proxy ends the chain. */ } return chain; };
+/** The SQLSTATE behind an error, including one wrapped by Drizzle, for logs: a five-character string or nothing. */
+export const databaseCodeOf = (error: unknown) => {
+  for (const e of errorChain(error)) {
+    let code: unknown;
+    try { code = (e as { code?: unknown }).code; } catch { continue; }
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return undefined;
+};
 export function transientDatabaseError(error: unknown) {
   if (error instanceof ApiError) return false;
   return errorChain(error).some(e => {
@@ -327,11 +334,19 @@ function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unk
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 const CREDENTIAL = /[A-Za-z0-9_]{40,}/g;
 const credentialLike = (run: string) => /[a-z]/.test(run) && /[0-9]/.test(run) ? '[redacted]' : run;
+// Only strings, numbers, booleans, plain objects and arrays are written. Anything else (an error, a class instance, an
+// object reached through a getter, something with toJSON) becomes '[object]', so no object's own fields or toString
+// reach a line.
 function scrub(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return value.replace(EMAIL, '[email]').replace(CREDENTIAL, credentialLike).slice(0, 2000);
-  if (depth > 2 || value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.slice(0, 50).map(item => scrub(item, depth + 1));
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item, depth + 1)]));
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return value;
+  if (typeof value !== 'object') return typeof value === 'bigint' ? String(value) : undefined; // Functions and symbols.
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (depth > 2 || (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null)) return '[object]';
+    if (Array.isArray(value)) return value.slice(0, 50).map(item => scrub(item, depth + 1));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item, depth + 1)]));
+  } catch { return '[object]'; } // A proxy or a throwing getter.
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   const rate = sampleRate(level, fields);
@@ -350,11 +365,14 @@ const FRAME = /^ {4}at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1
 const OWN_CODE = /(?:^|\/)(worker\.js|(?:src|dist)\/[\w./-]{1,200}\.(?:ts|js))$/;
 export function stackFrames(error: unknown, limit = 12) {
   if (!(error instanceof Error)) return undefined;
-  let stack: unknown, name: string, message: string;
-  try { stack = error.stack; name = error.name === undefined ? 'Error' : String(error.name); message = error.message === undefined ? '' : String(error.message); }
-  catch { return undefined; } // A throwing getter.
+  let stack: unknown, name: unknown, message: unknown;
+  try { stack = error.stack; name = error.name; message = error.message; } catch { return undefined; } // A throwing getter.
+  // Each read once; anything but a string (an object with its own toString) fails closed.
+  if (name === undefined) name = 'Error';
+  if (message === undefined) message = '';
+  if (typeof stack !== 'string' || typeof name !== 'string' || typeof message !== 'string') return undefined;
   const header = !name ? message : !message ? name : `${name}: ${message}`;
-  if (typeof stack !== 'string' || !stack.startsWith(`${header}\n`)) return undefined;
+  if (!stack.startsWith(`${header}\n`)) return undefined;
   const frames: string[] = [];
   for (const line of stack.slice(header.length + 1).split('\n')) {
     if (!/^ {4}at /.test(line)) return undefined; // Not a stack after all.
@@ -366,18 +384,30 @@ export function stackFrames(error: unknown, limit = 12) {
   }
   return frames.join('\n') || undefined;
 }
-/** An error's class name when it looks like one (`TypeError`, `DrizzleQueryError`); anything else is just `Error`. */
-export function errorTypeOf(error: unknown) {
-  const name = error instanceof Error ? error.name : undefined;
-  return name && /^[A-Z][A-Za-z0-9]{0,40}$/.test(name) ? name : error instanceof Error ? 'Error' : typeof error;
+/**
+ * An error's class name (`TypeError`, `DrizzleQueryError`) as a string, or `Error`. `name` is read once and used only
+ * when it is a string that looks like a class name: an object with its own toString would be serialized whole.
+ */
+const CLASS_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+export function errorTypeOf(error: unknown): string {
+  try {
+    if (!(error instanceof Error)) return error === null ? 'null' : typeof error;
+    const name: unknown = error.name;
+    return typeof name === 'string' && CLASS_NAME.test(name) ? name : 'Error';
+  } catch { return 'Error'; }
 }
 /**
  * One line for an unexpected failure: its code, error class, SQLSTATE and Bane's own stack frames. Never a message:
  * neither the error's nor an ApiError's, whose text can quote request data (a template variable, a filename).
  */
+/** An error code for a log line: an upper-case code string (`INTERNAL_ERROR`, `MCP_HTTP_405`), or `UNKNOWN_ERROR`. */
+export const errorCodeOf = (value: unknown) => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : 'UNKNOWN_ERROR';
 export function logError(error: unknown, fields: Record<string, unknown> & { code: string; message?: never }, level: 'error' | 'warn' = 'error') {
-  const known = error instanceof ApiError;
-  log(level, { ...fields, errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
+  let known = false;
+  try { known = error instanceof ApiError; } catch { /* A proxy: treat as unexpected. */ }
+  // `code` usually comes from an ApiError; it is logged only as an error-code-shaped string.
+  const code = errorCodeOf(fields.code);
+  log(level, { ...fields, code, errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
 }
 export const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
