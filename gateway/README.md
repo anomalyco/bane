@@ -18,4 +18,6 @@ Requirements: stable Rust with edition 2024, Python 3.11+, OpenSSL 3, swaks, Neo
 
 The IMAP subset uses rev1 grammar, LITERAL+, SASL-IR, UIDPLUS, MOVE, IDLE, NAMESPACE, ID and SPECIAL-USE. It does **not** advertise full IMAP4rev2, UTF8=ACCEPT, CONDSTORE or QRESYNC. Before enabling rev2, cover its required extensions (notably ESEARCH, extended LIST, BINARY and UTF-8 mailbox handling) and run the rev2 suite. No client should be offered a capability just to pass discovery.
 
+LIST and LSUB read `*` and `%` as RFC 3501 does. A run of wildcards counts as one, a literal start is compared before any matching, and the rest of the pattern is matched against every folder name: a query whose wildcard part times the bytes of the listed names passes 1 Mi steps answers `NO [LIMIT]`. That is a wildcard part of about 100 bytes over 200 folders with 50-byte names, and about 20 bytes for an inbox at its limits (200 folders, 255-byte names).
+
 For the real API adapter, task environment, migration ordering, measured budgets and current limits, see [Phase 2](PHASE2.md).
