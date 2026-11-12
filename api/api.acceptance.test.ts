@@ -10255,6 +10255,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const {rows:[r]}=await db.query('SELECT m.subject,left(m.text,3) AS start,right(m.text,1) AS tail,m.body_truncated,f.filename FROM mail_messages m JOIN mail_attachments f ON f.message_id=m.id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid]);
         assert.deepEqual(r,{subject:'x�y',start:'x�y',tail:'�',body_truncated:true,filename:'a�b'});
       });
+      await t.test('inbound Date and Message-ID headers the store cannot hold are left out, and the message is kept',async()=>{
+        // Varied text: a repeated character would compress into its index row.
+        let seed=7;const wide=(n:number)=>Array.from({length:n},()=>String.fromCharCode(0x4e00+(seed=(seed*1103515245+12345)&0x7fffffff)%20000)).join('')+'@example.net',fits=wide(328);
+        for(const [mid,headers,sent,id] of [
+          ['date-10000','Date: Mon, 01 Jan 10000 00:00:00 +0000\r\nMessage-ID: <a@example.net>',null,'a@example.net'],
+          ['date-275760','Date: +275760-09-12T00:00:00Z',null,null],
+          ['date-0','Date: 0000-06-01T00:00:00Z',null,null],
+          ['date-bce','Date: -000100-01-01T00:00:00Z',null,null],
+          ['date-1','Date: 0001-01-01T00:00:00Z','0001-01-01T00:00:00.000Z',null],
+          ['date-9999','Date: Fri, 31 Dec 9999 23:59:59 +0000','9999-12-31T23:59:59.000Z',null],
+          ['id-2862-bytes',`Message-ID: <${wide(950)}>`,null,null],
+          ['id-996-bytes',`Message-ID: <${fits}>`,null,fits],
+        ] as const){
+          raw.set(mid,Buffer.from(`From: a@example.net\r\nSubject: ${mid}\r\n${headers}\r\n\r\nbody`));
+          assert.equal(await submit(mid,['a@receive.example']),1);await run('mailbox.ingest',{sesMessageId:mid});
+          const {rows:[r]}=await db.query('SELECT status,sent_at,message_id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid]);
+          assert.deepEqual({...r,sent_at:r.sent_at?.toISOString()??null},{status:'received',sent_at:sent,message_id:id},mid);
+        }
+        const {normalizeMessageId}=await import('./src/mailbox-store.js');
+        assert.equal(normalizeMessageId(`<${'a'.repeat(998)}>`),'a'.repeat(998));assert.equal(normalizeMessageId(`<${'a'.repeat(999)}>`),null);
+        assert.equal(normalizeMessageId(`<${'\0'.repeat(333)}>`),null,'counted as stored: NUL becomes a three-byte replacement');
+      });
       await t.test('large inbound mail stays downloadable using a pinned copy or multipart Bcc scrub',async()=>{
         for(const mid of ['large','scrub']){await submit(mid,['a@receive.example']);
           if(mid==='scrub'){interruptCopy=true;await assert.rejects(run('mailbox.ingest',{sesMessageId:mid}),{code:'MAILBOX_RAW_UNAVAILABLE'});assert.ok(parts.pop()?.aborted);parts.pop();largeReads.splice(3);interruptCopy=false;}
