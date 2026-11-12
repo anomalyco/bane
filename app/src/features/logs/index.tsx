@@ -9,7 +9,7 @@ import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton } from './skeletons'
-import { isReceivedId, logColumns, logCsvRows, logHref } from './rows'
+import { isReceivedId, logColumns, logCsvRows, logHref, useLogRowIntent } from './rows'
 import { useAdaptivePageSize } from '../../lib/pagination'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
@@ -35,6 +35,7 @@ export function LogsHeader({ regionId, direction, onDirection, locked }: { regio
 }
 function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
   const [searchParams, setSearchParams] = useSearchParams()
+  const rowIntent = useLogRowIntent()
   // A campaign sends from one region, so its filter replaces the region selector; it lists sent mail only.
   const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
   const clearCampaign = () => { const next = new URLSearchParams(searchParams); next.delete('campaign'); setSearchParams(next) }
@@ -59,7 +60,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} columns={logColumns}
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} onRowIntent={rowIntent} columns={logColumns}
         empty={<EmptyState title="No mail found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign(); else if (direction !== 'all') setDirection('all') }}>Clear filters</Button>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
@@ -79,7 +80,7 @@ export function ReceivedEmailDetailPage() {
   const { id = '' } = useParams()
   // Delivery details (envelope, region, verdicts, headers, the raw .eml) are for owners and admins; members read the message.
   const { canAdminister } = useWorkspaceAccess()
-  const query = useApiQuery(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister))
+  const query = useApiDef(queries.receivedEmail(id, canAdminister))
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Received email" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return <ReceivedEmailDetailView email={query.data} />
@@ -125,7 +126,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
 const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['email', id], (api, signal) => api.emails.get(id, signal), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
+  const query = useApiDef(queries.email(id), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return query.data ? <EmailDetail email={query.data} /> : null

@@ -18,6 +18,11 @@ export const queries = {
   receivingAddresses: (search: string, cursor: string | undefined) => def(['inbound-addresses', 'address', search, cursor ?? null], (api, signal) => api.inbound.addresses({ kind: 'address', search: search || undefined, cursor }, signal)),
   inboundAddressOptions: () => def(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal)),
   inboundThreads: (addressId: string | undefined, view: InboundThreadView, q: string, cursor: string | undefined) => def(['inbound-threads', addressId ?? null, view, q, cursor ?? null], (api, signal) => api.inbound.threads({ addressId, view, q: q || undefined, cursor }, signal)),
+  email: (id: string) => def(['email', id], (api, signal) => api.emails.get(id, signal)),
+  receivedEmail: (id: string, canAdminister: boolean) => def(['received-email', id, canAdminister], (api, signal) => api.mailboxes.receivedEmail(id, signal, canAdminister)),
+  campaign: (id: string) => def(['campaign', id], (api, signal) => api.campaigns.get(id, signal)),
+  template: (id: string) => def(['template', id], (api, signal) => api.templates.get(id, signal)),
+  domain: (id: string) => def(['domain', id], (api, signal) => api.domains.get(id, signal)),
   campaigns: (request: PageRequest & { archived?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),
   contacts: (params: PageRequest) => def(['contacts', params], (api, signal) => api.contacts.list(params, signal)),
   audienceLists: (search = '', cursor?: string) => def(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {

@@ -8,6 +8,7 @@ import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
 import { chunk, ChunkFallback } from './lib/preloadable'
+import { composer } from './features/campaigns/composer-chunk'
 const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
 const logs = chunk(() => import('./features/logs'))
@@ -71,7 +72,7 @@ else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
 else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) {
   loadCampaigns().catch(noop)
   // The composer is the largest chunk; an editor route fetches it alongside the campaigns chunk, not after it.
-  if (/^\/campaigns\/(?:new|templates\/[^/]+|[^/]+\/edit)\/?$/.test(initialPath)) import('./features/campaigns/EmailComposer').catch(noop)
+  if (/^\/campaigns\/(?:new|templates\/[^/]+|[^/]+\/edit)\/?$/.test(initialPath)) composer.preload().catch(noop)
 }
 else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
