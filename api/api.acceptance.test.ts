@@ -7399,6 +7399,50 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(!lines.some(line => /object-(?:name|code|cause|errno|field|detail)-secret|deep-object-secret|url-object-secret/.test(line)), lines.join('\n'));
   });
 
+  // PR #131 recheck: hostile values (proxies, overridden array methods, getters, toJSON) at the logging helpers.
+  test('logging never throws and never runs a method, getter or toJSON of what it logs', async t => {
+    const { log, logError } = await import('./src/core.js');
+    const lines: string[] = [];
+    for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => lines.push(String(line)));
+    const marker = 'pr131-variant-private-marker', arrayMarker = 'pr131-array-proxy-private';
+    let calls = 0;
+    class PrivateData { toJSON() { calls++; return { authorization: `Bearer ${arrayMarker}` }; } }
+    // The reviewer's probes: a revoked proxy and a proxy whose getPrototypeOf throws, as the error.
+    const revoked = Proxy.revocable(new Error('fixed'), {}); revoked.revoke();
+    const hostile = new Proxy(new Error('fixed'), { getPrototypeOf() { throw new Error(marker); } });
+    for (const error of [revoked.proxy, hostile]) {
+      lines.length = 0;
+      assert.doesNotThrow(() => logError(error, { code: 'RECHECK_VARIANT' }));
+      assert.equal(lines.length, 1);
+      const entry = JSON.parse(lines[0]!) as Json;
+      assert.deepEqual([entry.code, entry.errorType, entry.stack], ['RECHECK_VARIANT', 'Error', undefined]);
+    }
+    // Fields that cannot be read at all: the fixed fallback line, never a throw.
+    lines.length = 0;
+    const unreadable = new Proxy({}, { ownKeys() { throw new Error(marker); } });
+    assert.doesNotThrow(() => log('warn', unreadable as Record<string, unknown>));
+    assert.doesNotThrow(() => logError(new Error('x'), unreadable as Record<string, unknown> & { code: string }));
+    assert.deepEqual(lines, ['{"level":"error","code":"LOG_SERIALIZE_FAILED"}', '{"level":"error","code":"LOG_SERIALIZE_FAILED"}']);
+    // The reviewer's array probe, and variants: methods, length, elements and getters are never trusted.
+    lines.length = 0;
+    const arrayProxy = new Proxy([], { get(target, key, receiver) { return key === 'slice' || key === 'map' ? () => ({ map: () => new PrivateData() }) : Reflect.get(target, key, receiver); } });
+    const overridden = Object.assign([1, 'two'], { slice: () => ({ map: () => new PrivateData() }), map: () => new PrivateData(), toJSON: () => new PrivateData() });
+    const huge = new Proxy([] as unknown[], { get(target, key, receiver) { return key === 'length' ? 1e9 : key === '0' ? new PrivateData() : Reflect.get(target, key, receiver); } });
+    const accessor: unknown[] = [0]; Object.defineProperty(accessor, 0, { enumerable: true, get() { calls++; return new PrivateData(); } });
+    const throwingElement = new Proxy([1], { getOwnPropertyDescriptor() { throw new Error(marker); } });
+    const getterObject = { get secret() { calls++; return arrayMarker; }, kept: 1 };
+    const withToJson = { toJSON() { calls++; return { authorization: arrayMarker }; }, kept: 2 };
+    log('warn', { code: 'RECHECK_ARRAY_PROXY', arrayProxy, overridden, huge, accessor, throwingElement, instances: [new PrivateData()], getterObject, withToJson, revokedValue: revoked.proxy, hostileValue: hostile });
+    const entry = JSON.parse(lines[0]!) as Json;
+    assert.deepEqual(entry.arrayProxy, []);
+    assert.deepEqual(entry.overridden, [1, 'two']);
+    assert.deepEqual(entry.huge, Array(50).fill(null));
+    assert.deepEqual([entry.accessor, entry.throwingElement, entry.instances], [['[object]'], ['[object]'], ['[object]']]);
+    assert.deepEqual([entry.getterObject, entry.withToJson, entry.revokedValue, entry.hostileValue], [{ secret: '[object]', kept: 1 }, { kept: 2 }, '[object]', '[object]']);
+    assert.equal(calls, 0, 'no toJSON or getter of a logged value ran');
+    assert.ok(!lines.some(line => line.includes(marker) || line.includes(arrayMarker)), lines.join('\n'));
+  });
+
   test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{
     const {publicSignals}=await import('./src/placement-probes.js'),tls=(await import('node:tls')).default;
     const sockets=t.mock.method(tls,'connect',()=>{throw Error('No Worker TCP');});

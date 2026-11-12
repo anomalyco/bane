@@ -302,11 +302,15 @@ export const databaseCodeOf = (error: unknown) => {
   return undefined;
 };
 export function transientDatabaseError(error: unknown) {
-  if (error instanceof ApiError) return false;
-  return errorChain(error).some(e => {
-    const code = (e as { code?: unknown }).code;
-    return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || TRANSIENT_DRIVER_MESSAGE.test(e.message);
-  });
+  try {
+    if (error instanceof ApiError) return false;
+    return errorChain(error).some(e => {
+      try {
+        const code: unknown = (e as { code?: unknown }).code, message: unknown = e.message;
+        return typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || /^08[0-9A-Z]{3}$/.test(code) || TRANSIENT_SOCKET_CODES.has(code)) || typeof message === 'string' && TRANSIENT_DRIVER_MESSAGE.test(message);
+      } catch { return false; }
+    });
+  } catch { return false; } // A hostile proxy is not a database error.
 }
 /** What callers see when the database is briefly unreachable: retry, nothing was committed by this request. */
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
@@ -325,7 +329,7 @@ const ROUTINE_CODES = new Set(['JOB_COMPLETED', 'QUEUE_WAKE', 'QUEUE_WAKE_COALES
 // a kept line carries its `sampleRate` so counts are estimated as 1/sampleRate lines each.
 function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   if (level !== 'info') return 1;
-  if (ROUTINE_CODES.has(String(fields.code))) return 0.01;
+  if (typeof fields.code === 'string' && ROUTINE_CODES.has(fields.code)) return 0.01;
   return typeof fields.status === 'number' && fields.status < 400 ? 0.1 : 1;
 }
 // Defense in depth: callers log operations, IDs and codes, never bodies, headers, addresses or tokens. A string that
@@ -334,24 +338,59 @@ function sampleRate(level: 'info' | 'warn' | 'error', fields: Record<string, unk
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 const CREDENTIAL = /[A-Za-z0-9_]{40,}/g;
 const credentialLike = (run: string) => /[a-z]/.test(run) && /[0-9]/.test(run) ? '[redacted]' : run;
-// Only strings, numbers, booleans, plain objects and arrays are written. Anything else (an error, a class instance, an
-// object reached through a getter, something with toJSON) becomes '[object]', so no object's own fields or toString
-// reach a line.
+// Only strings, numbers, booleans, plain objects and arrays are written, and every object or array in a line is one
+// scrub built itself: no method of the input is called (not slice, map or entries, which an array or proxy can
+// override) and no getter runs. An array is read by index up to 50 elements, an object by its own enumerable data
+// properties up to 50 keys, each read inside try. Anything else (an error, a class instance, an accessor, a proxy that
+// throws, anything nested deeper than three levels) becomes '[object]', so no toString or toJSON is ever reached.
+const SCRUB_ITEMS = 50;
 function scrub(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return value.replace(EMAIL, '[email]').replace(CREDENTIAL, credentialLike).slice(0, 2000);
   if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return value;
   if (typeof value !== 'object') return typeof value === 'bigint' ? String(value) : undefined; // Functions and symbols.
   try {
+    if (depth > 2) return '[object]';
     const prototype = Object.getPrototypeOf(value);
-    if (depth > 2 || (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null)) return '[object]';
-    if (Array.isArray(value)) return value.slice(0, 50).map(item => scrub(item, depth + 1));
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrub(item, depth + 1)]));
-  } catch { return '[object]'; } // A proxy or a throwing getter.
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) return '[object]';
+      const length: unknown = Reflect.get(value, 'length');
+      const items: unknown[] = [];
+      for (let index = 0; index < (typeof length === 'number' && length > 0 ? Math.min(Math.floor(length), SCRUB_ITEMS) : 0); index++) {
+        let item: unknown;
+        try { const descriptor = Reflect.getOwnPropertyDescriptor(value, String(index)); item = descriptor && 'value' in descriptor ? scrub(descriptor.value, depth + 1) : descriptor ? '[object]' : undefined; }
+        catch { item = '[object]'; }
+        items[index] = item === undefined ? null : item;
+      }
+      return items;
+    }
+    if (prototype !== Object.prototype && prototype !== null) return '[object]';
+    const entries: Record<string, unknown> = Object.create(null);
+    let kept = 0;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') continue;
+      if (kept++ >= SCRUB_ITEMS) break;
+      try {
+        const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+        if (descriptor?.enumerable) entries[key] = 'value' in descriptor ? scrub(descriptor.value, depth + 1) : '[object]';
+      } catch { entries[key] = '[object]'; }
+    }
+    return entries;
+  } catch { return '[object]'; } // A proxy that throws from getPrototypeOf, ownKeys or a revoked proxy.
 }
+/** What `log` writes when a line cannot be built: logging never throws into a request. */
+const LOG_FALLBACK = '{"level":"error","code":"LOG_SERIALIZE_FAILED"}';
+function logFallback() { try { console.error(LOG_FALLBACK); } catch { /* Nothing left to write with. */ } }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
-  const rate = sampleRate(level, fields);
-  if (rate < 1 && Math.random() >= rate) return;
-  console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...(scrub(fields) as Record<string, unknown>), ...(rate < 1 ? { sampleRate: rate } : {}) }));
+  let line: string, write: 'info' | 'warn' | 'error' = 'error';
+  try {
+    write = level === 'info' || level === 'warn' ? level : 'error';
+    const rate = sampleRate(write, fields);
+    if (rate < 1 && Math.random() >= rate) return;
+    const clean = scrub(fields);
+    if (clean === null || typeof clean !== 'object' || Array.isArray(clean)) throw new TypeError('fields are not a plain object');
+    line = JSON.stringify({ level: write, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...clean, ...(rate < 1 ? { sampleRate: rate } : {}) });
+  } catch { return logFallback(); }
+  try { console[write](line); } catch { logFallback(); }
 }
 // A V8 stack is a header and then "    at <function> (<location>)" frames. The header is the error's name and message
 // (`${name}: ${message}`, or whichever is not empty), and either can span lines that look exactly like frames: a
@@ -364,9 +403,11 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
 const FRAME = /^ {4}at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;
 const OWN_CODE = /(?:^|\/)(worker\.js|(?:src|dist)\/[\w./-]{1,200}\.(?:ts|js))$/;
 export function stackFrames(error: unknown, limit = 12) {
-  if (!(error instanceof Error)) return undefined;
   let stack: unknown, name: unknown, message: unknown;
-  try { stack = error.stack; name = error.name; message = error.message; } catch { return undefined; } // A throwing getter.
+  try {
+    if (!(error instanceof Error)) return undefined;
+    stack = error.stack; name = error.name; message = error.message;
+  } catch { return undefined; } // A throwing getter or proxy trap, or a revoked proxy.
   // Each read once; anything but a string (an object with its own toString) fails closed.
   if (name === undefined) name = 'Error';
   if (message === undefined) message = '';
@@ -403,11 +444,14 @@ export function errorTypeOf(error: unknown): string {
 /** An error code for a log line: an upper-case code string (`INTERNAL_ERROR`, `MCP_HTTP_405`), or `UNKNOWN_ERROR`. */
 export const errorCodeOf = (value: unknown) => typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : 'UNKNOWN_ERROR';
 export function logError(error: unknown, fields: Record<string, unknown> & { code: string; message?: never }, level: 'error' | 'warn' = 'error') {
-  let known = false;
-  try { known = error instanceof ApiError; } catch { /* A proxy: treat as unexpected. */ }
-  // `code` usually comes from an ApiError; it is logged only as an error-code-shaped string.
-  const code = errorCodeOf(fields.code);
-  log(level, { ...fields, code, errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) });
+  let entry: Record<string, unknown>;
+  try {
+    let known = false;
+    try { known = error instanceof ApiError; } catch { /* A proxy: treat as unexpected. */ }
+    // `code` usually comes from an ApiError; it is logged only as an error-code-shaped string.
+    entry = { ...fields, code: errorCodeOf(fields.code), errorType: known ? undefined : errorTypeOf(error), databaseCode: databaseCodeOf(error), stack: known ? undefined : stackFrames(error) };
+  } catch { return logFallback(); }
+  log(level, entry);
 }
 export const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
