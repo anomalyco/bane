@@ -56,7 +56,7 @@ export type ConnectionSummary = {
         reason: string;
     } | null;
     /**
-     * Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.
+     * Hosted only: the daily limit (set by the sender score) that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.
      */
     sendingLimit?: {
         /**
@@ -79,6 +79,13 @@ export type ConnectionSummary = {
          * When nextCap applies.
          */
         nextCapAt: string | null;
+    } | null;
+    /**
+     * Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.
+     */
+    standing?: {
+        step: 'ok' | 'notice' | 'warn' | 'restrict' | 'pause';
+        marketingHeld: boolean;
     } | null;
     /**
      * Domains claimed in this workspace and how many can send.
@@ -786,10 +793,10 @@ export type CampaignDelivery = {
         message: string;
     } | null;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe';
         until: string;
     } | null;
 } | null;
@@ -1307,7 +1314,7 @@ export type Webhook = {
      */
     url: string;
     description: string;
-    eventTypes: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
+    eventTypes: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed' | 'account.standing.changed'>;
     regions: Array<string> | null;
     paused: boolean;
     /**
@@ -1332,7 +1339,7 @@ export type CreatedWebhook = Webhook & {
 export type CreateWebhook = {
     url: string;
     description?: string;
-    eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
+    eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed' | 'account.standing.changed'>;
     regions?: Array<string> | null;
     paused?: boolean;
     /**
@@ -1347,7 +1354,7 @@ export type CreateWebhook = {
 export type UpdateWebhook = {
     url?: string;
     description?: string;
-    eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
+    eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed' | 'account.standing.changed'>;
     regions?: Array<string> | null;
     paused?: boolean;
     /**
@@ -1393,7 +1400,7 @@ export type WebhookDelivery = {
 
 export type Event = {
     id: string;
-    type: 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed';
+    type: 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed' | 'account.standing.changed';
     createdAt: string;
     workspaceId: string;
     region: string | null;
@@ -1527,34 +1534,35 @@ export type Metrics = {
 
 export type SenderScore = {
     /**
-     * warmup until the workspace has sent its first 100 real emails: not simulated, and to at least one recipient outside the SES mailbox simulator.
+     * warmup while calibrating: until 100 real recipients were accepted and 24 hours passed (Hosted), or the first 100 emails (self-hosted).
      */
     state: 'warmup' | 'graded';
     emails: {
         /**
-         * Real emails ever created, counted up to 100. Simulated sends and emails only to …@simulator.amazonses.com are left out.
+         * Real recipients accepted, counted up to 100.
          */
         firstEmails: number;
-        /**
-         * Real emails created in the 30 days to today.
-         */
         last30Days: number;
     };
     /**
-     * Emails before the first grade (100).
+     * Accepted recipients before the first score (100).
      */
     needed: number;
     /**
-     * 0–100, one decimal; null while warming up.
+     * When the 100th recipient was accepted; the score starts 24 hours later.
+     */
+    calibratedAt: string | null;
+    /**
+     * 0–100, one decimal; null while warming up. It moves towards target by at most +5 or −10 a day.
      */
     score: number | null;
     grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F' | null;
     /**
-     * Where the score is heading: the 30-day result shrunk towards 75 by volume.
+     * Where the score is heading: quality shrunk towards 60 by the decayed volume (250 emails count as much as the prior).
      */
     target: number;
     /**
-     * The 30-day weighted factor result before shrinkage.
+     * Quality: the weighted factor result before shrinkage. It is the ceiling the score can reach.
      */
     raw: number;
     /**
@@ -1573,7 +1581,7 @@ export type SenderScore = {
     } | null;
     factors: Array<SenderScoreFactor>;
     /**
-     * The replayed daily score, oldest first; the last entry is today.
+     * The published daily score, oldest first, up to 14 days.
      */
     history: Array<{
         /**
@@ -1582,18 +1590,23 @@ export type SenderScore = {
         date: string;
         score: number;
     }>;
+    limit: SenderLimit;
+    standing: SenderStanding;
     computedAt: string;
 };
 
 export type SenderScoreFactor = {
-    key: 'complaints' | 'bounces' | 'content' | 'auth' | 'hygiene' | 'consistency';
+    /**
+     * complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement.
+     */
+    key: 'complaints' | 'content' | 'bounces' | 'hygiene' | 'auth' | 'engagement';
     label: string;
     /**
      * Share of the score, out of 100, when every factor is measured.
      */
     weight: number;
     /**
-     * The measured rate or ratio for the 30 days to today; null when neutral.
+     * The measured rate or ratio, decayed with a 30-day half-life; null when neutral.
      */
     value: number | null;
     /**
@@ -1609,6 +1622,119 @@ export type SenderScoreFactor = {
      */
     source: 'measured' | 'neutral';
     basis: string;
+};
+
+/**
+ * Hosted only: the daily limit the score sets and what changes it.
+ */
+export type SenderLimit = {
+    /**
+     * Recipients per rolling 24 hours that admission enforces now. Null when the workspace has no hosted limit.
+     */
+    daily: number | null;
+    source: 'calibrating' | 'score' | 'override' | 'exempt';
+    /**
+     * The limit the score earns, before a resume or strike reduction.
+     */
+    band: number;
+    /**
+     * The next band up and the score it starts at.
+     */
+    next: {
+        limit: number;
+        atScore: number;
+    } | null;
+    override: {
+        daily: number;
+        expiresAt: string | null;
+    } | null;
+    /**
+     * After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it).
+     */
+    restore: {
+        daily: number;
+        until: string;
+    } | null;
+    strikeCapUntil: string | null;
+    perMinute: number;
+    marketingPerHour: number;
+    transactionalReserve: number;
+} | null;
+
+/**
+ * Hosted only: the enforcement step and why.
+ */
+export type SenderStanding = {
+    /**
+     * ok; notice (dashboard only); warn (limit frozen, owners emailed); restrict (marketing held, transactional flows); pause (all sending stopped).
+     */
+    step: 'ok' | 'notice' | 'warn' | 'restrict' | 'pause';
+    reasons: Array<StandingReason>;
+    since: string;
+    /**
+     * bounce: only transactional bounces paused it, and an owner may resume it once in 30 days. full: complaints, the spam screen, abuse or an AWS tenant pause; an operator reviews it.
+     */
+    pauseKind: 'bounce' | 'full' | null;
+    marketingHeld: boolean;
+    /**
+     * An owner released a restrict: marketing is at this share of its allowance until then.
+     */
+    marketingRelease: {
+        percent: number;
+        until: string;
+    } | null;
+    /**
+     * Pauses in the last 90 days. A second caps the limit at 50% for 7 days after the resume; a third needs an operator for any resume.
+     */
+    strikes: number;
+    /**
+     * Whether an owner or admin can release this step from the dashboard (POST /v1/sender-score/release), and if not, why.
+     */
+    selfService: {
+        available: boolean;
+        action: 'release_marketing' | 'resume_sending' | null;
+        reason: string | null;
+        availableAt: string | null;
+    };
+    /**
+     * Changes with every change of standing; account.standing.changed carries it.
+     */
+    version: number;
+    sequence: number;
+} | null;
+
+export type StandingReason = {
+    code: string;
+    metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external';
+    /**
+     * The measured rate.
+     */
+    value: number;
+    count: number;
+    /**
+     * The rate the line starts at.
+     */
+    threshold: number;
+    /**
+     * The count the line also needs.
+     */
+    minimum: number;
+    window: '24h' | '7d' | null;
+    step: 'ok' | 'notice' | 'warn' | 'restrict' | 'pause';
+    message: string;
+};
+
+export type SenderStandingRelease = {
+    checklist: {
+        /**
+         * Contacts that bounced or complained are removed.
+         */
+        bouncedRemoved: true;
+        /**
+         * Every contact opted in; no bought or old lists.
+         */
+        listSourceConfirmed: true;
+    };
 };
 
 export type Usage = {
@@ -4025,6 +4151,10 @@ export type GetCurrentIdentityResponses = {
          * Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.
          */
         workspaces: Array<Workspace> | null;
+        /**
+         * Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.
+         */
+        operator?: 'operator' | 'operator:read' | null;
     };
 };
 
@@ -11160,6 +11290,67 @@ export type GetSenderScoreResponses = {
 };
 
 export type GetSenderScoreResponse = GetSenderScoreResponses[keyof GetSenderScoreResponses];
+
+export type ReleaseSenderStandingData = {
+    body: SenderStandingRelease;
+    path?: never;
+    query?: never;
+    url: '/v1/sender-score/release';
+};
+
+export type ReleaseSenderStandingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ReleaseSenderStandingError = ReleaseSenderStandingErrors[keyof ReleaseSenderStandingErrors];
+
+export type ReleaseSenderStandingResponses = {
+    /**
+     * Success
+     */
+    200: SenderScore;
+};
+
+export type ReleaseSenderStandingResponse = ReleaseSenderStandingResponses[keyof ReleaseSenderStandingResponses];
 
 export type GetUsageData = {
     body?: never;

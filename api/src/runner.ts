@@ -9,6 +9,7 @@ import { checkReputationAlerts } from './reputation-alerts.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { mailboxHourly } from './mailbox-ingest.js';
 import { publicStatsTick } from './public-stats.js';
+import { standingTick } from './standing.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log } from './core.js';
@@ -49,7 +50,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = publicStatsTick(runtime).finally(() => { publicStats = undefined; });
+          publicStats = publicStatsTick(runtime).then(() => standingTick(runtime)).finally(() => { publicStats = undefined; });
         }
         if (Date.now() - lastCleanup > 3600000) {
           await cleanup(runtime); lastCleanup = Date.now();

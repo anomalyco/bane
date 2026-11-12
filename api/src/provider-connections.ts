@@ -11,7 +11,7 @@ import { byoEnabled } from './byo-pilot.js';
 import { hostedAllowance, type HostedAllowance } from './hosted-sending.js';
 import { requirePlatformAccount } from './config.js';
 import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
-import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
+import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, desiredTenantStatus, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const Kind = z.enum(['shared', 'byo']);
@@ -29,7 +29,9 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     resetAt: z.iso.datetime().nullable().describe('When capacity next frees up or the limit changes.'),
     nextCap: z.number().int().nullable().describe('The next limit for a new workspace, or null once it has the mature limit.'),
     nextCapAt: z.iso.datetime().nullable().describe('When nextCap applies.'),
-  }).nullable().optional().describe('Hosted only: the new-sender limit that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  }).nullable().optional().describe('Hosted only: the daily limit (set by the sender score) that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
+  standing: z.object({ step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), marketingHeld: z.boolean() }).nullable().optional()
+    .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
@@ -93,6 +95,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   const allowance = row.allowance;
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
+    standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
     domains: { total: row.domains, verified: row.verified_domains } };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
@@ -291,6 +294,49 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
     // The last retry marks the tenant failed so sends say so; the hourly reconcile keeps trying.
     if (job.attempts >= MAX_ATTEMPTS) await runtime.db.execute(setTenantState(payload.connectionId, 'failed',runtime.config.platformAccount));
     throw e;
+  }
+});
+
+// Bane is the source of truth for the SES tenant status. Every pause and resume bumps provider_connections.tenant_generation;
+// hosted_tenant_status records, per regional tenant, what was applied at which generation. The job reads what Bane
+// wants now (desiredTenantStatus), applies it to every ready tenant that differs, records each success, finishes a
+// resume once no ready tenant is still disabled, and runs again if a transition happened meanwhile. A transition while
+// it runs cannot requeue it, so the periodic reconcile (tenantStatusDrift) queues anything still out of line: every
+// interleaving converges. AWS denying the call (the runtime policy lacks ses:UpdateReputationEntityCustomerManagedStatus)
+// records nothing, so a resume does not wait on a disable that never happened.
+type TenantRow = { id: string; generation: string; desired: 'ENABLED' | 'DISABLED'; region: string; ready: boolean; tenant: string | null; managed_tenant: boolean; arn: string | null; applied: 'ENABLED' | 'DISABLED' | null; applied_generation: string | null };
+export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime, _payload, job) => {
+  if (!runtime.config.multiTenant) return;
+  const wid = job.workspaceId;
+  for (let pass = 0; pass < 3; pass++) {
+    const { rows } = await runtime.db.execute<TenantRow>(sql`SELECT c.id,c.tenant_generation::text AS generation,${desiredTenantStatus(sql`c`)} AS desired,r.region,r.tenant_state='ready' AS ready,
+        CASE WHEN r.legacy THEN c.pool_tenant_name ELSE r.pool_tenant_name END AS tenant,r.managed_tenant,o.arn,t.applied,t.generation::text AS applied_generation
+      FROM provider_connections c JOIN provider_connection_regions r ON r.connection_id=c.id LEFT JOIN hosted_tenant_ownership o ON o.workspace_id=c.workspace_id AND o.region=r.region
+      LEFT JOIN hosted_tenant_status t ON t.connection_id=c.id AND t.region=r.region WHERE c.workspace_id=${wid} AND c.kind='shared' ORDER BY r.region`);
+    if (!rows.length) return;
+    const { id: connection, generation, desired } = rows[0]!;
+    const work = rows.filter(r => r.ready && (desired === 'DISABLED' ? !(r.applied === 'DISABLED' && r.applied_generation === generation) : r.applied === 'DISABLED'));
+    const record = (region: string) => runtime.db.execute(sql`INSERT INTO hosted_tenant_status AS t(connection_id,region,applied,generation) VALUES(${connection},${region},${desired},${generation}::bigint)
+      ON CONFLICT(connection_id,region) DO UPDATE SET applied=excluded.applied,generation=excluded.generation,applied_at=now()`);
+    if (isSimulatedSes(runtime)) for (const row of work) await record(row.region);
+    else if (work.length) {
+      const { setTenantSendingStatus, mxResourceName } = await wrapModuleLoad(() => import('./ses-setup.js'));
+      for (const row of work) {
+        try { await setTenantSendingStatus(runtime, row.region, row.tenant ?? (row.managed_tenant ? mxResourceName(wid) : `bane-${wid}`), row.arn, desired); }
+        catch (error) {
+          if (error instanceof ApiError && error.code === 'AWS_ACCESS_DENIED') { log('error', { code: 'SES_TENANT_STATUS_DENIED', workspaceId: wid, region: row.region, status: desired }); return; }
+          throw error;
+        }
+        await record(row.region);
+      }
+    }
+    // A resume that waited for its tenants restarts sending once no ready tenant is still disabled, fenced on its generation.
+    await runtime.db.execute(sql`UPDATE provider_connections pc SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE pc.id=${connection} AND pc.resume_pending_at IS NOT NULL
+      AND pc.tenant_generation=${generation}::bigint AND NOT EXISTS (SELECT FROM hosted_tenant_status t JOIN provider_connection_regions r ON r.connection_id=t.connection_id AND r.region=t.region
+        WHERE t.connection_id=pc.id AND t.applied='DISABLED' AND r.tenant_state='ready')`);
+    const { rows: [now] } = await runtime.db.execute<{ generation: string }>(sql`SELECT tenant_generation::text AS generation FROM provider_connections WHERE id=${connection}`);
+    if (work.length) log('info', { code: 'SES_TENANT_STATUS_SET', workspaceId: wid, status: desired, tenants: work.length, simulated: isSimulatedSes(runtime) });
+    if (now?.generation === generation) return;
   }
 });
 

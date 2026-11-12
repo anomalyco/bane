@@ -5,6 +5,7 @@ import { EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../compone
 import { CopyAction } from '../../components/motion'
 import { useApi, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { AgentPrompt, McpSetup, agentPrompt } from './agent-setup'
+import { SendingLimitsGuide } from '../score/limits'
 import './docs.css'
 
 type Schema = Record<string, any>
@@ -99,8 +100,8 @@ function OperationPage({ document, operation }: {document: Document; operation: 
   </article>
 }
 
-// Agent setup sections the overview can be linked to, as on the former Developer page.
-const sectionAnchors = new Set(['agent-prompt', 'mcp', 'webhook-signatures'])
+// Overview sections that can be linked to: agent setup (as on the former Developer page) and sending limits.
+const sectionAnchors = new Set(['agent-prompt', 'mcp', 'webhook-signatures', 'sending-limits'])
 
 // Workspace admins (and demo mode) get a prompt with this workspace's domain; null while it loads.
 // Members and signed-out readers get the general prompt, so they never call /v1/domains.
@@ -135,6 +136,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>
       <a href="/openapi.json"><strong>OpenAPI 3.1</strong><span>Machine-readable schemas and generated code examples.</span></a>
     </div></section>
+    <section id="sending-limits" className="docs-section" aria-labelledby="sending-limits-title"><h2 id="sending-limits-title">How sending limits work</h2><SendingLimitsGuide /></section>
     <section className="docs-section"><h2 className="docs-section-heading">API operations<span>{all.length}</span></h2>
       <div className="docs-overview-groups">{groups.map(group => <section key={group}><h3>{group}<span>{all.filter(operation => operation.tag === group).length}</span></h3><div>{all.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span><code>{operation.path}</code></a>)}</div></section>)}</div>
     </section>

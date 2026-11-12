@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
-import { campaignActive, pauseHostedSending } from './states.js';
+import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
@@ -48,19 +48,15 @@ async function reconcilePages(runtime: Runtime, deadline: number) {
 // Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
 const RETENTION_BUDGET_MS = 4 * 60_000;
 
+/**
+ * The hourly backstop for the ten-minute standing job (src/standing.ts): runs the ladder now, which also re-queues any
+ * workspace whose SES tenants differ from what Bane wants. The ladder, not this check, decides pauses (docs/sending-limits.md).
+ */
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
-  await runtime.db.execute(sql`SELECT refresh_hosted_minute_tiers()`);
-  const result = await runtime.db.execute(pauseHostedSending(sql`WITH counts AS (
-    SELECT pc.id,pc.workspace_id,pc.resumed_at,sum(h.accepted) AS sends,
-      sum(h.bounces) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS bounces,
-      sum(h.complaints) FILTER (WHERE h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours') AS complaints
-    FROM provider_connections pc JOIN hosted_health_hourly h ON h.workspace_id=pc.workspace_id AND h.epoch=coalesce(pc.resumed_at,'-infinity')
-    WHERE pc.kind='shared' AND pc.paused_at IS NULL AND h.hour BETWEEN date_trunc('hour',now(),'UTC')-interval '47 hours' AND date_trunc('hour',now(),'UTC')
-    GROUP BY pc.id,pc.workspace_id,pc.resumed_at)
-  SELECT *,CASE WHEN (sends<200 AND bounces>=10) OR (sends>=200 AND bounces>sends*0.03) THEN 'Hosted sending paused: high hard-bounce volume in the last 24 hours.'
-    WHEN (sends<200 AND complaints>=2) OR (sends>=200 AND complaints>sends*0.0005) THEN 'Hosted sending paused: high spam-complaint volume in the last 24 hours.' END AS reason FROM counts`));
-  for (const row of result.rows) log('warn', { code: 'HOSTED_SENDING_AUTO_PAUSED', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints) });
+  const { refreshStanding } = await import('./standing.js');
+  const result = await refreshStanding(runtime);
+  if (result.changed) log('info', { code: 'STANDING_REFRESHED', ...result });
 }
 
 /** Independent bounded slice, before other hourly drains. A poison batch must not
@@ -133,9 +129,12 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
   if (runtime.config.multiTenant) {
-    for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits'])
+    // The score's daily evidence decays with a 30-day half-life; past 400 days it no longer moves the score or the card.
+    await drain('sender_score_daily', batch(sql`sender_score_daily`, sql`day < (now() AT TIME ZONE 'UTC')::date-400`));
+    await drain('operator_idempotency', batch(sql`operator_idempotency`, sql`created_at < now()-interval '1 day'`));
+    for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits','hosted_screen_hourly'])
       // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
-      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
+      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' || table==='hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
   }
   // Do not cascade-delete a consent/token committed as we pick candidates: lock the parent first,
   // then check its indexed references again in a fresh statement while FK inserts are fenced.

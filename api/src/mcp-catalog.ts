@@ -340,6 +340,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
+  releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
 };
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
 export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;

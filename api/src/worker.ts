@@ -260,6 +260,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
+      // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
+      if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./standing.js'))).standingTick(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

@@ -7,7 +7,7 @@ import { number } from '../../lib/format'
 import { gradeKey } from './gauge'
 
 const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
-export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), bounces: percent(1), content: percent(1), auth: value => `${Math.round(value * 100)}%`, hygiene: percent(1), consistency: value => `${value.toFixed(1)}×` }
+export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => string> = { complaints: percent(2), bounces: percent(1), content: percent(1), auth: value => `${Math.round(value * 100)}%`, hygiene: percent(1), engagement: percent(2) }
 // One plain line per part, where the score shows it; the API's `basis` gives the exact rule underneath.
 export const factorPlain: Record<SenderScoreFactor['key'], string> = {
   complaints: 'How often recipients mark your mail as spam.',
@@ -15,7 +15,7 @@ export const factorPlain: Record<SenderScoreFactor['key'], string> = {
   content: 'How often Bane’s content check stops a message as spam.',
   auth: 'Whether your domains sign mail (DKIM), align the sender (SPF) and publish DMARC.',
   hygiene: 'How often you send to addresses already on the suppression list.',
-  consistency: 'Whether your volume grows steadily instead of in sudden spikes.',
+  engagement: 'How often recipients open, click or reply to your mail.',
 }
 const grades = 'A+ from 95, A from 90, B from 80, C from 70, D from 60, F below 60.'
 

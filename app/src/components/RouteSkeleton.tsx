@@ -4,9 +4,12 @@ import { EmailDetailSkeleton, LogsRouteSkeleton } from '../features/logs/skeleto
 import { CampaignRouteSkeleton } from '../features/campaigns/skeletons'
 import { AudienceRouteSkeleton } from '../features/audience/skeletons'
 import { SettingsRouteSkeleton } from '../features/settings/skeletons'
+import { OperatorRouteSkeleton } from '../features/operator/skeletons'
+import { useSession } from '../data/context'
 
 export function RouteSkeleton() {
   const { pathname } = useLocation()
+  const operator = useSession()?.identity?.operator
   const [section, id, view] = pathname.split('/').filter(Boolean)
   if (!section) return <OverviewRouteSkeleton />
   if (section === 'logs') return id ? <EmailDetailSkeleton /> : <LogsRouteSkeleton />
@@ -14,6 +17,7 @@ export function RouteSkeleton() {
   if (section === 'audience') return id === 'lists' ? <AudienceRouteSkeleton kind={view ? 'list' : 'lists'} /> : id === 'segments' ? <AudienceRouteSkeleton kind={view ? 'segment' : 'segments'} isNew={view === 'new'} /> : <AudienceRouteSkeleton kind={view ? 'contact' : 'contacts'} />
   if (section === 'api-keys') return <SettingsRouteSkeleton kind="keys" />
   if (section === 'domains') return <SettingsRouteSkeleton kind={id ? 'domain' : 'domains'} />
+  if (section === 'operator') return <OperatorRouteSkeleton operator={operator} />
   if (section === 'settings') return <SettingsRouteSkeleton kind={id === 'webhooks' && view ? 'webhook' : 'settings'} isNew={view === 'new'} />
   return null
 }

@@ -5,8 +5,8 @@
     "": {
       "name": "@banemx/sdk",
       "devDependencies": {
-        "@types/node": "26.5.1",
-        "typescript": "6.0.3",
+        "@types/node": "^26.5.0",
+        "typescript": "^6.0.3",
       },
     },
   },

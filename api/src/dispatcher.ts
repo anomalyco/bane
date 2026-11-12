@@ -42,8 +42,9 @@ type Review = { version:number; draft: CampaignDraft; rendered: { html?: string;
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; transport: DispatchTransport; sendClient?:(domainId:string)=>SESv2Client; trusted?:boolean; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
-type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: Partial<EmailSnapshot> };
-type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
+// `screened`: the Hosted content screen judged this mail and passed it (a rejection never reaches sending).
+type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: Partial<EmailSnapshot>; screened?: boolean };
+type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string; screened?: boolean };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
@@ -385,25 +386,28 @@ class ScreenRejected extends ApiError {
 let screenSkipLoggedAt = 0;
 // Fail closed for probation and marketing. Trusted transactional and explicit BYO
 // checks may fail open. Policy is decided from the leased connection, never caller input.
-async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState) {
+// Returns true only when the screen actually judged the message (and passed it); a skip or a fail-open outage is not a clean verdict.
+async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot, required:boolean, hostedGate?:GateState): Promise<boolean> {
   const settings = runtime.config.screen;
   if (!settings) {
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
     if (Date.now() - screenSkipLoggedAt >= 60000) { screenSkipLoggedAt = Date.now(); log('warn', { code: 'CONTENT_SCREEN_SKIPPED', emailId: mail.id, message: 'screen requested but TYPESAFE_API_KEY is not configured' }); }
-    return;
+    return false;
   }
   let result: Awaited<ReturnType<typeof screenSnapshot>>;
   try { result = await screenSnapshot(runtime, s, required); }
   catch (error) {
     if(!(error instanceof ApiError) || error.code!=='CONTENT_SCREEN_UNAVAILABLE') throw error;
     if(required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted content screening is unavailable; deferring without calling SES.',undefined,true);
-    if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return;hostedGate.screenRetryAt=Date.now()+30_000;}
+    if(hostedGate){if((hostedGate.screenRetryAt??0)>Date.now())return false;hostedGate.screenRetryAt=Date.now()+30_000;}
     log('warn', { code: 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id, message: error instanceof ApiError ? error.message : 'The content classifier failed; sending unscreened.' });
-    return;
+    return false;
   }
-  if (!result || result.spam < settings.threshold) return;
+  if (!result) return false;
+  if (result.spam < settings.threshold) return true;
   if (required || settings.mode === 'reject') throw new ScreenRejected({ spam: result.spam, model: result.model, threshold: settings.threshold });
   log('warn', { code: 'CONTENT_SPAM_SUSPECTED', emailId: mail.id, spam: result.spam, model: result.model });
+  return true;
 }
 
 type AttachmentRow = typeof attachments.$inferSelect;
@@ -437,11 +441,12 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   const s = mail.snapshot;
   if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
   const hosted=Boolean(leased.owner.tenantName && runtime.config.hostedScreen);
+  let screened=false;
   if (!isSimulatedSes(runtime) && (hosted || (s.screen && s.kind==='transactional'))) {
     const required=hosted && (!leased.owner.trusted || s.kind==='marketing');
     if (hosted && (gate.screenRetryAt??0)>Date.now()) {
       if (required) throw new ApiError(503,'CONTENT_SCREEN_UNAVAILABLE','Hosted screen temporarily unavailable.',undefined,true);
-    } else await screenMail(runtime,mail,s,required,hosted?gate:undefined);
+    } else screened=await screenMail(runtime,mail,s,required,hosted?gate:undefined) && !!leased.owner.tenantName;
   }
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
@@ -452,9 +457,18 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE')
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : simpleContent(s, parts);
-  return { ...leased, mail, snapshot: s, content, unsubscribe, stored };
+  return { ...leased, mail, snapshot: s, content, unsubscribe, stored, screened };
 }
 
+/**
+ * Content-screen verdicts for reputation, counted when the screen judged the mail, in the epoch current then (so a
+ * verdict on mail queued before a resume still counts after it). Only Hosted mail with a real recipient; `verdicts`
+ * yields (workspace_id, rejected 0|1) per judged email. Runs inside the caller's statement.
+ */
+const countScreened = (verdicts: SQL) => sql`INSERT INTO hosted_screen_hourly AS s(workspace_id,epoch,hour,screened,rejected)
+  SELECT v.workspace_id,coalesce(pc.resumed_at,'-infinity'),date_trunc('hour',clock_timestamp(),'UTC'),count(*),sum(v.rejected) FROM (${verdicts}) v
+  JOIN provider_connections pc ON pc.workspace_id=v.workspace_id AND pc.kind='shared' GROUP BY 1,2,3 ORDER BY 1,2,3
+  ON CONFLICT(workspace_id,epoch,hour) DO UPDATE SET screened=s.screened+excluded.screened,rejected=s.rejected+excluded.rejected`;
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
 async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   const code = error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED';
@@ -468,8 +482,8 @@ async function rejectPreflight(runtime: Runtime, mail: Mail, error: unknown) {
   }
   const rejected=await runtime.db.execute<{n:number}>(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
-      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING ${terminalColumns}
-    ), ${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false,...(error instanceof ScreenRejected ? { screen: error.screen } : {})})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
+      WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING ${terminalColumns},to_addresses||cc_addresses||bcc_addresses AS recipients
+    ), ${error instanceof ScreenRejected ? sql`screen_counted AS (${countScreened(sql`SELECT r.workspace_id,1 AS rejected FROM rejected r WHERE hosted_real_cost(r.recipients)>0`)}), ` : sql``}${terminalEvents(sql`SELECT * FROM rejected`,sql`${JSON.stringify({providerCalled:false,...(error instanceof ScreenRejected ? { screen: error.screen } : {})})}::jsonb`)} SELECT count(*)::int AS n FROM webhook_jobs`);
   await wakeWebhooks(runtime,rejected.rows[0]!.n);
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
   if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
@@ -671,15 +685,16 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
     event_id: id('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.type === 'acceptance_unknown' ? {...o.data,status:o.type} : o.data, error_code: o.errorCode ?? null,
     next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
     next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
-    wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null,
+    wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null, screened: !!o.screened,
   }));
   const statement = sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, wait_ms float8)
+        AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, wait_ms float8, screened boolean)
     ), mail AS MATERIALIZED (
-      SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
+      SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version, e.to_addresses||e.cc_addresses||e.bcc_addresses AS recipients FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
       ORDER BY e.id FOR UPDATE
-    ), inserted AS (
+    ), ${outcomes.some(o => o.screened) ? sql`screen_counted AS (${countScreened(sql`SELECT x.workspace_id,0 AS rejected FROM input x JOIN mail m ON m.id=x.email_id
+      WHERE x.screened AND x.next_status IS DISTINCT FROM 'queued' AND hosted_real_cost(m.recipients)>0`)}), ` : sql``}inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
       SELECT x.event_id, m.workspace_id, m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *
@@ -818,6 +833,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - queuedAt;
       reserve(gate, cost(item), options.shard, pacing);
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
+        outcome.screened = item.screened;
         if (outcome.type === 'provider_throttled') brake(gate);
         if (outcome.errorCode==='SES_ACCOUNT_SENDING_PAUSED' || (outcome.errorCode==='SES_ACCOUNT_PAUSE_EXPIRED' && outcome.data.providerCalled)) {
           gate.accountPauseAt=Date.now();gate.brakeUntil=gate.nextAllowedAt=Math.max(gate.nextAllowedAt,gate.accountPauseAt+300000);

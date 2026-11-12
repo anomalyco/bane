@@ -1,192 +1,199 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
-import { actor, ApiError, errors, response, security, type App, type Runtime } from './core.js';
+import { cachedDashboardRead } from './dashboard-cache.js';
+import { actor, ApiError, dashboardSession, errors, json, response, security, type App, type Runtime } from './core.js';
+import { burstFor, CALIBRATION, evaluateLadder, FACTOR_KEYS, GRADE_BANDS, GRADES, gradeOf, marketingHourFor, nextBand, quality, reserveFor, round, stepRank, STEPS, type DayEvidence, type DomainAuth, type Factor, type Reason, type Step } from './standing-model.js';
 
-// Sender score: a per-workspace reputation grade from the workspace's own sending, computed on request from one SQL
-// statement and cached for dashboard sessions. Nothing is written: the daily movement limit is replayed over the last
-// 14 days instead of stored, so the score needs no table, job or hot-path write.
-//
-//   factor score  s = 100 × clamp((bad − x) ÷ (bad − good), 0, 1)
-//   raw           R = Σ weight·s ÷ Σ weight, over measured factors (neutral factors drop out and the rest re-weigh)
-//   target        T = (n·R + 400·75) ÷ (n + 400), n = non-simulated emails in the 30 days to that day
-//   score         starts at 75 fourteen days ago; each day moves towards that day's T by at most +2 or −15
-//   grade         none until the workspace's first 100 real emails; then A+ ≥ 95, A ≥ 90, B ≥ 80, C ≥ 70, D ≥ 60, F
-//
-// Real email: not simulated by the installation, and addressed to at least one recipient outside the SES mailbox
-// simulator (…@simulator.amazonses.com). Simulator feedback is test traffic, not reputation evidence: a test bounce
-// must not lower the score, and test sends must not count towards the first 100. (They still use the daily limit.)
-
-export const WARMUP_EMAILS = 100;
-const PRIOR = 75, CONFIDENCE = 400, MAX_RISE = 2, MAX_FALL = 15, WINDOW_DAYS = 30, HISTORY_DAYS = 14, SPIKE_FLOOR = 20;
-const DAY_MS = 86_400_000;
-const GRADES = ['A+', 'A', 'B', 'C', 'D', 'F'] as const;
-type Grade = (typeof GRADES)[number];
-const BANDS: { grade: Grade; min: number }[] = [{ grade: 'A+', min: 95 }, { grade: 'A', min: 90 }, { grade: 'B', min: 80 }, { grade: 'C', min: 70 }, { grade: 'D', min: 60 }, { grade: 'F', min: 0 }];
-const FACTOR_KEYS = ['complaints', 'bounces', 'content', 'auth', 'hygiene', 'consistency'] as const;
-type FactorKey = (typeof FACTOR_KEYS)[number];
-const FACTORS: Record<FactorKey, { label: string; weight: number; good: number; bad: number; basis: string }> = {
-  complaints: { label: 'Complaints', weight: 25, good: 0.0002, bad: 0.003, basis: 'Spam complaints ÷ delivered emails.' },
-  bounces: { label: 'Bounces', weight: 20, good: 0.01, bad: 0.08, basis: 'Bounced ÷ provider-accepted emails.' },
-  content: { label: 'Content', weight: 20, good: 0.001, bad: 0.03, basis: 'Emails the hosted content screen rejected as spam ÷ emails created. Neutral when the workspace is not screened.' },
-  auth: { label: 'Authentication', weight: 15, good: 1, bad: 0, basis: 'By sending volume: DKIM signing 40 %, a verified custom MAIL FROM (aligned SPF) 30 %, DMARC enforcing 30 % (p=none 15 %). Neutral without hosted domain records.' },
-  hygiene: { label: 'List hygiene', weight: 10, good: 0.005, bad: 0.05, basis: 'Emails stopped by the suppression list ÷ emails created.' },
-  consistency: { label: 'Consistency', weight: 10, good: 3, bad: 20, basis: 'Busiest day ÷ the median of the days with mail in the week before it (at least 20). Days with fewer than two such days are not compared.' },
-};
+// GET /v1/sender-score reads what the ten-minute standing job stored (src/standing.ts): the score, its factors, the
+// daily limit it sets and the ladder step. A workspace without a Hosted connection (self-hosted, BYO) has no standing;
+// its score is computed from its last 30 days of mail on read and only displayed. docs/sending-limits.md has the tables.
 
 const FactorSchema = z.object({
-  key: z.enum(FACTOR_KEYS), label: z.string(), weight: z.number().int().describe('Share of the score, out of 100, when every factor is measured.'),
-  value: z.number().nullable().describe('The measured rate or ratio for the 30 days to today; null when neutral.'),
+  key: z.enum(FACTOR_KEYS).describe('complaints, content (the spam screen), bounces (to known recipients), hygiene (list quality: first sends and suppression hits), auth, engagement.'),
+  label: z.string(), weight: z.number().int().describe('Share of the score, out of 100, when every factor is measured.'),
+  value: z.number().nullable().describe('The measured rate or ratio, decayed with a 30-day half-life; null when neutral.'),
   score: z.number().nullable().describe('0–100 for this factor; null when neutral.'),
   points: z.number().nullable().describe('weight × score ÷ 100; null when neutral.'),
   source: z.enum(['measured', 'neutral']).describe('Neutral factors are left out and the measured ones re-weighted.'),
   basis: z.string(),
 }).openapi('SenderScoreFactor');
+const ReasonSchema = z.object({
+  code: z.string(), metric: z.enum(['complaints', 'bounces', 'marketing_bounces', 'transactional_bounces', 'screen', 'external']),
+  value: z.number().describe('The measured rate.'), count: z.number().int(), threshold: z.number().describe('The rate the line starts at.'), minimum: z.number().int().describe('The count the line also needs.'),
+  window: z.enum(['24h', '7d']).nullable(), step: z.enum(STEPS), message: z.string(),
+}).openapi('StandingReason');
+export const StandingSchema = z.object({
+  step: z.enum(STEPS).describe('ok; notice (dashboard only); warn (limit frozen, owners emailed); restrict (marketing held, transactional flows); pause (all sending stopped).'),
+  reasons: z.array(ReasonSchema), since: z.iso.datetime(),
+  pauseKind: z.enum(['bounce', 'full']).nullable().describe('bounce: only transactional bounces paused it, and an owner may resume it once in 30 days. full: complaints, the spam screen, abuse or an AWS tenant pause; an operator reviews it.'),
+  marketingHeld: z.boolean(), marketingRelease: z.object({ percent: z.number().int(), until: z.iso.datetime() }).nullable().describe('An owner released a restrict: marketing is at this share of its allowance until then.'),
+  strikes: z.number().int().describe('Pauses in the last 90 days. A second caps the limit at 50% for 7 days after the resume; a third needs an operator for any resume.'),
+  selfService: z.object({ available: z.boolean(), action: z.enum(['release_marketing', 'resume_sending']).nullable(), reason: z.string().nullable(), availableAt: z.iso.datetime().nullable() })
+    .describe('Whether an owner or admin can release this step from the dashboard (POST /v1/sender-score/release), and if not, why.'),
+  version: z.number().int().describe('Changes with every change of standing; account.standing.changed carries it.'), sequence: z.number().int(),
+}).openapi('SenderStanding');
+const LimitSchema = z.object({
+  daily: z.number().int().nullable().describe('Recipients per rolling 24 hours that admission enforces now. Null when the workspace has no hosted limit.'),
+  source: z.enum(['calibrating', 'score', 'override', 'exempt']),
+  band: z.number().int().describe('The limit the score earns, before a resume or strike reduction.'),
+  next: z.object({ limit: z.number().int(), atScore: z.number() }).nullable().describe('The next band up and the score it starts at.'),
+  override: z.object({ daily: z.number().int(), expiresAt: z.iso.datetime().nullable() }).nullable(),
+  restore: z.object({ daily: z.number().int(), until: z.iso.datetime() }).nullable().describe('After a resume: the limit is at most this many recipients a day until then (half the limit before the resume, unless an operator restored all of it).'),
+  strikeCapUntil: z.iso.datetime().nullable(), perMinute: z.number().int(), marketingPerHour: z.number().int(), transactionalReserve: z.number().int(),
+}).openapi('SenderLimit');
 const SenderScoreSchema = z.object({
-  state: z.enum(['warmup', 'graded']).describe('warmup until the workspace has sent its first 100 real emails: not simulated, and to at least one recipient outside the SES mailbox simulator.'),
-  emails: z.object({ firstEmails: z.number().int().describe('Real emails ever created, counted up to 100. Simulated sends and emails only to …@simulator.amazonses.com are left out.'), last30Days: z.number().int().describe('Real emails created in the 30 days to today.') }),
-  needed: z.number().int().describe('Emails before the first grade (100).'),
-  score: z.number().nullable().describe('0–100, one decimal; null while warming up.'),
+  state: z.enum(['warmup', 'graded']).describe('warmup while calibrating: until 100 real recipients were accepted and 24 hours passed (Hosted), or the first 100 emails (self-hosted).'),
+  emails: z.object({ firstEmails: z.number().int().describe('Real recipients accepted, counted up to 100.'), last30Days: z.number().int() }),
+  needed: z.number().int().describe('Accepted recipients before the first score (100).'),
+  calibratedAt: z.iso.datetime().nullable().describe('When the 100th recipient was accepted; the score starts 24 hours later.'),
+  score: z.number().nullable().describe('0–100, one decimal; null while warming up. It moves towards target by at most +5 or −10 a day.'),
   grade: z.enum(GRADES).nullable(),
-  target: z.number().describe('Where the score is heading: the 30-day result shrunk towards 75 by volume.'),
-  raw: z.number().describe('The 30-day weighted factor result before shrinkage.'),
+  target: z.number().describe('Where the score is heading: quality shrunk towards 60 by the decayed volume (250 emails count as much as the prior).'),
+  raw: z.number().describe('Quality: the weighted factor result before shrinkage. It is the ceiling the score can reach.'),
   band: z.object({ min: z.number(), max: z.number() }).nullable().describe('The current grade band.'),
   next: z.object({ grade: z.enum(GRADES), at: z.number() }).nullable().describe('The next grade up and the score it starts at.'),
   factors: z.array(FactorSchema),
-  history: z.array(z.object({ date: z.string().describe('UTC day, YYYY-MM-DD.'), score: z.number() })).describe('The replayed daily score, oldest first; the last entry is today.'),
+  history: z.array(z.object({ date: z.string().describe('UTC day, YYYY-MM-DD.'), score: z.number() })).describe('The published daily score, oldest first, up to 14 days.'),
+  limit: LimitSchema.nullable().describe('Hosted only: the daily limit the score sets and what changes it.'),
+  standing: StandingSchema.nullable().describe('Hosted only: the enforcement step and why.'),
   computedAt: z.iso.datetime(),
 }).openapi('SenderScore');
 export type SenderScore = z.infer<typeof SenderScoreSchema>;
 
-export type DayRow = { day: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; screened: number; suppressed: number };
-export type DomainRow = { name: string; dkim: boolean; mailFrom: boolean; dmarc: string | null; emails: number };
-export type ScoreInputs = { days: DayRow[]; domains: DomainRow[]; firstEmails: number; screened: boolean; today: string };
+type Stored = { workspace_id: string; phase: 'seed' | 'calibrating' | 'graded'; first_recipients: number; calibrated_at: string | null; score: string | null; target: string; quality: string;
+  factors: Factor[]; band_limit: number; daily_limit: number; step: Step; reasons: Reason[]; since: string; pause_kind: 'bounce' | 'full' | null; marketing_hold: boolean; release_until: string | null;
+  release_percent: number | null; last_release_at: string | null; last_self_resume_at: string | null; strikes: unknown[]; strike_until: string | null; version: number; sequence: number; computed_at: string | null };
+type Row = { standing: Stored | null; history: { date: string; score: number }[]; last30: number; override: number | null; override_expires_at: string | null; exempt: boolean;
+  restore_until: string | null; restore_cap: number | null; paused_at: string | null; days: DayEvidence[] | null; domains: DomainAuth[] | null; screened: boolean };
+const iso = (v: string | null | undefined) => v ? new Date(v).toISOString() : null;
 
-const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
-const round = (value: number, digits = 1) => Math.round(value * 10 ** digits) / 10 ** digits;
-const dayKey = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-const subscore = (key: FactorKey, value: number) => { const { good, bad } = FACTORS[key]; return 100 * clamp((bad - value) / (bad - good), 0, 1); };
-// DKIM 40 + aligned SPF 30 + DMARC 30 (p=none half), weighted by each domain's 30-day mail, or evenly when there is none.
-export function authShare(domains: DomainRow[]): number | null {
-  if (!domains.length) return null;
-  const share = (d: DomainRow) => (d.dkim ? 0.4 : 0) + (d.mailFrom ? 0.3 : 0) + (d.dmarc === 'quarantine' || d.dmarc === 'reject' ? 0.3 : d.dmarc === 'none' ? 0.15 : 0);
-  const volume = domains.reduce((sum, d) => sum + d.emails, 0);
-  return volume ? domains.reduce((sum, d) => sum + share(d) * d.emails, 0) / volume : domains.reduce((sum, d) => sum + share(d), 0) / domains.length;
-}
-
-/** Pure scoring from per-day counts, so tests and the route share one implementation. */
-export function computeSenderScore(input: ScoreInputs, now = new Date()): SenderScore {
-  const today = Date.parse(input.today + 'T00:00:00Z'), byDay = new Map(input.days.map(row => [row.day, row]));
-  const count = (ms: number) => byDay.get(dayKey(ms));
-  const auth = authShare(input.domains);
-  // The factors for the 30 days ending with `end` (a UTC day start).
-  const window = (end: number) => {
-    const totals = { emails: 0, accepted: 0, delivered: 0, bounced: 0, complained: 0, screened: 0, suppressed: 0 };
-    let spike: number | null = null;
-    for (let i = WINDOW_DAYS - 1; i >= 0; i--) {
-      const ms = end - i * DAY_MS, row = count(ms);
-      if (row) for (const key of Object.keys(totals) as (keyof typeof totals)[]) totals[key] += row[key];
-      if (!row?.emails) continue;
-      // The baseline is the median of the days that had mail in the week before, so a new sender's first days and
-      // a quiet weekend don't read as spikes; a day needs two such days before it to be compared at all.
-      const before = Array.from({ length: 7 }, (_, k) => count(ms - (k + 1) * DAY_MS)?.emails ?? 0).filter(Boolean).sort((a, b) => a - b);
-      if (before.length < 2) continue;
-      const median = before.length % 2 ? before[(before.length - 1) / 2]! : (before[before.length / 2 - 1]! + before[before.length / 2]!) / 2;
-      spike = Math.max(spike ?? 1, row.emails / Math.max(median, SPIKE_FLOOR));
-    }
-    const values: Record<FactorKey, number | null> = {
-      complaints: totals.delivered ? totals.complained / totals.delivered : null,
-      bounces: totals.accepted ? totals.bounced / totals.accepted : null,
-      content: input.screened && totals.emails ? totals.screened / totals.emails : null,
-      auth,
-      hygiene: totals.emails ? totals.suppressed / totals.emails : null,
-      consistency: spike,
-    };
-    const factors = FACTOR_KEYS.map(key => {
-      const spec = FACTORS[key], value = values[key];
-      if (value === null) return { key, label: spec.label, weight: spec.weight, value: null, score: null, points: null, source: 'neutral' as const, basis: spec.basis };
-      const score = subscore(key, value);
-      return { key, label: spec.label, weight: spec.weight, value, score, points: spec.weight * score / 100, source: 'measured' as const, basis: spec.basis };
-    });
-    const measured = factors.filter(f => f.source === 'measured'), weight = measured.reduce((sum, f) => sum + f.weight, 0);
-    const raw = weight ? measured.reduce((sum, f) => sum + f.points!, 0) / weight * 100 : PRIOR;
-    return { factors, raw, target: (totals.emails * raw + CONFIDENCE * PRIOR) / (totals.emails + CONFIDENCE), emails: totals.emails };
-  };
-  const history: { date: string; score: number }[] = [];
-  let score = PRIOR, last = window(today);
-  for (let i = HISTORY_DAYS - 1; i >= 0; i--) {
-    const end = today - i * DAY_MS, day = i === 0 ? last : window(end);
-    score += clamp(day.target - score, -MAX_FALL, MAX_RISE);
-    history.push({ date: dayKey(end), score: round(score) });
+/** What an owner may release now, from the stored standing (the POST re-checks the live 24-hour figures). */
+export function selfService(s: Pick<Stored, 'step' | 'since' | 'pause_kind' | 'last_release_at' | 'last_self_resume_at' | 'strikes' | 'release_until' | 'release_percent'>, now = Date.now()) {
+  const later = (from: string | null, days: number) => from && Date.parse(from) + days * 86_400_000 > now ? new Date(Date.parse(from) + days * 86_400_000).toISOString() : null;
+  if (s.step === 'restrict') {
+    if (s.release_until && Date.parse(s.release_until) > now && s.release_percent) return { available: false, action: null, reason: 'Marketing is already released at a reduced allowance.', availableAt: null };
+    const wait = later(s.since, 1) ?? later(s.last_release_at, 14);
+    return wait ? { available: false, action: 'release_marketing' as const, reason: later(s.since, 1) ? 'A restrict can be released 24 hours after it started.' : 'A restrict can be released once every 14 days; a second one needs a review.', availableAt: wait }
+      : { available: true, action: 'release_marketing' as const, reason: null, availableAt: null };
   }
-  const warmup = input.firstEmails < WARMUP_EMAILS;
-  const index = BANDS.findIndex(band => score >= band.min), above = index > 0 ? BANDS[index - 1]! : null;
+  if (s.step === 'pause') {
+    if (s.pause_kind !== 'bounce') return { available: false, action: null, reason: 'This pause needs a review: ask for one from the dashboard.', availableAt: null };
+    if (s.strikes.length >= 3) return { available: false, action: null, reason: 'A third pause in 90 days needs a review.', availableAt: null };
+    const wait = later(s.last_self_resume_at, 30);
+    return wait ? { available: false, action: 'resume_sending' as const, reason: 'Sending can be resumed by an owner once every 30 days; this one needs a review.', availableAt: wait } : { available: true, action: 'resume_sending' as const, reason: null, availableAt: null };
+  }
+  return { available: false, action: null, reason: null, availableAt: null };
+}
+
+// One statement: the stored standing with 14 days of history, or (without one) 30 days of mail counted on read.
+export async function loadStanding(runtime: Runtime, wid: string): Promise<Row> {
+  const screened = Boolean(runtime.config.screen && runtime.config.hostedScreen);
+  const { rows: [row] } = await runtime.db.execute<Row>(sql`WITH s AS (SELECT * FROM sender_standing WHERE workspace_id=${wid}),
+    pc AS (SELECT * FROM provider_connections WHERE workspace_id=${wid} AND kind='shared'),
+    mail AS MATERIALIZED (SELECT (e.created_at AT TIME ZONE 'UTC')::date AS day,e.status,e.error_code,e.event_outcomes,e.provider_id,e.campaign_id,e.snapshot->>'kind' AS kind,
+        lower(substring(e.from_address from '@([A-Za-z0-9.-]+)')) AS domain
+      FROM sending_emails e WHERE e.workspace_id=${wid} AND NOT e.simulated AND NOT EXISTS (SELECT FROM s) AND e.created_at>=date_trunc('day',now(),'UTC')-interval '29 days')
+    SELECT (SELECT to_jsonb(s) FROM s) AS standing,
+      coalesce((SELECT json_agg(json_build_object('date',to_char(d.day,'YYYY-MM-DD'),'score',round(d.score,1)) ORDER BY d.day) FROM sender_score_daily d
+        WHERE d.workspace_id=${wid} AND d.score IS NOT NULL AND d.day>(now() AT TIME ZONE 'UTC')::date-14),'[]') AS history,
+      coalesce((SELECT sum(d.accepted) FROM sender_score_daily d WHERE d.workspace_id=${wid} AND d.day>(now() AT TIME ZONE 'UTC')::date-30),0)::int AS last30,
+      (SELECT send_cap_override FROM workspaces WHERE id=${wid}) AS override,(SELECT send_cap_override_expires_at FROM workspaces WHERE id=${wid}) AS override_expires_at,
+      coalesce((SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}),false) AS exempt,
+      (SELECT restore_until FROM pc) AS restore_until,(SELECT restore_cap FROM pc) AS restore_cap,(SELECT CASE WHEN resume_pending_at IS NULL THEN paused_at END FROM pc) AS paused_at,${screened} AND EXISTS (SELECT FROM pc) AS screened,
+      (SELECT json_agg(x) FROM (SELECT to_char(day,'YYYY-MM-DD') AS day,count(*)::int AS emails,
+        count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
+        count(*) FILTER (WHERE status='delivered' OR event_outcomes & 2 <> 0)::int AS delivered,count(*) FILTER (WHERE status='bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
+        count(*) FILTER (WHERE campaign_id IS NOT NULL AND status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0))::int AS first_sends,
+        count(*) FILTER (WHERE campaign_id IS NOT NULL AND (status='bounced' OR event_outcomes & 4 <> 0))::int AS first_bounced,
+        count(*) FILTER (WHERE status='complained' OR event_outcomes & 8 <> 0)::int AS complained,
+        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM' OR (status<>'suppressed' AND (provider_id IS NOT NULL OR event_outcomes & 1 <> 0)))::int AS screened,
+        count(*) FILTER (WHERE error_code='CONTENT_REJECTED_SPAM')::int AS rejected,count(*) FILTER (WHERE status='suppressed')::int AS suppressed,
+        count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND (status='delivered' OR event_outcomes & 2 <> 0))::int AS marketing_delivered,0 AS unsubscribed,
+        count(*) FILTER (WHERE (kind='marketing' OR campaign_id IS NOT NULL) AND event_outcomes & 32 <> 0)::int AS clicked FROM mail GROUP BY day) x) AS days,
+      (SELECT json_agg(json_build_object('name',dc.name,'dkim',dc.identity #>> '{ses,DkimAttributes,Status}'='SUCCESS' AND dc.identity #>> '{ses,DkimAttributes,SigningEnabled}'='true',
+        'mailFrom',dc.identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS','dmarc',dc.identity #>> '{dmarc,status}',
+        'emails',(SELECT count(*) FROM mail m WHERE m.domain=dc.name OR m.domain LIKE '%.'||dc.name)))
+        FROM domain_claims dc WHERE dc.workspace_id=${wid} AND dc.sending_state='verified' AND NOT EXISTS (SELECT FROM s)) AS domains`);
+  return row!;
+}
+
+export function scoreView(row: Row, now = new Date()): SenderScore {
+  const s = row.standing;
+  if (!s) {
+    // Display only: no stored standing, so no movement limit; the score is the target once 100 emails were counted.
+    const q = quality(row.days ?? [], row.domains ?? [], false, now.toISOString().slice(0, 10)), emails = (row.days ?? []).reduce((n, d) => n + d.emails, 0);
+    const graded = emails >= CALIBRATION.recipients, score = graded ? round(q.target) : null;
+    return { state: graded ? 'graded' : 'warmup', emails: { firstEmails: Math.min(emails, CALIBRATION.recipients), last30Days: emails }, needed: CALIBRATION.recipients, calibratedAt: null,
+      score, grade: score === null ? null : gradeOf(score), target: round(q.target), raw: round(q.quality), ...grades(score), factors: q.factors, history: [], limit: null, standing: null, computedAt: now.toISOString() };
+  }
+  const score = s.phase === 'graded' && s.score !== null ? round(Number(s.score)) : null;
+  const overrideActive = row.override !== null && (!row.override_expires_at || Date.parse(row.override_expires_at) > now.getTime());
+  // As admission computes it (hosted_allowance_read): the base is the override or the score's limit; a resume caps it.
+  const base = row.exempt && !overrideActive ? null : overrideActive ? row.override! : s.daily_limit;
+  const restore = base !== null && row.restore_until && Date.parse(row.restore_until) > now.getTime() && row.restore_cap && row.restore_cap < base ? { daily: row.restore_cap, until: iso(row.restore_until)! } : null;
+  const daily = restore ? restore.daily : base;
+  const next = score === null ? null : nextBand(score);
+  const effective = daily ?? 10_000;
+  const release = s.release_until && Date.parse(s.release_until) > now.getTime() && s.release_percent ? { percent: s.release_percent, until: iso(s.release_until)! } : null;
   return {
-    state: warmup ? 'warmup' : 'graded',
-    emails: { firstEmails: Math.min(input.firstEmails, WARMUP_EMAILS), last30Days: last.emails },
-    needed: WARMUP_EMAILS,
-    score: warmup ? null : round(score),
-    grade: warmup ? null : BANDS[index]!.grade,
-    target: round(last.target), raw: round(last.raw),
-    band: warmup ? null : { min: BANDS[index]!.min, max: above?.min ?? 100 },
-    next: warmup || !above ? null : { grade: above.grade, at: above.min },
-    factors: last.factors.map(f => ({ ...f, value: f.value === null ? null : round(f.value, 6), score: f.score === null ? null : round(f.score), points: f.points === null ? null : round(f.points, 2) })),
-    history: warmup ? [] : history,
-    computedAt: now.toISOString(),
+    state: score === null ? 'warmup' : 'graded', emails: { firstEmails: Math.min(s.first_recipients, CALIBRATION.recipients), last30Days: row.last30 }, needed: CALIBRATION.recipients, calibratedAt: iso(s.calibrated_at),
+    score, grade: score === null ? null : gradeOf(score), target: round(Number(s.target)), raw: round(Number(s.quality)), ...grades(score), factors: s.factors, history: row.history.map(h => ({ date: h.date, score: Number(h.score) })),
+    limit: { daily, source: overrideActive ? 'override' : row.exempt ? 'exempt' : score === null ? 'calibrating' : 'score', band: s.band_limit,
+      next: next && !overrideActive && !row.exempt ? { limit: next.limit, atScore: next.min } : null,
+      override: overrideActive ? { daily: row.override!, expiresAt: iso(row.override_expires_at) } : null, restore,
+      strikeCapUntil: s.strike_until && Date.parse(s.strike_until) > now.getTime() ? iso(s.strike_until) : null,
+      perMinute: burstFor(effective), marketingPerHour: marketingHourFor(effective), transactionalReserve: overrideActive ? Math.ceil(effective * 0.1) : reserveFor(effective) },
+    standing: { step: s.step, reasons: s.reasons, since: iso(s.since)!, pauseKind: s.step === 'pause' ? s.pause_kind : null,
+      marketingHeld: (stepRank(s.step) >= stepRank('restrict') && !release) || s.marketing_hold, marketingRelease: release, strikes: s.strikes.length,
+      selfService: selfService(s, now.getTime()), version: s.version, sequence: Number(s.sequence) },
+    computedAt: iso(s.computed_at) ?? now.toISOString(),
   };
 }
-
-// One statement: per-day counts for the 50 days the 14 replayed windows need (each 30 days plus the 7 days before its
-// busiest day), sender volume per From domain, the first-100 count, the connection kind and the hosted domain facts.
-async function loadInputs(runtime: Runtime, workspaceId: string, now: Date): Promise<ScoreInputs> {
-  const today = dayKey(Date.parse(now.toISOString().slice(0, 10) + 'T00:00:00Z'));
-  const since = new Date(Date.parse(today + 'T00:00:00Z') - (WINDOW_DAYS + HISTORY_DAYS + 6) * DAY_MS).toISOString();
-  const recent = new Date(Date.parse(today + 'T00:00:00Z') - (WINDOW_DAYS - 1) * DAY_MS).toISOString();
-  const { rows: [row] } = await runtime.db.execute<{ days: DayRow[]; senders: { domain: string; emails: number }[]; first_emails: number; kind: string | null; domains: Omit<DomainRow, 'emails'>[] }>(sql`
-    WITH mail AS MATERIALIZED (
-      SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, created_at, status, error_code, event_outcomes, provider_id,
-        lower(substring(from_address from '@([A-Za-z0-9.-]+)')) AS domain
-      FROM sending_emails WHERE workspace_id = ${workspaceId} AND NOT simulated AND created_at >= ${since}::timestamptz
-        AND hosted_real_cost(to_addresses || cc_addresses || bcc_addresses) > 0
-    ), days AS (
-      SELECT day, count(*)::int AS emails,
-        count(*) FILTER (WHERE status <> 'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
-        count(*) FILTER (WHERE status = 'delivered' OR event_outcomes & 2 <> 0)::int AS delivered,
-        count(*) FILTER (WHERE status = 'bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
-        count(*) FILTER (WHERE status = 'complained' OR event_outcomes & 8 <> 0)::int AS complained,
-        count(*) FILTER (WHERE error_code = 'CONTENT_REJECTED_SPAM')::int AS screened,
-        count(*) FILTER (WHERE status = 'suppressed')::int AS suppressed
-      FROM mail GROUP BY day
-    )
-    SELECT
-      (SELECT coalesce(json_agg(days ORDER BY day), '[]'::json) FROM days) AS days,
-      (SELECT coalesce(json_agg(json_build_object('domain', domain, 'emails', n)), '[]'::json) FROM (SELECT domain, count(*)::int AS n FROM mail WHERE created_at >= ${recent}::timestamptz AND domain IS NOT NULL GROUP BY domain) s) AS senders,
-      (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id = ${workspaceId} AND NOT simulated
-        AND hosted_real_cost(to_addresses || cc_addresses || bcc_addresses) > 0 LIMIT ${WARMUP_EMAILS}) f) AS first_emails,
-      (SELECT kind FROM provider_connections WHERE workspace_id = ${workspaceId}) AS kind,
-      (SELECT coalesce(json_agg(json_build_object('name', name,
-        'dkim', identity #>> '{ses,DkimAttributes,Status}' = 'SUCCESS' AND identity #>> '{ses,DkimAttributes,SigningEnabled}' = 'true',
-        'mailFrom', identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}' = 'SUCCESS',
-        'dmarc', identity #>> '{dmarc,status}')), '[]'::json)
-        FROM domain_claims WHERE workspace_id = ${workspaceId} AND sending_state = 'verified') AS domains`);
-  const senders = row?.senders ?? [];
-  // Mail from a subdomain counts towards the claimed domain it belongs to.
-  const volume = (name: string) => senders.filter(s => s.domain === name || s.domain.endsWith('.' + name)).reduce((sum, s) => sum + s.emails, 0);
-  const screened = Boolean(runtime.config.screen && runtime.config.hostedScreen && row?.kind === 'shared');
-  return { days: row?.days ?? [], domains: (row?.domains ?? []).map(d => ({ ...d, dkim: d.dkim === true, mailFrom: d.mailFrom === true, emails: volume(d.name) })), firstEmails: row?.first_emails ?? 0, screened, today };
+function grades(score: number | null) {
+  if (score === null) return { band: null, next: null };
+  const index = GRADE_BANDS.findIndex(b => score >= b.min), above = index > 0 ? GRADE_BANDS[index - 1]! : null;
+  return { band: { min: GRADE_BANDS[index]!.min, max: above?.min ?? 100 }, next: above ? { grade: above.grade, at: above.min } : null };
 }
 
-export async function protocolScoreCap(runtime:Runtime,w:string){const now=new Date();const grade=computeSenderScore(await loadInputs(runtime,w,now),now).grade;return grade===null?200:({'A+':2000,A:2000,B:1000,C:300,D:100,F:50})[grade];}
+/** IMAP/SMTP compose caps follow the same limit as API sending (merge principle): the stored daily limit, or 100. */
+export async function protocolScoreCap(runtime: Runtime, w: string) {
+  const { rows: [row] } = await runtime.db.execute<{ cap: number | null }>(sql`SELECT daily_limit AS cap FROM sender_standing WHERE workspace_id=${w}`);
+  return row?.cap ?? CALIBRATION.limit;
+}
+
+const dashboardSecurity = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 export function registerSenderScore(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/sender-score', operationId: 'getSenderScore', tags: ['Metrics'], security,
-    description: 'The workspace sender score: a 0–100 reputation grade from its own sending over 30 days (complaints, bounces, content-screen rejections, domain authentication, suppression hits, volume spikes). No grade until the first 100 real emails: simulated sends and emails only to the SES mailbox simulator (…@simulator.amazonses.com) never count. The score starts at 75 and moves at most +2 or −15 a day towards its target. ' + DASHBOARD_CACHE_NOTE + ' Workspace-wide: keys restricted to domains get 403.',
+    description: 'The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds; a change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.',
     responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
     const a = actor(c, 'read');
     if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.');
-    const compute = async () => { const now = new Date(); return computeSenderScore(await loadInputs(c.env, a.workspaceId, now), now); };
+    const compute = async () => scoreView(await loadStanding(c.env, a.workspaceId));
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const body = await dashboardRead(c, ['sender-score', a.workspaceId, Math.floor(Date.now() / 60_000)].join('|'), compute);
-    c.header('x-bane-sender-score-cache', body.cache);
+    // Keyed by the standing's version and sequence too: a release, resume or operator action (or a limit change) shows at
+    // once, on every isolate, instead of after the minute. One indexed read.
+    const { rows: [standing] } = await c.env.db.execute<{ v: string | null }>(sql`SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}`);
+    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
+    c.header('x-bane-sender-score-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/sender-score/release', operationId: 'releaseSenderStanding', tags: ['Metrics'], security: dashboardSecurity,
+    description: 'Owner self-service on the dashboard, after the fix checklist. A restrict (marketing held) can be released 24 hours after it started, once every 14 days, when the last 24 hours are back under the warn line: marketing resumes at 50% of its allowance for 48 hours. A pause caused only by transactional bounces can be resumed once every 30 days: the limit is 50% for 48 hours and marketing stays held for 24 hours. Anything else needs a review. Owners and admins only.',
+    request: { body: json(z.object({ checklist: z.object({ bouncedRemoved: z.literal(true).describe('Contacts that bounced or complained are removed.'), listSourceConfirmed: z.literal(true).describe('Every contact opted in; no bought or old lists.') }).strict() }).strict().openapi('SenderStandingRelease')) },
+    responses: { 200: response(SenderScoreSchema), ...errors } }), async c => {
+    const session = dashboardSession(c, true);
+    const { applyChange, liveLadder } = await import('./standing.js');
+    const stored = (await c.env.db.execute<Stored>(sql`SELECT * FROM sender_standing WHERE workspace_id=${session.workspaceId}`)).rows[0];
+    if (!stored) throw new ApiError(404, 'NOT_FOUND', 'This workspace has no Hosted sending standing.');
+    const offer = selfService(stored);
+    if (!offer.available) throw new ApiError(409, 'STANDING_REVIEW_REQUIRED', offer.reason ?? 'Nothing to release: sending is not held.', undefined, false, offer.availableAt ?? undefined);
+    if (offer.action === 'release_marketing') {
+      const live = await liveLadder(c.env, session.workspaceId);
+      if (live && stepRank(evaluateLadder(live).level) >= stepRank('warn')) throw new ApiError(409, 'STANDING_STILL_ABOVE_LINE', 'The last 24 hours are still over the warn line. Remove the contacts that bounced or complained, then try again once the rate is under it.');
+    }
+    await c.env.db.transaction(tx => applyChange(tx, { workspaceId: session.workspaceId, actor: { kind: 'owner', id: session.userId, via: 'dashboard' }, kind: 'release', expectVersion: stored.version, step: 'warn',
+      reasons: stored.reasons, ...(offer.action === 'release_marketing' ? { release: { percent: 50, hours: 48 }, touch: { lastRelease: true } } : { resume: { percent: 50, marketingHours: 24, caps: c.env.config.hostedSendCaps }, touch: { lastSelfResume: true } }),
+      details: { checklist: ['bouncedRemoved', 'listSourceConfirmed'], action: offer.action } }));
+    return c.json(scoreView(await loadStanding(c.env, session.workspaceId)), 200);
   });
 }
