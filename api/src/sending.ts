@@ -1385,8 +1385,10 @@ export function registerSending(app: App) {
     if (at <= Date.now() || at > Date.now() + 365 * 86400000) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.', 'scheduledAt');
     const ref = campaignRef(a, campaign.id);
     if (!(await db.execute(rescheduleCampaign(ref, new Date(at).toISOString()))).rows.length) throw new ApiError(409, 'CAMPAIGN_NOT_SCHEDULED', 'This campaign started sending; it can no longer be rescheduled.');
-    // The run job waits for the old time; wake it so it rereads the schedule now (an earlier time would otherwise be missed).
-    await db.execute(wakeCampaignRun(ref)); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
+    // Requeue the run with a fresh token in this transaction: a worker that already decided to wait for the old time
+    // (or to start sending at it) can no longer settle its deferral, so an earlier time is never missed. Only waiting
+    // runs: a paused campaign has none, and resume queues one.
+    if (campaign.state !== 'paused') { await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {})); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
   }, unreleasedSchedule));
 }
 

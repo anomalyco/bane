@@ -12591,6 +12591,49 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  // PR #86 review: rescheduling raced the campaign's one run job. Both PoCs drive the real handler; the first also the
+  // real processJobs claim and settlement, with a session-local jobs table so no other scenario's job is claimed.
+  async function scheduledCampaign(local: (method: string, path: string, body?: Json) => Promise<Reply>, run: (type: string) => Promise<void>, inMs: number) {
+    const list = ok(await local('POST', '/v1/lists', { name: unique('reschedule-race') }), 201);
+    const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+    ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'acceptance-fixture', evidence: 'Synthetic reserved-domain fixture.' }));
+    ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+    const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('reschedule-race'), from: 'sender@example.com', subject: 'Scheduled', html: '<p>Scheduled content.</p>', audience: { listId: list.id } }), 201);
+    ok(await local('POST', `/v1/campaigns/${campaign.id}/schedule`, { revision: campaign.revision, scheduledAt: new Date(Date.now() + inMs).toISOString() }), 202);
+    await run('campaign.run');
+    assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'scheduled');
+    return campaign as Json;
+  }
+  test('an earlier reschedule wins over a run that already decided to wait for the old time', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const [{ processJobs, JobDeferred }, { jobHandlers }, { sql }] = await Promise.all([import('./src/jobs.js'), import('./src/sending.js'), import('drizzle-orm')]);
+      const campaign = await scheduledCampaign(local, run, 3_600_000), jobId = `campaign.run:${campaign.id}`;
+      await runtime.db.execute(sql`CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP`);
+      try {
+        await runtime.db.execute(sql`INSERT INTO jobs SELECT * FROM public.jobs WHERE id = ${jobId}`);
+        await runtime.db.execute(sql`UPDATE jobs SET available_at = now() - interval '1 second' WHERE id = ${jobId}`);
+        const token = (await db.query('SELECT payload FROM jobs WHERE id = $1', [jobId])).rows[0].payload.run;
+        // The handler reads the old time and throws its deferral; the owner moves the send earlier before it settles.
+        const earlier = new Date(Date.now() + 1_800_000).toISOString();
+        let moved: Json | undefined;
+        const racing: import('./src/core.js').JobHandler = async (rt, payload, job) => {
+          try { await jobHandlers['campaign.run']!(rt, payload, job); }
+          catch (cause) { if (cause instanceof JobDeferred && !moved) moved = ok(await local('POST', `/v1/campaigns/${campaign.id}/reschedule`, { scheduledAt: earlier })); throw cause; }
+        };
+        assert.equal(await processJobs(runtime, { 'campaign.run': racing }, 1, 1), 1);
+        assert.equal(Date.parse(moved!.scheduledAt), Date.parse(earlier));
+        const requeued = (await db.query('SELECT status, available_at, payload FROM jobs WHERE id = $1', [jobId])).rows[0];
+        assert.equal(requeued.status, 'pending');
+        assert.notEqual(requeued.payload.run, token, 'The reschedule requeued the run with a fresh token, so the old deferral could not settle.');
+        assert.ok(new Date(requeued.available_at).getTime() <= Date.parse(earlier), `The run wakes by the new time, not the old one (job at ${new Date(requeued.available_at).toISOString()}).`);
+        // The fresh run waits for exactly the new, earlier time.
+        assert.equal(await processJobs(runtime, { 'campaign.run': jobHandlers['campaign.run']! }, 1, 1), 1);
+        const waiting = (await db.query('SELECT status, available_at FROM jobs WHERE id = $1', [jobId])).rows[0];
+        assert.deepEqual({ status: waiting.status, at: new Date(waiting.available_at).getTime() }, { status: 'pending', at: Date.parse(earlier) });
+      } finally { await runtime.db.execute(sql`DROP TABLE IF EXISTS pg_temp.jobs`); }
+    });
+  });
+
   test('routine callbacks create processed receipts and public events immediately, without prereceipts or SES work', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const { operationJobs } = await import('./src/operations.js');
