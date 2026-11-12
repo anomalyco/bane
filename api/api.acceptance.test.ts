@@ -8777,6 +8777,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(await race(()=>accept(a,'m2',many),()=>accept(b,'m2',['a@rwin.invalid'])),null);
     assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'failed'}});
   });
+  // tear witnesses: W accept m1, V accept m2, W commit (backlog 1) -> m2 pending; and a release pass waiting
+  // behind an admission released past the backlog (8 steps).
+  test('receive backlog: an admission or release waiting on the window row counts the backlog committed meanwhile',async t=>{
+    const {a,b,w,accept,race,state}=await receiptRace(t,{messages:3,backlog:1});
+    assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m2',['a@rwin.invalid'])),'held');
+    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'held'}});
+    await a.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
+    await a.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[w]);
+    assert.equal(await race(()=>accept(a,'m3',['a@rwin.invalid']),async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n),1);
+    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held',m3:'pending'}});
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
