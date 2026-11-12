@@ -98,14 +98,16 @@ function WebhooksList() {
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
     <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail on inbound addresses: received messages and the replies you send from them. Without a public URL, long-poll <code>GET /v1/inbound/events</code>. For email sent through the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
     {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
-        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${row.id}`}>{row.description || row.url}</Link>{row.description && <span className="muted settings-break">{row.url}</span>}</div> },
-        { key: 'addresses', label: 'Addresses', width: '20%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
-        { key: 'events', label: 'Events', width: '14%', render: row => <span title={row.eventTypes.join(', ')}>{!row.eventTypes.length ? <span className="muted">None</span> : row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span> },
-        { key: 'headers', label: 'Headers', width: '16%', render: row => <HeaderNames headers={row.headers} /> },
-        { key: 'status', label: 'Status', render: row => <StatusBadge status={row.paused ? 'Paused' : 'Active'} tone={row.paused ? 'neutral' : 'success'} /> },
+        // A webhook's card: its name and status, its URL, then the addresses and events it gets.
+        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><span>{row.description || row.url}</span>{row.description && <span className="muted settings-break">{row.url}</span>}</div>, cardRender: row => row.description || row.url },
+        { key: 'url', label: 'URL', table: false, card: 'line', render: row => row.url },
+        { key: 'addresses', label: 'Addresses', width: '20%', card: 'line', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
+        { key: 'events', label: 'Events', width: '14%', card: 'inline', render: row => <span title={row.eventTypes.join(', ')}>{!row.eventTypes.length ? <span className="muted">None</span> : row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span>, cardRender: row => !row.eventTypes.length ? 'No events' : row.eventTypes.length === 1 ? row.eventTypes[0] : `${row.eventTypes.length} events` },
+        { key: 'headers', label: 'Headers', width: '16%', card: 'hide', render: row => <HeaderNames headers={row.headers} /> },
+        { key: 'status', label: 'Status', card: 'aside', render: row => <StatusBadge status={row.paused ? 'Paused' : 'Active'} tone={row.paused ? 'neutral' : 'success'} /> },
       ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={50} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data?.nextCursor)} />}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add inbound webhook" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-mailbox-webhook">Add webhook</Button></>}>
@@ -173,7 +175,7 @@ function WebhookDetail() {
         {!input ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
           <WebhookFields input={input} urlHint={save.data?.url ?? current.url} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
-          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setHeaders(null); setErrors({}) }}>Discard</Button>}</div>
+          <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setHeaders(null); setErrors({}) }}>Discard</Button>}</div>
         </form>}
       </section>
     </>}

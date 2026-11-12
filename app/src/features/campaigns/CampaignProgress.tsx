@@ -22,6 +22,8 @@ const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(camp
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
 const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
+/** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
+export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
 
 // Poll only while a send can still change; a future schedule waits until it is due.
 // While paused or waiting for the next window, poll slowly unless queued mail is still draining.

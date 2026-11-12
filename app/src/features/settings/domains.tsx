@@ -12,7 +12,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
 import { catchAllSetting } from '../inbound/concepts'
 import { fieldError, MutationError } from './shared'
-import { DomainDetailSkeleton, settingsColumns } from './skeletons'
+import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
@@ -36,6 +36,13 @@ function ReceivingCell({ domain, name }: { domain?: MailboxDomain; name: string 
   const status = receivingStatus[domain.status]
   // The receiving host is shown only when it isn't the domain itself (a reply. subdomain, say).
   return <div className="settings-cell-stack"><StatusBadge status={status.label} tone={status.tone} />{domain.name !== name && <div className="muted receiving-clip">at {domain.name}</div>}</div>
+}
+
+// A domain's card line: what setup still waits for, or where it receives and how many addresses it has.
+function DomainCardLine({ domain, receiving }: { domain: Domain; receiving?: MailboxDomain }) {
+  if (domain.status !== 'verified' || ['pending', 'failed'].includes(domain.mailFromStatus) || domain.receivingIssue) return <span className={domain.receivingIssue ? 'text-warning' : undefined}>{setupSummary(domain)}</span>
+  if (!receiving || receiving.status === 'off' || receiving.status === 'disabled') return <>Send only</>
+  return <>Receiving {receivingStatus[receiving.status].label.toLowerCase()}{receiving.name !== domain.name ? ` at ${receiving.name}` : ''} · {receiving.addressCount.toLocaleString('en-US')} {receiving.addressCount === 1 ? 'address' : 'addresses'}</>
 }
 
 /** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
@@ -64,6 +71,7 @@ export function DomainsPage() {
   const { regionId } = useRegion()
   const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
+  const columns = domainColumns(multiTenant)
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
   const page = pageState.regionId === regionId ? pageState.page : 1
@@ -91,11 +99,12 @@ export function DomainsPage() {
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} description="Add a domain to send from it and receive mail at it." action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
-        { key: 'name', label: 'Domain', width: multiTenant ? '30%' : '26%', render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { key: 'sending', label: 'Sending', width: '24%', render: row => <div className="settings-cell-stack"><StatusBadge status={row.status === 'verified' ? 'Verified' : label(row.status)} tone={row.status === 'issue' ? 'danger' : row.status === 'verified' ? 'success' : 'warning'} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus) || row.receivingIssue) && <div className={row.receivingIssue ? 'text-warning' : 'muted'}>{setupSummary(row)}</div>}</div> },
-        { key: 'receiving', label: 'Receiving', width: '28%', render: row => <ReceivingCell domain={receivingOf(row.id)} name={row.name} /> },
-        { key: 'addresses', label: 'Addresses', align: 'right', render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted">—</span> } },
-        ...multiTenant ? [] : [{ ...settingsColumns.domains[2], render: (row: Domain) => row.regionId }],
+        { ...columns[0], render: row => row.name },
+        { ...columns[1], render: row => <div className="settings-cell-stack"><StatusBadge status={row.status === 'verified' ? 'Verified' : label(row.status)} tone={row.status === 'issue' ? 'danger' : row.status === 'verified' ? 'success' : 'warning'} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus) || row.receivingIssue) && <div className={row.receivingIssue ? 'text-warning' : 'muted'}>{setupSummary(row)}</div>}</div>,
+          cardRender: row => <StatusBadge status={row.status === 'verified' ? 'Verified' : label(row.status)} tone={row.status === 'issue' ? 'danger' : row.status === 'verified' ? 'success' : 'warning'} /> },
+        { ...columns[2], render: row => <ReceivingCell domain={receivingOf(row.id)} name={row.name} />, cardRender: row => <DomainCardLine domain={row} receiving={receivingOf(row.id)} /> },
+        { ...columns[3], render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted">—</span> } },
+        ...multiTenant ? [] : [{ ...columns[4], render: (row: Domain) => row.regionId }],
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
