@@ -10424,6 +10424,10 @@
                   "null"
                 ]
               },
+              "htmlTooComplex": {
+                "type": "boolean",
+                "description": "With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it."
+              },
               "attachments": {
                 "type": "array",
                 "items": {
@@ -10472,6 +10476,7 @@
             },
             "required": [
               "html",
+              "htmlTooComplex",
               "attachments"
             ]
           }

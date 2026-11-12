@@ -9882,6 +9882,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('hosted screen reads what Outlook shows inside a conditional comment',async t=>{
+    // A subtest, so its classifier mock is lifted before the fixture's own network guard is.
+    await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
+      const {screenSnapshot}=await import('./src/screen.js');
+      runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>Response.json({answers:{spam:{noul:JSON.parse(String(init.body)).state.email.body.toLowerCase().includes('samplemarker')?0.99:0.1}}}));
+      const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,text:'Hello',raw:'Hello'};
+      // Its text, with or without markup, and where its links go.
+      for(const html of ['<p>Hello</p><!--[if mso]><p>SampleMarker</p><![endif]-->','<p>Hello</p><!-- [if gte mso 9]>SampleMarker<![endif] -->','<!--[if (gte mso 9)|(IE)]><table><tr><td>SampleMarker</td></tr></table><![endif]--><p>Hello</p>',
+        '<p>Hello</p><!--[if mso]><v:roundrect href="https://samplemarker.invalid/open"><center>Open</center></v:roundrect><![endif]-->'])
+        assert.equal((await screenSnapshot(runtime,{...s,html},true))?.spam,.99,html);
+      // A note in an ordinary comment, a template and a conditional style sheet are not the message's copy.
+      for(const html of ['<p>Hello</p><!-- SampleMarker <p>SampleMarker</p> -->','<p>Hello</p><template><p>SampleMarker</p></template>','<p>Hello</p><!--[if mso]><style>.samplemarker{color:red}</style><![endif]-->'])
+        assert.equal((await screenSnapshot(runtime,{...s,html},true))?.spam,.1,html);
+      await assert.rejects(screenSnapshot(runtime,{...s,html:`<p>Hello</p><!--[if mso]>${'<div>'.repeat(257)}<![endif]-->`},true),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
+    }));
+  });
+
+  test('received HTML past the parsing budget is flagged for readers, and the dashboard scans HTML in one pass',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const wid=runtime.config.workspaceId,thread=unique('thr'),id=unique('msg'),small='<p>Hello <b>there</b></p>';
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,wid]);
+      await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,subject,text,html) VALUES($1,$2,'inbound',$3,'Budget','Plain body',$4)",[id,wid,thread,small]);
+      const read=async(html:string,query='includeHtml=true')=>{await db.query('UPDATE mail_messages SET html=$1 WHERE id=$2',[html,id]);return ok(await local('GET',`/v1/inbound/messages/${id}?${query}`));};
+      assert.deepEqual([(await read(small)).html,(await read(small)).htmlTooComplex],[small,false]);
+      assert.deepEqual([(await read(small,'')).html,(await read(small,'')).htmlTooComplex],[null,false],'Without includeHtml there is no HTML to judge.');
+      // 300 formatting elements left open, then a paragraph: nested deeper than the 256 levels any reader of stored HTML parses.
+      const open=Array.from({length:300},(_,i)=>`<font size="${i}">`).join(''),deep=`<p>${open}<p>Text`;
+      for(const html of [deep,`<noscript>${deep}</noscript>`,'<div>'.repeat(257)]) for(const query of ['includeHtml=true','includeHtml=true&includeDelivery=true']) {
+        const message=await read(html,query);
+        assert.equal(message.htmlTooComplex,true,`${html.slice(0,24)} with ${query}`);assert.equal(message.html,html,'The body is returned as stored.');assert.equal(message.text,'Plain body');
+      }
+      assert.equal((await read(`<noscript>${small}</noscript>`)).htmlTooComplex,false);
+      assert.equal((await read('<table>'+'<tr><td><b>Cell</b></td></tr>'.repeat(2000)+'</table>')).htmlTooComplex,false,'A large ordinary table is within the budget.');
+    });
+    // The dashboard reads these straight from the sender's HTML before sanitizing it (app/src/lib/html-scan.ts).
+    const {mentionsRemoteImage,withoutFontStyles,imageTags}=await import('../app/src/lib/html-scan.js');
+    for(const [html,remote] of [['<img src="https://images.example/a.png">',true],["<img alt=x\n src = 'http://images.example/a.png'>",true],['<p style="background:url(https://images.example/a.png)">',true],['<td background="https://images.example/a.png">',true],
+      ['<p style="background:url( \'//images.example/a.png\')">',true],['<img src="cid:logo">',false],['<img src="data:image/png;base64,AAAA">',false],['<video src="https://media.example/a.mp4"></video><img alt="">',false],['<p>src = https: is only text here</p>',false],['<p>Plain</p>',false]] as const) assert.equal(mentionsRemoteImage(html),remote,html);
+    assert.equal(withoutFontStyles('a<style data-bane-fonts>@font-face{font-style:italic}</style>b<style data-opensend-fonts>i</style>c'),'abc');
+    assert.equal(withoutFontStyles('a<style data-bane-fonts>italic'),'a<style data-bane-fonts>italic','An unclosed block is left alone.');
+    assert.deepEqual(imageTags('<p><img src="cid:a"><IMG alt="x" src=cid:b>text<img src="cid:unclosed"'),['<img src="cid:a">','<IMG alt="x" src=cid:b>'],'Inline images are looked up in complete tags only.');
+    // One pass each over a megabyte of the shapes that make a backtracking pattern start over: well under a second in all.
+    const started=performance.now(),run=1_000_000;
+    for(const html of ['<img '.repeat(run/5),'<img src='+' '.repeat(run),'url('+' '.repeat(run),'<p background='+' '.repeat(run),' src'+' '.repeat(run),'<style data-bane-fonts>'.repeat(run/23)]) {
+      assert.equal(mentionsRemoteImage(html),false);assert.equal(withoutFontStyles(html),html);assert.deepEqual(imageTags(html),[]);
+    }
+    const elapsed=performance.now()-started;t.diagnostic(`HTML scans: 6 MB of adversarial input in ${elapsed.toFixed(0)} ms`);
+    assert.ok(elapsed<1000,`Scanning took ${elapsed.toFixed(0)} ms`);
+  });
+
   test('direct-send HTML exceeding the tree budget is refused before admission SQL', async t=>{
     await simulatedSesFixture(t,async({runtime,local,request,db})=>{
       const key=ok(await local('POST','/v1/api-keys',{name:'HTML budget',permissions:['read','send']}),201).secret;
@@ -9895,7 +9946,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.diagnostic(`Bounded HTML: ${size} bytes refused in ${ms.toFixed(1)} ms`);
         if (BENCH) assert.ok(ms<50,`HTML validation took ${ms} ms`);
       }
+      // The markup is validated as every mail client may read it, not only as an HTML parser does. Mail is read without
+      // scripting, so <noscript> is markup; Outlook shows the inside of a conditional comment; and what a parser keeps
+      // as data (any other comment, a template, the fallback of frames and plugins) is markup to a lenient reader.
+      const send=(html:string)=>request('POST','/v1/emails/send',key,{from:'a@example.invalid',to:'b@example.invalid',subject:'Notes',html});
+      const link='<a href="javascript:void(0)">Notes</a>';
+      for(const html of [`<noscript>${link}</noscript>`,
+        `<!--[if mso]>${link}<![endif]-->`,`<!-- [IF gte mso 9]>${link}<![ENDIF] -->`,'<p>Notes</p><!--[if (gte mso 9)|(IE)]><table><tr><td background="javascript:void(0)">Notes</td></tr></table><![endif]-->',
+        '<!--[if mso]><v:roundrect href="file://files.example/notes"><center>Notes</center></v:roundrect><![endif]-->','<!--[if mso]><v:imagedata src="cid:notes" o:href="file://files.example/notes.png"/><![endif]-->',
+        `<!--[if mso]><p>One</p><!--[if gte mso 9]>${link}<![endif]--><p>Two</p><![endif]-->`,`<!--[if mso]><template>${link}</template><![endif]-->`,`<!--[if mso]>${link}-->`,
+        `<!-- ${link} -->`,`<!-- one -- > ${link} -->`,`<! ${link}`,`<template>${link}</template>`,
+        `<iframe>${link}</iframe>`,'<iframe srcdoc="&lt;a href=&quot;javascript:void(0)&quot;&gt;Notes&lt;/a&gt;"><textarea></iframe>',`<noembed>${link}</noembed>`,`<noframes>${link}</noframes>`,`<noframes><!--[if mso]>${link}<![endif]--></noframes>`,
+      ]) error(await send(html),422,'UNSAFE_HTML_URL');
+      // Their nesting and their size count against the one budget, wherever they sit and however they are chained.
+      for(const html of [`<noscript>${nested}</noscript>`,`<!--[if mso]>${nested}<![endif]-->`,'<div>'.repeat(200)+`<!--[if mso]>${'<div>'.repeat(100)}<![endif]-->`,`<!-- ${nested} -->`,
+        '<!--'.repeat(6000),'<iframe>'.repeat(6000),'<!--[if mso]><b>x</b><![endif]-->'.repeat(6000)]){
+        const start=performance.now();error(await send(html),422,'CONTENT_TOO_LARGE_TO_SCREEN');
+        assert.ok(performance.now()-start<1500,`${html.slice(0,24)} is refused within the budget`);
+      }
       assert.equal(query.mock.callCount(),0); query.mock.restore();
+      // An ordinary message for Outlook and everyone else is none of that: Office settings, conditional tables, a VML
+      // button beside its plain link, and notes left in comments.
+      const ordinary='<!--[if mso]><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--><!-- header: logo left, links right -->'
+        +'<!--[if (gte mso 9)|(IE)]><table role="presentation" width="600"><tr><td><![endif]--><p>Hello</p>'
+        +'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="https://example.invalid/open" style="height:44px;width:200px" arcsize="12%" fillcolor="#111111"><center>Open</center></v:roundrect><![endif]-->'
+        +'<!--[if !mso]><!--><a href="https://example.invalid/open">Open</a><!--<![endif]--><!--[if (gte mso 9)|(IE)]></td></tr></table><![endif]--><!-- <a href="/old">An older link</a> -->';
+      runtime.config.multiTenant=false;
+      ok(await local('POST','/v1/emails/send',mail({html:ordinary})),202);
     });
   });
 

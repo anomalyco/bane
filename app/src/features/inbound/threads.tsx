@@ -83,8 +83,8 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
         {detail.error && <Alert tone="danger">{detail.error instanceof Error ? detail.error.message : 'The full message could not be loaded.'}</Alert>}
         {loaded ? loaded.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full.</Alert>
           : message.bodyTruncated && <Alert tone="info">This is a preview of a long message. <Button variant="ghost" size="sm" loading={pending && wanted === 'full'} onClick={() => setWanted('full')}>Show the full message</Button></Alert>}
-        {formatted && loaded?.html ? <ReceivedEmailPreview html={loaded.html} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />
-          : <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
+        {formatted && loaded?.html && <ReceivedEmailPreview html={loaded.html} tooComplex={loaded.htmlTooComplex} title={`Message from ${nameOf(message.from)}`} className="mailbox-message__html" />}
+        {(!formatted || !loaded?.html || loaded.htmlTooComplex) && <div className="mailbox-message__body">{(showQuoted ? text : replyText || text) || <span className="muted">(no text)</span>}</div>}
         {loaded && wanted === 'formatted' && !loaded.html && <p className="mailbox-message__attachments-note muted">This message has no formatted version.</p>}
         <div className="cluster mailbox-message__toggles">
           <Button variant="ghost" size="sm" onClick={onReply} aria-pressed={isTarget}><Reply size={14} aria-hidden="true" />{isTarget ? 'Replying to this' : 'Reply to this message'}</Button>

@@ -612,7 +612,8 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
       for (const attr of element.attrs) {
         const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
         // Template structure is checked before rendering; validate complete URLs only after substitution.
-        if (!template && URL_ATTRIBUTES.has(name)) validateUrl(attr.value);
+        // Office markup carries its links and images under a prefix (o:href on VML), read like the plain attribute.
+        if (!template && (URL_ATTRIBUTES.has(name) || /:(?:href|src)$/.test(name))) validateUrl(attr.value);
         if (!template && ['srcset', 'imagesrcset', 'ping', 'archive'].includes(name)) {
           const urls = name.endsWith('srcset') ? attr.value.split(',').map(part => part.trim().split(/\s+/)[0]!) : attr.value.trim().split(/\s+/);
           for (const url of urls) if (url) validateUrl(url);
@@ -628,7 +629,8 @@ function inspectHtml(source: string, root: DefaultTreeAdapterMap['node'], templa
       }
     }
     if ('childNodes' in node) for (const child of node.childNodes) stack.push({ node: child, unsafe: blocked });
-    if (element && 'content' in element) stack.push({ node: (element as DefaultTreeAdapterMap['template']).content, unsafe: blocked });
+    // A template's content, and markup a lenient client may read where this parser kept data (bounded-html.ts).
+    if ('content' in node) stack.push({ node: (node as DefaultTreeAdapterMap['template']).content, unsafe: blocked });
   }
   safe.sort((a, b) => a.start - b.start); let rangeIndex = 0;
   if (template) for (const match of source.matchAll(/{{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*}}/g)) {
@@ -664,7 +666,8 @@ function interpolate(source: string | undefined, values: Record<string, unknown>
 }
 async function validateHtmlUrls(html: string | undefined) {
   if (html) {
-    const root = (await loadBoundedHtml()).boundedHtmlFragment(html, 'document');
+    // Every reading a mail client may give the markup: a link only Outlook shows is checked like any other.
+    const root = (await loadBoundedHtml()).boundedHtmlFragment(html, 'document', { clients: true });
     if (!root) throw new ApiError(422,'CONTENT_TOO_LARGE_TO_SCREEN','Simplify the HTML so it can be validated safely.','html');
     inspectHtml(html, root);
   }

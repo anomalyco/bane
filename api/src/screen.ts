@@ -69,7 +69,7 @@ async function body(snapshot: EmailSnapshot) {
   if (snapshot.html) {
     const { boundedHtmlFragment } = await import('./bounded-html.js');
     if (snapshot.html.length>512*1024) throw tooLarge();
-    const fragment=boundedHtmlFragment(snapshot.html);
+    const fragment=boundedHtmlFragment(snapshot.html,'fragment',{clients:true});
     if (!fragment) throw tooLarge();
     // Text as a client lays it out: inline runs stay one word, block elements end the line, and text a client shows
     // beside the flow (alt, title) follows on its own lines, as does a table row whose cells hold short pieces read
