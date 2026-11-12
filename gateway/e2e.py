@@ -193,7 +193,11 @@ def real_services():
             DATABASE_URL=db.replace("postgres@", "fixture_listener@"),
             MAILGW_HEALTH_PORT="0",
         )
-        yield lambda:run(['node','--import','tsx','--test','--test-name-pattern=^mail gateway:|agent inbox contracts and storage budgets', 'api.acceptance.test.ts'],cwd=api,env=env)
+        def acceptance():
+            tap=run(['node','--import','tsx','--test','--test-reporter=tap','--test-name-pattern=^mail gateway:|agent inbox contracts and storage budgets','api.acceptance.test.ts'],cwd=api,env=env)
+            for test in ['folder entries keep independent UIDs and shared flags, not shared state across inboxes','mail gateway: preview migration yields to writers and validates in a separate transaction']:
+                assert re.search(r'^\s*ok \d+ - '+re.escape(test)+r'\s*$',tap,re.M),f'Acceptance test did not run: {test}'
+        yield acceptance
         REAL.clear()
 
 
