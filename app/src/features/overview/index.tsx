@@ -26,9 +26,9 @@ export function OverviewPage() {
   const stream = requested === 'transactional' || requested === 'marketing' ? requested : 'all'
   // Each refresh runs one created-cohort aggregation; a minute is fresh enough, and a hidden tab stays quiet.
   const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
-  const regions = useRegionCatalog()
-  const current = regions.data?.data.find(region => region.region === regionId)
   const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const regions = useRegionCatalog({ enabled: !multiTenant })
+  const current = regions.data?.data.find(region => region.region === regionId)
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
   const controls = <div className="cluster ov-controls">
     {!multiTenant && <><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></>}
@@ -101,7 +101,7 @@ function Chart({ data, range, live }: { data: Overview; range: TimeRange; live: 
 // always reserved so loading, short and full lists are the same height.
 function LatestEmails() {
   const navigate = useNavigate()
-  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
+  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
     {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} onRowClick={row => navigate(logHref(row))} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
   </section>

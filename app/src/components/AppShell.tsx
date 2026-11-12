@@ -26,7 +26,8 @@ export function AppShell() {
   const location = useLocation()
   // Hosted workspaces view every region at once, so no page waits on a selected region.
   const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
-  const regions = useRegionCatalog()
+  // Hosted workspaces view every region at once and never read the SES region catalog.
+  const regions = useRegionCatalog({ enabled: !access.multiTenant })
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
   // Hosted workspaces reach the shell only once onboarding is done (see App). Their regions are

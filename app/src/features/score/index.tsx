@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import { Link } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Domain, SenderScore, SenderScoreFactor } from '../../data/types'
 import { number } from '../../lib/format'
@@ -94,7 +94,7 @@ function bestStep(report: SenderScore | undefined, domains: Domain[]) {
 export type NextItem = { key: string; text: string; meta?: string; to: string }
 export function useNextSteps(report: SenderScore | undefined): { items: NextItem[]; ready: boolean } {
   const { canAdminister } = useWorkspaceAccess()
-  const domains = useApiQuery(['domains', 'next-steps'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal), { enabled: canAdminister })
+  const domains = useApiDef(queries.domainSummary(), { enabled: canAdminister })
   const invitations = useApiDef(queries.workspaceInvitations(), { enabled: canAdminister })
   const webhooks = useApiDef(queries.webhooks(), { enabled: canAdminister })
   if (!canAdminister) return { items: [], ready: true }
