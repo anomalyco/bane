@@ -1,9 +1,9 @@
-export { RoutingPage } from './routing'
 import { Navigate, useLocation, useParams } from 'react-router'
 
 export { InboundPage } from './threads'
 export { InboundAddressDetailPage } from './addresses'
 export { ReceivingPage } from './receiving'
+export { TracePage } from './trace'
 export { InboundWebhookDetailPage, InboundWebhooksPage } from './webhooks'
 
 // Former /mailboxes links keep working: a mailbox is now an address filter on the thread-first inbox.

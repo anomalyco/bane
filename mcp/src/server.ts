@@ -15,11 +15,13 @@ const INBOUND = new Map([
   ['getRituals','get /v1/rituals'], ['testRituals','post /v1/rituals/test'],
   ['getRouting', 'get /v1/routing'], ['testRouting', 'post /v1/routing/test'], ['listRoutingVersions', 'get /v1/routing/versions'],
   ['listInboundDomains', 'get /v1/inbound/domains'], ['getInboundDomain', 'get /v1/inbound/domains/{id}'], ['enableInboundDomain', 'post /v1/inbound/domains/{id}/enable'],
-  ['listInboundAddresses', 'get /v1/inbound/addresses'], ['createInboundAddress', 'post /v1/inbound/addresses'],
+  ['listInboundAddresses', 'get /v1/inbound/addresses'], ['getInboundOverview', 'get /v1/inbound/overview'], ['createInboundAddress', 'post /v1/inbound/addresses'],
   ['getInboundAddress', 'get /v1/inbound/addresses/{addressId}'], ['updateInboundAddress', 'patch /v1/inbound/addresses/{addressId}'], ['deleteInboundAddress', 'delete /v1/inbound/addresses/{addressId}'],
   ['listInboundThreads', 'get /v1/inbound/threads'], ['createInboundThread', 'post /v1/inbound/threads'],
   ['getInboundThread', 'get /v1/inbound/threads/{threadId}'], ['updateInboundThread', 'patch /v1/inbound/threads/{threadId}'], ['replyToInboundThread', 'post /v1/inbound/threads/{threadId}/reply'],
   ['listInboundEvents', 'get /v1/inbound/events'],
+  // Read-only, so getInboundOverview's endpointsTruncated and toMore have a way to the full list here too.
+  ['listInboundWebhooks', 'get /v1/inbound/webhooks'], ['getInboundWebhook', 'get /v1/inbound/webhooks/{id}'],
   ['listInboundMessages', 'get /v1/inbound/messages'], ['getInboundMessage', 'get /v1/inbound/messages/{messageId}'],
 ]);
 const THREAD_SENDS = new Set(['createInboundThread', 'replyToInboundThread']);
@@ -250,7 +252,8 @@ async function main() {
       if (inbound || INBOUND.has(name)) {
         if (INBOUND.get(name) !== `${method} ${path}`) continue;
       }
-      if (config.addressKey && (routing || !inbound || path.startsWith('/v1/inbound/domains') || (path.startsWith('/v1/inbound/addresses') && method !== 'get'))) continue;
+      // An inbox key reads its own mail; REST refuses it workspace administration such as domains and webhooks.
+      if (config.addressKey && (routing || !inbound || path.startsWith('/v1/inbound/domains') || path.startsWith('/v1/inbound/webhooks') || (path.startsWith('/v1/inbound/addresses') && method !== 'get'))) continue;
       if (EXCLUDED.has(name) || (path === '/v1/api-keys' && method !== 'get')) continue;
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
       const write = method !== 'get' && !READ_ONLY_POSTS.has(name);

@@ -73,25 +73,28 @@ export function renderChat(type: string, body: unknown) {
     : { content: s.replace(/([\\*_~`|>\[\]()#])/g, '\\$1').replace(/^(\s*)-/gm,'$1\\-').slice(0, 2000), allowed_mentions: { parse: [] }, flags:4 };
 }
 
-type Row = {
+export type EndpointRow = {
   name: string; type: EndpointType; hook_id: string; verified: boolean; expires_at: string | Date | null; declined_at: string | Date | null;
   created_at: string | Date; paused: boolean; encrypted_value: string | null; url: string | null;
   per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null;
 };
 const iso = (v: string | Date | null) => (v === null ? null : new Date(v).toISOString());
 /** All endpoints of a workspace: Slack, Discord and forwards in mail_endpoints, plus keyed webhooks. One name space. */
-async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
-  return (await db.execute<Row>(sql`WITH e AS (
+/** Every endpoint row (named Slack, Discord, webhook and forward endpoints, and keyed webhooks) with its policy, as a
+ * FROM-able subquery. listEndpoints and the Receiving overview read endpoints through this one definition. */
+export const endpointSource = (w: string) => sql`(SELECT e.*,p.per_minute,p.retry_on_timeout,p.idempotent FROM (
       SELECT split_part(d.ref,':',2) AS name,split_part(d.ref,':',1) AS type,d.hook_id,d.verified,d.expires_at,d.declined_at,d.created_at,h.paused,d.encrypted_value,NULL::text AS url
       FROM mail_endpoints d JOIN mailbox_webhooks h ON h.workspace_id=d.workspace_id AND h.id=d.hook_id WHERE d.workspace_id=${w}
       UNION ALL
       SELECT h.key,'webhook',h.id,true,NULL,NULL,h.created_at,h.paused,NULL,h.url FROM mailbox_webhooks h
-      WHERE h.workspace_id=${w} AND h.key IS NOT NULL AND NOT starts_with(h.id,'con_'))
-    SELECT e.*,p.per_minute,p.retry_on_timeout,p.idempotent FROM e LEFT JOIN mail_action_policies p ON p.workspace_id=${w} AND p.hook_id=e.hook_id
+      WHERE h.workspace_id=${w} AND h.key IS NOT NULL AND NOT starts_with(h.id,'con_')) e
+    LEFT JOIN mail_action_policies p ON p.workspace_id=${w} AND p.hook_id=e.hook_id)`;
+export async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
+  return (await db.execute<EndpointRow>(sql`SELECT e.* FROM ${endpointSource(w)} e
     WHERE (${q.name ?? null}::text IS NULL OR e.name=${q.name ?? null}) AND (${q.cursor ?? null}::text IS NULL OR e.name>${q.cursor ?? null}) AND (${q.type ?? null}::text IS NULL OR e.type=${q.type ?? null})
     ORDER BY e.name LIMIT ${(q.limit ?? 500) + 1}`)).rows;
 }
-async function view(runtime: Runtime, w: string, r: Row): Promise<z.infer<typeof Endpoint>> {
+export async function endpointView(runtime: Runtime, w: string, r: EndpointRow): Promise<z.infer<typeof Endpoint>> {
   const policy = endpointPolicy(r.type, r), call = endpointCall(r.name);
   const value = r.encrypted_value ? await decrypt(runtime, r.encrypted_value, w + ':endpoint:' + r.hook_id) : null;
   const target = r.type === 'webhook' ? webhookUrlHint(r.url!) : r.type === 'forward' ? value! : `${r.type === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} ${webhookUrlHint(value!)}`;
@@ -171,11 +174,11 @@ async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, row: { hoo
 export function registerEndpoints(app: App) {
   app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: 'listEndpoints', summary: 'List endpoints rituals can call', request: { query: z.object({ type: z.enum(types).optional(), cursor: z.string().max(64).optional(), limit: z.coerce.number().int().min(1).max(200).default(100) }) }, responses: { 200: response(z.object({ data: z.array(Endpoint), nextCursor: z.string().nullable() }).openapi('EndpointPage')), ...errors } }), async c => {
     const w = ritualAdmin(c).workspaceId, q = c.req.valid('query'), rows = await endpointRows(c.env.db, w, q);
-    return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(r => view(c.env, w, r))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.name : null }, 200);
+    return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(r => endpointView(c.env, w, r))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.name : null }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'get', path: `${base}/{name}`, operationId: 'getEndpoint', summary: 'Read one endpoint, its status and the next step', request: { params: NameParam }, responses: { 200: response(Endpoint), ...errors } }), async c => {
     const w = ritualAdmin(c).workspaceId;
-    return c.json(await view(c.env, w, await findEndpoint(c.env.db, w, c.req.valid('param').name)), 200);
+    return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, c.req.valid('param').name)), 200);
   });
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createEndpoint', summary: 'Create a named Slack, Discord, webhook or forward endpoint',
@@ -209,7 +212,7 @@ export function registerEndpoints(app: App) {
       if (q.type === 'forward' && !preverified) await requestConfirmation(c, tx, w, { hook_id: hookId }, value, q.from);
     });
     c.header('Cache-Control', 'no-store');
-    const created = await view(c.env, w, await findEndpoint(c.env.db, w, q.name));
+    const created = await endpointView(c.env, w, await findEndpoint(c.env.db, w, q.name));
     if (created.status === 'pending') c.get('actor').wakeJobs = 1;
     return c.json({ ...created, ...(secret ? { secret } : {}) }, 201);
   });
@@ -235,7 +238,7 @@ export function registerEndpoints(app: App) {
       }
       await ownReceiving(tx, c, 'endpoint', row.hook_id);
     });
-    return c.json(await view(c.env, w, await findEndpoint(c.env.db, w, name)), 200);
+    return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name;
@@ -261,7 +264,7 @@ export function registerEndpoints(app: App) {
       await requestConfirmation(c, tx, w, row, await decrypt(c.env, row.encrypted_value!, w + ':endpoint:' + row.hook_id), q.from);
     });
     c.get('actor').wakeJobs = 1;
-    return c.json(await view(c.env, w, await findEndpoint(c.env.db, w, name)), 202);
+    return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 202);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{name}/test`, operationId: 'testEndpoint', summary: 'Post a fixed test message to a Slack, Discord or webhook endpoint now', description: 'Bypasses rituals and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRituals for a dry run.', request: { params: NameParam }, responses: { 200: response(z.object({ ok: z.boolean(), status: z.number().int().nullable(), error: z.string().nullable() }).openapi('EndpointTest')), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, row = await findEndpoint(c.env.db, w, name);
