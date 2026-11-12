@@ -73,12 +73,14 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 `acceptance.sh` modes: `ACCEPTANCE_QUARANTINE` unset skips quarantined tests, `only` runs just them, `all` runs everything; `ACCEPTANCE_JUNIT=<dir>` also writes `integration.xml` and `simulated.xml` there.
 
-### CLS: fonts arrive late on every run
+### CLS: web fonts load before any text, every run
 
-The CLS gate's `Settings · webhook` phone measurement failed on dev twice on Nov 12 (CLS 0.0334, and a re-run passed): the event-type checkboxes grew 7% and "Complaint" wrapped onto the next line. Inter is 7.2% wider than Arial, and `Inter Fallback` (sized for Arial) named only `Arial` and `Helvetica`, which Linux doesn't have, so CI drew the first paint in unsized Liberation Sans. Whether that paint happened before Inter arrived depended on the runner's load.
+The CLS gate's `Settings · webhook` phone measurement failed on dev twice on Nov 12 (CLS 0.0334; re-runs passed): the event-type checkboxes grew 7% and "Complaint" wrapped onto the next line when Inter arrived. Inter is 7.2% wider than Arial, and `Inter Fallback` (sized for Arial) named only `Arial` and `Helvetica`, which Linux doesn't have, so CI's first paint used unsized Liberation Sans. Whether text painted before Inter arrived depended on the runner's load.
 
-- `tokens.css` now also names the metric twins Linux has: Liberation Sans (Arial's metrics) and DejaVu Sans Mono (Menlo's).
-- `cls.mjs` delays every web font until after the slowest API response, so text always paints first in its fallback and the swap is measured on every run, not by luck. It also fails a page if a fallback face has no local font.
-- With fonts always late, Docs showed the same class of shift (0.0023): its text measures were in `ch`, the width of the current font's `0`, which changes with the swap. They are in `em` now.
+- `cls.mjs` serves web fonts at once from `app/dist/fonts`, outside the throttled network, so they have loaded before the throttled script that renders any text runs. Font timing no longer varies between runs. `CLS_FONTS=late` delivers every font 1.8 s late instead, to look at the fallback-to-web-font swap itself (it also fails a page if a fallback face has no local font).
+- `tokens.css`: the fallbacks also name their Linux metric twins (Liberation Sans for Arial, DejaVu Sans Mono for Menlo), so readers without Arial get sized fallbacks too.
+- Docs' text measures were in `ch` (the width of the current font's `0`, which changes when the font swaps); they are in `em` now.
+
+With late fonts the fallbacks keep most pages still, but no fallback wraps every string exactly like Inter at a 0.001 limit (on Linux, Onboarding's option cards at phone width wrap one line differently, 0.0071), so the gate measures layout with the real fonts and the late-font mode is for investigation.
 
 **When CLS fails only sometimes**, look for something whose size depends on timing: a font swap (a `ch` width, text measured before the font loaded, a fallback without local metrics), an image without dimensions, or content that arrives after its placeholder with a different size. Make the gate reproduce it every run, then fix the page. Never raise the limit.
