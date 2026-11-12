@@ -508,7 +508,7 @@ impl Model {
         let Some(e) = self.eps.get(&ep).cloned() else { return done };
         if e.paused {
             // Decided after the pause committed: park like the claim does.
-            if !stale && self.d(label).is_some_and(|d| d.status == "pending") {
+            if self.d(label).is_some_and(|d| d.status == "pending") {
                 let d = self.dm(label).unwrap();
                 d.status = "paused".into();
                 d.err = Some("ENDPOINT_PAUSED".into());

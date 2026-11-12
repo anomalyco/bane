@@ -112,7 +112,11 @@ use std::{
 const PROPERTY: &str = "bane.delivery";
 
 /// Shortest witnesses of bugs this model found, replayed by every `ci` run: (retries, actions).
-const REGRESSIONS: &[(u32, &[&str])] = &[];
+const REGRESSIONS: &[(u32, &[&str])] = &[
+    // A pause committed between the claim and the fence: the paused endpoint still received the POST.
+    (1, &["ingest m1 a", "claim K m1:W", "pause W", "go K"]),
+    (1, &["ingest m1 a", "claim K m1:W", "pause W", "go K", "unpause W", "run K m1:W", "reply K 200"]),
+];
 
 fn model(v: &Value) -> R<Model> {
     serde_json::from_value(v.clone()).map_err(|e| Error::new(e.to_string()))

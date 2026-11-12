@@ -9436,6 +9436,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mail_endpoints SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND ref='forward:team'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
       });
+      await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{
+        // tear/delivery witness: ingest m1 a, claim K m1:W, pause W, go K.
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{inboundHookClaim}=await import('./src/jobs.js'),{sql}=await import('drizzle-orm');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'paused-claim',url:'https://hooks.example.org/paused-claim'},201);
+        await route('paused-claim@receive.example',['webhook:paused-claim'],'paused-claim');
+        const m=await ingest('paused-claim',['paused-claim@receive.example']);
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='paused-claim'",[wid])).rows[0].id;
+        const delivery=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0].id as string;
+        // The claim statement joins the endpoint while it is still active, then the pause commits.
+        const payload={deliveryId:delivery};
+        const claimed=(await runtime.db.execute<import('./src/core.js').ClaimedWebhook>(sql`WITH claimed AS (SELECT 'job_paused_claim'::text AS id,${wid}::text AS workspace_id,'mailbox.webhook' AS type,${JSON.stringify(payload)}::jsonb AS payload),${inboundHookClaim} SELECT * FROM inbound_hooks WHERE blocked IS NULL`)).rows[0];
+        assert.ok(claimed);
+        await call('PATCH','/v1/endpoints/paused-claim',{paused:true});
+        const prev=runtime.webhookFetch;let posts=0;runtime.webhookFetch=async()=>{posts++;return {status:204}};
+        try{
+          await mailboxEventJobs['mailbox.webhook']!(runtime,payload,{id:'job_paused_claim',workspaceId:wid,attempts:1,webhook:claimed});
+          assert.equal(posts,0);
+          assert.deepEqual((await db.query('SELECT status,last_error,attempt_count FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0],{status:'paused',last_error:'ENDPOINT_PAUSED',attempt_count:0});
+          assert.equal((await db.query('SELECT FROM mail_action_attempts WHERE delivery_id=$1',[delivery])).rowCount,0);
+          // Unpausing requeues it as a new generation, which posts once.
+          await call('PATCH','/v1/endpoints/paused-claim',{paused:false});
+          await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook:hookId},{id:'job_paused_resume',workspaceId:wid,attempts:1});
+          const resumed=(await db.query("SELECT payload FROM jobs WHERE workspace_id=$1 AND type='mailbox.webhook' AND payload->>'deliveryId'=$2 AND payload->>'generation'='1'",[wid,delivery])).rows[0];
+          await mailboxEventJobs['mailbox.webhook']!(runtime,resumed.payload,{id:'job_paused_retry',workspaceId:wid,attempts:1});
+          assert.equal(posts,1);
+          assert.equal((await db.query('SELECT status FROM mailbox_webhook_deliveries WHERE id=$1',[delivery])).rows[0].status,'delivered');
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;

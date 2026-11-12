@@ -66,7 +66,10 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   const {deliverInboundWebhook}=await loadWebhookOps();
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   let actionError:ActionRetry|undefined;try {
-    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery));if(result.status===410)retryable=false;
+    const result=await ritualDelivery(runtime,job.workspaceId,delivery,()=>deliverInboundWebhook(runtime,job.workspaceId,delivery));
+    // Paused after the claim: the fence parked the delivery for resume; nothing was sent.
+    if(result.parked)return;
+    if(result.status===410)retryable=false;
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { if(e instanceof ActionRetry)actionError=e;if (e instanceof ModuleLoadError || e instanceof JobDeferred) throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < mailboxWebhookAttempts(delivery);

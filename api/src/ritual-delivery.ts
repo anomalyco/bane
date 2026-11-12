@@ -5,10 +5,12 @@ import { ActionRetry, endpointPolicy, replaySafe, retryAfterMs } from './ritual-
 import type { EndpointType } from './ritual-schema.js';
 export { ActionRetry } from './ritual-retry.js';
 
-type Sent = { status: number; retryAfter?: string | null };
+type Sent = { status: number; retryAfter?: string | null; parked?: true };
 /**
  * The one delivery path for every ritual endpoint call (Slack, Discord, webhook, forward).
- * Order: grant still active → endpoint policy → per-action fence → per-endpoint rate slot → send.
+ * Order: grant still active → endpoint policy and pause → per-action fence → per-endpoint rate slot → send.
+ * The claim checks the pause too, but a pause can commit between the claim and this fence: the
+ * fence holds the endpoint row (FOR SHARE) and parks the delivery, so unpause resumes it.
  * Retries all leave through ActionRetry, so backoff, jitter and Retry-After are identical for
  * every endpoint type. An attempt with an unknown outcome is replayed only when the endpoint is
  * idempotent or opted in to retryOnTimeout. Plain event subscriptions keep their webhook semantics.
@@ -25,13 +27,17 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
   const action = (h.payload as { ritualAction?: string }).ritualAction;
   if (!action && !h.routed) return send();
   const fence = await runtime.db.transaction(async tx => {
-    const row = (await tx.execute<{ type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null }>(sql`
-      SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent
+    const row = (await tx.execute<{ type: EndpointType | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; paused: boolean }>(sql`
+      SELECT nullif(split_part(d.ref,':',1),'') AS type,p.per_minute,p.retry_on_timeout,p.idempotent,h.paused
       FROM mailbox_webhooks h LEFT JOIN mail_endpoints d ON d.workspace_id=h.workspace_id AND d.hook_id=h.id
       LEFT JOIN mail_action_policies p ON p.workspace_id=h.workspace_id AND p.hook_id=h.id
-      WHERE h.workspace_id=${w} AND h.id=${h.webhook_id}`)).rows[0];
+      WHERE h.workspace_id=${w} AND h.id=${h.webhook_id} FOR SHARE OF h`)).rows[0];
     if (!row) throw new ApiError(422, 'UNKNOWN_DESTINATION', 'Endpoint no longer exists.');
     const policy = endpointPolicy(row.type ?? 'webhook', row);
+    if (row.paused) {
+      await tx.execute(sql`UPDATE mailbox_webhook_deliveries SET status='paused',last_error='ENDPOINT_PAUSED',updated_at=now() WHERE workspace_id=${w} AND id=${h.delivery_id} AND generation=${h.generation} AND status='pending'`);
+      return { policy, done: true, parked: true as const };
+    }
     // The action ID (the delivery ID) is stable across retries: it fences replays here and is the Idempotency-Key a webhook receives.
     const inserted = await tx.execute(sql`INSERT INTO mail_action_attempts VALUES(${w},${h.delivery_id},'sending') ON CONFLICT(delivery_id,workspace_id) DO NOTHING RETURNING state`);
     const prior = inserted.rowCount ? null : (await tx.execute<{ state: string }>(sql`SELECT state FROM mail_action_attempts WHERE workspace_id=${w} AND delivery_id=${h.delivery_id} FOR UPDATE`)).rows[0]!.state;
@@ -44,6 +50,7 @@ export async function ritualDelivery(runtime: Runtime, w: string, h: ClaimedWebh
     if (prior) await tx.execute(sql`UPDATE mail_action_attempts SET state='sending' WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`);
     return { policy, done: false };
   });
+  if ('parked' in fence) return { status: 0, parked: true };
   if (fence.done) return { status: 200 };
   const mark = (state: 'retry' | 'unknown' | 'delivered') => runtime.db.execute(sql`UPDATE mail_action_attempts SET state=${state} WHERE workspace_id=${w} AND delivery_id=${h.delivery_id}`);
   let result: Sent;
