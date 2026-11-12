@@ -4615,7 +4615,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.
+ * Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.
  *
  * @deprecated
  */

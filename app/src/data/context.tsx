@@ -194,9 +194,9 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     return multiTenant
   } })
   const authResult = new URLSearchParams(window.location.search).get('auth')
-  // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
+  // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your OIDC address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This OIDC account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
     : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. Check that you used your invited or approved account.</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>

@@ -30,7 +30,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   updateWorkspaceSettings: shared, configureRegion: shared, provisionRegion: shared, configureRegionAutoValidation: shared,
   createDomain: 'Creates an SES identity/domain claim; the runner does not provision DNS or AWS resources.',
   deleteDomain: 'The verified claim is shared by every run.', configureDomainMailFrom: shared,
-  getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and Google session.',
+  getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and OIDC session.',
   receiveSesSnsEvent: 'Authenticated AWS ingress; indirect coverage via real SES feedback, never forge SNS.',
   unsubscribeOneClick: 'Leaves a persistent recipient opt-out; consent CRUD uses a fresh simulator contact instead.',
   importTemplateImage: 'Requires a remote HTTPS image source; test assets are generated in-process.',
@@ -42,14 +42,14 @@ const safeModeSkips: Partial<Record<Op, string>> = {
 };
 const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
 const SKIP: Partial<Record<Op,string>> = destructive ? {
-  createWorkspace: 'Google dashboard only; no public delete for a newly created workspace.',
+  createWorkspace: 'OIDC dashboard only; no public delete for a newly created workspace.',
   createConnection: 'Would replace or reconfigure the sole shared Hosted connection; happy path requires a dashboard owner.',
   deleteConnection: 'Would disconnect the fixture and release shared domain claims if authorization regressed.',
   provisionRegion: 'Queues real AWS resource provisioning; no run-owned region or rollback.',
   configureRegionAutoValidation: 'Changes SES validation behavior for shared configuration sets; no run-owned configuration set.',
   disableInboundDomain: 'Would disable receiving on the shared MX fixture if the Hosted guard regressed.',
   createInboundSubdomain: 'Hosted receiving has no wildcard claim; creating the first child could enable catch-all routing on the shared fixture.',
-  completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating Google session for the success flow.',
+  completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating OIDC session for the success flow.',
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';

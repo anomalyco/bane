@@ -25,7 +25,8 @@ export function registerMcpAuth(app:App) {
   });
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
     const workspace=owner(c),{id}=c.req.valid('param');
-    const changed=await c.env.db.execute(sql`UPDATE bane_resource_grants SET revoked=true WHERE workspace_id=${workspace} AND id=${id} RETURNING id`);
+    const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true WHERE workspace_id=${workspace} AND id=${id} RETURNING grant_key),
+      removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)) SELECT grant_key FROM revoked`);
     if(!changed.rowCount) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
     return c.json({id,revoked:true as const},200);
   });

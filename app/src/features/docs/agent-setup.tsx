@@ -86,7 +86,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
     <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
-    <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s Google login; no API key or local MCP process is needed.</p>
+    <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s OIDC login; no API key or local MCP process is needed.</p>
     <div className="developer-client-bar">
       <Tabs label="MCP client" value={client} onValueChange={setClient} items={clients} />
       <CopyAction key={`${client}-${access}`} value={snippet} label={`Copy ${label} setup`} variant="ghost" size="sm" compact className="developer-copy-icon" />
@@ -102,7 +102,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
       {value === 'opencode' ? <ol className="developer-steps">
         <li>Merge this entry into your project or global <code>opencode.json</code>. Keep your existing servers and settings.</li>
         <li>Open <code>/mcps</code>, select <strong>bane</strong>, then choose <strong>Sign in</strong>.</li>
-        <li>Approve the requested access in your browser. A dashboard session in that browser profile skips Google sign-in.</li>
+        <li>Approve the requested access in your browser. A dashboard session in that browser profile skips OIDC sign-in.</li>
       </ol> : value === 'claude' ? <ol className="developer-steps">
         <li>Run this in your project’s terminal.</li>
         <li>In Claude Code, run <code>/mcp</code>, select <strong>bane</strong>, then choose <strong>Authenticate</strong>.</li>

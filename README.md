@@ -1,6 +1,6 @@
 # bane
 
-Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, Google-only sign-in, and one public API shared by the dashboard, SDK, and MCP server.
+Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, OIDC sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
 ![Bane dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
 

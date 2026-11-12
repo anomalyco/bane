@@ -1732,7 +1732,7 @@ export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: S
     AND (${c.multiTenant} OR ${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email)) LIMIT 1 FOR SHARE OF m,u,i`;
 }
 export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; actorKeyId: string; campaignId?: string | null; snapshot: Pick<EmailSnapshot, 'from'> }) {
-  // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
+  // Session-origin jobs retain the OIDC principal, not a browser session or bootstrap credential.
   // Queued work may re-check membership but must never create or restore it.
   if (mail.actorKeyId.startsWith('user_')) {
     return (await db.execute(approvedOriginUser(runtime, sql`${mail.workspaceId}`, sql`${mail.actorKeyId.slice(5)}`, sql`${!mail.campaignId}::boolean`))).rows.length > 0;

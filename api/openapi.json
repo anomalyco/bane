@@ -39,13 +39,13 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "bane.session_token",
-        "description": "Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-bane.session_token",
-        "description": "Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
     "schemas": {
@@ -51774,7 +51774,7 @@
           }
         ],
         "deprecated": true,
-        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.",
         "responses": {
           "200": {
             "description": "Success",

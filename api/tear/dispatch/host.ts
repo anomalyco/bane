@@ -65,7 +65,7 @@ const url = await (async () => {
 const withClock = `${url}?options=${encodeURIComponent('-c search_path=tear_clock,pg_catalog,public')}`;
 
 const env = {
-  DATABASE_URL: withClock, BETTER_AUTH_SECRET: 'tear-'.repeat(8), GOOGLE_CLIENT_ID: 'tear', GOOGLE_CLIENT_SECRET: 'tear',
+  DATABASE_URL: withClock, BETTER_AUTH_SECRET: 'tear-'.repeat(8), ACCOUNT_CLIENT_ID: 'tear', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear',
   AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false',
   S3_BUCKET: 'tear', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear', S3_ENDPOINT: 'http://127.0.0.1:9',
   SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0', AWS_EC2_METADATA_DISABLED: 'true',

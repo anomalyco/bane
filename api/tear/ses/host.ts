@@ -53,7 +53,7 @@ const REGION = 'us-east-1', ACCOUNT = '111122223333', TOPIC = `arn:aws:sns:${REG
 const STRAY = `arn:aws:sns:${REGION}:${ACCOUNT}:tear-ses-unregistered`, PUBLIC = 'http://127.0.0.1:9';
 // Another account's (retired) shared feedback topic: verified, but not the topic this workspace's mail is bound to.
 const OTHER_ACCOUNT = '222233334444', OTHER = `arn:aws:sns:${REGION}:${OTHER_ACCOUNT}:tear-ses-feedback`;
-const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture',
+const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
   AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: PUBLIC, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear' });
 const runtime = instance.runtime;
 // Hosted (multi-tenant) feedback on a shared pool topic, as production runs it. No feedback queue sink:

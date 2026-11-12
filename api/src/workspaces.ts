@@ -42,7 +42,7 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
   return !!result.rowCount;
 }
 
-// Called only in the transaction that *inserts* the Google user. Ordinary dashboard requests,
+// Called only in the transaction that *inserts* the OIDC user. Ordinary dashboard requests,
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
@@ -123,7 +123,7 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 export function registerWorkspaces(app: App) {
   // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
-    description: 'Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
+    description: 'Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a OIDC session.',
     responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
     description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
@@ -137,7 +137,7 @@ export function registerWorkspaces(app: App) {
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
-      if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
+      if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);

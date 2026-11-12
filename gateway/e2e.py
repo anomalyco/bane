@@ -147,8 +147,8 @@ def real_services():
             API_BASE_URL=url,
             AUTH_ALLOWED_EMAILS='operator@example.com',
             AUTH_ALLOWED_DOMAINS='example.com',
-            GOOGLE_CLIENT_ID='fixture',
-            GOOGLE_CLIENT_SECRET='fixture',
+            ACCOUNT_CLIENT_ID='fixture',
+            ACCOUNT_CLIENT_PRIVATE_KEY='fixture',
         )
         run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)
         prk = hmac.digest(bytes(32), secret.encode(), "sha256")

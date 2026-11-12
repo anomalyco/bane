@@ -935,7 +935,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
         await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
         const org={id:unique('ws'),name:'Fixture organization',slug:unique('slug')};
-        if(own){runtime.config.allowedEmails.push(email);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);}
+        if(own){runtime.config.allowedEmails.push(email);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
         return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
       }
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
@@ -2845,7 +2845,7 @@ describe('DB region catalog and explicit SES setup', () => {
     ]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'true',
       S3_BUCKET: 'synthetic-ses-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -4837,7 +4837,7 @@ describe('Operational configuration and public event boundaries', () => {
     const [{ nodeRuntime }, { operationJobs }] = await Promise.all([import('./src/adapters/node.js'), import('./src/operations.js')]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-validation-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5154,7 +5154,7 @@ describe('Operational configuration and public event boundaries', () => {
     });
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5305,7 +5305,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-    ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
     PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
@@ -5316,7 +5316,12 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.config.simulatedSes.latencyMs = 0;
   const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
-  const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network is forbidden in simulated SES acceptance scenarios.'); });
+  const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
+  t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
+    const url=new URL(input instanceof Request?input.url:String(input));
+    if(url.origin===process.env.ACCOUNT_ISSUER && url.hostname==='127.0.0.1') return fetchIssuer(input,init);
+    unexpectedNetwork++; throw Error('Network is forbidden in simulated SES acceptance scenarios.');
+  });
   try {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
@@ -5355,7 +5360,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         }
       }
       await scenario({ runtime, db, local, run, jobs, request, fetch: req => Promise.resolve(app.fetch(req, runtime)) });
-      assert.equal(network.mock.callCount(), 0, 'No provider, webhook, certificate or credential network request is allowed.');
+      assert.equal(unexpectedNetwork,0,'Only the loopback fixture issuer may be contacted.');
       throw rollback;
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
@@ -5623,7 +5628,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -6182,7 +6187,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       Object.assign(runtime.config,{multiTenant:true,placementShadow:false});
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')`,[wid,oh]);
       await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
-      await db.query(`UPDATE auth_user SET google_hosted_domain='example.com',email_verified=true WHERE id=$1`,[manager!.userId]);
       await db.query(`UPDATE workspace_members m SET created_at=w.created_at FROM workspaces w WHERE m.workspace_id=w.id AND w.id=$1`,[wid]);
       const prior=ok(await create('off.example.com'),201);
       assert.equal((await jobs(type)).length,0); runtime.config.placementShadow=true;
@@ -6260,7 +6264,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
       topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
-    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -6375,7 +6379,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [owner,other]=[0,1].map(()=>'ws_'+randomUUID().replaceAll('-','')) as [string,string];
     const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
     const env={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
-    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
+    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
       AUTH_ALLOWED_DOMAINS:'example.com',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
@@ -6797,7 +6801,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -13271,7 +13275,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(localEncodedSes.status, 422);
     assert.equal(((await localEncodedSes.json()) as Json).error?.code, 'VALIDATION_FAILED');
     const localEncodedJwks = await encodedApp.fetch(new Request(`${PUBLIC_ORIGIN}/api/%61uth/jwks`, { method: 'OPTIONS' }), encodedRuntime);
-    assert.equal(localEncodedJwks.status, 405);
+    assert.equal(localEncodedJwks.status, 404);
 
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');

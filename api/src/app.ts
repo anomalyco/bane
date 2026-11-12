@@ -81,8 +81,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin.' });
   } else {
     const rawOpenapi = app.openapi;
     app.openapi = ((route, handler, hook) => allowPath && !allowPath(route.path) ? app : rawOpenapi({ ...route, hide: true }, handler, hook)) as typeof app.openapi;
@@ -128,7 +128,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
     // Reviewing that invitation before joining authenticates the same way and changes nothing.
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
-    // Provider redirects cannot carry a workspace header. This route authenticates the Google
+    // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') return next();

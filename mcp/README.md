@@ -7,8 +7,8 @@ If you authorised your client against `https://opensend.mx/mcp`, reconnect it to
 ## Connect
 
 1. Add the HTTPS URL as a remote HTTP MCP server in your client.
-2. Start OAuth authorization. Bane reuses your dashboard's Google session in the same browser/profile. If you are signed out, use the normal Google sign-in.
-3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
+2. Start OAuth authorization at the issuer advertised by Bane’s protected resource metadata.
+3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or ID token.
 
 Choose the catalog that fits your client:
 
@@ -32,7 +32,7 @@ OAuth scopes map to the existing API permissions:
 | `bane:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
 | `offline_access` | Obtain a rotating refresh token, valid for up to 30 days. |
 
-Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
+Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's OIDC approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
 Authenticated dashboard clients can inspect their approvals with `GET /api/auth/oauth2/get-consents` and revoke one with `POST /api/auth/oauth2/delete-consent` and JSON `{ "id": "consent-id" }`. Revocation requires the dashboard session and canonical Origin. These are not MCP tools.
 

@@ -40,7 +40,7 @@ const values = z.object({
   HOSTED_SEND_CAP_SECOND_WEEK: z.coerce.number().int().positive().max(2147483647).default(1000),
   HOSTED_SEND_CAP_MATURE: z.coerce.number().int().positive().max(2147483647).default(10000),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
-  // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
+  // Upgrade-only decryption input for pre-OIDC installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
   PUBLIC_URL: z.string().url(),
   SES_FEEDBACK_URL: optional(z.string().url().max(2048)),
