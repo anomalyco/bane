@@ -104,7 +104,9 @@ export interface Runtime {
   webhookFetch?: WebhookFetch;
 }
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
-export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
+// mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
+// scopeIds is an inbox key's configured scope, which never changes for that key.
+export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
@@ -154,6 +156,28 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
   const permission = action === 'editContent' ? (c.env.config.multiTenant && value?.credential === 'dashboard' ? 'send' : 'manage') : action;
   if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
+}
+// ---------- route guards shared by REST and the MCP listing ----------
+// Each takes a concrete request path or an OpenAPI template ({id} segments). The middleware that
+// enforces a guard and the MCP listing that must agree with it call the same predicate.
+/** mailboxAuth: inbox keys, or a workspace credential through actorMailAccess. */
+export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$)/.test(path);
+/** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
+export const receivingConsentRoute = (path: string) =>
+  /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
+/** notMember: workspace members are refused these areas whatever their scopes. */
+export const ownerRoute = (method: string, path: string) => {
+  const verb = method.toUpperCase();
+  return /^\/v1\/(?:domains|webhooks|agent-tokens)(?:\/|$)|^\/v1\/regions\/|^\/v1\/settings\/ses$/.test(path) || (path === '/v1/regions' && verb !== 'GET')
+    || (verb === 'POST' && /^\/v1\/campaigns\/[^/]+\/(?:send|schedule|pause|resume|pacing|cancel)$/.test(path));
+};
+// Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read
+// the whole workspace; everything else reads none. Used by mailboxAuth, the unified logs and the MCP listing.
+export function actorMailAccess(actor: Actor): MailboxAccess | null {
+  if (actor.domains.length) return null;
+  if (actor.role === 'member' && actor.credential === 'dashboard') return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: ['read', 'send'] };
+  if (!actor.permissions.includes('manage')) return null;
+  return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] };
 }
 export function senderDomainAllowed(allowed: readonly string[], candidate: string) {
   const domain = candidate.toLowerCase();

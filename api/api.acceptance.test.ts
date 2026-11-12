@@ -2607,6 +2607,82 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // tear witnesses (2 steps): mint grant2; probe grant2 code -> a member's read+send grant listed createContactList, createApiKey,
+  // createAgentToken and listApiKeys; mint grant; probe grant code -> listMcpConnections. REST refuses all of them.
+  test('MCP listings offer only what REST authorizes: permission, member role and dashboard-only administration',async t=>{
+    await simulatedSesFixture(t,async({db,request,runtime})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      runtime.config.multiTenant=true;
+      try{
+        const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
+        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
+          return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);
+          for(const name of ['getCurrentIdentity','sendEmail','sendCampaign','createAgentToken','listDomains'])assert.ok(ops.has(name),`${name} codemode=${codemode}`);
+          for(const name of ['createContactList','createApiKey','listApiKeys','listMcpConnections','revokeMcpConnection'])assert.ok(!ops.has(name),`${name} codemode=${codemode}`);
+        }
+        const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
+        assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
+        // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
+        // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
+        await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+        const receiving=await listed(true);
+        for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
+        assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
+        const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
+        const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
+        const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId))!;assert.ok(grantActor);
+        const dummy=(schema:Json|undefined)=>schema?.enum?.[0]??(schema?.format==='email'?'tear@example.com':[schema?.type].flat().includes('integer')?'1':String(schema?.pattern??'').includes('\\d')?'us-east-1':'tear-missing');
+        let gets=0;
+        for(const [name,op] of buildMcpCatalog(api)){
+          if(op.method!=='get')continue;gets++;
+          const path=op.path.replace(/\{([^}]+)\}/g,(_,field:string)=>encodeURIComponent(dummy((spec.paths[op.path].get.parameters??[]).find((p:Json)=>p.in==='path'&&p.name===field)?.schema)));
+          const status=(await dispatchAsActor(app,new Request(`${PUBLIC_ORIGIN}${path}`,{headers:{accept:'application/json'}}),runtime,grantActor)).status;
+          assert.equal(receiving.has(name),status!==401&&status!==403,`${name}: listed=${receiving.has(name)}, REST ${status}`);
+        }
+        assert.ok(gets>=80,String(gets));
+        // As a workspace member the same approval also loses the owner and admin areas.
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
+        for(const codemode of [true,false]){
+          const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
+          for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
+        }
+      }finally{runtime.config.multiTenant=false;}
+    });
+  });
+
+  // tear witness (recheck 2 of #51): mint g-s; probe g-s code|plain -> getCurrentIdentity missing; probe g-s call -> TOOL_UNAVAILABLE.
+  test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
+      const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
+      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
+      const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
+      const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
+      for(const ops of [code,plain]){assert.ok(ops.has('getCurrentIdentity'));assert.ok(ops.has('sendEmail'));assert.ok(!ops.has('listContacts'),'read-level reads need read');}
+      const me=ok(await rpc(true,'tools/call',{name:'getCurrentIdentity',arguments:{}})).result;
+      assert.equal(me.isError,false,redact(me));assert.equal(me._meta.status,200);assert.deepEqual(me.structuredContent.permissions,['send']);
+    });
+  });
+
+  // tear witness (7 steps): mint grant; A begin apikey grant k1; A step; A step; revoke grant; A step; A step -> 500 INTERNAL_ERROR.
+  test('a grant-derived key create racing the approval revoke is refused as unauthorized, not a 500',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {token,consentId}=await oauthGrant(t,db,writableScope,request);
+      const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let revoked=false;
+      // The revoke commits between this request's authorization and the row that ties the new key to the approval.
+      const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM oauth_consent WHERE id=$1',[consentId]).then(()=>query.apply(this,args));}
+        return query.apply(this,args);} as typeof pg.Client.prototype.query);
+      let result:Json;
+      try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
+      assert.equal(revoked,true);assert.equal(result.isError,true,redact(result));assert.equal(result._meta.status,401);assert.equal(result.structuredContent.error.code,'AUTH_INVALID');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM api_keys WHERE name='tear raced key'")).rows[0].n,0);
+    });
+  });
+
   test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
@@ -2921,17 +2997,30 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
+  test('hosted MCP read-only OAuth hides state changes except read-only delegation, offers REST read operations, and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
-    assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
+    // The one state change a read grant may make is read-only delegation, which REST allows too.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['createAgentToken']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'queryAudience'));
+    // REST lets a read credential run AudienceQL reads and segment previews (POSTs that change nothing): no confirm argument.
+    for (const name of ['queryAudience', 'previewSegment']) {
+      const tool = catalog.tools.find((x: Json) => x.name === name);
+      assert.ok(tool, name); assert.equal(tool.annotations.readOnlyHint, true, name); assert.equal(tool.inputSchema.properties.confirm, undefined, name);
+    }
+    await callTool(token, 'queryAudience', { body: { statement: 'SELECT count(*) FROM contacts' } });
+    const unconfirmed = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } } });
+    assert.equal(unconfirmed.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(unconfirmed));
+    const delegated = await callTool(token, 'createAgentToken', { confirm: true, body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } }, 201);
+    secrets.add(delegated.token); assert.deepEqual(delegated.permissions, ['read']);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 200);
+    const escalation = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { confirm: true, body: { permissions: ['read', 'send'], expiresInSeconds: 60, purpose: 'escalation' } } });
+    assert.equal(escalation._meta.status, 403, redact(escalation));
     // One HTTP request is one JSON-RPC call: batches and unbounded non-JSON bodies never reach the SDK.
     const batch = await http('POST', '/mcp', token, Array.from({ length: 500 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'tools/list', params: {} })), rpcHeaders);
     assert.equal(batch.status, 400, diagnostic(batch));
@@ -2982,9 +3071,10 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('L1: read-only descriptions omit contact writes, credential creation and inbound keys', () => {
       assert.match(contacts.description, /list contacts/i);
       assert.doesNotMatch(contacts.description, /manage|create|update|delete/i);
+      // A read grant's only credential action is read-only delegation: no API keys, inbound keys, listing or revocation.
       const keys = plainTools.find((tool:Json)=>tool.name==='keys');
-      assert.match(keys.description, /list agent tokens/i);
-      assert.doesNotMatch(keys.description, /manage|create|revoke|secret|inbound/i);
+      assert.deepEqual(keys.inputSchema.properties.action.enum, ['createToken']);
+      assert.doesNotMatch(keys.description, /api key|inbound|revoke|secret|manage/i);
     });
     const mergedDenied = await rpc(token, 'tools/call', { name:'contacts', arguments:{ action:'create', confirm:true, body:{ email:address() } } }, '/mcp');
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
@@ -2995,6 +3085,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revoked.status, 401, diagnostic(revoked));
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+    assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
     const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(fallback.status, 401, 'Hosted MCP must not fall back to API-key authentication.');
@@ -8854,6 +8945,47 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(ok(await http('GET',`/v1/inboxes/${bids[1]}/messages/${mid}`,tokens[1]!)).id,mid);
     assert.deepEqual((await peer.query("SELECT total,uid_next::int FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bids[0]])).rows,[{total:0,uid_next:2}]);
   });
+  // tear (api/tear) witness: accept, store, W delete, V flag, W commit.
+  test('inbox delete: a flag change queued on the inbox row behind the deletion fails and changes nothing',async t=>{
+    const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('qdel'),bid=unique('mbx'),mid=unique('msg'),tid=unique('thr');
+    await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'qdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'qdel@qdel.invalid','inbox','forever')",[bid,w]);
+    await writer.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await writer.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);await writer.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'outbound','kept')",[mid,w,tid]);
+    await writer.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read) VALUES($1,$2,$3,$4,'outbound',now(),true)",[w,bid,mid,tid]);
+    const state=()=>peer.query('SELECT s.modseq::int,l.flags,l.modseq::int AS member FROM inbox_state s JOIN mailbox_messages l ON l.mailbox_id=s.inbox_id WHERE s.inbox_id=$1',[bid]).then(r=>r.rows[0]);
+    const before=await state(),pid=(await peer.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+    await writer.query('BEGIN');try{
+      await writer.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const queued=peer.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}') r`,[w,bid,mid]);
+      // Commit only once the change waits on the inbox row: it must then see the deletion.
+      let waiting=false;
+      for(let i=0;i<400&&!waiting;i++){waiting=(await writer.query('SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1',[pid])).rows[0]?.wait_event_type==='Lock';if(!waiting)await new Promise(r=>setTimeout(r,5));}
+      assert.ok(waiting,'the flag change must queue behind the deletion');
+      await writer.query('COMMIT');
+      assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
+    }finally{await writer.query('ROLLBACK');}
+    assert.deepEqual(await state(),before);
+  });
+  // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
+  test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{
+    const db=await fixtureDatabase(t),w=unique('fence'),bid=unique('mbx'),tid=unique('thr'),ids=[unique('msg'),unique('msg')];
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'fence.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,quota_messages) VALUES($1,$2,$1,'fence@fence.invalid','inbox','forever',1)",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    for(const [i,id] of ids.entries()){
+      await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,lifecycle) VALUES($1,$2,$3,'inbound','kept')",[id,w,tid]);
+      await db.query("INSERT INTO mailbox_messages(workspace_id,mailbox_id,message_id,thread_id,direction,received_at,read,held_reason) VALUES($1,$2,$3,$4,'inbound',now(),false,$5)",[w,bid,id,tid,i?'quota':null]);
+    }
+    await db.query('INSERT INTO mailbox_threads(mailbox_id,thread_id,workspace_id,message_count,unread_count,last_message_at) VALUES($1,$2,$3,1,1,now())',[bid,tid,w]);
+    const summary=()=>db.query('SELECT message_count,unread_count FROM mailbox_threads WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]).then(r=>r.rows[0]);
+    // The old patchThread left read unchanged, then recounted unread inbound mail, held mail included.
+    await assert.rejects(db.query("UPDATE mailbox_threads SET unread_count=(SELECT count(*) FROM mailbox_messages WHERE mailbox_id=$1 AND thread_id=$2 AND NOT read AND direction='inbound') WHERE mailbox_id=$1 AND thread_id=$2",[bid,tid]),{code:'40001'});
+    assert.deepEqual(await summary(),{message_count:1,unread_count:1});
+    // A delivery still updates the summary: it changes the message count with the unread count.
+    await db.query('UPDATE mailbox_threads SET message_count=message_count+1,unread_count=unread_count+1 WHERE mailbox_id=$1 AND thread_id=$2',[bid,tid]);
+    assert.deepEqual(await summary(),{message_count:2,unread_count:2});
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
@@ -9117,7 +9249,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
   test('ephemeral inbox: extract finds codes and links only in visible text and flags hidden content',async()=>{const {visibleMail}=await import('./src/inbox-content.js');const m=visibleMail('code 000000','<div hidden>code 111111</div><p style="font-size:0">code 222222</p><p>Verify: A3B4</p><a href="https://real.invalid/">other.invalid</a><span>zero\u200bwidth</span>','codes,links');assert.equal(m.hiddenContent,true);assert.deepEqual(m.extract,{codes:['A3B4'],links:[{text:'other.invalid',href:'https://real.invalid/',mismatch:true}]});assert.ok(!m.text.includes('111111'));});
   test('inbound staging recovery and ingest limits',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,jobs,local,fetch:rawFetch})=>{
+    await simulatedSesFixture(t,async({runtime,db,jobs,local,request,fetch:rawFetch})=>{
       const {acceptInboundNotification,mailboxIngestJobs,recoverMailReceipts}=await import('./src/mailbox-ingest.js'),{scheduleMailRecovery}=await import('./src/mailbox-staging.js'),{S3Client}=await import('@aws-sdk/client-s3');
       const wid=runtime.config.workspaceId,bucket=unique('bucket'),topic=`arn:aws:sns:${REGION}:111122223333:inbound`,domain=unique('mdom');
       runtime.config.aws={accessKeyId:'synthetic',secretAccessKey:'synthetic'};
@@ -9560,9 +9692,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const importer=runtime.importPublicImage;let imports=0;
         runtime.importPublicImage=async()=>{if(++imports===1)throw Error('Synthetic importer failure');return {data:Uint8Array.of(2),contentType:'image/png'};};
         try {
-          const attempt=()=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},'import-after-500');
-          assert.equal((await attempt()).status,500);const created=ok(await attempt(),201);
-          assert.equal(ok(await attempt(),201).id,created.id);assert.equal(imports,2);
+          const attempt=(key='import-after-500')=>post('/v1/template-assets/import',{url:'https://example.com/logo.png'},key);
+          assert.equal((await attempt()).status,500);
+          // The handler charged its render budget (a write) before the importer failed, so the outcome is unknown: the key never runs it again.
+          error(await attempt(),409,'IDEMPOTENCY_OUTCOME_UNKNOWN');assert.equal(imports,1);
+          const created=ok(await attempt('import-after-500-new-key'),201);
+          assert.equal(ok(await attempt('import-after-500-new-key'),201).id,created.id);assert.equal(imports,2);
         } finally {runtime.importPublicImage=importer;}
         const first=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(first.status,201);const again=await post('/v1/inbound/addresses',{address:'replay@receive.example',key:'replay'},'addr-1');assert.equal(again.status,201,JSON.stringify(again.body));assert.equal(again.body.id,first.body.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
         error(await post('/v1/inbound/addresses',{address:'other@receive.example'},'addr-1'),409,'IDEMPOTENCY_CONFLICT');
@@ -9579,6 +9714,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
         error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
+      });
+      // tear witness (api/tear): mint key, lost list key k1 b1, create list key k1 b1 created a second list.
+      await t.test('create idempotency: a lost commit acknowledgement keeps the key, so the retry never creates twice',async st=>{
+        const post=(key:string)=>local('POST','/v1/lists',{name:'tear lost ack'},'live',{'idempotency-key':key});
+        const count=async()=>(await db.query("SELECT count(*)::int AS n FROM audience_lists WHERE workspace_id=$1 AND name='tear lost ack'",[runtime.config.workspaceId])).rows[0].n;
+        // Mock the prototype (as later tests do): an instance mock would leave an own property behind.
+        const query=pg.Client.prototype.query as (...args:unknown[])=>unknown;let lose=true;
+        // The INSERT commits on the server; the client sees the connection drop before the reply.
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db||!lose||!/^insert into "audience_lists"/i.test(text))return query.apply(this,args);
+          lose=false;return (query.apply(this,args) as Promise<unknown>).then(()=>{throw Object.assign(new Error('Connection terminated unexpectedly'),{code:'ECONNRESET'});});} as typeof pg.Client.prototype.query);
+        try{error(await post('lost-ack-1'),503,'DATABASE_UNAVAILABLE');}finally{wire.mock.restore();}
+        assert.equal(await count(),1);
+        assert.match(error(await post('lost-ack-1'),409,'IDEMPOTENCY_OUTCOME_UNKNOWN').message,/may have committed/);
+        assert.equal(await count(),1);
+      });
+      // tear witness: mint key, mint ikey, create inbox ikey k1, create inbox ikey k1 answered 409 IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a provisioning inbox key replays its own inbox create',async()=>{
+        const key=ok(await local('POST','/v1/inbound/keys',{name:'tear provisioning',permissions:['read','create'],addressIds:[]}),201);secrets.add(key.secret);
+        const create=()=>request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'tear provisioned'},{'idempotency-key':'provision-1'});
+        const first=ok(await create(),201),again=await create();
+        // Its visible inbox set now includes the new inbox; the retry is still the same request.
+        assert.equal(again.status,201,diagnostic(again));assert.equal(again.body.id,first.id);assert.equal(again.headers.get('idempotent-replayed'),'true');
+        error(await request('POST','/v1/inboxes',key.secret,{type:'sandbox',name:'another'},{'idempotency-key':'provision-1'}),409,'IDEMPOTENCY_CONFLICT');
+        ok(await local('POST',`/v1/inbound/keys/${key.id}/revoke`),200);
+      });
+      // tear witness (9 steps): two requests on one key; the holder fails and releases between the other's claim and lookup -> IDEMPOTENCY_CONFLICT.
+      await t.test('create idempotency: a duplicate whose holder failed and released the key gets a retryable answer',async st=>{
+        const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let stage=0;
+        const wire=st.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+          const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+          if(this!==db)return query.apply(this,args);
+          // A concurrent holder claims the key first; this request's claim then conflicts with it.
+          if(stage===0&&/^insert into "sending_idempotency"/i.test(text)){stage=1;return query.apply(this,args).then(()=>query.apply(this,args));}
+          // The holder is refused (4xx) and releases the key just before this request reads it.
+          if(stage===1&&/^select .*from "sending_idempotency"/i.test(text)){stage=2;return query.call(this,"DELETE FROM sending_idempotency WHERE request_key='released-1'").then(()=>query.apply(this,args));}
+          return query.apply(this,args);} as typeof pg.Client.prototype.query);
+        const post=()=>local('POST','/v1/lists',{name:'tear released'},'live',{'idempotency-key':'released-1'});
+        let reply:Reply;try{reply=await post();}finally{wire.mock.restore();}
+        assert.equal(stage,2);assert.equal(error(reply,409,'IDEMPOTENCY_IN_PROGRESS').retryable,true);assert.equal(reply.headers.get('retry-after'),'1');
+        assert.equal(ok(await post(),201).name,'tear released');
       });
       await t.test('routing: declarative apply previews a diff, rejects stale versions and round-trips by key', async () => {
         const read = await local('GET', '/v1/routing?format=config'),

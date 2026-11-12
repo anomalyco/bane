@@ -7,6 +7,45 @@ import { nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, guardPublicRequest } from './core.js';
+import { brotliCompress, constants, gzip } from 'node:zlib';
+import { promisify } from 'node:util';
+
+// The dashboard's files on Node/Docker. Cloudflare serves them itself, with app/public/_headers and compression;
+// here every response would otherwise be uncompressed and no-store, so each visit re-downloaded the whole app.
+// Hashed /assets/* are immutable and compressed once per process; fonts follow _headers; the HTML shell revalidates.
+const encoders = { br: (raw: Buffer) => promisify(brotliCompress)(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: 9 } }), gzip: (raw: Buffer) => promisify(gzip)(raw, { level: 9 }) };
+const encoded = new Map<string, Promise<Buffer>>();
+async function dashboardFile(request: Request, path: string, response: Response) {
+  if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200) return response;
+  // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
+  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
+  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
+  const html = response.headers.get('content-type')?.startsWith('text/html');
+  const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
+  if (!html && !asset && !font) return response;
+  const headers = new Headers(response.headers);
+  // A missing /assets/ file falls back to the HTML shell: never cache that answer.
+  headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache');
+  if (!asset || !/\.(?:js|css|svg|json|map)$/.test(path)) return new Response(response.body, { status: 200, headers });
+  return encode(request, path, response, headers, '');
+}
+// Brotli (or gzip) once per file per process; `version` separates bodies that can change under one path.
+async function encode(request: Request, path: string, response: Response, headers: Headers, version: string) {
+  const accept = request.headers.get('accept-encoding') ?? '';
+  const encoding = /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : null;
+  if (!encoding || response.headers.has('content-encoding')) return new Response(response.body, { status: response.status, headers });
+  headers.append('vary', 'accept-encoding');
+  const key = `${encoding} ${path} ${version}`;
+  let body = encoded.get(key);
+  if (!body) {
+    body = response.arrayBuffer().then(raw => encoders[encoding](Buffer.from(raw)));
+    body.catch(() => encoded.delete(key));
+    if (encoded.size < 1000) encoded.set(key, body);
+  } else void response.body?.cancel();
+  const bytes = await body;
+  headers.set('content-encoding', encoding); headers.set('content-length', String(bytes.length));
+  return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { status: 200, headers });
+}
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
@@ -37,7 +76,8 @@ try {
     const headers = new Headers(request.headers);
     headers.delete('x-opensend-client-ip');
     headers.set('x-bane-client-ip', address);
-    const response = await guardPublicRequest(getPath(request), headers, await digest(address), async () => app.fetch(new Request(request, { headers }), runtime));
+    const path = getPath(request);
+    const response = await dashboardFile(request, path, await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), runtime)));
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
     return response;

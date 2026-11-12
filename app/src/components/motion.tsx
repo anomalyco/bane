@@ -12,7 +12,7 @@ export function CopyAction({ value, label, variant = 'secondary', size = 'md', c
   const toast = useToast()
   useEffect(() => () => clearTimeout(timer.current), [])
   async function copy() {
-    try { await navigator.clipboard.writeText(value) } catch { toast('Could not copy to clipboard.', 'error'); return }
+    try { await navigator.clipboard.writeText(value) } catch { toast('Couldn’t copy to clipboard.', 'error'); return }
     setCopied(true)
     clearTimeout(timer.current)
     timer.current = setTimeout(() => setCopied(false), 1800)

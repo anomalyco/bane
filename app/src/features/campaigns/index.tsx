@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
@@ -19,12 +19,12 @@ export { CampaignsPage } from './CampaignList'
 export { TemplatesPage, TemplateEditorPage } from './templates'
 import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
+import { composer as composerChunk, EmailComposer } from './composer-chunk'
+import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignSenderInput } from './CampaignSenderInput'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
-const loadEmailComposer = () => import('./EmailComposer').then(module => ({ default: module.EmailComposer }))
-const EmailComposer = lazy(loadEmailComposer)
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -61,7 +61,7 @@ export function CampaignEditorPage() {
 function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: string; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
   const opened = useRef<Campaign | null | undefined>(undefined)
-  useEffect(() => { void loadEmailComposer() }, [])
+  useEffect(() => { void composerChunk.preload().catch(() => {}) }, [])
   useEffect(() => {
     if (query.data) console.info('[Bane timing] campaign content ready', { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
   }, [query.data])
@@ -305,7 +305,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
             </div>
             <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="campaign-subject">Subject</label><Input id="campaign-subject" placeholder="Add a subject" value={form.subject} onChange={event => change('subject', event.target.value)} disabled={controlsDisabled} /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled={controlsDisabled} aria-expanded={previewOpen} aria-controls="campaign-preview-row" onClick={() => {setPreviewOpen(!previewOpen); if (!previewOpen) requestAnimationFrame(() => previewInput.current?.focus({preventScroll: true}))}}>Preview text</Button></div>
           </div>
-          <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></Suspense>
+          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
         </div>
       </div>
@@ -417,7 +417,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   }
   return <div className="stack campaign-review">
     <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
-    {stale && <Alert tone="warning">Could not refresh this campaign. Showing the last available counts.</Alert>}
+    {stale && <Alert tone="warning">Couldn’t refresh this campaign. Showing the last available counts.</Alert>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.delivery?.error && <Alert tone="danger">{campaign.delivery.error.message} [{campaign.delivery.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">

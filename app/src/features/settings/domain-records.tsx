@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { Alert, Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { request } from '../../data/live'
 import type { DnsRecord, DnsRecordPurpose, Domain, ReceivingIssue } from '../../data/types'
@@ -17,8 +18,8 @@ export function useDomain(id: string, recheckUntil = 0) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['bane', api.mode, 'domain', id],
-    queryFn: ({ signal }) => api.domains.get(id, signal),
+    queryKey: ['bane', api.mode, ...queries.domain(id).key],
+    queryFn: ({ signal }) => queries.domain(id).read(api, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: multiTenant ? 'always' : false,
@@ -193,7 +194,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const receivingCopy = subdomain ? `Receive at addresses on ${receiving[0]?.name}. Mail to ${domain.name} itself keeps going wherever it goes today.` : `Receive mail for every address at ${domain.name}.`
   async function copyAll() {
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} ${guided ? 'sending ' : ''}records`, 'success') }
-    catch { toast('Could not copy to clipboard.', 'error') }
+    catch { toast('Couldn’t copy to clipboard.', 'error') }
   }
   const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
   const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
