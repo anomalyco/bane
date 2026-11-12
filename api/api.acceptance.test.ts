@@ -6075,6 +6075,124 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(run.statements() <= 8, `${run.statements()} statements`);
     });
   });
+  // Recheck of #52 (P1): one owner's full page set no owner cursor, so the no-progress check
+  // never ran (24 two-recipient envelopes and one credit: 133 leases / 266 statements in 500 ms,
+  // idle false). (P2): the fair page took every owner's oversized head, so the hold starved the
+  // affordable mail behind it (24 one-recipient followers left queued, idle). The lease now skips
+  // the specific envelopes the allowance cannot afford, and a batch that advanced nothing ends.
+  test('the allowance skips specific unaffordable envelopes: one owner\'s full page holds, and mail behind oversized heads sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { sesDailyReserve } = await import('./src/sending.js');
+      const w = runtime.config.workspaceId, percent = runtime.config.dispatch.dailyHeadroomPercent, max = 100;
+      const template = ok(await local('POST', '/v1/emails/send', mail()), 202).id, contacts = [address(), address()];
+      // Owners with their own send key and two subscribed contacts; each owner's envelopes are
+      // queued oldest first with the given recipient counts and streams.
+      const seed = async (region: string, owners: string[], envelopes: { cost: number; kind?: string }[]) => {
+        await db.query('INSERT INTO workspaces(id,name,slug) SELECT o,o,o FROM unnest($1::text[]) o', [owners]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions)
+          SELECT o,'install_'||o,$2,jsonb_build_array($2::text) FROM unnest($1::text[]) o`, [owners, region]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT o||'-key',o,'owner',o||'-key','bane_owner','["send"]','[]' FROM unnest($1::text[]) o`, [owners]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT o||'-c'||n,o,($2::text[])[n],'subscribed' FROM unnest($1::text[]) o,generate_series(1,2) n`, [owners, contacts]);
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+          SELECT 'email_'||md5(o||x.n),o,o||'-key',$2,e.from_address,x.dest,'[]','[]',e.subject,
+            jsonb_set(jsonb_set(jsonb_set(e.snapshot,'{kind}',to_jsonb(x.kind)),'{region}',to_jsonb($2::text)),'{to}',x.dest),e.simulated,clock_timestamp()-interval '1 hour'+x.n*interval '1 second'
+          FROM sending_emails e,unnest($1::text[]) o,jsonb_to_recordset($4::jsonb) x(n int,kind text,dest jsonb) WHERE e.id=$3`,
+          [owners, region, template, JSON.stringify(envelopes.map((v, n) => ({ n, kind: v.kind ?? 'marketing', dest: contacts.slice(0, v.cost) })))]);
+      };
+      const counted = () => {
+        let statements = 0;
+        const counting = new Proxy(runtime.db, { get(target, prop, receiver) {
+          if (prop === 'execute') return (query: Parameters<typeof target.execute>[0]) => { statements++; return target.execute(query); };
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        return { runtime: { ...runtime, db: counting }, statements: () => statements };
+      };
+      // `credits` marketing recipients left in a cached, current sample.
+      const gate = (credits: number) => ({ nextAllowedAt: 0, sentSinceRefresh: 0, refreshAt: Date.now() + 60_000,
+        quota: { maxSendRate: 1000, max24HourSend: max, sentLast24Hours: max - sesDailyReserve(max, percent) - credits, checkedAt: Date.now() } });
+      const state = async (region: string) => (await db.query(`SELECT count(*) FILTER (WHERE status='queued' AND lease_until IS NULL)::int AS free,
+        count(*) FILTER (WHERE status='queued')::int AS queued, count(*) FILTER (WHERE status='accepted')::int AS accepted,
+        count(*) FILTER (WHERE status='accepted' AND jsonb_array_length(to_addresses)>1)::int AS oversized FROM sending_emails WHERE region=$1`, [region])).rows[0];
+      const run = async (label: string, region: string, credits: number | 'blind', options: { lanes?: number } = {}) => {
+        const counter = counted(), started = Date.now();
+        const report = await runDispatcher(counter.runtime, { region, lanes: options.lanes ?? 1, batchSize: 24, gate: credits === 'blind' ? initialGate() : gate(credits), until: Date.now() + 5000 });
+        t.diagnostic(`ALLOWANCE-SKIP ${label}: sent ${report.sent}, ${counter.statements()} statements in ${Date.now() - started} ms, idle ${report.idle}`);
+        assert.equal(report.idle, true, `${label}: a quota hold is idle, not unfinished work that re-arms at once`);
+        assert.ok(report.quotaRetryAt && report.quotaRetryAt >= started + 1000, `${label}: it retries when the quota sample can change`);
+        return { report, statements: counter.statements() };
+      };
+
+      // P1: one owner, 24 two-recipient envelopes (a full page), one credit.
+      const solo = 'te-allowance-2', soloOwner = [`${w}-solo`];
+      await seed(solo, soloOwner, Array.from({ length: 24 }, () => ({ cost: 2 })));
+      for (const lanes of [1, 2]) {
+        const { report, statements } = await run(`one owner, ${lanes} lane(s)`, solo, 1, { lanes });
+        assert.equal(report.sent, 0);
+        assert.ok(statements <= 2 * lanes, `${statements} statements with ${lanes} lane(s)`);
+        assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      }
+      // Leased before the allowance is known (a fresh database sample, no gate yet): the page
+      // comes back unaffordable once, the next lease skips it, and the run ends.
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES ($1,$2,1000,$3,$4,clock_timestamp())`,
+        [soloOwner[0], solo, max, max - sesDailyReserve(max, percent) - 1]);
+      const blind = await run('one owner, blind first lease', solo, 'blind');
+      assert.equal(blind.report.sent, 0); assert.ok(blind.statements <= 4, `${blind.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 0, oversized: 0 });
+      // Four shards, two lanes each, splitting four credits: the same bound on every shard.
+      const shards = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: solo, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP one owner, four shards: ${shards.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of shards.entries()) {
+        assert.equal(report.sent, 0); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 4, `shard ${index}: ${statements} statements`);
+      }
+      // The same owner's affordable envelope behind the 24 is reached and sent.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        SELECT 'email_'||md5(e.id||'follower'),e.workspace_id,e.actor_key_id,e.region,e.from_address,$2,'[]','[]',e.subject,jsonb_set(e.snapshot,'{to}',$2),e.simulated,clock_timestamp()
+        FROM sending_emails e WHERE e.workspace_id=$1 ORDER BY e.created_at LIMIT 1`, [soloOwner[0], JSON.stringify(contacts.slice(0, 1))]);
+      const follower = await run('one owner, follower', solo, 1);
+      assert.equal(follower.report.sent, 1); assert.ok(follower.statements <= 8, `${follower.statements} statements`);
+      assert.deepEqual(await state(solo), { free: 24, queued: 24, accepted: 1, oversized: 0 });
+
+      // P2: 24 owners (one lease's worth), each with an older two-recipient head and a
+      // one-recipient follower. Each new sample's credit sends one follower; no head is sent.
+      const deep = 'te-allowance-3', owners = Array.from({ length: 24 }, (_, i) => `${w}-h${String(i).padStart(2, '0')}`);
+      await seed(deep, owners, [{ cost: 2 }, { cost: 1 }]);
+      let sent = 0;
+      for (const [label, lanes] of [['heads', 1], ['heads, next idle cycle', 1], ['heads, two lanes', 2]] as const) {
+        const { report, statements } = await run(label, deep, 1, { lanes });
+        assert.equal(report.sent, 1, `${label}: the credit sends an affordable follower`); sent += 1;
+        assert.ok(statements <= 8 * lanes, `${label}: ${statements} statements`);
+        assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+      }
+      // Four shards, one credit each: no shard sends more than its share or spins, and the mail
+      // one shard held while a sibling leased is released for the next run.
+      const parallel = await Promise.all([0, 1, 2, 3].map(async index => {
+        const counter = counted(), report = await runDispatcher(counter.runtime, { region: deep, lanes: 2, batchSize: 24, shard: { index, count: 4 }, gate: gate(4), until: Date.now() + 5000 });
+        return { report, statements: counter.statements() };
+      }));
+      t.diagnostic(`ALLOWANCE-SKIP heads, four shards: sent ${parallel.map(s => s.report.sent).join(',')}; ${parallel.map(s => s.statements).join(',')} statements`);
+      for (const [index, { report, statements }] of parallel.entries()) {
+        assert.ok(report.sent <= 1, `shard ${index} sent ${report.sent}`); assert.equal(report.idle, true); assert.ok(report.quotaRetryAt);
+        assert.ok(statements <= 16, `shard ${index}: ${statements} statements`);
+      }
+      const shardSent = parallel.reduce((n, s) => n + s.report.sent, 0); sent += shardSent;
+      assert.ok(shardSent >= 1, 'The shards send affordable followers');
+      assert.deepEqual(await state(deep), { free: 48 - sent, queued: 48 - sent, accepted: sent, oversized: 0 });
+
+      // The reserve: transactional followers behind oversized marketing heads spend the 11
+      // recipients the account has left; the marketing heads, needing two of one credit, wait.
+      const reserve = 'te-allowance-4', tx = Array.from({ length: 24 }, (_, i) => `${w}-t${String(i).padStart(2, '0')}`);
+      await seed(reserve, tx, [{ cost: 2 }, { cost: 1, kind: 'transactional' }]);
+      const priority = await run('transactional behind heads', reserve, 1);
+      assert.equal(priority.report.sent, sesDailyReserve(max, percent) + 1);
+      assert.deepEqual(await state(reserve), { free: 24, queued: 37, accepted: 11, oversized: 0 });
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
