@@ -9226,18 +9226,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // behind an admission released past the backlog (8 steps). Since 156 the release does not wait at all.
   test('receive backlog: an admission or release waiting on the window row counts the backlog committed meanwhile',async t=>{
     const {a,b,w,accept,race,state}=await receiptRace(t,{messages:3,backlog:1});
+    // m2 waits on the window row, is charged, and its job insert finds m1's job filling the backlog.
     assert.equal(await race(()=>accept(a,'m1',['a@rwin.invalid']),()=>accept(b,'m2',['a@rwin.invalid'])),'held');
-    assert.deepEqual(await state(),{window:1,active:1,receipts:{m1:'pending',m2:'held'}});
+    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held'}});
+    // m1's job ends: the job end admits m2 into the freed slot without charging the window again (155).
     await a.query("UPDATE jobs SET status='completed' WHERE workspace_id=$1",[w]);
-    await a.query("UPDATE mail_receipts SET budget_retry_at=now() WHERE workspace_id=$1 AND status='held'",[w]);
-    // A release pass never waits (156): behind an in-flight admission it leaves the hold for its next pass,
-    // which then counts that admission's job.
+    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'pending'}});
+    // A release pass never waits (156): behind an in-flight admission it moves a due hold ten seconds back
+    // and counts it. Its own job insert would be checked under the backlog row the admission's job holds.
+    await a.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      VALUES($1,'m4',$2,'tear-bucket','key','["a@rwin.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 second')`,[w,REGION]);
     const release=async()=>(await b.query('SELECT release_receive_budget_holds($1) n',[w])).rows[0].n;
     await a.query('BEGIN');
-    try { await accept(a,'m3',['a@rwin.invalid']); assert.equal(await release(),0); await a.query('COMMIT'); }
+    try { assert.equal(await accept(a,'m3',['a@rwin.invalid']),'held'); assert.equal(await release(),1); await a.query('COMMIT'); }
     finally { await a.query('ROLLBACK'); }
-    assert.equal(await release(),1);
-    assert.deepEqual(await state(),{window:2,active:1,receipts:{m1:'pending',m2:'held',m3:'pending'}});
+    assert.deepEqual(await state(),{window:3,active:1,receipts:{m1:'pending',m2:'pending',m3:'held',m4:'held'}});
+    assert.equal((await a.query("SELECT budget_retry_at>now() later FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='m4'",[w])).rows[0].later,true);
   });
   // tear witness (2 steps): accept m1 with 100 recipients, accept m1 with those plus one -> the reopen was refused.
   test('receipt reopen: the 200-recipient bound counts the merged recipients once',async t=>{
@@ -9318,8 +9322,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok('n' in released,`release failed: ${JSON.stringify(released)}`);
       assert.equal(admitted,'ok');
     } finally { await g.query('ROLLBACK'); }
-    const holds=(await g.query("SELECT workspace_id,ses_message_id,status,budget_retry_at>now() AS later FROM mail_receipts WHERE workspace_id=ANY($1) AND ses_message_id LIKE 'held-%' ORDER BY 1",[ids])).rows;
-    assert.deepEqual(holds.map(h=>[h.ses_message_id,h.status,h.later]),[['held-a','held',false],['held-b','held',true]]);
+    // A's hold moved ten seconds back (busy rows); B's took a window slot, then was held for the full backlog.
+    const holds=(await g.query("SELECT workspace_id,ses_message_id,status,error,budget_retry_at>now() AS later FROM mail_receipts WHERE workspace_id=ANY($1) AND ses_message_id LIKE 'held-%' ORDER BY 1",[ids])).rows;
+    assert.deepEqual(holds.map(h=>[h.ses_message_id,h.status,h.error,h.later]),[['held-a','held','MAILBOX_RECEIVE_BUDGET',true],['held-b','held','MAILBOX_RECEIVE_BACKLOG',true]]);
   });
   // Review of #57, P2 (tear witness, 4 steps: accept m1 h, claim, done, legacy-accept m1 x -> the previous Worker's
   // route refused 100 known recipients plus one new, and the new recipient never got the message).
@@ -9452,6 +9457,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.deepEqual(results.map(r=>r.status==='rejected'?String((r.reason as Json)?.cause?.code??(r.reason as Json)?.code??r.reason):'ok'),['ok','ok']);
     const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
     assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
+  });
+  // Recheck of #57, R4 (tear witness, 5 steps: accept m1 a, accept m2 a, hour, W accept m3 a, release -> the busy
+  // workspace's hold was skipped uncounted). Due holds of a busy workspace stayed first in line on every pass.
+  test('receive release: holds of a busy workspace do not starve the due holds behind them',async t=>{
+    const g=await fixtureDatabase(t),rel=await fixtureDatabase(t),base=unique('rfair'),A=base+'-a',B=base+'-b',ids=[A,B];
+    cleanup(t,async()=>{for(const table of ['jobs','mail_receipts','mail_receive_windows','mail_receive_limits','mail_ingest_turns'])await g.query(`DELETE FROM ${table} WHERE workspace_id=ANY($1)`,[ids]);});
+    await g.query('INSERT INTO mail_receive_limits(workspace_id,message_limit,backlog_limit) VALUES($1,1000,1000),($2,1000,1000)',[A,B]);
+    await g.query("INSERT INTO mail_receive_windows(workspace_id,window_at,messages,bytes) SELECT w,date_trunc('hour',now()),0,0 FROM unnest($1::text[]) w",[ids]);
+    // A full page of older due holds in A, then one in B.
+    await g.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      SELECT $1,'held-'||lpad(i::text,3,'0'),$2,'tear-bucket','key','["x@rfair.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '2 hours' FROM generate_series(1,100) i`,[A,REGION]);
+    await g.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error,budget_retry_at)
+      VALUES($1,'idle',$2,'tear-bucket','key','["x@rfair.invalid"]','{}','held','MAILBOX_RECEIVE_BUDGET',now()-interval '1 hour')`,[B,REGION]);
+    const release=async()=>(await rel.query('SELECT release_receive_budget_holds(NULL) n')).rows[0].n;
+    const idle=async()=>(await g.query("SELECT status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id='idle'",[B])).rows[0].status;
+    // An admission in A holds its window row across two passes of the global release.
+    await g.query('BEGIN');
+    let passes:number[]=[];
+    try {
+      await g.query('UPDATE mail_receive_windows SET messages=messages WHERE workspace_id=$1',[A]);
+      passes=[await release(),await release()];
+    } finally { await g.query('ROLLBACK'); }
+    // The first pass counts the busy holds it moved back, so the caller continues at once; the next reaches B.
+    assert.deepEqual(passes,[100,1]);
+    assert.equal(await idle(),'pending');
+    // The busy holds are due again ten seconds later and keep their order.
+    assert.equal((await g.query("SELECT count(*)::int n FROM mail_receipts WHERE workspace_id=$1 AND status='held' AND budget_retry_at BETWEEN now() AND now()+interval '10 seconds'",[A])).rows[0].n,100);
   });
   // tear witness (5 steps): U1 upload, expire, sweep, purge, U1 ok -> the object outlived its reservation with no deletion queued.
   test('attachment upload: a put that outlasts its swept reservation still queues the object for deletion',async t=>{
