@@ -4,9 +4,12 @@ Lives in `api/tear/admission/`. The access checker owns `api/tear/`; dispatch, i
 
 A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs on the real API code over an isolated PostgreSQL. It is checked against an independent reference model, and failing traces are reduced to short, replayable witnesses. It has three profiles:
 
-- **`recv`: the receive-side hourly window.**
-  - Covers SNS notifications (the real `acceptInboundNotification` and its `mail_receive_admit` trigger), the message limit, the ingest backlog and the 100-recipient budget.
-  - Covers budget holds released by `release_receive_budget_holds`, and their 72-hour expiry.
+- **`recv`: the receive-side hourly window and ingest backlog.**
+  - Uses two hosted workspaces, A < B, through the shared pool, so one SNS message can create receipts in both.
+  - Covers notifications through the real `acceptInboundNotification` and its triggers: the message limit, the backlog for every ingest-job producer, reopen coalescing, and the 100- and 200-recipient bounds.
+  - `legacy-accept` runs the previous Worker's route statement against the same database, which covers old/new Worker overlap.
+  - Covers the real global `release_receive_budget_holds(NULL)` (it must never wait) and the 72-hour hold expiry.
+  - Ingest `claim` and `done` are fixture steps with the store's settle fence.
 - **`send`: hosted send admission.**
   - Covers `POST /v1/emails/send` and `/batch` with a bearer key, through the one-statement atomic admission.
   - Covers the rolling 24-hour recipient cap shared by a quota sponsor's workspaces, the marketing reserve and the pending cap.
@@ -15,16 +18,19 @@ A [tear](https://github.com/anomalyco/tear) model of admission. Each step runs o
   - Covers refunds by the `hosted_adjust` trigger.
 - **`upload`: stored-attachment quota reservations.**
   - Covers reserve, R2 put, finish and refund in `POST /v1/attachments`.
-  - Covers the hourly sweeper (the real `cleanup`) and the deletion jobs (the real job runner).
+  - Covers the hourly sweeper and upload tombstones (the real `cleanup`) and the deletion jobs (the real job runner).
+  - `Ux crash` stands for a Worker that dies after a late put, which also covers an older Worker's refund.
 
 Files:
 
 - `src/model.rs` is the reference model: committed state plus one open transaction per connection, with the lock order the contract documents.
 - `src/main.rs` holds the edge-case checklist and its coverage, the properties, the bug witnesses and boundary traces, and the run modes.
 - `host.ts` drives the real code with Bun.
-  - Connections `W` and `V` each hold their statement's transaction open until a separate `commit` or `abort` step. A statement waiting on another backend's lock is reported as `blocked`.
+  - Connections `W` and `V` (and `X` on the receive side) each hold their statement's transaction open until a separate `commit` or `abort` step. A statement waiting on another backend's lock is reported as `blocked`.
   - Upload slots `U1` to `U3` each stop at their R2 put until `ok` or `fail`.
   - Time moves only by shifting stored timestamps, between transactions.
+
+- The host refuses network egress: `fetch` throws, and object storage points at a closed loopback port.
 
 tear is pinned by git rev in `Cargo.toml` (the same rev as the other checkers). Cargo fetches it with your git credentials (`.cargo/config.toml`), so you need read access to `anomalyco/tear`. tear is a dev tool only: nothing here ships with the API.
 
@@ -47,7 +53,7 @@ psql postgresql://…@127.0.0.1:5432/tear_admission -c "DO \$\$ BEGIN EXECUTE fo
 export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_admission
 ```
 
-## Pull-request run (about 20–35 s after the build)
+## Pull-request run (about 25–40 s after the build)
 
 ```sh
 cd api/tear/admission && cargo run --release -- ci
@@ -55,9 +61,11 @@ cd api/tear/admission && cargo run --release -- ci
 
 `ci` runs the following, prints a JSON report with checklist coverage (`checklist.missing` should be empty), and exits 1 on any mismatch or error:
 
-1. The six bug witnesses and 19 boundary traces.
+1. The eleven bug witnesses (including the four from the #57 review) and 19 boundary traces.
 2. Every transition of the core alphabet: `recv` to depth 2, `send` to depth 1, `upload` to depth 3.
 3. 540 seeded random walks over the full alphabet and every configuration (about 12,000 steps).
+
+It covers about 15,000 steps in 1,900 traces.
 
 Pass `--seed N` to rotate the walks.
 
@@ -65,11 +73,10 @@ Pass `--seed N` to rotate the walks.
 
 | Command | Size | Time (M-series Mac) |
 |---|---:|---:|
-| `cargo run --release -- edges 3 --profile recv` | 3,364 edges, 9,662 steps | about 26 s |
-| `cargo run --release -- edges 4 --profile recv` | 20,992 edges, 80,174 steps | about 2 min |
+| `cargo run --release -- edges 3 --profile recv` | 13,345 edges, 38,930 steps | about 2 min |
 | `cargo run --release -- edges 2 --profile send` | 2,399 edges, 4,738 steps | about 30 s |
 | `cargo run --release -- edges 3 --profile send --budget 600` | 46,794 edges, 137,923 steps | about 10 min (8 min covers 84%) |
-| `cargo run --release -- edges 5 --profile upload` | 1,221 edges, 5,434 steps | about 10 s |
+| `cargo run --release -- edges 5 --profile upload` | 2,048 edges, 9,260 steps | about 12 s |
 | `cargo run --release -- random 2000 30 --profile P --seed $(date +%s)` | 60,000 steps | 1–2 min |
 
 - `space N --profile P` prints the core graph's size per depth without touching the database.
