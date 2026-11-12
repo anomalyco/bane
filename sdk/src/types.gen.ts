@@ -1322,6 +1322,13 @@ export type Webhook = {
     updatedAt: string;
 };
 
+export type CreatedWebhook = Webhook & {
+    /**
+     * The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret.
+     */
+    secret: string;
+};
+
 export type CreateWebhook = {
     url: string;
     description?: string;
@@ -1520,14 +1527,17 @@ export type Metrics = {
 
 export type SenderScore = {
     /**
-     * warmup until the workspace has sent its first 100 non-simulated emails.
+     * warmup until the workspace has sent its first 100 real emails: not simulated, and to at least one recipient outside the SES mailbox simulator.
      */
     state: 'warmup' | 'graded';
     emails: {
         /**
-         * Non-simulated emails ever created, counted up to 100.
+         * Real emails ever created, counted up to 100. Simulated sends and emails only to …@simulator.amazonses.com are left out.
          */
         firstEmails: number;
+        /**
+         * Real emails created in the 30 days to today.
+         */
         last30Days: number;
     };
     /**
@@ -1599,6 +1609,82 @@ export type SenderScoreFactor = {
      */
     source: 'measured' | 'neutral';
     basis: string;
+};
+
+export type Usage = {
+    billing: {
+        /**
+         * Billing is not on yet: nothing is charged, and the prices below are information only.
+         */
+        enabled: false;
+    };
+    pricing: {
+        currency: 'USD';
+        /**
+         * Price per 1,000 messages, sent or received. SES mailbox simulator sends count like any other send.
+         */
+        perThousand: number;
+        /**
+         * Sent messages included free each calendar month (UTC).
+         */
+        freeSent: number;
+        /**
+         * Received messages included free each calendar month (UTC).
+         */
+        freeReceived: number;
+    };
+    month: {
+        /**
+         * Start of the current calendar month, UTC.
+         */
+        from: string;
+        /**
+         * Emails created this month, each counted once however many recipients it has.
+         */
+        sent: number;
+        /**
+         * Messages received this month on any address, routed, unrouted or spam. Null unless the credential may read every received message (owners, admins and manage credentials): members and read-only keys never learn about mail they can't open.
+         */
+        received: number | null;
+    };
+    /**
+     * Null until the workspace connects hosted sending.
+     */
+    daily: {
+        /**
+         * Recipients allowed per rolling 24 hours; null when this workspace has no daily limit.
+         */
+        cap: number | null;
+        /**
+         * Recipients charged in the rolling 24 hours, SES mailbox simulator addresses included.
+         */
+        used: number;
+        /**
+         * When capacity next frees up or the limit changes.
+         */
+        resetAt: string | null;
+        /**
+         * Index into steps of the step this workspace has reached; null when an operator set a custom limit.
+         */
+        step: number | null;
+    } | null;
+    /**
+     * How the daily limit grows, for every workspace on this installation. Only real SES acceptances count towards the next step: simulated sends and simulator addresses use the limit but never raise it.
+     */
+    steps: Array<{
+        /**
+         * Recipients per rolling 24 hours at this step.
+         */
+        cap: number;
+        /**
+         * What a workspace needs to reach this step, in plain words.
+         */
+        requires: string;
+    }>;
+    /**
+     * This installation simulates SES: no email leaves it, and simulated sends never count against the daily limit.
+     */
+    simulated: boolean;
 };
 
 export type RegionCatalog = {
@@ -10186,7 +10272,7 @@ export type CreateWebhookResponses = {
     /**
      * Success
      */
-    201: Webhook;
+    201: CreatedWebhook;
 };
 
 export type CreateWebhookResponse = CreateWebhookResponses[keyof CreateWebhookResponses];
@@ -11081,6 +11167,67 @@ export type GetSenderScoreResponses = {
 };
 
 export type GetSenderScoreResponse = GetSenderScoreResponses[keyof GetSenderScoreResponses];
+
+export type GetUsageData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/usage';
+};
+
+export type GetUsageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetUsageError = GetUsageErrors[keyof GetUsageErrors];
+
+export type GetUsageResponses = {
+    /**
+     * Success
+     */
+    200: Usage;
+};
+
+export type GetUsageResponse = GetUsageResponses[keyof GetUsageResponses];
 
 export type ListRegionsData = {
     body?: never;
@@ -17323,9 +17470,9 @@ export type ListLogsData = {
          */
         search?: string;
         /**
-         * Sent mail only; received mail is left out when set.
+         * A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received.
          */
-        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+        status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated' | 'received' | 'spam';
         /**
          * Sent mail only; received mail is left out when set.
          */

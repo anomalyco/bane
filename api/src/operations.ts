@@ -1,5 +1,6 @@
-import { cachedDashboardRead } from './dashboard-cache.js';
+import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { registerSenderScore } from './sender-score.js';
+import { registerUsage } from './usage.js';
 import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
@@ -7,7 +8,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
@@ -32,7 +33,7 @@ import { receivingPolicy } from './mailbox-ingest-input.js';
 import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
-import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
+import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -86,7 +87,7 @@ function webhookManager(c: Ctx) {
   if (a.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, change or delete webhooks or read their signing secrets.');
   return a;
 }
-// A webhook that an approval sets up, changes or reads the signing secret of is tied to the approval, like the keys it
+// A webhook that an approval sets up, changes or rotates the signing secret of is tied to the approval, like the keys it
 // creates: it is posted to only while the approval is active (webhookJob) and is held when the approval is removed
 // (migration 198). The approval is read again here, inside the write's transaction, and held (shared lock) until the
 // write commits: a removal under way finishes first and the write is refused; one that starts later waits for the
@@ -99,7 +100,7 @@ async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
 }
 // A held webhook is marked (reconfirm). Its URL is write-only, so nothing is posted to it, a test included, until
 // the URL is sent again. Sending the URL takes the webhook over: the mark goes, and so does the signing secret the
-// approval could read.
+// approval was given (on create or rotate).
 const webhookNeedsUrl = () => new ApiError(409, 'WEBHOOK_URL_REQUIRED', 'Deliveries were held when the approval that set up or changed this webhook was removed, and its URL is write-only. Send the URL again to resume; the webhook then gets a new signing secret.', 'url');
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
@@ -120,6 +121,10 @@ async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIde
     throw new ApiError(503, 'SES_UNAVAILABLE', 'SES could not complete the operation. Check service availability and deployment connectivity.', undefined, true);
   }
 }
+const REVEALS_PER_MINUTE = 10;
+/** One row in webhook_secret_audit (migration 220) for each hand-out of a signing secret. */
+const recordSecret = (db: Pick<Database, 'insert'>, a: Actor, webhookId: string, action: 'created' | 'revealed' | 'rotated') =>
+  db.insert(webhookSecretAudit).values({ workspaceId: a.workspaceId, id: id('wsa'), webhookId, action, actorKeyId: a.keyId, credential: a.credential ?? 'apiKey', actorEmail: a.email ?? null });
 async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
   const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, reconfirm: _r, ...value } = row;
   return { ...value, url: webhookUrlHint(value.url), headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
@@ -1022,17 +1027,22 @@ export function registerOperations(app: App) {
     const a = workspaceActor(c), q = c.req.valid('query'); const rows = await c.env.db.select().from(webhooks).where(and(scoped(webhooks, a), q.cursor ? lt(webhooks.id, q.cursor) : undefined)).orderBy(desc(webhooks.id)).limit(q.limit + 1);
     return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(row => metadata(c.env, row, a))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
-    const a = webhookManager(c), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
+  // The signing secret comes back once with the new endpoint, like an API key, so a first delivery can be verified
+  // without a rotation; revealWebhookSecret reads it again later and rotateWebhookSecret replaces it.
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, description: 'Create an endpoint for email events. The response includes the signing secret (whsec_…) used for the Webhook-Signature header; store it on your server. Deliveries follow Standard Webhooks: Webhook-Signature is v1,<base64 HMAC-SHA256 of "{Webhook-Id}.{Webhook-Timestamp}.{raw body}"> keyed with the base64 bytes after whsec_.', request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema.extend({ secret: z.string().describe('The signing secret, whsec_ followed by 32 base64 bytes. Read it again with revealWebhookSecret.') }).openapi('CreatedWebhook')), ...errors } }), async c => {
+    const a = webhookManager(c), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId), secret = webhookSecret();
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
-    const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
+    const values = { ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) };
     const [row] = await c.env.db.transaction(async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(140913,hashtext(${a.workspaceId}))`);
       if ((await tx.execute(sql`SELECT 1 FROM operation_webhooks WHERE workspace_id=${a.workspaceId} OFFSET 9 LIMIT 1`)).rowCount) throw new ApiError(409,'WEBHOOK_LIMIT_REACHED','A workspace can have at most 10 operation webhook endpoints (including paused endpoints).');
       await ownWebhook(c, tx, a, webhookId);
-      return tx.insert(webhooks).values(values).returning();
+      const created = await tx.insert(webhooks).values(values).returning();
+      await recordSecret(tx, a, webhookId, 'created');
+      return created;
     });
-    return c.json(await metadata(c.env, row!, a), 201);
+    c.header('Cache-Control', 'no-store');
+    return c.json({ ...await metadata(c.env, row!, a), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
     const a = workspaceActor(c); return c.json(await metadata(c.env, await getWebhook(c.env, a, c.req.valid('param').id), a), 200);
@@ -1062,17 +1072,32 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
     const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
   });
-  for (const rotate of [false, true]) app.openapi(createRoute({ method: rotate ? 'post' : 'get', path: rotate ? '/v1/webhooks/{id}/rotate-secret' : '/v1/webhooks/{id}/secret', operationId: rotate ? 'rotateWebhookSecret' : 'revealWebhookSecret', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
+  // Reveal hands out a durable capability: whoever holds the secret can sign requests the receiver trusts, with no trace in
+  // Bane. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
+  // approval), at most REVEALS_PER_MINUTE times a minute per workspace, and every hand-out is recorded. Rotation stays open
+  // to every manage credential: it breaks the receiver until it is updated, so it can't go unnoticed.
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/secret', operationId: 'revealWebhookSecret', tags: ['Webhooks'], security, description: `Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most ${REVEALS_PER_MINUTE} reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.`, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
+    const a = webhookManager(c);
+    if (a.credential === 'mcp' || a.credential === 'agentToken' || a.grantId) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Read a signing secret back from the dashboard or with an API key you created. MCP approvals and agent tokens can rotate it instead.');
+    const row = await getWebhook(c.env, a, c.req.valid('param').id); c.header('Cache-Control', 'no-store');
+    if (!await chargeBudget(c.env, a.workspaceId, 'webhook-secret:reveal', REVEALS_PER_MINUTE)) {
+      c.header('Retry-After', '60');
+      throw new ApiError(429, 'REVEAL_RATE_LIMITED', `This workspace read signing secrets back ${REVEALS_PER_MINUTE} times in the last minute. Retry after the window resets.`, undefined, true);
+    }
+    const secret = await decrypt(c.env, row.encryptedSecret, secretBinding(a, row.id));
+    await recordSecret(c.env.db, a, row.id, 'revealed');
+    return c.json({ secret }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/rotate-secret', operationId: 'rotateWebhookSecret', tags: ['Webhooks'], security, description: 'Replace the endpoint\'s signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.', request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
     const a = webhookManager(c), webhookId = c.req.valid('param').id, binding = secretBinding(a, webhookId); c.header('Cache-Control', 'no-store');
-    // The approval is held and the webhook row locked from the read to the end: the secret read or written is the one
-    // the row holds when this commits, and a removal that lands later holds the webhook, whose URL then takes it over
-    // with a new secret.
+    // The approval is held and the webhook row locked from the read to the end: the secret written is the one the row
+    // holds when this commits, and a removal that lands later holds the webhook, whose URL then takes it over.
     const secret = await c.env.db.transaction(async tx => {
       await ownWebhook(c, tx, a, webhookId);
       const [row] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))).for('update'); if (!row) return notFound('Webhook');
-      if (!rotate) return decrypt(c.env, row.encryptedSecret, binding);
       const secret = webhookSecret();
       await tx.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId)));
+      await recordSecret(tx, a, webhookId, 'rotated');
       return secret;
     });
     return c.json({ secret }, 200);
@@ -1107,6 +1132,7 @@ export function registerOperations(app: App) {
   registerPublicEvents(app);
   registerMetrics(app);
   registerSenderScore(app);
+  registerUsage(app);
 }
 
 const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
@@ -1364,7 +1390,7 @@ function registerMetrics(app: App) {
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.');
     const compute = async () => {
     if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
@@ -1451,8 +1477,10 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['metrics', a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
-    c.header('x-bane-metrics-cache', body.hit ? 'hit' : 'miss');
+    // Cached until the workspace's next email or email event, so a send or delivery shows on the next read, the same
+    // moment Logs lists it, instead of up to a minute later.
+    const body = await dashboardRead(c, ['metrics', a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
+    c.header('x-bane-metrics-cache', body.cache);
     return c.json(body.value, 200);
   });
 }
