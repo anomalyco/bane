@@ -68,7 +68,7 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     const secret = randomBytes(36).toString('hex');
     const envFor = port => ({
       PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: `http://127.0.0.1:${port}`, API_BASE_URL: `http://127.0.0.1:${port}`, HOST: '127.0.0.1', PORT: String(port),
-      MULTI_TENANT: 'true', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       AUTH_ALLOWED_EMAILS: 'dana@northwind.example', ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',

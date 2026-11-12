@@ -12,6 +12,10 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
+# Hosted sign-in and MCP are Google-only: config.ts refuses to start without it, so
+# fail here, before secrets sync or migrations, instead of deploying a 503.
+acr=$(node -e "const ts=require('typescript');const c=ts.parseConfigFileTextToJson('w',require('fs').readFileSync(process.argv[1],'utf8')).config;process.stdout.write(String(c?.vars?.MULTI_TENANT)+' '+String(c?.vars?.ACCOUNT_REQUIRED_ACR))" "$config")
+[[ $acr == 'true urn:anomaly:acr:google' ]] || { echo "::error::$config must set MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google"; exit 1; }
 for name in BANE_ROOT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
@@ -65,6 +69,7 @@ else
 fi
 args+=(--secrets-file "$secrets_file")
 if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
+if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi
 WRANGLER_LOG=error "$wrangler" "${args[@]}"
 if bound; then state=true; else state=false; fi
 [[ $state == "$gateway" ]] || { echo "::error::Worker MAILGW_API_TOKEN bound=$state, but bane:mailGatewayEnabled=$gateway"; exit 1; }

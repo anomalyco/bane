@@ -1,6 +1,6 @@
 import * as oauth from 'oauth4webapi';
 import { sql } from 'drizzle-orm';
-import { digest, type Actor, type Runtime, type DbExecutor, type Permission } from './core.js';
+import { digest, log, type Actor, type Runtime, type DbExecutor, type Permission } from './core.js';
 
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
@@ -42,10 +42,12 @@ export async function externalMcpGrant(runtime: Runtime, keyId: string, db: DbEx
 export async function authorizeResource(runtime: Runtime, request: Request, handler: (actor: Actor) => Promise<Response>) {
   const resource = audience(runtime);
   const metadata = new URL('/.well-known/oauth-protected-resource/mcp', resource).href;
-  function denied(status: 401 | 403) {
-    const error = status === 401 ? 'invalid_token' : 'insufficient_scope';
+  // MCP clients expect a JSON-RPC envelope; the challenge itself lives in WWW-Authenticate (RFC 6750, RFC 9470).
+  function denied(status: 401 | 403, error = status === 401 ? 'invalid_token' : 'insufficient_scope', extra = '') {
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
-    return Response.json({error,error_description:status===401?'Reconnect and authorize this MCP client at the account service.':'This client has no active Bane approval for the requested access.'}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", resource_metadata="${metadata}", scope="bane:read"` }});
+    const message = error === 'insufficient_user_authentication' ? 'Bane requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.'
+      : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : 'This client has no active Bane approval for the requested access.';
+    return Response.json({jsonrpc:'2.0', error:{code:-32000, message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="bane:read"${extra}` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -57,6 +59,15 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
       { signingAlgorithms: ['ES256','RS256'], [oauth.clockTolerance]: 0, signal: AbortSignal.timeout(5000) });
   } catch { return denied(401); }
   if (claims.aud !== resource && !(Array.isArray(claims.aud) && claims.aud.length === 1 && claims.aud[0] === resource)) return denied(401);
+  // A token minted in the future would also block every later token from updating the approval.
+  if (typeof claims.iat !== 'number' || claims.iat > Date.now() / 1000 + 30) return denied(401);
+  // The dashboard's sign-in requirement applies to every access token, refreshed ones included:
+  // the issuer copies the authentication context of the original sign-in into each token it mints.
+  const requiredAcr = runtime.config.accountRequiredAcr;
+  if (requiredAcr && claims.acr !== requiredAcr) {
+    log('warn', { code: 'MCP_ACR_REFUSED', client: String(claims.client_id).slice(0, 200), acr: typeof claims.acr === 'string' ? claims.acr.slice(0, 100) : null });
+    return denied(401, 'insufficient_user_authentication', `, acr_values="${requiredAcr}"`);
+  }
   const scopes = new Set(typeof claims.scope === 'string' ? claims.scope.split(' ') : []);
   const allowed = permissions.filter(p => scopes.has(`bane:${p}`));
   if (!allowed.length) return denied(403);

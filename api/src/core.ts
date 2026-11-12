@@ -44,7 +44,11 @@ export interface Config {
   previousAuthSecret?: string;
   accountIssuer?: string;
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
+  /** Required `acr` on ID tokens and on every MCP access token. Hosted installations always require Google. */
+  accountRequiredAcr?: string;
   allowedEmails: string[];
+  /** Verified addresses at these domains may sign up when the required authentication context was met. */
+  allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   platformAccount?: string;
