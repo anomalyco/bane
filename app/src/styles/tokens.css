@@ -180,6 +180,8 @@
   /* Micro-interactions: strong ease-out for enters and feedback (120–250 ms), ease-in-out for on-screen moves. */
   --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
   --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
+  /* Sheets: the iOS drawer curve. */
+  --ease-drawer: cubic-bezier(.32, .72, 0, 1);
   --shadow-raised: 0 2px 4px rgb(0 0 0 / 4%), 0 1px 2px -1px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);
   --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
   --shadow-popover: 0 8px 16px rgb(0 0 0 / 4%), 0 4px 8px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);

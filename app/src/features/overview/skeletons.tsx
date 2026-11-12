@@ -16,7 +16,7 @@ export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
 }
 
 export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as const
-export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '60%' }, { key: 'sent', label: 'Recipients', width: '20%', align: 'right' as const }, { key: 'delivered', label: 'Delivered', width: '20%', align: 'right' as const }]
+export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '60%' }, { key: 'sent', label: 'Recipients', width: '20%', align: 'right' as const, card: 'line' as const }, { key: 'delivered', label: 'Delivered', width: '20%', align: 'right' as const, card: 'inline' as const }]
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
 export function FactsSkeleton() {
