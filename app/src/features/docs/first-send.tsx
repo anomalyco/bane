@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { useMutation } from '@tanstack/react-query'
+import { useGuardedMutation } from '../../lib/single-flight'
 import { Send } from 'lucide-react'
 import { Alert, Button, ErrorText, SectionHeader, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
@@ -32,7 +32,7 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   const to = identity?.email
   const from = `hello@${domain.name}`
   const verified = domain.status === 'verified'
-  const test = useMutation({ mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
     onSuccess: data => onSent?.(data.id) })
   if (!to) return null
   return <>

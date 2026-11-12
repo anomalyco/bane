@@ -159,7 +159,7 @@ function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: bo
   const [extend, setExtend] = useState('')
   const limit = Date.parse(inbox.createdAt) + 30 * 86_400_000
   const until = extend === '' ? null : new Date(extend === 'max' ? limit : Math.min(limit, Math.max(Date.now(), Date.parse(inbox.expiresAt)) + Number(extend) * 1000))
-  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated')
+  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated', false, true, inbox.id)
   useEffect(() => { if (open) { save.reset(); setName(inbox.name ?? ''); setExtend('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const canExtend = inbox.status === 'active' && Date.parse(inbox.expiresAt) < limit - 60_000
   async function submit(event: FormEvent) {
@@ -190,7 +190,7 @@ function InboxDetail({ id }: { id: string }) {
   const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
   const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
   const keys = useApiQuery(['agent-inbox-keys', id], async (api, signal) => (await api.mailboxes.keys(false, signal)).filter(key => key.addressIds?.length === 1 && key.addressIds[0] === id), { enabled: canAdminister })
-  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted')
+  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, true, id)
   const revoke = useApiMutation((api, keyId: string) => api.mailboxes.revokeKey(keyId), 'Inbox key revoked')
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
