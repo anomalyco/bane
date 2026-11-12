@@ -430,6 +430,35 @@ fn scenarios(check: &mut Check) -> R<Value> {
     Ok(json!({"campaign": "scenarios", "traces": SCENARIOS.len(), "matched": SCENARIOS.len() - failed.len(), "mismatched": failed.len(), "errors": [], "steps": 0, "checkMs": 0, "witnesses": failed}))
 }
 
+/// Why a report must fail the process: a trace that did not match, or any campaign (a run,
+/// the scenarios, each part of `ci`) with a mismatch, an error or a trace that neither matched
+/// nor mismatched.
+fn failures(report: &Value) -> Vec<String> {
+    let mut out = vec![];
+    match report {
+        Value::Array(parts) => parts.iter().for_each(|p| out.extend(failures(p))),
+        Value::Object(o) if o.contains_key("campaign") => {
+            let name = o["campaign"].as_str().unwrap_or("campaign");
+            let n = |k: &str| o.get(k).and_then(Value::as_u64).unwrap_or(0);
+            if n("mismatched") > 0 {
+                out.push(format!("{name}: {} mismatched", n("mismatched")));
+            }
+            let errors = o.get("errors").and_then(Value::as_array).map_or(0, Vec::len);
+            if errors > 0 || n("matched") + n("mismatched") < n("traces") {
+                out.push(format!("{name}: {} traces neither matched nor mismatched", n("traces") - n("matched") - n("mismatched")));
+            }
+        }
+        Value::Object(o) => {
+            let status = o.get("status").and_then(Value::as_str).unwrap_or("missing");
+            if status != "match" {
+                out.push(format!("trace: {status}"));
+            }
+        }
+        _ => out.push("report: unexpected shape".to_owned()),
+    }
+    out
+}
+
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
@@ -515,5 +544,41 @@ fn main() -> R<()> {
     };
     println!("{}", serde_json::to_string_pretty(&json!({"report": report, "fixtures": check.traces, "wallMs": started.elapsed().as_millis() as u64})).unwrap_or_default());
     check.fixture.close()?;
+    // The JSON report stays on stdout for diagnosis; a failing check fails the process.
+    let failed = failures(&report);
+    if !failed.is_empty() {
+        eprintln!("tear: FAILED: {}", failed.join("; "));
+        std::process::exit(1);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::failures;
+    use serde_json::json;
+
+    fn run(traces: u64, matched: u64, mismatched: u64, errors: usize) -> serde_json::Value {
+        json!({"campaign": "c", "traces": traces, "matched": matched, "mismatched": mismatched, "errors": vec![json!({}); errors]})
+    }
+
+    #[test]
+    fn a_clean_report_passes() {
+        assert!(failures(&run(10, 10, 0, 0)).is_empty());
+        assert!(failures(&json!({"status": "match"})).is_empty());
+        assert!(failures(&json!([run(22, 22, 0, 0), run(100, 100, 0, 0), run(1112, 1112, 0, 0)])).is_empty());
+    }
+
+    // Review of #52 (P2): a mismatching trace or a failed ci part exited 0.
+    #[test]
+    fn mismatches_errors_and_failed_scenarios_fail() {
+        for status in ["mismatch", "error", "disabled"] {
+            assert_eq!(failures(&json!({"status": status})), vec![format!("trace: {status}")]);
+        }
+        assert_eq!(failures(&run(10, 9, 1, 0)).len(), 1);
+        assert_eq!(failures(&run(10, 9, 0, 1)).len(), 1);
+        assert_eq!(failures(&run(10, 3, 0, 0)).len(), 1, "errors beyond the five kept still count");
+        assert_eq!(failures(&json!([run(25, 24, 1, 0), run(100, 100, 0, 0), run(30, 30, 0, 0)])).len(), 1);
+        assert_eq!(failures(&json!(null)).len(), 1);
+    }
 }

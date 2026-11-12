@@ -28,7 +28,7 @@ Turn off `fsync` and `synchronous_commit` on that cluster. Commit stalls otherwi
 cd api/tear && cargo run --release -- ci
 ```
 
-The run covers the 22 scenarios, 100 random walks of 24 steps over the exact configurations, 30 quota-profile walks, and every edge of the dispatch profile's model graph to depth 3. It prints a JSON report. Each distinct mismatch appears under `witnesses` with its reduced trace, and `coverage` counts every edge case reached.
+The run covers the 25 scenarios, 100 random walks of 24 steps over the exact configurations, 30 quota-profile walks, and every edge of the dispatch profile's model graph to depth 3. It also covers 30 two-owner walks. It prints a JSON report on stdout and exits 1 when any trace mismatches or errors; the reasons go to stderr. Each distinct mismatch appears under `witnesses` with its reduced trace, and `coverage` counts every edge case reached. `cargo test` checks that exit rule.
 
 ## Deeper runs
 
