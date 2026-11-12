@@ -16,11 +16,13 @@ export const campaignColumns: SkeletonColumn[] = [
   { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
+// A template's card: its name and status, its subject or purpose, when it changed, and Use template.
 export const templateColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton },
-  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} /> },
-  { key: 'updated', label: 'Updated · UTC', width: 190, skeleton: <SkeletonText width="90%" /> },
-  { key: 'action', label: '', width: 150, align: 'right', skeleton: <span /> },
+  { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton, card: 'title' },
+  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'about', label: 'About', card: 'line', table: false },
+  { key: 'updated', label: 'Updated · UTC', width: 190, skeleton: <SkeletonText width="90%" />, card: 'inline' },
+  { key: 'action', label: '', width: 150, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
 export function CampaignAudienceSkeleton() {
