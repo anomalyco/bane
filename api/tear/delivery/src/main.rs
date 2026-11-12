@@ -174,6 +174,9 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // A breaker deferral counted as a fence attempt, so a resumed delivery lost a retry.
     (1, &["ingest m1 z", "run K m1:V", "reply K timeout", "ingest m2 z", "run K m2:V", "reply K timeout", "ingest m3 z", "run K m3:V", "reply K timeout",
         "run K m1:V", "pause V", "run K m1:V", "unpause V"]),
+    // Mail stored before forward verdicts existed was refused by a later forward, safe or not.
+    (1, &["ingest m1 z", "strip m1", "rituals forward", "ingest m1 b+z", "run K m1:F"]),
+    (1, &["ingest m1 z loop", "strip m1", "rituals forward", "ingest m1 b+z loop", "run K m1:F"]),
     // A delivery held past retention was deleted silently; it is dead-lettered with a reason.
     (1, &["ingest m1 a", "pause W", "run K m1:W", "age m1:W", "prune", "prune"]),
     // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).
