@@ -47,7 +47,9 @@
     "WEBHOOK_QUEUE_NAME": "bane-dev-webhooks",
     "FEEDBACK_QUEUE_NAME": "bane-dev-feedback-v2",
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
-    "LEGACY_FEEDBACK_QUEUE_NAME": "bane-dev-feedback"
+    "LEGACY_FEEDBACK_QUEUE_NAME": "bane-dev-feedback",
+    // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
+    "LEGACY_FEEDBACK_CUTOVER": ""
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).
@@ -63,7 +65,8 @@
     "producers": [
       { "binding": "WAKE_QUEUE", "queue": "bane-dev-work" },
       { "binding": "WEBHOOK_QUEUE", "queue": "bane-dev-webhooks" },
-      { "binding": "FEEDBACK_DLQ", "queue": "bane-dev-feedback-dlq" },
+      { "binding": "FEEDBACK_DLQ", "queue": "bane-dev-feedback-v2-dlq" },
+      { "binding": "LEGACY_FEEDBACK_DLQ", "queue": "bane-dev-feedback-dlq" },
       { "binding": "FEEDBACK_QUEUE", "queue": "bane-dev-feedback-v2" }
     ],
     "consumers": [
@@ -71,7 +74,7 @@
       { "queue": "bane-dev-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "bane-dev-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
-      { "queue": "bane-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-dlq" },
+      { "queue": "bane-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-v2-dlq" },
       // Legacy lane (untagged items from the previous version); remove with LEGACY_FEEDBACK_QUEUE_NAME once drained.
       { "queue": "bane-dev-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "bane-dev-feedback-dlq" }
     ]

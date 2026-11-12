@@ -1,6 +1,8 @@
 // Review and replay untagged items the legacy feedback queue quarantined (operation_feedback_failures,
 // reason FEEDBACK_UNTAGGED). Without --apply it lists them; with --apply and reviewed ids it ingests
-// those rows as verified feedback and removes the ones that were ingested. Needs the API's environment
+// only rows carrying a currently valid installation tag and removes those ingested. Recover unsigned
+// rows from the original signed SNS evidence through /v1/events/ses, not by trusting an operator ID list.
+// Needs the API's environment
 // (DATABASE_URL and the hosted configuration), like the other operator scripts in this directory.
 import { Client } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';

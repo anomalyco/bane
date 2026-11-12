@@ -60,33 +60,45 @@ export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry
 }
 
 /**
- * No lane ever ingests an untagged item. The tagged lane (`FEEDBACK_QUEUE`) carries what this installation
+ * The tagged lane (`FEEDBACK_QUEUE`) carries what this installation
  * tagged; anything else on it is refused: wrapped, dead-lettered on its own and acknowledged, so it is kept
  * as evidence, never retried, and a replay of that dead letter is refused again. The legacy lane is the
- * queue the previous Worker version wrote to without tags: its untagged items are quarantined in the
- * database for an operator to review and replay (scripts/replay-feedback-quarantine.ts), tagged items are
+ * queue the previous Worker version wrote to without tags: only messages the platform enqueued before
+ * the fixed deployment cutover may drain unsigned. New or undated items are quarantined for review;
+ * no body-supplied date establishes provenance. Tagged items are
  * verified like the tagged lane's. One message's verdict never changes another's; a quarantine or
  * dead-letter write that fails holds only that message for a later attempt.
  */
 export type FeedbackLane = 'tagged' | 'legacy';
 export type FeedbackVerdict = 'ingest' | 'untagged' | 'refused';
-export function feedbackVerdict(secrets: FeedbackSecrets, lane: FeedbackLane, body: unknown): FeedbackVerdict {
+/** Missing, malformed or future cutovers fail closed. Never derive this from a queued body. */
+export function legacyFeedbackCutover(value: unknown, now = Date.now()): number | undefined {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return undefined;
+  const cutover = Date.parse(value);
+  return Number.isFinite(cutover) && cutover > 0 && cutover <= now ? cutover : undefined;
+}
+export function feedbackVerdict(secrets: FeedbackSecrets, lane: FeedbackLane, body: unknown, provenance?: { timestamp?: Date; cutover?: number }): FeedbackVerdict {
   if (authenticFeedback(secrets, body)) return 'ingest';
-  if (lane === 'legacy' && typeof body === 'object' && body !== null && !Array.isArray(body) && !('mac' in body) && !('refused' in body)) return 'untagged';
+  if (lane === 'legacy' && typeof body === 'object' && body !== null && !Array.isArray(body) && !('mac' in body) && !('refused' in body)) {
+    const item = body as Partial<FeedbackItem>, timestamp = provenance?.timestamp?.getTime(), cutover = provenance?.cutover;
+    if (timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0 && cutover !== undefined && Number.isFinite(cutover) && cutover <= Date.now() && timestamp < cutover &&
+      typeof item.region === 'string' && typeof item.topicArn === 'string' && typeof item.messageId === 'string' && item.message !== null && typeof item.message === 'object' && !Array.isArray(item.message)) return 'ingest';
+    return 'untagged';
+  }
   return 'refused';
 }
 /** What a refused item looks like in the dead-letter queue: never a feedback item, whichever lane replays it. */
 export type RefusedFeedback = { refused: 'FEEDBACK_UNAUTHENTICATED'; lane: FeedbackLane; body: unknown };
-type FeedbackMessage = Pick<Message, 'attempts' | 'retry' | 'ack'> & { body: unknown };
+type FeedbackMessage = Pick<Message, 'attempts' | 'retry' | 'ack'> & { body: unknown; timestamp?: Date };
 export async function settleFeedbackBatch(options: {
-  secrets: FeedbackSecrets; lane: FeedbackLane; messages: readonly FeedbackMessage[];
+  secrets: FeedbackSecrets; lane: FeedbackLane; messages: readonly FeedbackMessage[]; legacyCutover?: number;
   ingest: (items: FeedbackItem[]) => Promise<{ ok: boolean; error?: string }[]>;
   /** Stores an untagged legacy item for review; false when the quarantine is full, so it is dead-lettered instead. */
   quarantine: (body: unknown) => Promise<boolean>;
   deadLetter: (item: RefusedFeedback) => Promise<void>;
 }) {
   const { secrets, lane, messages, ingest, quarantine, deadLetter } = options;
-  const verdicts = messages.map(message => feedbackVerdict(secrets, lane, message.body));
+  const verdicts = messages.map(message => feedbackVerdict(secrets, lane, message.body, { timestamp: message.timestamp, cutover: options.legacyCutover }));
   const ingested = await ingest(messages.filter((_, index) => verdicts[index] === 'ingest').map(message => message.body as FeedbackItem));
   const outcomes = verdicts.map(verdict => verdict === 'ingest' ? ingested.shift()! : { ok: false, error: verdict === 'untagged' ? 'FEEDBACK_UNTAGGED' : 'FEEDBACK_UNAUTHENTICATED' });
   let retiredUnmatched = 0, quarantined = 0, deadLettered = 0, held = 0;

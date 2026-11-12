@@ -1589,15 +1589,17 @@ export async function quarantineUntaggedFeedback(runtime: Runtime, lane: string,
     ON CONFLICT (id) DO UPDATE SET reason=EXCLUDED.reason RETURNING id`);
   return result.rowCount === 1;
 }
-/** Ingests reviewed untagged quarantine rows as if they had arrived verified, and removes the ones that were ingested. */
+/** Replays only authenticated quarantine rows. An operator's selection is not provider provenance. */
 export async function replayQuarantinedFeedback(runtime: Runtime, ids: string[]): Promise<{ id: string; ok: boolean; error?: string }[]> {
   if (!ids.length) return [];
+  const { authenticFeedback } = await import('./adapters/feedback-queue.js');
   const rows = (await runtime.db.execute<{ id: string; payload: string }>(sql`SELECT id,payload FROM operation_feedback_failures WHERE reason='FEEDBACK_UNTAGGED' AND id = ANY(${sql.param(ids)}::text[])`)).rows;
   const items: { id: string; item?: FeedbackItem; error?: string }[] = rows.map(row => {
     try {
       const value = JSON.parse(row.payload) as Partial<FeedbackItem> | null;
       if (!value || typeof value !== 'object' || typeof value.region !== 'string' || typeof value.topicArn !== 'string' || typeof value.messageId !== 'string' || !value.message || typeof value.message !== 'object') return { id: row.id, error: 'FEEDBACK_INVALID' };
-      const { mac: _, ...item } = value as FeedbackItem; return { id: row.id, item };
+      if (!authenticFeedback(runtime.config, value)) return { id: row.id, error: 'FEEDBACK_UNAUTHENTICATED' };
+      return { id: row.id, item: value };
     } catch { return { id: row.id, error: 'FEEDBACK_INVALID' }; }
   });
   const outcomes = await ingestFeedbackBatch(runtime, items.flatMap(entry => entry.item ? [entry.item] : []));

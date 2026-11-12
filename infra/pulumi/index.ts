@@ -52,7 +52,7 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
 // feedback DLQ: an operator replays only after the ingestion fault has been repaired.
 // feedback-v2 is the tagged feedback lane the Worker writes to; the original feedback queue
 // stays as the legacy lane until drained (api/wrangler.<stage>.jsonc).
-for (const purpose of ['webhooks','feedback-dlq','feedback-v2']) {
+for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-v2-dlq']) {
   const id = stage.extraQueues?.[purpose];
   new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
     ...(id ? adopt(`${cloudflareAccountId}/${id}`, cloudflare) : { provider: cloudflare, protect: true }),
