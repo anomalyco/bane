@@ -60,6 +60,13 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('dashboard receiving health: stale proof and identity show repair actions; unknown states remain readable', async () => {
+  const { receivingIssueTitle } = await import('../app/src/features/settings/receiving-issue-title.js');
+  const host = 'inbox.example.com';
+  assert.equal(receivingIssueTitle('proof_stale', host), `Recheck ownership of ${host}`);
+  assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
+  for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
+});
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
   const prefix='export default function route(email){', source=(s:string)=>prefix+s+'}';
@@ -2875,6 +2882,17 @@ describe('Hosted MCP OAuth and tools', () => {
         }
       }
       assert.equal((await tool('getEmailContent', { emailId: first.emailId })).content.length, 1, 'An original outbound message is not a quoted reply.');
+      // Retained legacy reply after inbox erasure: no MIME parent, mailbox row, or provenance field survives.
+      const legacyId = unique('email');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated)
+        SELECT $2,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,
+          (snapshot - 'replyAuthors' - 'untrustedContent') || '{"headers":[]}'::jsonb,'delivered',true FROM sending_emails WHERE id=$1`, [confirmed.emailId, legacyId]);
+      for (const [name, args] of [['getEmailContent', { emailId: legacyId }], ['listEmails', { search: legacyId }], ['listLogs', { search: legacyId, direction: 'sent' }]] as const) {
+        const result = await tool(name, args);
+        assert.equal(result.isError, false, redact(result));
+        assert.equal((result.structuredContent.data?.[0] ?? result.structuredContent).untrustedContent, true);
+        assert.match(result.content[0].text, /^Untrusted email/);
+      }
       const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
       assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('replyToInboundThread',reviewed)).id,confirmed.id);
       await dispatchDue(runtime, REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
@@ -4411,6 +4429,14 @@ describe('Dashboard API capabilities', () => {
       assert.equal(subjectOf(ok(await request('GET', '/v1/emails', reader.secret))), 'Logs one [redacted]');
       assert.equal(ok(await request('GET', `/v1/emails/${s1}`, reader.secret)).subject, 'Logs one [redacted]');
       assert.equal(subjectOf(ok(await request('GET', '/v1/logs', manager_.secret))), `Logs one ${token}`);
+      // A retained campaign delivery has a workspace audience recipient even when From matches the key.
+      const campaignId = unique('campaign');
+      await db.query('UPDATE sending_emails SET campaign_id=$2 WHERE id=$1', [s1, campaignId]);
+      for (const path of ['/v1/logs', '/v1/emails']) {
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, scoped.secret))), []);
+        assert.deepEqual(ids(ok(await request('GET', `${path}?campaignId=${campaignId}`, reader.secret))), [s1]);
+      }
+      for (const suffix of ['', '/detail', '/content', '/events']) error(await request('GET', `/v1/emails/${s1}${suffix}`, scoped.secret), 404, 'NOT_FOUND');
       // Delivery details of received mail: owner/admin sessions and manage API keys only, never MCP grants or agent tokens.
       const { readsDelivery } = await import('./src/inbound-threads.js');
       const admin = { keyId: 'k', workspaceId: wid, admin: true, mailboxIds: null, permissions: ['read' as const] };
@@ -4521,14 +4547,21 @@ describe('Campaign authorization and dispatch credentials', () => {
     ok(await http('POST', `/v1/lists/${list.id}/members`, owner.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
     const group = unique('domain-list');
-    const own = await campaignFixture(t, owner.secret, { listId: list.id }, { name: group, from: 'sender@sub.allowed.example.com' });
+    const own = await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@sub.allowed.example.com' });
+    const targeted = await campaignFixture(t, owner.secret, { listId: list.id }, { name: group, from: own.draft.from });
     await campaignFixture(t, owner.secret, {}, { name: group, from: 'sender@notallowed.example.com' });
     await campaignFixture(t, owner.secret, {}, { name: group, from: '' });
     const shown = ok(await http('GET', `/v1/campaigns?search=${group}&limit=1`, restricted.secret));
     assert.deepEqual(shown.data.map((row: Json) => row.id), [own.id]); assert.equal(shown.nextCursor, null);
     ok(await http('GET', `/v1/campaigns/${own.id}/preview`, restricted.secret));
     error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, from: '' } }), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    for (const suffix of ['', '/stats', '/state', '/preview', '/preview-image', '/audience']) error(await http('GET', `/v1/campaigns/${campaign.id}${suffix}`, restricted.secret), 404, 'NOT_FOUND');
+    for (const hidden of [campaign, targeted]) for (const suffix of ['', '/state', '/preview', '/preview-image']) error(await http('GET', `/v1/campaigns/${hidden.id}${suffix}`, restricted.secret), 404, 'NOT_FOUND');
+    for (const suffix of ['/audience', '/stats']) error(await http('GET', `/v1/campaigns/${targeted.id}${suffix}`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    for (const [action, body] of [['test', { to: address() }], ['send', { revision: 1 }], ['schedule', { revision: 1, scheduledAt: new Date(Date.now()+3600000).toISOString() }]] as const) {
+      error(await http('POST', `/v1/campaigns/${targeted.id}/${action}`, restricted.secret, body), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    }
+    error(await http('POST', '/v1/campaigns', restricted.secret, { name: group, from: own.draft.from, audience: { listId: list.id } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('PATCH', `/v1/campaigns/${own.id}`, restricted.secret, { revision: own.revision, draft: { ...own.draft, audience: { segmentId: 'seg_fixture' } } }), 403, 'UNRESTRICTED_KEY_REQUIRED');
     for (const path of ['/contacts', `/contacts/${contact.id}`, `/contacts/${contact.id}/consent`, '/lists', `/lists/${list.id}/members`, '/segments', '/contact-imports', '/contact-imports/example']) error(await http('GET', '/v1' + path, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     error(await http('POST', '/v1/audience-query/query', restricted.secret, { statement: 'SELECT id FROM contacts LIMIT 1' }), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const createBody = { name: group, from: 'sender@allowed.example.com' }, idem = { 'Idempotency-Key': unique('campaign-replay') };
@@ -4536,12 +4569,12 @@ describe('Campaign authorization and dispatch credentials', () => {
     cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${created.id}`, owner.secret)); });
     ok(await http('PATCH', `/v1/campaigns/${created.id}`, owner.secret, { revision: created.revision, draft: { ...created.draft, from: 'sender@elsewhere.example' } }));
     error(await http('POST', '/v1/campaigns', restricted.secret, createBody, idem), 404, 'NOT_FOUND');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/send`, restricted.secret, { revision: campaign.revision }), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/send`, restricted.secret, { revision: campaign.revision }), 403, 'UNRESTRICTED_KEY_REQUIRED');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, restricted.secret, {
       revision: campaign.revision, draft: { ...campaign.draft, from: 'sender@allowed.example.com' },
     }), 404, 'NOT_FOUND');
     error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 404, 'NOT_FOUND');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchanged.state, 'draft');
     assert.equal(unchanged.revision, campaign.revision);
@@ -4550,8 +4583,8 @@ describe('Campaign authorization and dispatch credentials', () => {
       revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
     }), 202);
     await poll(`/v1/campaigns/${campaign.id}`, owner.secret, row => row.state === 'scheduled');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 404, 'NOT_FOUND');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 404, 'NOT_FOUND');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unchangedScheduled = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
     assert.equal(unchangedScheduled.state, 'scheduled');
     assert.equal(unchangedScheduled.delivery.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');

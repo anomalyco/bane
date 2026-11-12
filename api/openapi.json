@@ -2164,7 +2164,7 @@
         "properties": {
           "untrustedContent": {
             "type": "boolean",
-            "description": "True for mailbox replies, whose subject and quoted body can contain text from a received message."
+            "description": "True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content."
           },
           "id": {
             "type": "string"
@@ -2428,7 +2428,7 @@
         "properties": {
           "untrustedContent": {
             "type": "boolean",
-            "description": "True for mailbox replies, whose subject and quoted body can contain text from a received message."
+            "description": "True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content."
           },
           "subject": {
             "type": "string"

@@ -5,7 +5,7 @@ import { actor, ApiError, errors, PageQuery, region, response, security, type Ac
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { accessibleMessages, readsDelivery, visibleAddresses } from './inbound-threads.js';
-import { listedSubject, literalSearch, pageBinding, scope, senderDomainWhere, sentUntrustedContent, Status } from './sending.js';
+import { listedSubject, literalSearch, mailWhere, pageBinding, sentUntrustedContent, Status } from './sending.js';
 
 // Logs: sent and received mail in one list, newest first, from one SQL statement. Each side keeps its own index
 // (sending_emails_created_page, mail_messages_tenant_page) and limit; the outer query merges the two pages. The cursor
@@ -77,7 +77,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${sentUntrustedContent} AS untrusted, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,
         ${emails.from} AS from_address, ${emails.snapshot}->>'fromName' AS from_name, ${emails.to} AS "to", ${emails.subject} AS subject, ${emails.snapshot}->>'kind' AS stream,
         ${emails.campaignId} AS campaign_id, ${emails.simulated} AS simulated, NULL::int AS attachment_count, NULL::text AS thread_id, NULL::jsonb AS addresses, ${emails.region} AS region, NULL::jsonb AS envelope_to
-      FROM ${emails} WHERE ${and(scope(emails, a), senderDomainWhere(emails.from, a.domains),
+      FROM ${emails} WHERE ${and(mailWhere(a),
         after ? after.direction === 'sent' ? sql`(${emails.createdAt}, ${emails.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${emails.createdAt} < ${after.at}::timestamptz` : undefined,
         q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.status ? sql`${emails.status} = ${q.status}` : undefined,
         q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined, q.region ? sql`${emails.region} = ${q.region}` : undefined,

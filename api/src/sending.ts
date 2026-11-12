@@ -126,7 +126,7 @@ const ReplyAddressId = z.string().min(1).max(120).optional();
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 export const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
-const UntrustedContent = z.boolean().describe('True for mailbox replies, whose subject and quoted body can contain text from a received message.');
+const UntrustedContent = z.boolean().describe('True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.');
 const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), suppressionReason: SuppressionReason.nullable().optional(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), simulated: z.boolean() }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
@@ -188,12 +188,8 @@ const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('Cam
 export type SendRequest = z.infer<typeof SendInput>;
 const now = () => new Date().toISOString();
 // Metadata routes must not materialize HTML, raw MIME or template data from the immutable snapshot.
-// Even an empty replyAuthors array identifies a mailbox reply. Older snapshots predate that marker:
-// use their threading headers, or the retained conversation for replies to mail without a Message-ID.
-export const sentUntrustedContent = sql<boolean>`CASE WHEN ${emails.campaignId} IS NOT NULL THEN false
-  WHEN ${emails.snapshot} ? 'replyAuthors' OR ${emails.snapshot}->'headers' @> '[{"Name":"In-Reply-To"}]'::jsonb THEN true
-  ELSE EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=sending_emails.workspace_id AND m.sending_email_id=sending_emails.id
-    AND EXISTS (SELECT FROM mail_messages p WHERE p.workspace_id=m.workspace_id AND p.thread_id=m.thread_id AND p.direction='inbound' AND p.created_at < m.created_at)) END`;
+// Only the campaign relation or an explicit snapshot value proves this was not a reply.
+export const sentUntrustedContent = sql<boolean>`${emails.campaignId} IS NULL AND ${emails.snapshot}->'untrustedContent' IS DISTINCT FROM 'false'::jsonb`;
 const emailColumns = {
   untrustedContent: sentUntrustedContent,
   id: emails.id, region: emails.region, campaignId: emails.campaignId,
@@ -229,7 +225,7 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
   if (!rows.length) return [];
   const load = async () => runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
   // Only dashboard lists may reuse counts. Detail, mutations and machine credentials stay exact.
-  const grouped = listOrigin && a.credential === 'dashboard'
+  const grouped = a.domains.length ? [] : listOrigin && a.credential === 'dashboard'
     ? (await cachedDashboardRead(listOrigin,JSON.stringify(['campaign-counts',a.workspaceId,rows.map(r=>[r.id,r.updatedAt])]),load)).value : await load();
   return rows.map(row => {
     const counts = emptyCounts();
@@ -264,8 +260,9 @@ export function senderDomainWhere(column: AnyPgColumn | SQL, allowed: readonly s
   const domain = sql`(reverse(lower(split_part(${column}, '@', 2))) || '.') COLLATE "C"`;
   return or(...allowed.map(value => { const prefix = [...value.toLowerCase()].reverse().join(''); return sql`(${domain} >= ${prefix+'.'} AND ${domain} < ${prefix+'/'})`; }));
 }
-export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains));
-export const campaignWhere = (a: Actor, campaignId?: string) => and(scope(campaigns, a), campaignId === undefined ? undefined : eq(campaigns.id, campaignId), senderDomainWhere(sql`${campaigns.draft}->>'from'`, a.domains));
+export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'domains'>, emailId?: string) => and(scope(emails, a), emailId === undefined ? undefined : eq(emails.id, emailId), senderDomainWhere(emails.from, a.domains), a.domains.length ? isNull(emails.campaignId) : undefined);
+export const campaignWhere = (a: Actor, campaignId?: string) => and(scope(campaigns, a), campaignId === undefined ? undefined : eq(campaigns.id, campaignId), senderDomainWhere(sql`${campaigns.draft}->>'from'`, a.domains),
+  a.domains.length ? and(eq(campaigns.state, 'draft'), isNull(campaigns.reviewId), sql`${campaigns.draft}->'audience' = '{}'::jsonb`) : undefined);
 function keySender(a: Actor, from: string) {
   const domain = from.split('@')[1]!.toLowerCase();
   if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
@@ -321,6 +318,7 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!regionalSending(runtime)) region(runtime, draft.region);
   if (!draft.from && a.domains.length) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', 'from');
   if (draft.from) keySender(a, draft.from);
+  if (a.domains.length && Object.keys(draft.audience).length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Selecting a campaign audience requires an unrestricted credential.');
 }
 async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
   if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
@@ -390,7 +388,7 @@ export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: A
       // and a temporary token may share its parent grant's receipt with a narrower domain scope.
       if (a.domains.length && (c.req.path === '/v1/campaigns' || c.req.path.startsWith('/v1/campaigns/'))) {
         const receipt = previous.result as { id: string; draft?: CampaignDraft };
-        if (receipt.draft && !senderDomainAllowed(a.domains, receipt.draft.from.split('@')[1] ?? '')) notFound('Campaign');
+        if (receipt.draft && (Object.keys(receipt.draft.audience).length || !senderDomainAllowed(a.domains, receipt.draft.from.split('@')[1] ?? ''))) notFound('Campaign');
         const [visible] = await db.select({ id: campaigns.id }).from(campaigns).where(campaignWhere(a, c.req.param('id') ?? receipt.id));
         if (!visible) notFound('Campaign');
       }
@@ -676,7 +674,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
-  return { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
+  return { untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection,bulkVolume=false): Promise<EmailSnapshot> {
   const route = sharedValidated ? {region:request.region!} : runtime.config.multiTenant ? await sendingRegion(runtime,db,a,request.from,request.region,bulkVolume || request.kind==='marketing') : {region:await assertRegionEnabled(db,a.workspaceId,request.region)};
@@ -978,6 +976,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   const bulk=await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc));
   const snapshot = await prepare(runtime, db, a, parsed.data,false,undefined,false,false,undefined,undefined,bulk);
   snapshot.headers = [...snapshot.headers, ...request.headers];
+  snapshot.untrustedContent = replyAuthors !== null || snapshot.headers.some(h => h.Name.toLowerCase() === 'in-reply-to');
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
   if (request.sealed) snapshot.sealed = true;
   const receipt = await queueEmail(runtime, db, a, snapshot);
@@ -1056,7 +1055,7 @@ export function registerSending(app: App) {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await c.env.db.select(emailColumns).from(emails).where(and(scope(emails, a), senderDomainWhere(emails.from, a.domains),
+    const rows = await c.env.db.select(emailColumns).from(emails).where(and(mailWhere(a),
       cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,

@@ -15,6 +15,8 @@ export type EmailSnapshot = {
   deferredCampaign?: boolean;
   /** Present only on mailbox replies; recipients who actually wrote to this mailbox in this thread. */
   replyAuthors?: string[];
+  /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
+  untrustedContent?: boolean;
   /** Live transactional only: ask the content classifier (Jev) before dispatch. */
   screen?: boolean;
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */

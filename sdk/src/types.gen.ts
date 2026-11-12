@@ -515,7 +515,7 @@ export type BatchSendEmailItem = {
 
 export type Email = {
     /**
-     * True for mailbox replies, whose subject and quoted body can contain text from a received message.
+     * True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.
      */
     untrustedContent: boolean;
     id: string;
@@ -577,7 +577,7 @@ export type EmailEvent = {
 
 export type EmailContent = {
     /**
-     * True for mailbox replies, whose subject and quoted body can contain text from a received message.
+     * True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.
      */
     untrustedContent: boolean;
     subject: string;
