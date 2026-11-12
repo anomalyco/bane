@@ -9544,6 +9544,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const receipts=(await g.query('SELECT ses_message_id,recipients FROM mail_receipts WHERE workspace_id=$1 ORDER BY 1',[w])).rows;
     assert.deepEqual(receipts.map(r=>[r.ses_message_id,r.recipients]),[['a-new',to('a')],['z-known',to('a','b','c')]]);
   });
+  // Dev E2E, Nov 12 (40P01, 500 after ~8 s): POST /v1/domains (reserve_placed_claim) locks the settings row, then the
+  // claim. A send's region lookup locked the closest claim inside regional_sender before its FOR SHARE OF the settings
+  // row, so a reply from a domain deadlocked with a re-add of that domain (and with domain.verify queued on the claim).
+  test('regional sender: a send waits on the settings row before it locks the claim a domain re-add needs',async t=>{
+    const {nodeRuntime}=await import('./src/adapters/node.js'),{sendingRegion}=await import('./src/sending.js');
+    const {runtime,close}=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL});cleanup(t,close);
+    Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:false});
+    const g=await fixtureDatabase(t),w=unique('sdead'),host=w+'.invalid',region='us-east-2';
+    cleanup(t,async()=>{for(const q of ['DELETE FROM workspaces WHERE id=$1','DELETE FROM operation_domains WHERE workspace_id=$1','DELETE FROM ses_installation_settings WHERE workspace_id=$1'])await g.query(q,[w]);});
+    await g.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[w]);
+    await g.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$1,$2,jsonb_build_array($2::text))",[w,region]);
+    await g.query("INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')",[w,region]);
+    await g.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')",[host,w]);
+    await g.query('INSERT INTO operation_domains(id,name,workspace_id,region) VALUES($1,$2,$1,$3)',[w,host,region]);
+    const actor={workspaceId:w,permissions:[],domains:[],keyId:'fixture-key'} as import('./src/core.js').Actor;
+    // The gate is the re-add after reserve_placed_claim's first lock: it holds the settings row, not yet the claim.
+    await g.query('BEGIN');
+    let send:Promise<unknown>|undefined,readd:string|undefined;
+    try {
+      await g.query('SELECT FROM ses_installation_settings WHERE workspace_id=$1 FOR NO KEY UPDATE',[w]);
+      send=runtime.db.transaction(tx=>sendingRegion(runtime,tx,actor,`reply@${host}`));send.catch(()=>{});
+      for(let i=0;i<400&&!(await g.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;i++)await new Promise(r=>setTimeout(r,5));
+      // Then it locks the claim. Before the fix the waiting send already held it FOR SHARE: 40P01 after deadlock_timeout.
+      const started=Date.now();
+      readd=(await g.query('SELECT id,error_code FROM reserve_placed_claim($1,$2,NULL,$3)',[w,host,unique('dom')])).rows[0].id;
+      assert.ok(Date.now()-started<500,'The re-add never waits on the send.');
+      await g.query('COMMIT');
+    } finally { await g.query('ROLLBACK'); }
+    assert.equal(readd,w,'The re-add is idempotent and returns the existing domain.');
+    const route=await send!.then(r=>r,(e:Json)=>String(e?.cause?.code??e?.code??e));
+    assert.deepEqual(route,{region,binding:{domain:w,connection:w,generation:1,account:'111122223333',topic:null}});
+  });
   // Recheck 2 of #57 (tear witness, 5 steps: accept m1 a, claim, accept m1 ac, lose, legacy-fail -> the previous
   // Worker's unfenced terminal write failed the receipt its reopen had expanded). Lease exhaustion retires a job
   // in the database, but the old invocation keeps running and still issues that write.

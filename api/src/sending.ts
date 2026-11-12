@@ -299,8 +299,11 @@ function checkBulk(runtime:Runtime,kind:string|undefined,marketing:boolean,host:
   if(!policy || policy.status==='missing' || policy.status==='invalid' || !(policy.alignment.dkim || policy.alignment.spf))
     throw new ApiError(409,'BULK_DMARC_REQUIRED',`Hosted bulk sending requires a valid DMARC policy and aligned DKIM or SPF. Add or recheck the exact From domain ${host}.`,'from');
 }
-// Reuse the existing region-lock round trip for non-batch admission (including mailbox replies).
-async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
+// Reuse the existing region-lock round trip for non-batch admission (including mailbox replies). Lock the settings
+// row before any claim, the order every reservation and connection change takes: a top-level FOR SHARE OF s runs
+// after the claim locks inside regional_sender and verified_sending_domains, and deadlocked with POST /v1/domains.
+const lockedSettings = (wid: string) => sql`settings AS MATERIALIZED (SELECT workspace_id,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=${wid} FOR SHARE)`;
+export async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
   if (!runtime.config.multiTenant) {
     const selected = await assertRegionEnabled(db, a.workspaceId, requested);
     keySender(a, from); return {region:selected};
@@ -308,17 +311,17 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   const host=from.split('@')[1]!.toLowerCase(), bulk=bulkColumns(runtime,a.workspaceId,marketing?[host]:[]);
   if (regionalSending(runtime)) {
     keySender(a,from);
-    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`SELECT r.* ${bulk} FROM ses_installation_settings s CROSS JOIN LATERAL ${regionalSender(runtime,sql`s.workspace_id`,host)} r WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`WITH ${lockedSettings(a.workspaceId)} SELECT r.* ${bulk} FROM settings s CROSS JOIN LATERAL ${regionalSender(runtime,sql`s.workspace_id`,host)} r`)).rows[0];
     const route=checkRoute(runtime,row,requested);
     checkBulk(runtime,route.connection!.kind,marketing,host,row?.bulk);
     a.dispatchAccount={aws_account_id:route.connection!.aws_account_id,kind:route.connection!.kind};
     return {region:route.region,binding:route.binding};
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; bulk?:BulkFacts; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; bulk?:BulkFacts; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`WITH ${lockedSettings(a.workspaceId)}
+    SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${host}::text`)} AS verified ${bulk}
-    FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
-    WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+    FROM settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
   verifiedSender(a, from, state.verified);
@@ -905,7 +908,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
     const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection'];bulk?:BulkFacts}>(sql`
-      WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
+      WITH ${lockedSettings(a.workspaceId)}
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(c.env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
       FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
     checkCapacity(state, cost, marketing);
