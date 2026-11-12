@@ -339,6 +339,37 @@ after(async () => {
     finally { await authDb.end(); }
   }
 });
+test('OIDC migration preserves connected subjects and requires a verified, approved legacy claim', async t => {
+  const db = await fixtureDatabase(t);
+  const schema = 'oidc_' + randomUUID().replaceAll('-', '');
+  await db.query('BEGIN');
+  try {
+    await db.query(`CREATE SCHEMA ${schema}; SET LOCAL search_path TO ${schema}`);
+    for (const file of ['006_google_auth', '042_workspace_selection']) {
+      await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
+    }
+    await db.query(`INSERT INTO auth_user(id, name, email, email_verified) VALUES
+      ('connected','Ada','ada@example.org', true), ('legacy','Lee','lee@example.org', true);
+      INSERT INTO auth_account(id, account_id, provider_id, user_id) VALUES
+      ('link','["https://id.example.org","A"]','account','connected'),('old','123','google','legacy')`);
+    await db.query(await readFile(new URL('./migrations/184_oidc_identities.sql', import.meta.url), 'utf8'));
+    assert.deepEqual((await db.query('SELECT * FROM bane_oidc_identities')).rows, [
+      {issuer:'https://id.example.org', subject:'A', user_id:'connected'},
+    ]);
+    const claim = async (verified: boolean, issuer = 'https://id.example.org') =>
+      (await db.query('SELECT claim_bane_legacy_user($1,$2,$3,$4) AS id', [issuer, 'B', 'lee@example.org', verified])).rows[0].id;
+    assert.equal(await claim(true), null);
+    await db.query("INSERT INTO bane_legacy_claims VALUES ('legacy','https://id.example.org','lee@example.org')");
+    assert.equal(await claim(false), null);
+    assert.equal(await claim(true, 'https://other.example.org'), null);
+    assert.equal(await claim(true), 'legacy');
+    assert.equal(await claim(true), null);
+    assert.equal((await db.query('SELECT count(*) FROM auth_account')).rows[0].count, '2');
+  } finally {
+    await db.query('ROLLBACK');
+  }
+});
+
 test('mail gateway: preview migration yields to writers and validates in a separate transaction',async(t)=>{
   const writer=await fixtureDatabase(t),ddl=await fixtureDatabase(t),schema='gw_'+randomUUID().replaceAll('-','');
   await writer.query(`CREATE SCHEMA ${schema}`);cleanup(t,async()=>{await writer.query('ROLLBACK');await ddl.query('ROLLBACK');await writer.query(`DROP SCHEMA ${schema} CASCADE`)});
