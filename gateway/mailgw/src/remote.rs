@@ -30,6 +30,8 @@ pub struct FolderMeta {
 }
 #[derive(Clone, Deserialize)]
 pub struct Principal {
+    #[serde(skip)]
+    pub epoch: u64,
     pub kid: String,
     pub inbox: String,
     addresses: Vec<String>,
@@ -48,9 +50,24 @@ struct Message {
 struct Snapshot {
     folders: Vec<FolderMeta>,
     entries: Vec<Message>,
+    gone: Vec<u32>,
+    floor: u64,
+    more: Option<u32>,
 }
-type WakeCache = HashMap<(String, Option<String>), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
+type WakeCache = HashMap<(String, Option<String>, u64), Arc<std::sync::OnceLock<Option<Snapshot>>>>;
+struct Gate {
+    uploads: Arc<tokio::sync::Semaphore>,
+    bytes: Arc<Mutex<crate::admission::Bucket>>,
+    calls: crate::admission::Bucket,
+    inbox: String,
+    reads: Arc<tokio::sync::Semaphore>,
+    last: Instant,
+}
 pub struct Api {
+    epoch: std::sync::atomic::AtomicU64,
+    gates: Mutex<HashMap<String, Gate>>,
+    views: Arc<tokio::sync::Semaphore>,
+    heavy: tokio::sync::Semaphore,
     pub online: std::sync::atomic::AtomicBool,
     wakes: Mutex<WakeCache>,
     client: reqwest::Client,
@@ -69,7 +86,11 @@ impl Api {
             "invalid gateway API configuration"
         );
         Ok(Self {
+            epoch: 0.into(),
             online: false.into(),
+            gates: Mutex::default(),
+            views: Arc::new(tokio::sync::Semaphore::new(192 * 1024)),
+            heavy: tokio::sync::Semaphore::new(4),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
@@ -81,15 +102,59 @@ impl Api {
         })
     }
     fn call(&self, p: Value) -> Result<Vec<u8>, u16> {
+        let mut inbox_work = None;
+        if let Some(kid) = p.get("kid").and_then(Value::as_str) {
+            let start = Instant::now();
+            loop {
+                let mut gates = self.gates.lock().map_err(|_| 503u16)?;
+                let g = gates.get_mut(kid).ok_or(403u16)?;
+                g.last = Instant::now();
+                if !g.calls.take(tokio::time::Instant::now(), 1) {
+                    drop(gates);
+                    if start.elapsed() > Duration::from_secs(1) {
+                        return Err(429);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                } else {
+                    inbox_work = Some(g.reads.clone());
+                    break;
+                }
+            }
+        }
+        let _work = if matches!(
+            p["op"].as_str(),
+            Some("snapshot" | "body" | "subject" | "submit")
+        ) {
+            let inbox = inbox_work.ok_or(403u16)?;
+            Some(tokio::runtime::Handle::current().block_on(async {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let local = inbox.acquire_owned().await.map_err(|_| 503u16)?;
+                    Ok::<_, u16>((local, self.heavy.acquire().await.map_err(|_| 503u16)?))
+                })
+                .await
+                .map_err(|_| 429u16)?
+            })?)
+        } else {
+            None
+        };
+        let scope = hex::encode(Sha256::digest(
+            p.get("kid")
+                .or_else(|| p.get("user"))
+                .and_then(Value::as_str)
+                .unwrap_or("login")
+                .to_ascii_lowercase()
+                .as_bytes(),
+        ));
         let b = serde_json::to_vec(&p).map_err(|_| 500u16)?;
         let hash = hex::encode(Sha256::digest(&b));
         let ts = chrono::Utc::now().timestamp().to_string();
         let mut mac = Hmac::<Sha256>::new_from_slice(self.key.as_bytes()).map_err(|_| 500u16)?;
-        mac.update(format!("POST\n/internal/v1/mail\n{ts}\n{hash}").as_bytes());
+        mac.update(format!("POST\n/internal/v1/mail\n{ts}\n{hash}\n{scope}").as_bytes());
         let req = self
             .client
             .post(&self.url)
             .header("content-type", "application/json")
+            .header("x-bane-scope", scope)
             .header("x-bane-content", hash)
             .header("x-bane-timestamp", ts)
             .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
@@ -101,7 +166,12 @@ impl Api {
             }
             let mut out = vec![];
             while let Some(chunk) = r.chunk().await.map_err(|_| 503u16)? {
-                if out.len() + chunk.len() > 48 << 20 {
+                let cap = if p["headers"].as_bool() == Some(true) {
+                    65536
+                } else {
+                    48 << 20
+                };
+                if out.len() + chunk.len() > cap {
                     return Err(413);
                 }
                 out.extend_from_slice(&chunk)
@@ -118,21 +188,26 @@ impl Api {
         })?)
         .map_err(|_| store::Error::Unavailable)
     }
-    pub fn clear(&self) {
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn invalidate(&self, inbox: Option<&str>) {
         if let Ok(mut c) = self.cache.lock() {
-            c.clear()
+            self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            c.retain(|_, (_, p)| inbox.is_some_and(|i| p.inbox != i));
         }
     }
-    fn login(&self, user: &str, password: &str, proto: Protocol) -> Option<Principal> {
+    fn login(&self, user: &str, password: &str, proto: Protocol) -> Result<Principal, u16> {
+        let epoch = self.epoch();
         if !self.online.load(std::sync::atomic::Ordering::Acquire) {
-            return None;
+            return Err(503);
         }
         let p = if proto == Protocol::Imap {
             "imap"
         } else {
             "smtp"
         };
-        let mut hash = Hmac::<Sha256>::new_from_slice(self.key.as_bytes()).ok()?;
+        let mut hash = Hmac::<Sha256>::new_from_slice(self.key.as_bytes()).map_err(|_| 503u16)?;
         for x in [p, user, password] {
             hash.update(&(x.len() as u64).to_be_bytes());
             hash.update(x.as_bytes())
@@ -141,26 +216,36 @@ impl Api {
         if let Some((_, v)) = self
             .cache
             .lock()
-            .ok()?
+            .map_err(|_| 503u16)?
             .get(&k)
             .filter(|(t, _)| t.elapsed() < Duration::from_secs(5))
         {
-            return Some(v.clone());
+            let mut cached = v.clone();
+            cached.epoch = epoch;
+            return Ok(cached);
         }
-        let principal: Principal = self
-            .json(json!({"op":"login","protocol":p,"user":user,"password":password}))
-            .ok()?;
-        let mut c = self.cache.lock().ok()?;
+        let mut principal: Principal = serde_json::from_slice(
+            &self.call(json!({"op":"login","protocol":p,"user":user,"password":password}))?,
+        )
+        .map_err(|_| 503u16)?;
+        let mut c = self.cache.lock().map_err(|_| 503u16)?;
+        if self.epoch() != epoch {
+            return Err(503);
+        }
+        principal.epoch = epoch;
         if c.len() >= 1024 {
             c.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(5))
         }
         if c.len() < 1024 {
             c.insert(k, (Instant::now(), principal.clone()));
         }
-        Some(principal)
+        Ok(principal)
     }
 }
 pub struct Login {
+    pub unavailable: std::sync::atomic::AtomicBool,
+    pub limits: Arc<Mutex<crate::admission::Limits>>,
+    pub ip: std::net::IpAddr,
     pub api: Arc<Api>,
     pub principal: Mutex<Option<Principal>>,
 }
@@ -175,17 +260,44 @@ impl Identity for Login {
         let (Ok(u), Ok(pw)) = (str::from_utf8(user), str::from_utf8(pass)) else {
             return false;
         };
-        let Some(v) = self.api.login(u, pw, p) else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        u.to_ascii_lowercase().hash(&mut h);
+        let k = h.finish();
+        let now = tokio::time::Instant::now();
+        if self.limits.lock().is_ok_and(|l| l.blocked(self.ip, k, now)) {
             return false;
+        }
+        let v = match self.api.login(u, pw, p) {
+            Ok(v) => v,
+            Err(403) => {
+                if let Ok(mut l) = self.limits.lock() {
+                    l.failure(self.ip, k, now)
+                }
+                return false;
+            }
+            Err(_) => {
+                self.unavailable
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
         };
         let Ok(mut slot) = self.principal.lock() else {
             return false;
         };
+        if let Ok(mut l) = self.limits.lock() {
+            l.success(self.ip, k);
+        }
         *slot = Some(v);
         true
     }
 }
 pub struct Store {
+    headers: std::cell::RefCell<BTreeMap<u32, Arc<[u8]>>>,
+    bytes: std::cell::RefCell<Option<tokio::sync::OwnedSemaphorePermit>>,
+    pub upload: Option<crate::upload::Upload>,
+    pub uploads: Arc<tokio::sync::Semaphore>,
+    pub upload_rate: Arc<Mutex<crate::admission::Bucket>>,
     api: Arc<Api>,
     pub principal: Principal,
     folders: BTreeMap<String, Folder>,
@@ -193,21 +305,59 @@ pub struct Store {
     handles: BTreeMap<u32, String>,
     selected: Option<String>,
     pub stamp: Instant,
+    checkpoint: Option<(u32, u64)>,
+    pub deadline: Instant,
 }
 impl Store {
-    pub fn new(api: Arc<Api>, p: Principal) -> Self {
+    pub fn new(api: Arc<Api>, p: Principal) -> Result<Self> {
         let meta = p.folders.clone();
+        let (uploads, upload_rate) = {
+            let mut gates = api.gates.lock().unwrap_or_else(|p| p.into_inner());
+            gates.retain(|_, v| {
+                Arc::strong_count(&v.uploads) > 1 || v.last.elapsed() < Duration::from_secs(60)
+            });
+            ensure!(
+                gates.len() < 8192 || gates.contains_key(&p.kid),
+                "credential admission full"
+            );
+            let reads = gates
+                .values()
+                .find(|g| g.inbox == p.inbox)
+                .map(|g| g.reads.clone())
+                .unwrap_or_else(|| Arc::new(tokio::sync::Semaphore::new(2)));
+            let g = gates.entry(p.kid.clone()).or_insert_with(|| Gate {
+                inbox: p.inbox.clone(),
+                reads,
+                last: Instant::now(),
+                uploads: Arc::new(tokio::sync::Semaphore::new(2)),
+                bytes: Arc::new(Mutex::new(crate::admission::Bucket::new(
+                    tokio::time::Instant::now(),
+                    16384,
+                    2048,
+                ))),
+                calls: crate::admission::Bucket::new(tokio::time::Instant::now(), 200, 50),
+            });
+            g.last = Instant::now();
+            (g.uploads.clone(), g.bytes.clone())
+        };
         let mut s = Self {
             api,
+            bytes: Default::default(),
+            upload: None,
+            headers: Default::default(),
+            uploads,
+            upload_rate,
             principal: p,
             folders: BTreeMap::new(),
             keys: BTreeMap::new(),
             handles: BTreeMap::new(),
             selected: None,
             stamp: Instant::now(),
+            checkpoint: None,
+            deadline: Instant::now() + Duration::from_secs(5),
         };
         s.install(meta);
-        s
+        Ok(s)
     }
     fn install(&mut self, meta: Vec<FolderMeta>) {
         self.folders.clear();
@@ -235,51 +385,177 @@ impl Store {
             );
         }
     }
+    fn reserve_view(&self, bytes: usize) -> Result<(), store::Error> {
+        let target = bytes.div_ceil(1024);
+        if target > 96 * 1024 {
+            return Err(store::Error::Limit);
+        }
+        let mut slot = self.bytes.borrow_mut();
+        let held = slot.as_ref().map_or(0, |p| p.num_permits());
+        if target > held {
+            let extra = self
+                .api
+                .views
+                .clone()
+                .try_acquire_many_owned((target - held) as u32)
+                .map_err(|_| store::Error::Limit)?;
+            if let Some(p) = slot.as_mut() {
+                p.merge(extra)
+            } else {
+                *slot = Some(extra)
+            }
+        }
+        Ok(())
+    }
     pub fn refresh(&mut self) -> Result<(), store::Error> {
         self.reload(false)
     }
     pub fn reload(&mut self, wake: bool) -> Result<(), store::Error> {
+        let checkpoint = self.checkpoint;
+        if wake {
+            self.deadline = Instant::now() + Duration::from_secs(5);
+        }
+        let since = checkpoint.map_or(0, |x| x.1);
         let read = || {
-            self.api.json::<Snapshot>(
-                json!({"op":"snapshot","kid":self.principal.kid,"path":self.selected}),
-            )
+            let mut after = 0;
+            let mut estimated = 0usize;
+            let mut result: Option<Snapshot> = None;
+            loop {
+                let mut page:Snapshot=self.api.json(json!({"op":"snapshot","kid":self.principal.kid,"path":self.selected,"since":since,"after":after}))?;
+                estimated += page
+                    .entries
+                    .iter()
+                    .map(|m| {
+                        512 + m.handle.as_ref().map_or(0, String::len)
+                            + m.flags.iter().map(|s| s.len() + 96).sum::<usize>()
+                    })
+                    .sum::<usize>();
+                self.reserve_view(
+                    estimated.max(self.folders.values().map(|f| f.entries.len() * 512).sum()),
+                )?;
+                let cursor = page.more;
+                if let Some(first) = &mut result {
+                    let stamp = |s: &Snapshot| {
+                        s.folders
+                            .iter()
+                            .find(|f| Some(&f.path) == self.selected.as_ref())
+                            .map(|f| (f.validity, f.highest))
+                    };
+                    if stamp(first) != stamp(&page) {
+                        return Err(store::Error::Unavailable);
+                    }
+                    first.entries.append(&mut page.entries);
+                    first.gone.append(&mut page.gone);
+                } else {
+                    result = Some(page)
+                }
+                if let Some(next) = cursor {
+                    if next <= after || self.deadline < std::time::Instant::now() {
+                        return Err(store::Error::Limit);
+                    }
+                    after = next
+                } else {
+                    break;
+                }
+            }
+            result.ok_or(store::Error::Unavailable)
         };
-        let snap = if wake {
+        let snap = if wake && since != 0 {
             let cell = {
                 let mut m = self
                     .api
                     .wakes
                     .lock()
                     .map_err(|_| store::Error::Unavailable)?;
-                if m.len() >= 64 {
+                if m.len() >= 8 {
                     m.clear()
                 }
-                m.entry((self.principal.kid.clone(), self.selected.clone()))
+                m.entry((self.principal.kid.clone(), self.selected.clone(), since))
                     .or_default()
                     .clone()
             };
-            cell.get_or_init(|| read().ok())
-                .clone()
-                .ok_or(store::Error::Unavailable)?
+            // Coalesce small IDLE updates only. Large deltas belong to a session's
+            // view budget, not to a process-global cache after that session exits.
+            let mut uncached = None;
+            let cached = cell.get_or_init(|| match read() {
+                Ok(s) if s.entries.len() <= 16 && s.gone.len() <= 128 && s.folders.len() <= 64 => {
+                    Some(s)
+                }
+                other => {
+                    uncached = Some(other);
+                    None
+                }
+            });
+            if let Some(s) = cached {
+                s.clone()
+            } else {
+                uncached.unwrap_or_else(read)?
+            }
         } else {
             read()?
         };
+        let stamp = snap
+            .folders
+            .iter()
+            .find(|f| Some(&f.path) == self.selected.as_ref())
+            .map(|f| (f.validity, f.highest));
+        if since != 0 && (checkpoint.map(|x| x.0) != stamp.map(|x| x.0) || since < snap.floor) {
+            self.checkpoint = None;
+            return self.reload(false);
+        }
+        let mut old = if since > 0 {
+            self.selected
+                .as_ref()
+                .and_then(|p| self.folders.get_mut(p))
+                .map(|f| std::mem::take(&mut f.entries))
+                .unwrap_or_default()
+        } else {
+            self.handles.clear();
+            self.headers.get_mut().clear();
+            vec![]
+        };
         self.install(snap.folders);
-        self.handles.clear();
+        self.checkpoint = stamp;
+        let gone: std::collections::HashSet<_> = snap.gone.into_iter().collect();
+        old.retain(|e| !gone.contains(&e.uid));
+        for uid in gone {
+            self.handles.remove(&uid);
+        }
+        let empty: Arc<[u8]> = Arc::default();
+        for m in snap.entries {
+            if let Some(h) = m.handle {
+                self.handles.insert(m.uid, h);
+            }
+            let e = Entry {
+                size: m.size,
+                uid: m.uid,
+                id: 0,
+                date: m.date,
+                flags: m.flags,
+                modseq: m.modseq,
+                raw: empty.clone(),
+            };
+            if let Ok(i) = old.binary_search_by_key(&e.uid, |e| e.uid) {
+                old[i] = e
+            } else {
+                old.push(e)
+            }
+        }
         if let Some(f) = self.selected.as_ref().and_then(|p| self.folders.get_mut(p)) {
-            for m in snap.entries {
-                if let Some(h) = m.handle {
-                    self.handles.insert(m.uid, h);
-                }
-                f.entries.push(Entry {
-                    size: m.size,
-                    uid: m.uid,
-                    id: 0,
-                    date: m.date,
-                    flags: m.flags,
-                    modseq: m.modseq,
-                    raw: Arc::default(),
-                });
+            f.entries = old;
+        }
+        let weight = self
+            .folders
+            .values()
+            .flat_map(|f| &f.entries)
+            .map(|e| 512 + e.flags.iter().map(|s| 96 + s.len()).sum::<usize>())
+            .sum::<usize>()
+            + self.handles.values().map(String::len).sum::<usize>();
+        self.reserve_view(weight)?;
+        if let Some(p) = self.bytes.get_mut() {
+            let excess = p.num_permits().saturating_sub(weight.div_ceil(1024));
+            if excess > 0 {
+                drop(p.split(excess));
             }
         }
         self.stamp = Instant::now();
@@ -287,18 +563,70 @@ impl Store {
     }
 }
 impl MailStore for Store {
+    fn subject(&self, p: &str, term: &str) -> Result<Option<Vec<u32>>, store::Error> {
+        if term.len() > 1024 {
+            return Err(store::Error::Limit);
+        }
+        self.api.json(json!({"op":"subject","kid":self.principal.kid,"folder":self.keys.get(p).ok_or(store::Error::Missing)?,"term":term})).map(Some)
+    }
     fn list_fresh(&mut self) -> Result<(), store::Error> {
-        self.refresh()
+        // Cached LOGIN data can predate a folder edit. Read only folder metadata;
+        // LIST must not download a selected folder or advance its MODSEQ checkpoint.
+        let snap: Snapshot = self
+            .api
+            .json(json!({"op":"snapshot","kid":self.principal.kid,"path":null}))?;
+        let selected = self.selected.as_ref().and_then(|p| self.folders.remove(p));
+        self.install(snap.folders);
+        if let (Some(old), Some(f)) = (
+            selected,
+            self.selected.as_ref().and_then(|p| self.folders.get_mut(p)),
+        ) && old.validity == f.validity
+        {
+            f.entries = old.entries;
+            f.highest = old.highest;
+        }
+        Ok(())
     }
     fn select(&mut self, path: &str) -> Result<(), store::Error> {
+        self.checkpoint = None;
         self.selected = Some(path.into());
         self.refresh()
+    }
+    fn budget(&self) -> Result<(), store::Error> {
+        if Instant::now() > self.deadline {
+            Err(store::Error::Limit)
+        } else {
+            Ok(())
+        }
+    }
+    fn header(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
+        self.budget()?;
+        if let Some(raw) = self.headers.borrow().get(&e.uid) {
+            let mut entry = e.clone();
+            entry.raw = raw.clone();
+            return Ok(entry);
+        }
+        let h = self.handles.get(&e.uid).ok_or(store::Error::Missing)?;
+        let raw = self
+            .api
+            .call(json!({"op":"body","handle":h,"kid":self.principal.kid,"headers":true}))
+            .map_err(|_| store::Error::Unavailable)?;
+        let mut entry = e.clone();
+        entry.raw = raw.into();
+        if entry.raw.len() <= 8192 {
+            let mut cache = self.headers.borrow_mut();
+            if cache.len() >= 8 {
+                cache.pop_first();
+            }
+            cache.insert(e.uid, entry.raw.clone());
+        }
+        Ok(entry)
     }
     fn materialize(&self, _: &str, e: &Entry) -> Result<Entry, store::Error> {
         let h = self.handles.get(&e.uid).ok_or(store::Error::Missing)?;
         let raw = self
             .api
-            .call(json!({"op":"body","handle":h}))
+            .call(json!({"op":"body","handle":h,"kid":self.principal.kid}))
             .map_err(|_| store::Error::Unavailable)?;
         if raw.len() != e.size {
             return Err(store::Error::Unavailable);
@@ -352,23 +680,88 @@ impl MailStore for Store {
                 arg["uids"] = json!(uids);
                 arg["to"] = json!(self.keys.get(to).ok_or(store::Error::Missing)?)
             }
-            Change::Append {
-                raw, date, flags, ..
-            } => {
-                arg = json!({"op":"append","kid":self.principal.kid,"folder":folder,"date":date.to_rfc3339(),"flags":flags,"content":STANDARD.encode(raw)})
+            Change::Append { date, flags, .. } => {
+                if let Some(mut upload) = self.upload.take() {
+                    let meta=STANDARD.encode(serde_json::to_vec(&json!({"kid":self.principal.kid,"folder":folder,"date":date.to_rfc3339(),"flags":flags,"size":upload.size})).map_err(|_|store::Error::Unavailable)?);
+                    let scope = hex::encode(Sha256::digest(self.principal.kid.as_bytes()));
+                    let api = &self.api;
+                    let size = upload.size;
+                    let a: Value = tokio::runtime::Handle::current().block_on(async {
+                        let (body, hash) = upload
+                            .finish()
+                            .await
+                            .map_err(|_| store::Error::Unavailable)?;
+                        let ts = chrono::Utc::now().timestamp();
+                        let mut mac = Hmac::<Sha256>::new_from_slice(api.key.as_bytes())
+                            .map_err(|_| store::Error::Unavailable)?;
+                        mac.update(
+                            format!(
+                                "POST\n/internal/v1/mail\n{ts}\n{hash}\n{scope}\n{}",
+                                hex::encode(Sha256::digest(meta.as_bytes()))
+                            )
+                            .as_bytes(),
+                        );
+                        let r = api
+                            .client
+                            .post(&api.url)
+                            .header("x-bane-append", meta)
+                            .header("x-bane-scope", scope)
+                            .header("x-bane-content", hash)
+                            .header("x-bane-timestamp", ts.to_string())
+                            .header("x-bane-signature", hex::encode(mac.finalize().into_bytes()))
+                            .header("content-length", size)
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(|_| store::Error::Unavailable)?;
+                        if !r.status().is_success() {
+                            return Err(match r.status().as_u16() {
+                                409 | 413 | 429 => store::Error::Limit,
+                                403 | 422 => store::Error::Denied,
+                                _ => store::Error::Unavailable,
+                            });
+                        }
+                        r.json().await.map_err(|_| store::Error::Unavailable)
+                    })?;
+                    let a: AppliedWire =
+                        serde_json::from_value(a).map_err(|_| store::Error::Unavailable)?;
+                    self.refresh()?;
+                    return Ok(Applied {
+                        pairs: a.pairs,
+                        validity: a.validity,
+                    });
+                }
+                return Err(store::Error::Denied);
             }
         }
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct AppliedWire {
             validity: u32,
             pairs: Vec<(u32, u32)>,
         }
-        let a: AppliedWire = self.api.json(arg)?;
+        let mut out = Applied {
+            validity: 0,
+            pairs: vec![],
+        };
+        if let Some(Value::Array(uids)) = arg.get_mut("uids") {
+            let all = std::mem::take(uids);
+            if all.is_empty() {
+                out.validity = self.folder(p)?.validity;
+            }
+            for batch in all.chunks(1000) {
+                self.budget()?;
+                arg["uids"] = Value::Array(batch.to_vec());
+                let a: AppliedWire = self.api.json(arg.clone())?;
+                out.validity = a.validity;
+                out.pairs.extend(a.pairs)
+            }
+        } else {
+            let a: AppliedWire = self.api.json(arg)?;
+            out.validity = a.validity;
+            out.pairs = a.pairs
+        }
         self.refresh()?;
-        Ok(Applied {
-            validity: a.validity,
-            pairs: a.pairs,
-        })
+        Ok(out)
     }
 }
 impl Submitter for Store {
@@ -385,7 +778,7 @@ impl Submitter for Offline {
 
 pub async fn listen(
     url: &str,
-    events: &tokio::sync::broadcast::Sender<(String, bool)>,
+    events: &crate::hints::Hints,
     api: &Api,
     ready: &tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
@@ -428,12 +821,12 @@ pub async fn listen(
                 }
                 let auth = n.channel() == "bane_protocol_auth";
                 if auth {
-                    api.clear()
+                    api.invalidate(Some(n.payload()))
                 }
-                drop(events.send((n.payload().into(), auth)));
+                events.publish(Some(n.payload()), auth);
             }
         }
         Err::<(), _>(anyhow!("listener ended"))
     };
-    tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.clear();api.online.store(true,std::sync::atomic::Ordering::Release);ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
+    tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.invalidate(None);api.online.store(true,std::sync::atomic::Ordering::Release);ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
 }

@@ -1,5 +1,7 @@
 mod admission;
+mod hints;
 mod remote;
+mod upload;
 use admission::{Limits, Slot};
 use anyhow::{Context, Result, anyhow};
 use mailgw_core::{
@@ -36,7 +38,13 @@ struct State {
 }
 struct Gateway {
     api: Option<Arc<remote::Api>>,
-    events: tokio::sync::broadcast::Sender<(String, bool)>,
+    events: Arc<hints::Hints>,
+    stop: watch::Sender<bool>,
+    sockets: Arc<Semaphore>,
+    uploads: Arc<Semaphore>,
+    smtp_data: Arc<Semaphore>,
+    responses: Arc<Semaphore>,
+    handshakes: Semaphore,
     per_inbox: Mutex<std::collections::HashMap<String, std::sync::Weak<Semaphore>>>,
     limit: usize,
     tls: TlsAcceptor,
@@ -83,6 +91,7 @@ impl Gateway {
         Ok(r)
     }
     async fn accept_tls(&self, stream: Stream, deadline: Instant) -> Result<Stream> {
+        let _permit = self.handshakes.try_acquire().context("handshake limit")?;
         Ok(Box::new(
             timeout_at(deadline, self.tls.accept(stream)).await??,
         ))
@@ -91,6 +100,7 @@ impl Gateway {
     async fn serve(&self, tcp: TcpStream, port: Port, ip: IpAddr, slot: Slot) -> Result<()> {
         let start = Instant::now();
         let auth_deadline = start + self.preauth;
+        timeout_at(auth_deadline, tokio::time::sleep_until(slot.after)).await?;
         tcp.set_nodelay(true)?;
         let mut stream: Stream = Box::new(tcp);
         if port.implicit {
@@ -103,10 +113,19 @@ impl Gateway {
         };
         write(&mut stream, greeting.as_bytes()).await?;
         let mut changed = self.changed.subscribe();
-        let mut events = self.events.subscribe();
+        let mut feed = None;
+        let mut login_generation = 0;
+        let mut stop = self.stop.subscribe();
+        if *stop.borrow() {
+            return Ok(());
+        }
+        let mut commands = admission::Bucket::new(start, 200, 50);
         let identity = self.api.as_ref().map(|api| remote::Login {
             api: api.clone(),
             principal: Mutex::new(None),
+            unavailable: false.into(),
+            limits: self.limits.clone(),
+            ip,
         });
         let mut backend: Option<remote::Store> = None;
         let mut stale = false;
@@ -114,6 +133,9 @@ impl Gateway {
         let mut login = None;
         let mut failures = 0;
         let mut frame = Frame::default();
+        let mut data_permit = None;
+        let mut spool: Option<upload::Upload> = None;
+        let mut terminator = 0usize;
         let mut buf = [0u8; 4096];
         let mut deadline = auth_deadline;
         const KEEPALIVE: Duration = Duration::from_secs(240);
@@ -123,8 +145,8 @@ impl Gateway {
             let read = tokio::select! {
                 biased;
                 _=tokio::time::sleep_until(deadline)=>break,
-                event=events.recv(),if backend.is_some()=>{let Some(store)=backend.as_mut()else{continue};match event{Ok((inbox,auth)) if inbox.is_empty()||inbox==store.principal.inbox=>{if auth{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;},Err(_)=>break,_=>continue}
-                    if idling && let Core::Imap(i)=&mut core{tokio::task::block_in_place(||store.reload(true))?;stale=false;let r=i.update(store);write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
+                _=stop.changed()=>{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE [UNAVAILABLE] Restarting\r\n",Protocol::Smtp=>b"421 4.3.2 Restarting\r\n"}).await?;break},
+                event=async {match &mut feed{Some((_,rx))=>next_hint(rx).await,None=>std::future::pending().await}}=>{let generation=event?;if generation.auth!=login_generation{write(&mut stream,match port.protocol{Protocol::Imap=>b"* BYE Credential changed\r\n",Protocol::Smtp=>b"421 4.7.0 Credential changed\r\n"}).await?;break}stale=true;if idling&&let Some(store)=backend.as_mut()&&let Core::Imap(i)=&mut core{tokio::task::block_in_place(||store.reload(true))?;stale=false;let r=i.update(store);write(&mut stream,&r.bytes).await?;if r.action==Action::Close{break}}continue},
                 n=stream.read(&mut buf)=>n?,
                 _=tokio::time::sleep_until(heartbeat),if idling=>{
                     write(&mut stream,b"* OK Still here\r\n").await?;
@@ -146,13 +168,69 @@ impl Gateway {
             }
             let mut src = &buf[..read];
             while !src.is_empty() {
+                if let Some(u) = spool.as_mut() {
+                    if u.remaining != 0 {
+                        let n = u.remaining.min(src.len());
+                        u.write(&src[..n]).await?;
+                        src = &src[n..];
+                        if src.is_empty() {
+                            break;
+                        }
+                    }
+                    let needed = &b"\r\n"[terminator..];
+                    let n = src.len().min(needed.len());
+                    anyhow::ensure!(src[..n] == needed[..n], "invalid append terminator");
+                    terminator += n;
+                    src = &src[n..];
+                    if terminator < 2 {
+                        break;
+                    }
+                }
                 let was_partial = frame.partial();
-                let event =
-                    frame.consume(&mut src, port.protocol == Protocol::Imap, login.is_some())?;
+                let stream_body = backend.is_some() && matches!(&core,Core::Imap(i) if !i.idling());
+                let event = if let Some(u) = spool.take() {
+                    terminator = 0;
+                    backend.as_mut().context("missing upload owner")?.upload = Some(u);
+                    frame.consume_mode(&mut &b"\r\n"[..], true, true, true)?
+                } else {
+                    frame.consume_mode(
+                        &mut src,
+                        port.protocol == Protocol::Imap,
+                        login.is_some() && !idling,
+                        stream_body,
+                    )?
+                };
                 if login.is_some() && !was_partial && frame.partial() {
                     deadline = Instant::now() + IO
                 }
                 let bytes = match event {
+                    Event::AppendBody { len, sync } => {
+                        let store = backend.as_mut().context("missing upload owner")?;
+                        let global = self
+                            .uploads
+                            .clone()
+                            .try_acquire_owned()
+                            .context("upload limit")?;
+                        let local = store
+                            .uploads
+                            .clone()
+                            .try_acquire_owned()
+                            .context("inbox upload limit")?;
+                        if !store
+                            .upload_rate
+                            .lock()
+                            .map_err(|_| anyhow!("limits unavailable"))?
+                            .take(Instant::now(), len.div_ceil(1024).max(1) as u64)
+                        {
+                            anyhow::bail!("upload byte rate")
+                        }
+                        spool = Some(upload::Upload::new(len, global, local)?);
+                        deadline = Instant::now() + Duration::from_secs(180);
+                        if sync {
+                            write(&mut stream, b"+ Ready for literal\r\n").await?;
+                        }
+                        continue;
+                    }
                     Event::More => break,
                     Event::Continue => {
                         write(&mut stream, b"+ Ready for literal\r\n").await?;
@@ -160,19 +238,34 @@ impl Gateway {
                     }
                     Event::Complete(bytes) => bytes,
                 };
-                if login.is_none()
-                    && self
-                        .limits
-                        .lock()
-                        .map_err(|_| anyhow!("limits unavailable"))?
-                        .blocked(ip, Instant::now())
-                {
-                    return Ok(());
+                if !matches!(&core,Core::Smtp(s) if s.receiving_data()) {
+                    while !commands.take(Instant::now(), 1) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
                 }
-                let r = if let Some(identity) = &identity {
+                let verb = bytes
+                    .split(|b| b.is_ascii_whitespace())
+                    .nth(1)
+                    .unwrap_or_default();
+                let _response = if matches!(core, Core::Imap(_))
+                    && [b"FETCH".as_slice(), b"UID", b"SEARCH"]
+                        .iter()
+                        .any(|v| verb.eq_ignore_ascii_case(v))
+                {
+                    Some(
+                        self.responses
+                            .clone()
+                            .try_acquire_owned()
+                            .context("response limit")?,
+                    )
+                } else {
+                    None
+                };
+                let mut r = if let Some(identity) = &identity {
                     tokio::task::block_in_place(|| -> Result<Reply> {
                         let now = chrono::Utc::now().fixed_offset();
                         if let Some(store) = backend.as_mut() {
+                            store.deadline = std::time::Instant::now() + Duration::from_secs(5);
                             let selects = bytes.split(|b| *b == b' ').nth(1).is_some_and(|w| {
                                 w.eq_ignore_ascii_case(b"SELECT")
                                     || w.eq_ignore_ascii_case(b"EXAMINE")
@@ -205,6 +298,17 @@ impl Gateway {
                 } else {
                     self.step(&mut core, &bytes)?
                 };
+                if matches!(&core,Core::Smtp(s) if s.receiving_data()) {
+                    if data_permit.is_none() {
+                        let Ok(permit) = self.smtp_data.clone().try_acquire_owned() else {
+                            write(&mut stream, b"421 4.3.1 Submission capacity busy\r\n").await?;
+                            return Ok(());
+                        };
+                        data_permit = Some(permit);
+                    }
+                } else {
+                    drop(data_permit.take())
+                }
                 if r.action == Action::Login {
                     let slots = if let Some(auth) = &identity {
                         let p = auth
@@ -223,7 +327,14 @@ impl Gateway {
                             .and_then(std::sync::Weak::upgrade)
                             .unwrap_or_else(|| Arc::new(Semaphore::new(self.limit)));
                         m.insert(p.inbox.clone(), Arc::downgrade(&slots));
-                        backend = Some(remote::Store::new(auth.api.clone(), p));
+                        let sub = self.events.subscribe(&p.inbox);
+                        login_generation = sub.1.borrow().auth;
+                        anyhow::ensure!(
+                            p.epoch == auth.api.epoch(),
+                            "authentication changed during login"
+                        );
+                        feed = Some(sub);
+                        backend = Some(remote::Store::new(auth.api.clone(), p)?);
                         slots
                     } else {
                         self.slots.clone()
@@ -244,10 +355,27 @@ impl Gateway {
                 }
                 if r.action == Action::Failure {
                     failures += 1;
-                    self.limits
-                        .lock()
-                        .map_err(|_| anyhow!("limits unavailable"))?
-                        .failure(ip, Instant::now());
+                    if identity.as_ref().is_some_and(|i| {
+                        i.unavailable
+                            .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    }) {
+                        failures -= 1;
+                        if matches!(port.protocol, Protocol::Imap) {
+                            let tag = r
+                                .bytes
+                                .split(|b| *b == b' ')
+                                .next()
+                                .unwrap_or(b"*")
+                                .to_vec();
+                            r.bytes = tag;
+                            r.bytes
+                                .extend(b" NO [UNAVAILABLE] Authentication service unavailable\r\n")
+                        } else {
+                            r = Reply::one("454 4.7.0 Authentication service unavailable");
+                        }
+                    } else {
+                        tracing::info!(reason = "credentials_denied", "login refused");
+                    }
                     tokio::time::sleep_until(
                         auth_deadline.min(Instant::now() + Duration::from_secs(1)),
                     )
@@ -339,7 +467,13 @@ async fn main() -> Result<()> {
     let limit = setting("MAILGW_LOGIN_LIMIT", 10)?;
     let gw = Arc::new(Gateway {
         api: api.clone(),
-        events: tokio::sync::broadcast::channel(256).0,
+        events: Arc::default(),
+        stop: watch::channel(false).0,
+        sockets: Arc::new(Semaphore::new(1024)),
+        uploads: Arc::new(Semaphore::new(8)),
+        smtp_data: Arc::new(Semaphore::new(4)),
+        responses: Arc::new(Semaphore::new(6)),
+        handshakes: Semaphore::new(32),
         per_inbox: Mutex::default(),
         limit,
         tls: TlsAcceptor::from(Arc::new(config)),
@@ -376,15 +510,16 @@ async fn main() -> Result<()> {
                     api.online
                         .store(false, std::sync::atomic::Ordering::Release);
                     tracing::warn!("protocol notification connection unavailable");
-                    api.clear();
-                    drop(events.send((String::new(), true)));
+                    api.invalidate(None);
+                    events.publish(None, true);
                     tokio::time::sleep(Duration::from_secs(1)).await
                 }
             }
         });
         timeout(IO, rx.wait_for(|up| *up)).await??;
         let health = TcpListener::bind((bind, setting("MAILGW_HEALTH_PORT", 8080)?)).await?;
-        listeners.spawn(async move{let mut tasks=JoinSet::new();loop{tokio::select!{v=health.accept()=>{let(mut s,_)=v?;if tasks.len()<32{tasks.spawn(async move{let _result=timeout(Duration::from_secs(2),async{let mut line=Vec::new();while line.len()<128{let b=s.read_u8().await?;line.push(b);if b==b'\n'{break}}let status=if line==b"GET /health HTTP/1.1\r\n"||line==b"GET /health HTTP/1.0\r\n"{"200 OK"}else{"404 Not Found"};s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await}).await;});}},Some(res)=tasks.join_next()=>res?,}}#[allow(unreachable_code)]Ok::<(),anyhow::Error>(())});
+        let healthy = rx.clone();
+        listeners.spawn(health_listener(health, healthy, gw.stop.subscribe()));
     }
     for (name, number, protocol, implicit) in [
         ("IMAPS", 993, Protocol::Imap, true),
@@ -395,9 +530,95 @@ async fn main() -> Result<()> {
         let l = TcpListener::bind((bind, setting(&format!("MAILGW_{name}_PORT"), number)?)).await?;
         println!("{name} {}", l.local_addr()?.port());
         let gw = gw.clone();
-        listeners.spawn(async move{let mut connections=JoinSet::new();loop{tokio::select!{c=l.accept()=>{let(t,a)=c?;let g=gw.clone();if let Some(slot)=Slot::take(g.limits.clone(),a.ip(),Instant::now()){connections.spawn(async move{if g.serve(t,Port{protocol,implicit},a.ip(),slot).await.is_err(){tracing::debug!("connection ended before logout")}});}},Some(result)=connections.join_next()=>{result?;}}}#[allow(unreachable_code)]Ok::<(),anyhow::Error>(())});
+        let mut stop = gw.stop.subscribe();
+        listeners.spawn(async move {
+            let mut connections=JoinSet::new();
+            loop {tokio::select! {
+                biased;
+                _=stop.changed()=>break,
+                Some(result)=connections.join_next()=>if result.is_err(){tracing::warn!("isolated connection task failed")},
+                c=l.accept()=>{
+                    let (tcp,peer)=match c{Ok(v)=>v,Err(e)=>{tracing::warn!(kind=?e.kind(),"accept deferred");tokio::time::sleep(Duration::from_millis(100)).await;continue}};
+                    if let Ok(permit)=gw.sockets.clone().try_acquire_owned() && let Some(slot)=Slot::take(gw.limits.clone(),peer.ip(),Instant::now()) {
+                        let g=gw.clone();
+                        connections.spawn(async move {let _permit=permit;if g.serve(tcp,Port{protocol,implicit},peer.ip(),slot).await.is_err(){tracing::debug!("connection ended before logout")}});
+                    }
+                }
+            }}
+            drop(l);
+            while let Some(result)=connections.join_next().await {if result.is_err(){tracing::warn!("connection task failed while draining")}}
+            Ok(())
+        });
     }
     println!("READY");
-    tokio::select! {_=tokio::signal::ctrl_c()=>(),Some(res)=listeners.join_next()=>res??}
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {_=tokio::signal::ctrl_c()=>(),_=term.recv()=>(),Some(res)=listeners.join_next()=>res??}
+    gw.stop.send_replace(true);
+    let _drain = timeout(Duration::from_secs(105), async {
+        let mut ports = 0;
+        while let Some(result) = listeners.join_next().await {
+            result??;
+            ports += 1;
+            if ports == 4 + usize::from(gw.api.is_some()) {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
     Ok(())
+}
+async fn next_hint(rx: &mut watch::Receiver<hints::Generation>) -> Result<hints::Generation> {
+    rx.changed().await?;
+    Ok(*rx.borrow_and_update())
+}
+
+async fn health_listener(
+    l: TcpListener,
+    ready: watch::Receiver<bool>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
+    let mut tasks = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _=stop.changed()=>return Ok(()),
+            Some(res)=tasks.join_next()=>if res.is_err(){tracing::warn!("health task failed")},
+            v=l.accept()=>{
+                let Ok((mut s,_))=v else{tokio::time::sleep(Duration::from_millis(100)).await;continue};
+                if tasks.len()<32 {
+                    let ready=ready.clone();
+                    tasks.spawn(async move {let _result=timeout(Duration::from_secs(2),async{
+                        let mut line=Vec::new();
+                        while line.len()<128 {let b=s.read_u8().await?;line.push(b);if b==b'\n'{break}}
+                        let status=match line.as_slice(){b"GET /health HTTP/1.1\r\n"|b"GET /health HTTP/1.0\r\n"=>if *ready.borrow(){"200 OK"}else{"503 Service Unavailable"},_=>"404 Not Found"};
+                        s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await
+                    }).await;});
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn health_reflects_listener_state() {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let (ready, rx) = watch::channel(false);
+        let (stop, shutdown) = watch::channel(false);
+        let task = tokio::spawn(health_listener(tcp, rx, shutdown));
+        for (online, status) in [(false, "503"), (true, "200"), (false, "503")] {
+            ready.send_replace(online);
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+            let mut response = String::new();
+            s.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {status}")));
+        }
+        stop.send_replace(true);
+        task.await.unwrap().unwrap();
+    }
 }
