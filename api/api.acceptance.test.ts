@@ -9454,6 +9454,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         }
         assert.equal((await call('GET', '/v1/inbound/overview')).endpointsTruncated, false);
       });
+      // PR #55 review P3: Trace showed the sender-written header To in full. The dashboard's one rule (app/src/lib/received-to.ts),
+      // now shared by Logs and Trace, shows only our receiving address or envelope recipient in full and masks the rest.
+      await t.test('inbound received To: real log rows show only our own address in full; a header To is masked', async () => {
+        const { receivedTo } = await import('../app/src/lib/received-to.js');
+        const stored = await route('mask-store@receive.example', []);
+        const mail = async (mid: string, to: string) => {
+          raw.set(mid, Buffer.from(`From: Agent <a@example.org>\r\nTo: Someone Else <someone@elsewhere.example>\r\nSubject: Masking ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));
+          await submit(mid, [to]); await run('mailbox.ingest', { sesMessageId: mid });
+        };
+        const row = async (mid: string) => (await call('GET', '/v1/logs?direction=received&limit=100')).data.find((r: Json) => r.subject === `Masking ${mid}`);
+        try {
+          await mail('mask-unrouted', 'mask-store@receive.example'); await mail('mask-routed', box.address);
+          const unrouted = await row('mask-unrouted');
+          assert.deepEqual([unrouted.addresses, unrouted.to], [[], ['someone@elsewhere.example']]);
+          assert.deepEqual(receivedTo(unrouted), { address: 'mask-store@receive.example', own: true }, 'the envelope recipient is ours');
+          assert.deepEqual(receivedTo(await row('mask-routed')), { address: box.address, own: true }, 'the receiving address it was delivered to');
+          // A message stored without its envelope (older mail): only the sender-written header To is known, so it is masked.
+          await db.query("UPDATE mail_messages SET envelope_to='[]'::jsonb WHERE workspace_id=$1 AND subject='Masking mask-unrouted'", [wid]);
+          assert.deepEqual(receivedTo(await row('mask-unrouted')), { address: 'someone@elsewhere.example', own: false });
+          assert.equal(receivedTo({ to: [], addresses: [], envelopeTo: [] }), null);
+        } finally { await call('DELETE', '/v1/routing/routes/' + stored.id); }
+      });
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
         const path='/v1/rituals',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
         const questions=(start:number,count:number)=>Array.from({length:count},(_,i)=>`q${start+i}:"question ${start+i}?"`).join(',');
