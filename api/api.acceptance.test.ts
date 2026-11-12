@@ -310,7 +310,7 @@ test('mail gateway: exact wire projections distinguish complete objects from hea
   const runtime=fixtureWorker?.runtime;if(!runtime)return t.skip('requires disposable loopback object storage');
   const raw=Buffer.from('Subject: One\r\n\tfold\r\n\r\n','ascii').toString('base64');
   const row={uid:1,mid:'fixture',key:'fixture',bucket:'local:',region:'',size:5000,header:22,raw,complete:false};
-  assert.deepEqual(await previewPage(runtime,'default',[row,{...row,uid:2,complete:true}]),[{uid:1,raw,complete:false},{uid:2,raw,complete:true}]);
+  assert.deepEqual(await previewPage(runtime,'default',[row,{...row,uid:2,complete:true}],(await import('drizzle-orm')).sql`SELECT 1`),[{uid:1,raw,complete:false},{uid:2,raw,complete:true}]);
 });
 
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
@@ -9010,6 +9010,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual((await queued).rows[0].r,{error:'NOT_FOUND'});
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
+  });
+  test('mail gateway: a signed folder edit waiting behind deletion is denied without a write',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwdel'),bid=unique('mbx'),kid=unique('app');
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwdel.invalid',$3,'active','store')",[bid,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,'box@gwdel.invalid','inbox','forever')",[bid,w]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const key=randomUUID(),path='/internal/v1/mail',raw=JSON.stringify({op:'edit',kid,action:'subscribe',folder:'inbox',path:null,sub:false});
+    const hash=(s:string)=>createHash('sha256').update(s).digest('hex'),ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),digest=hash(raw);
+    const headers={'x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,digest,scope].join('\n')).digest('hex')};
+    const app=(await import('./src/app.js')).createApp(),send=()=>app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,config:{...rt.config,mailGatewayToken:key}});
+    const active=await send();assert.equal(active.status,200,await active.text());
+    await db.query("UPDATE inbox_folders SET subscribed=true WHERE inbox_id=$1 AND role='inbox'",[bid]);
+    await db.query('BEGIN');try{
+      await db.query('SELECT inbox_end($1,$2)',[w,bid]);
+      const response=send();
+      for(const start=Date.now();!(await db.query('SELECT FROM pg_stat_activity WHERE pg_backend_pid()=ANY(pg_blocking_pids(pid))')).rowCount;){
+        assert.ok(Date.now()-start<5000,'signed writer did not reach the fence');await new Promise(r=>setTimeout(r,5));
+      }
+      await db.query('COMMIT');assert.equal((await response).status,403);
+      assert.equal((await db.query("SELECT subscribed FROM inbox_folders WHERE inbox_id=$1 AND role='inbox'",[bid])).rows[0].subscribed,true);
+    }finally{await db.query('ROLLBACK');}
   });
   // tear witness: accept m1, store m1, accept m2 (a reply), store m2 (held by quota), old Worker PATCH {read:false}.
   test('writer fence: a pre-folder conversation recount cannot rewrite an inbox unread count that excludes held mail',async t=>{

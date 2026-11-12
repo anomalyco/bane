@@ -4,7 +4,7 @@ SET LOCAL lock_timeout='2s';
 CREATE FUNCTION mailgw_append(w text,b text,f text,mid text,tid text,client_id text,subj text,sender text,txt text,dt timestamptz,n int,bucket text,k text,mime jsonb,fl text[]) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE v bigint; u bigint; s bigint; seen boolean:='\Seen'=ANY(fl); bits int:=0; labels text[]; i int; standard text[]:=ARRAY['\Flagged','\Answered','\Draft','$Forwarded','$Junk','$NotJunk','$MDNSent'];
 BEGIN
- PERFORM FROM inbox_state WHERE inbox_id=b AND workspace_id=w FOR UPDATE; IF NOT FOUND THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
+ IF NOT inbox_lock_visible(w,b,true) THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
  SELECT uid_validity INTO STRICT v FROM inbox_folders WHERE inbox_id=b AND role=f;
  IF f='sent' AND client_id IS NOT NULL THEN SELECT e.uid INTO u FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id WHERE e.inbox_id=b AND e.role=f AND m.sender_mailbox_id=b AND m.message_id=client_id AND m.created_at>now()-interval '24 hours' LIMIT 1;
  IF FOUND THEN RETURN jsonb_build_object('validity',v,'pairs',jsonb_build_array(jsonb_build_array(1,u))); END IF; END IF;

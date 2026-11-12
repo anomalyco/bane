@@ -148,6 +148,8 @@ export function registerMailGateway(app: App) {
       return c.json(await contentWrite(c, p));
     }
     const auth = principal(runtime, 'imap', sql`p.id=${p.kid}`);
+    // MATERIALIZED ensures the write fence is acquired before calling the writer.
+    const writer = (ingest: boolean) => sql`SELECT a.* FROM (${auth}) a WHERE mailgw_write_allowed(a.w,a.b,a.k,${receivingPolicy(runtime.config)}::jsonb,${ingest})`;
     if (p.op === 'projections') {
       const { previewPage } = await import('./protocol-preview.js');
       const row = (
@@ -156,7 +158,7 @@ export function registerMailGateway(app: App) {
         )
       ).rows[0];
       if (!row) throw bad();
-      return c.json(await previewPage(runtime, row.w, row.items));
+      return c.json(await previewPage(runtime, row.w, row.items, writer(false)));
     }
     if (p.op === 'subject') {
       const row = (
@@ -235,7 +237,7 @@ export function registerMailGateway(app: App) {
     if (p.op === 'edit') {
       const row = (
         await runtime.db.execute<{ r: { error?: string } }>(
-          sql`WITH a AS (${auth}) SELECT inbox_edit_folder(a.w,a.b,${p.action},${p.folder},${p.path},${p.sub}) r FROM a`,
+          sql`WITH a AS MATERIALIZED (${writer(p.action === 'delete')}) SELECT inbox_edit_folder(a.w,a.b,${p.action},${p.folder},${p.path},${p.sub}) r FROM a`,
         )
       ).rows[0];
       if (!row) throw bad();
@@ -263,7 +265,7 @@ export function registerMailGateway(app: App) {
       :sql`mailgw_mutate(a.w,a.b,${p.folder},${p.to},${p.action},${sql.param(p.uids)}::bigint[],${p.mode},${JSON.stringify(flags)}::jsonb,${sql.param(labels)}::text[])`;
     const row = (
       await runtime.db.execute<{ r: { pairs: number[][]; validity: number; error?: string } }>(
-        sql`WITH a AS (${auth}) SELECT ${mutation} r FROM a`,
+        sql`WITH a AS MATERIALIZED (${writer(p.action === 'expunge')}) SELECT ${mutation} r FROM a`,
       )
     ).rows[0];
     if (!row) throw bad();

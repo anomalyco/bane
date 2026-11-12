@@ -1,8 +1,7 @@
 SET LOCAL lock_timeout='2s';
 CREATE FUNCTION inbox_revoke_password(w text,b text,k text) RETURNS boolean LANGUAGE plpgsql AS $$
 BEGIN
- PERFORM FROM inbox_state WHERE workspace_id=w AND inbox_id=b FOR UPDATE;
- IF NOT FOUND THEN RETURN false; END IF;
+ IF NOT inbox_lock_visible(w,b,true) THEN RETURN false; END IF;
  UPDATE inbox_app_passwords SET revoked_at=clock_timestamp() WHERE id=k AND inbox_id=b AND revoked_at IS NULL;
  IF NOT FOUND THEN RETURN false; END IF;
  UPDATE inbox_state SET protocol_passwords=protocol_passwords-1 WHERE inbox_id=b;

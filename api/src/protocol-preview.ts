@@ -60,7 +60,7 @@ export async function objectProjection(rt:Runtime, workspace:string, r:Pick<Row,
 }
 /** Existing immutable objects need no offline migration. Limit both the concurrent
  * range reads and the total returned bytes; never label an incomplete header as exact. */
-export async function previewPage(rt: Runtime, workspace: string, rows: Row[]) {
+export async function previewPage(rt: Runtime, workspace: string, rows: Row[], writer: ReturnType<typeof sql>) {
   if(rows.length>1 && rows.reduce((n,r)=>n+r.size,0)>4*1024*1024)throw new ApiError(413,'PAGE_LIMIT','Request a smaller projection page.');
   const items: { uid: number; raw: string; complete: boolean }[] = [];
   const fill:{mid:string;key:string;prefix:string;complete:boolean}[]=[];
@@ -79,8 +79,8 @@ export async function previewPage(rt: Runtime, workspace: string, rows: Row[]) {
     }
   }
   await Promise.all(Array.from({ length: 8 }, worker));
-  if(fill.length)await rt.db.execute(sql`INSERT INTO mailgw_previews(mid,object_key,prefix,complete)
+  if(fill.length)await rt.db.execute(sql`WITH a AS MATERIALIZED (${writer}) INSERT INTO mailgw_previews(mid,object_key,prefix,complete)
     SELECT m.id,m.raw_key,x.prefix,x.complete FROM jsonb_to_recordset(${JSON.stringify(fill)}::jsonb) x(mid text,key text,prefix text,complete boolean)
-    JOIN mail_messages m ON m.id=x.mid AND m.raw_key=x.key AND m.workspace_id=${workspace} ORDER BY m.id ON CONFLICT(mid) DO NOTHING`);
+    JOIN mail_messages m ON m.id=x.mid AND m.raw_key=x.key AND m.workspace_id=${workspace} WHERE EXISTS(SELECT FROM a) ORDER BY m.id ON CONFLICT(mid) DO NOTHING`);
   return items;
 }

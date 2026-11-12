@@ -12,8 +12,7 @@ CREATE FUNCTION mailgw_copy_once(w text,b text,k text,src text,dst text,uids big
 RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE clock_s bigint; saved mailgw_copy_receipts; result jsonb;
 BEGIN
-  PERFORM FROM inbox_state WHERE workspace_id=w AND inbox_id=b FOR UPDATE;
-  IF NOT FOUND THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
+  IF NOT inbox_lock_visible(w,b,true) THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
   clock_s:=floor(extract(epoch FROM clock_timestamp()));
   IF issued_ NOT BETWEEN clock_s-300 AND clock_s+5 OR cardinality(uids)>1000 OR uids IS NULL THEN RETURN '{"error":"LIMIT"}'; END IF;
   SELECT * INTO saved FROM mailgw_copy_receipts WHERE kid=k AND nonce=nonce_;

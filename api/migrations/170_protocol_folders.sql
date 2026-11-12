@@ -13,13 +13,23 @@ CREATE FUNCTION inbox_folder_path(f inbox_folders) RETURNS text LANGUAGE sql IMM
  SELECT coalesce(f.custom_path,CASE WHEN f.role='inbox' THEN 'INBOX' ELSE initcap(f.role) END)
 $$;
 
+-- Match dev 151: a join in the locking statement retains its pre-wait mailbox
+-- snapshot. Check visibility in a separate statement after taking the fence.
+CREATE FUNCTION inbox_lock_visible(w text,b text,persistent boolean DEFAULT false) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+ PERFORM FROM inbox_state WHERE workspace_id=w AND inbox_id=b FOR UPDATE;
+ IF NOT FOUND THEN RETURN false; END IF;
+ RETURN EXISTS(SELECT FROM mailboxes WHERE workspace_id=w AND id=b AND kind='inbox' AND
+   (delete_after IS NULL OR delete_after>statement_timestamp()) AND
+   (NOT persistent OR (delete_after IS NULL AND retention_mode='forever')));
+END $$;
+
 -- Same inbox_state fence as ingest and inbox_mutate. Serializes create/rename path
 -- checks, entry removal, subscription and the folder delta with every other writer.
 CREATE FUNCTION inbox_edit_folder(wid text,bid text,op text,fid text,p text,sub boolean) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE f inbox_folders; made text; stamp bigint; item record; prefix text;
 BEGIN
- PERFORM FROM inbox_state s JOIN mailboxes b ON b.id=s.inbox_id WHERE s.inbox_id=bid AND s.workspace_id=wid AND (b.delete_after IS NULL OR b.delete_after>now()) FOR UPDATE OF s;
- IF NOT FOUND THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
+ IF NOT inbox_lock_visible(wid,bid) THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
  IF op IN ('create','rename') AND (p IS NULL OR octet_length(p) NOT BETWEEN 1 AND 255 OR p ~ '[[:cntrl:]]|(^/|/$|//)' OR cardinality(string_to_array(p,'/'))>8 OR lower(p) IN ('inbox','sent','drafts','junk','archive','trash')) THEN RETURN '{"error":"INVALID_PATH"}'; END IF;
  IF op<>'create' THEN SELECT * INTO f FROM inbox_folders WHERE inbox_id=bid AND role=fid; IF NOT FOUND THEN RETURN '{"error":"NOT_FOUND"}'; END IF; END IF;
  IF op IN ('create','rename') AND EXISTS(SELECT FROM inbox_folders WHERE inbox_id=bid AND custom_path=p) THEN RETURN '{"error":"ALREADYEXISTS"}'; END IF;

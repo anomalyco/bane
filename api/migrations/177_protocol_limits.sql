@@ -7,7 +7,7 @@ ALTER TABLE inbox_state ADD COLUMN protocol_append_window timestamptz, ADD COLUM
 CREATE OR REPLACE FUNCTION mailgw_append(w text,b text,f text,mid text,tid text,client_id text,subj text,sender text,txt text,dt timestamptz,n int,bucket text,k text,mime jsonb,fl text[]) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE v bigint; u bigint; s bigint; seen boolean:='\Seen'=ANY(fl); bits int:=0; labels text[]; i int; standard text[]:=ARRAY['\Flagged','\Answered','\Draft','$Forwarded','$Junk','$NotJunk','$MDNSent'];
 BEGIN
- PERFORM FROM inbox_state WHERE inbox_id=b AND workspace_id=w FOR UPDATE; IF NOT FOUND THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
+ IF NOT inbox_lock_visible(w,b,true) THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
  IF n>8388608 THEN RETURN '{"error":"OVERQUOTA"}'; END IF;
  SELECT uid_validity INTO STRICT v FROM inbox_folders WHERE inbox_id=b AND role=f;
  IF f='sent' AND client_id IS NOT NULL THEN SELECT e.uid INTO u FROM inbox_entries e JOIN mail_messages m ON m.id=e.message_id WHERE e.inbox_id=b AND e.role=f AND m.sender_mailbox_id=b AND m.message_id=client_id AND m.created_at>now()-interval '24 hours' LIMIT 1;
@@ -30,7 +30,7 @@ CREATE OR REPLACE FUNCTION mailgw_mutate(w text,b text,src text,dst text,op text
 DECLARE e record; data jsonb; result jsonb; pairs jsonb:='[]'; validity bigint;
 BEGIN
  IF op='expunge' THEN PERFORM inbox_lock_ingest(w); END IF;
- PERFORM FROM inbox_state WHERE workspace_id=w AND inbox_id=b FOR UPDATE;
+ IF NOT inbox_lock_visible(w,b,true) THEN RETURN '{"error":"NOT_FOUND"}'; END IF;
  SELECT uid_validity INTO STRICT validity FROM inbox_folders WHERE inbox_id=b AND role=coalesce(dst,src);
  FOR e IN SELECT i.uid,i.deleted,i.message_id,l.labels FROM inbox_entries i JOIN mailbox_messages l ON l.mailbox_id=b AND l.message_id=i.message_id WHERE i.inbox_id=b AND i.role=src AND (uids IS NULL OR i.uid=ANY(uids)) AND (op<>'expunge' OR i.deleted) ORDER BY i.uid LOOP
   data:=jsonb_build_object('source',src,'uid',e.uid,'folder',dst);
