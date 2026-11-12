@@ -15,7 +15,7 @@ import { actor, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, e
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
-import { checkRoute, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
+import { checkRoute, lockedSettings, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
 import { dmarcView } from './dmarc.js';
 import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
@@ -90,8 +90,8 @@ function assertPending(counts: { projected: number; quota: number | string | nul
   const cap = pendingCap(counts.quota, counts.hosted);
   if (counts.projected > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
+/** Caller holds the admission lock (sendFromMailbox takes it before its sender check). */
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
-  await lockAdmission(db, a);
   const charge = isSimulatedSes(runtime) ? 0 : cost;
   const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
   assertHostedAllowance(counts!.hosted, charge);
@@ -300,9 +300,8 @@ function checkBulk(runtime:Runtime,kind:string|undefined,marketing:boolean,host:
     throw new ApiError(409,'BULK_DMARC_REQUIRED',`Hosted bulk sending requires a valid DMARC policy and aligned DKIM or SPF. Add or recheck the exact From domain ${host}.`,'from');
 }
 // Reuse the existing region-lock round trip for non-batch admission (including mailbox replies). Lock the settings
-// row before any claim, the order every reservation and connection change takes: a top-level FOR SHARE OF s runs
-// after the claim locks inside regional_sender and verified_sending_domains, and deadlocked with POST /v1/domains.
-const lockedSettings = (wid: string) => sql`settings AS MATERIALIZED (SELECT workspace_id,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=${wid} FOR SHARE)`;
+// row before any claim (lockedSettings): a top-level FOR SHARE OF s ran after the claim locks inside regional_sender
+// and verified_sending_domains, and deadlocked with POST /v1/domains.
 export async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
   if (!runtime.config.multiTenant) {
     const selected = await assertRegionEnabled(db, a.workspaceId, requested);
@@ -999,7 +998,8 @@ export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'work
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
 export type MailboxSendRequest = { protocolEnvelope?:boolean; from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region?: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; sealed?: boolean; headers: { Name: string; Value: string }[] };
-/** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
+/** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers.
+ * Only sendFromMailbox calls it, after taking the admission lock. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
   const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
