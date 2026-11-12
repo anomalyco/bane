@@ -13,7 +13,7 @@ export function CampaignArchiveButton({ campaign, compact = false, onSuccess }: 
   async function update() {
     if (active || mutation.isPending) return
     try { await mutation.mutateAsync(!archived); onSuccess?.() }
-    catch (error) { toast(error instanceof Error ? error.message : 'Could not update this campaign.', 'error') }
+    catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t update this campaign.', 'error') }
   }
   return compact
     ? <IconButton label={`${archived ? 'Restore' : 'Archive'} ${campaign.name}`} title={title} disabled={active} loading={mutation.isPending} onClick={event => { event.stopPropagation(); void update() }}>{archived ? <ArchiveRestore size={16} /> : <Archive size={16} />}</IconButton>

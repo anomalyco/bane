@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApi, useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { usePrefetchQueries } from '../../data/prefetch'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { request } from '../../data/live'
@@ -61,6 +62,7 @@ function ReceivingSettings({ domainId }: { domainId: string }) {
 
 export function DomainsPage() {
   const { regionId } = useRegion()
+  const warm = usePrefetchQueries()
   const { multiTenant } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
@@ -88,7 +90,7 @@ export function DomainsPage() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} description="Add a domain to send from it and receive mail at it." action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+      <DataTable loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} description="Add a domain to send from it and receive mail at it." action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { key: 'name', label: 'Domain', width: multiTenant ? '30%' : '26%', render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
         { key: 'sending', label: 'Sending', width: '24%', render: row => <div className="settings-cell-stack"><StatusBadge status={row.status === 'verified' ? 'Verified' : label(row.status)} tone={row.status === 'issue' ? 'danger' : row.status === 'verified' ? 'success' : 'warning'} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus) || row.receivingIssue) && <div className={row.receivingIssue ? 'text-warning' : 'muted'}>{setupSummary(row)}</div>}</div> },
         { key: 'receiving', label: 'Receiving', width: '28%', render: row => <ReceivingCell domain={receivingOf(row.id)} name={row.name} /> },
