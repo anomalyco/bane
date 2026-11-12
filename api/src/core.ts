@@ -338,26 +338,31 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
   if (rate < 1 && Math.random() >= rate) return;
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), service: logContext.service, deploy: logContext.deploy, ...(scrub(fields) as Record<string, unknown>), ...(rate < 1 ? { sampleRate: rate } : {}) }));
 }
-// A V8 stack is "<name>: <message>" and then "    at <function> (<location>)" frames, but a message can span lines
-// that look exactly like frames: a database error quotes its SQL parameters, so a request can put its own text there
-// (PR #131 review). So skip as many lines as the message has, after checking the stack really starts with it, and keep
-// only frames whose location is Bane's own code: the Worker bundle, or src/ or dist/ outside node_modules. Each kept
-// frame is rebuilt from the function name and file:line:column. Anything else fails closed: no frames.
-const FRAME = /^\s+at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;
+// A V8 stack is a header and then "    at <function> (<location>)" frames. The header is the error's name and message
+// (`${name}: ${message}`, or whichever is not empty), and either can span lines that look exactly like frames: a
+// database error quotes its SQL parameters, and a name is just a property (PR #131 review). So neither is trusted and
+// no line is counted: the stack must start with that exact header text, character for character, and frames are read
+// only after it (V8 formats the header from the current name and message on first access). Every line after it must be
+// a frame; only frames in Bane's own code (the Worker bundle, or src/ or dist/ outside node_modules) are kept, rebuilt
+// from the function name and file:line:column. Anything else fails closed: no frames. The one case this cannot see is
+// code that shortens a message after something already read the stack; no request can do that.
+const FRAME = /^ {4}at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;
 const OWN_CODE = /(?:^|\/)(worker\.js|(?:src|dist)\/[\w./-]{1,200}\.(?:ts|js))$/;
 export function stackFrames(error: unknown, limit = 12) {
-  if (!(error instanceof Error) || typeof error.stack !== 'string') return undefined;
-  const lines = error.stack.split('\n'), message = typeof error.message === 'string' ? error.message : '';
-  const headerLines = message ? message.split('\n').length : 1;
-  if (message ? !lines.slice(0, headerLines).join('\n').endsWith(message) : /^\s+at /.test(lines[0] ?? '')) return undefined;
+  if (!(error instanceof Error)) return undefined;
+  let stack: unknown, name: string, message: string;
+  try { stack = error.stack; name = error.name === undefined ? 'Error' : String(error.name); message = error.message === undefined ? '' : String(error.message); }
+  catch { return undefined; } // A throwing getter.
+  const header = !name ? message : !message ? name : `${name}: ${message}`;
+  if (typeof stack !== 'string' || !stack.startsWith(`${header}\n`)) return undefined;
   const frames: string[] = [];
-  for (const line of lines.slice(headerLines)) {
+  for (const line of stack.slice(header.length + 1).split('\n')) {
+    if (!/^ {4}at /.test(line)) return undefined; // Not a stack after all.
     const match = FRAME.exec(line);
-    if (!match) { if (/^\s+at /.test(line)) continue; return undefined; } // A native or eval frame, or not a stack at all.
-    const [, name, location, row, column] = match;
+    if (!match) continue; // A native, eval or anonymous-location frame.
+    const [, fn, location, row, column] = match;
     const file = location!.includes('node_modules') ? undefined : OWN_CODE.exec(location!)?.[1];
-    if (file) frames.push(`${name ?? '<anonymous>'} (${file}:${row}:${column})`);
-    if (frames.length >= limit) break;
+    if (file && frames.length < limit) frames.push(`${fn ?? '<anonymous>'} (${file}:${row}:${column})`);
   }
   return frames.join('\n') || undefined;
 }

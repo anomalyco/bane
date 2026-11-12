@@ -7268,8 +7268,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const forged = `bane_${'5e'.repeat(32)}`;
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Log reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
       const execute = runtime.db.execute.bind(runtime.db);
-      let fault: unknown = null; // Thrown as a new Error with its message, so the stack is the API's call, as a driver's error would be.
-      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message); } return execute(...args); }) as typeof execute);
+      let fault: unknown = null; // Thrown as a new Error with its name and message, so the stack is the API's call, as a driver's error would be.
+      t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw Object.assign(new Error(thrown.message), { name: thrown.name }); } return execute(...args); }) as typeof execute);
       const seen = async (reply: Reply, expected: Json) => {
         const requestId = reply.headers.get('x-request-id'), entries = lines.map(line => JSON.parse(line) as Json).filter(entry => entry.requestId === requestId && entry.event === 'request');
         assert.equal(entries.length, 1, `one request line for ${requestId}`);
@@ -7298,6 +7298,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const failure = errorLine(broken);
       assert.ok(failure?.stack && failure.errorType === 'Error' && failure.code === 'INTERNAL_ERROR' && failure.route === '/v1/emails' && failure.message === undefined, JSON.stringify(failure));
       assert.ok(ownFrames(failure.stack) && /\(src\/[\w./-]+\.ts:\d+:\d+\)/.test(failure.stack), failure.stack);
+      // The same through the error's name, which is a property like any other (PR #131 recheck).
+      fault = Object.assign(new Error(''), { name: 'Error\n    at InjectedName (worker.js:1:1)' });
+      const renamed = await request('GET', '/v1/emails', reader.secret);
+      await seen(renamed, { route: '/v1/emails', status: 500, code: 'INTERNAL_ERROR' });
+      const renamedLine = errorLine(renamed);
+      assert.ok(renamedLine?.stack && ownFrames(renamedLine.stack) && renamedLine.errorType === 'Error', JSON.stringify(renamedLine));
       // Unsupported keys are caller text: the line names no field rather than the key (an IP address, a code).
       const unsupported = await local('POST', '/v1/contacts', { email: address(), pr131_OAuthCode_123: 1, '192.0.2.131': 1 });
       await seen(unsupported, { route: '/v1/contacts', status: 422, code: 'VALIDATION_FAILED', field: undefined });
@@ -7323,9 +7329,44 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const refused = errorLine(nul);
       assert.ok(refused?.databaseCode === '22021' && (refused.stack === undefined || ownFrames(refused.stack)), JSON.stringify(refused));
       const leaked = [email, encodeURIComponent(email), body, forged, reader.secret, manager!.cookie.split('=').slice(1).join('='), 'injectedframe', 'pr131-confidential-subject',
-        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
+        'short-secret', 'oauth-private-code', 'example.invalid', 'private.invalid', '192.0.2.13', 'pr131_OAuthCode_123', '192.0.2.131', 'InjectedName'].filter(secret => secret.length > 8 && lines.some(line => line.includes(secret)));
       assert.deepEqual(leaked, [], 'no address, body, token, session cookie or text a request smuggled into an error reaches a log line');
     });
+  });
+
+  // PR #131 recheck: an error's name and message are both caller-reachable text, and either can span lines that look
+  // exactly like frames. stackFrames reads frames only after the exact header text, and keeps Bane's own.
+  test('stack frames: an error name or message that looks like frames is never logged as one', async () => {
+    const { stackFrames, errorTypeOf } = await import('./src/core.js');
+    const real = '    at realHandler (worker.js:5:5)\n    at async Pool.query (/app/node_modules/pg/lib/client.js:9:9)\n    at async handler (/app/dist/app.js:7:3)';
+    const formatted = (name: string, message: string) => {
+      const error = Object.assign(new Error(message), { name });
+      error.stack = `${!name ? message : !message ? name : `${name}: ${message}`}\n${real}`;
+      return error;
+    };
+    const fake = '\n    at InjectedName (worker.js:1:1)', fakeMessage = '\n    at InjectedMessage (src/app.ts:1:1)\n    at https://example.invalid/?code=x ip=192.0.2.13';
+    for (const [name, message] of [
+      [`Error${fake}`, ''], // The reviewer's probe.
+      [`Error${fake}`, 'boom'],
+      [`TypeError${fake}${fake}`, `boom${fakeMessage}`],
+      ['Error', `boom${fakeMessage}`],
+      ['', `boom${fakeMessage}`],
+      [`Error: x${fake}`, `y${fakeMessage}`],
+      [fake.slice(1), ''],
+    ] as const) {
+      const error = formatted(name, message);
+      assert.equal(stackFrames(error), 'realHandler (worker.js:5:5)\nhandler (dist/app.js:7:3)', JSON.stringify({ name, message }));
+      assert.equal(errorTypeOf(error), /^[A-Z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'Error');
+    }
+    // Formatted by V8 itself, from this file: no frame of Bane's, and none of the injected ones.
+    const lazy = Object.assign(new Error(`boom${fakeMessage}`), { name: `Error${fake}` });
+    assert.equal(stackFrames(lazy), undefined);
+    // Fails closed when the stack does not start with the current header, or has a line that is not a frame after it.
+    const renamedLater = formatted('Error', 'boom'); renamedLater.name = `Error${fake}`;
+    const trailing = formatted('Error', 'boom'); trailing.stack += '\nnot a frame';
+    const headless = formatted('Error', 'boom'); headless.stack = real;
+    const getter = Object.defineProperty(new Error('x'), 'name', { get() { throw new Error('no'); } });
+    for (const error of [renamedLater, trailing, headless, getter, { stack: real }, 'Error\n    at realHandler (worker.js:5:5)']) assert.equal(stackFrames(error), undefined);
   });
 
   test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{
