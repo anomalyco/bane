@@ -91,8 +91,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
-    // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
-    c.header('x-request-id', requestId); if (!c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
+    // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
+    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));

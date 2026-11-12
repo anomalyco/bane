@@ -16,18 +16,26 @@ import { promisify } from 'node:util';
 const encoders = { br: (raw: Buffer) => promisify(brotliCompress)(raw, { params: { [constants.BROTLI_PARAM_QUALITY]: 9 } }), gzip: (raw: Buffer) => promisify(gzip)(raw, { level: 9 }) };
 const encoded = new Map<string, Promise<Buffer>>();
 async function dashboardFile(request: Request, path: string, response: Response) {
-  if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200 || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
+  if (!['GET', 'HEAD'].includes(request.method) || response.status !== 200) return response;
+  // The public docs (the Docs page reads the 1.7 MB OpenAPI document) are the same for every reader: compress them too.
+  if (/^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/operations\/)/.test(path)) return encode(request, path, response, new Headers(response.headers), response.headers.get('content-length') ?? '');
+  if (/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(path)) return response;
   const html = response.headers.get('content-type')?.startsWith('text/html');
   const asset = path.startsWith('/assets/') && !html, font = path.startsWith('/fonts/') && !html;
   if (!html && !asset && !font) return response;
   const headers = new Headers(response.headers);
   // A missing /assets/ file falls back to the HTML shell: never cache that answer.
   headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache');
+  if (!asset || !/\.(?:js|css|svg|json|map)$/.test(path)) return new Response(response.body, { status: 200, headers });
+  return encode(request, path, response, headers, '');
+}
+// Brotli (or gzip) once per file per process; `version` separates bodies that can change under one path.
+async function encode(request: Request, path: string, response: Response, headers: Headers, version: string) {
   const accept = request.headers.get('accept-encoding') ?? '';
-  const encoding = !asset || !/\.(?:js|css|svg|json|map)$/.test(path) ? null : /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : null;
-  if (!encoding) return new Response(response.body, { status: 200, headers });
+  const encoding = /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : null;
+  if (!encoding || response.headers.has('content-encoding')) return new Response(response.body, { status: response.status, headers });
   headers.append('vary', 'accept-encoding');
-  const key = `${encoding} ${path}`;
+  const key = `${encoding} ${path} ${version}`;
   let body = encoded.get(key);
   if (!body) {
     body = response.arrayBuffer().then(raw => encoders[encoding](Buffer.from(raw)));
