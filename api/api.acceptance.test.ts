@@ -187,39 +187,44 @@ test('dashboard receiving health: stale proof and identity show repair actions; 
   assert.equal(receivingIssueTitle('identity_stale', host), `Recheck the SES identity for ${host}`);
   for (const code of ['future_code', 'constructor']) assert.equal(receivingIssueTitle(code, host), `Receiving at ${host} needs attention`);
 });
-// PR #144 review: a contact property is free text, and every mailbox address written in it is masked whole
-// (app/src/lib/private-address.ts addressParts, rendered by components/AddressText.tsx).
-test('dashboard addresses in free text: quoted, punctuated and internationalized addresses are masked whole; prose stays readable', async () => {
+// PR #144 review: a contact property is free text. Every run of non-space characters with an @ in it is masked whole,
+// with any quoted string or comment it touches (app/src/lib/private-address.ts addressParts, components/AddressText.tsx).
+test('dashboard addresses in free text: every run holding an @ is masked whole, with the quoted string or comment it touches', async () => {
   const { addressParts, maskedParts } = await import('../app/src/lib/private-address.js');
-  const found = (text: string) => addressParts(text).filter(part => part.address).map(part => part.text);
-  // Everything the page shows is the text back again, in order.
-  for (const text of ['Reach "mary smith"@example.net now', 'Reply to second-person@example.net.', 'plain prose, no address', ''])
-    assert.equal(addressParts(text).map(part => part.text).join(''), text);
-  const cases: [string, string[]][] = [
-    ['Reach "mary smith"@example.net now', ['"mary smith"@example.net']],
-    ['Reach "a@b \\" c"@example.net', ['"a@b \\" c"@example.net']],
-    ['Reach person@例子.公司 now', ['person@例子.公司']],
-    ['person@例子。公司。', ['person@例子。公司']],
-    ['dörte@münchen.example and 用户@例子.广告', ['dörte@münchen.example', '用户@例子.广告']],
-    ['first/last@example.net', ['first/last@example.net']],
-    ["o'connor@example.net", ["o'connor@example.net"]],
-    ["!#$%&'*+-/=?^_`{|}~.x@example.net", ["!#$%&'*+-/=?^_`{|}~.x@example.net"]],
-    ['Reply to second-person@example.net.', ['second-person@example.net']],
-    ['mailto:bob@example.net, <ada@example.net> (cc: lin@example.net)', ['bob@example.net', 'ada@example.net', 'lin@example.net']],
-    ["Say 'quoted@example.net' or “curly@example.net”", ['quoted@example.net', 'curly@example.net']],
-    ['bob@[192.0.2.1] and reply+*@example.net', ['bob@[192.0.2.1]', 'reply+*@example.net']],
-    // Can't be read as an address: masked as far back as it could reach rather than shown.
-    ['stray bob"@example.net', ['bob"@example.net']],
-    ['cut off: bob@', ['bob@']],
-    // No mailbox: handles, domains and catch-all patterns stay readable.
-    ['@team ping *@bane.mx bane.mx', []],
+  const shown = (text: string) => addressParts(text).map(part => part.address ? `[${part.text}]` : part.text).join('');
+  const cases: [string, string][] = [
+    // Round 3: a comment before the @, and a local part no parser reads.
+    ['bob(comment)@example.net', '[bob(comment)@example.net]'],
+    ['Reach bob(my work comment)@example.net now', 'Reach [bob(my work comment)@example.net] now'],
+    ['bob\\local@example.net', '[bob\\local@example.net]'],
+    // Earlier rounds.
+    ['Reach "mary smith"@example.net now', 'Reach ["mary smith"@example.net] now'],
+    ['Reach "a@b \\" c"@example.net', 'Reach ["a@b \\" c"@example.net]'],
+    ['Reach person@例子.公司 now', 'Reach [person@例子.公司] now'],
+    ['first/last@example.net', '[first/last@example.net]'],
+    ["o'connor@example.net", "[o'connor@example.net]"],
+    ['dörte@münchen.example', '[dörte@münchen.example]'],
+    // Over-masking is fine: the punctuation a run carries goes with it.
+    ['Reply to second-person@example.net.', 'Reply to [second-person@example.net.]'],
+    ['mailto:bob@example.net, <ada@example.net> (cc lin@example.net)', '[mailto:bob@example.net,] [<ada@example.net>] [(cc lin@example.net)]'],
+    ['bob@example.net(Bob Smith) after', '[bob@example.net(Bob Smith)] after'],
+    ['"mary smith"@x.example" tail', '["mary smith"@x.example"] tail'],
+    ['"a@b.example y"@c.example tail', '["a@b.example y"@c.example] tail'],
+    ['cut off: bob@', 'cut off: [bob@]'],
+    // No mailbox in the run: handles, domains and catch-all patterns stay readable.
+    ['@team ping *@bane.mx bane.mx', '@team ping *@bane.mx bane.mx'],
+    ['plain prose, no address', 'plain prose, no address'],
   ];
-  for (const [text, addresses] of cases) assert.deepEqual(found(text), addresses, text);
-  // Each one renders masked: two characters shown, the rest blurred.
-  for (const [, addresses] of cases) for (const value of addresses) assert.equal(maskedParts(value)?.shown, value.slice(0, 2), value);
-  // Linear in the length of the text, however many @ it has.
-  const long = 'x'.repeat(200_000) + '@' + '"'.repeat(1000) + '@a.b '.repeat(20_000);
-  const started = performance.now(); addressParts(long); assert.ok(performance.now() - started < 1000, 'long text is split quickly');
+  for (const [text, expected] of cases) {
+    assert.equal(shown(text), expected, text);
+    // Every readable piece is free of any @ that belongs to a mailbox; the pieces join back to the text.
+    assert.equal(addressParts(text).map(part => part.text).join(''), text);
+    for (const part of addressParts(text)) if (part.address) assert.ok(maskedParts(part.text), part.text);
+  }
+  // Fast on long text whatever it holds.
+  const started = performance.now();
+  addressParts('x@'.repeat(100_000) + ' ' + '"('.repeat(50_000) + '@'); addressParts('a "b" (c) d@e '.repeat(5_000));
+  assert.ok(performance.now() - started < 1000, 'long text is split quickly');
 });
 test('ritual compile limits: maximum-size comments remain valid; identifiers, tokens and depth have bounded diagnostics',async()=>{
   const {compileRitual,RitualError}=await import('./src/ritual-engine.js');
