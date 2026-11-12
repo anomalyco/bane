@@ -1,13 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
-import { ApiError, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { authUser } from './db/google-auth.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { approvedGoogleIdentity, invitationRecipient, verifiedDashboardUser } from './google-auth.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
-const Workspace = z.object({ id: z.string(), name: z.string(), slug: z.string(), role: WorkspaceRole }).openapi('Workspace');
+export const Workspace = z.object({ id: z.string(), name: z.string(), slug: z.string(), role: WorkspaceRole }).openapi('Workspace');
 const Member = z.object({ id: z.string(), userId: z.string(), email: z.string(), name: z.string(), role: WorkspaceRole }).openapi('WorkspaceMember');
 const Invitation = z.object({ id: z.string(), workspaceId: z.string(), email: z.string(), role: WorkspaceRole, expiresAt: z.string(), acceptUrl: z.string().url() }).openapi('WorkspaceInvitation');
 const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string(), workspaceSlug: z.string(), inviterName: z.string(), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
@@ -73,18 +73,16 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 }
 const maxOwnedWorkspaces = 10;
 
-function dashboard(c: Ctx, manage = false) {
-  if (!c.env.config.multiTenant) return notFound('Endpoint');
-  const a = c.get('actor');
-  if (a.credential !== 'dashboard') throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.');
-  if (manage && a.role !== 'admin' && a.role !== 'owner') throw new ApiError(403, 'PERMISSION_DENIED', 'Workspace administration requires an owner or admin.');
-  return { workspaceId: a.workspaceId, userId: a.keyId.slice(5), email: a.email! };
+/** Every workspace the user belongs to, with their role, by name: one statement. Read by GET /v1/me and the deprecated GET /v1/workspaces. */
+export async function memberships(db: DbExecutor, userId: string) {
+  const rows = await db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, userId)).orderBy(workspaces.name, workspaces.id);
+  return rows.map(row => Workspace.parse(row));
 }
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
 // concurrent demotions cannot authorize each other on an old snapshot or remove both owners.
 function administer<T>(c: Ctx, action: (db: DbExecutor, workspaceId: string, userId: string, role: 'owner' | 'admin') => Promise<T>) {
-  const { workspaceId, userId } = dashboard(c, true);
+  const { workspaceId, userId } = dashboardSession(c, true);
   return c.env.db.transaction(async db => {
     await db.select({ id: workspaces.id }).from(workspaces).where(eq(workspaces.id, workspaceId)).for('no key update');
     const [member] = await db.select({ role: workspaceMembers.role }).from(workspaceMembers).where(and(eq(workspaceMembers.workspaceId, workspaceId), eq(workspaceMembers.userId, userId)));
@@ -123,17 +121,14 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 }
 
 export function registerWorkspaces(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security,
-    description: 'Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
-    responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => {
-    const a = dashboard(c);
-    const rows = await c.env.db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, a.userId)).orderBy(workspaces.name, workspaces.id);
-    return c.json({ data: rows.map(row => Workspace.parse(row)) }, 200);
-  });
+  // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
+  app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
+    description: 'Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
+    responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
     description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
-    const a = dashboard(c), { name } = c.req.valid('json');
+    const a = dashboardSession(c), { name } = c.req.valid('json');
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
       const [user] = await db.select({ email: authUser.email, verified: authUser.emailVerified, hd: authUser.googleHostedDomain }).from(authUser).where(eq(authUser.id, a.userId)).for('update');
@@ -155,7 +150,7 @@ export function registerWorkspaces(app: App) {
     return c.json(row, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/members`, operationId: 'listWorkspaceMembers', tags, security, responses: { 200: response(z.object({ data: z.array(Member) })), ...errors } }), async c => {
-    const a = dashboard(c, true);
+    const a = dashboardSession(c, true);
     const rows = await c.env.db.select({ id: workspaceMembers.id, userId: authUser.id, role: workspaceMembers.role, email: authUser.email, name: authUser.name }).from(workspaceMembers).innerJoin(authUser, eq(authUser.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(authUser.email);
     return c.json({ data: rows.map(row => Member.parse(row)) }, 200);
   });
@@ -169,7 +164,7 @@ export function registerWorkspaces(app: App) {
     const { id } = c.req.valid('param'); await changeMember(c, id); return c.json({ id, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/invitations`, operationId: 'listWorkspaceInvitations', tags, security, description: 'List pending, unexpired workspace invitations.', responses: { 200: response(z.object({ data: z.array(Invitation) })), ...errors } }), async c => {
-    const a = dashboard(c, true);
+    const a = dashboardSession(c, true);
     const result = await c.env.db.execute<InviteRow>(sql`SELECT id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt" FROM workspace_invitations WHERE workspace_id = ${a.workspaceId} AND status = 'pending' AND expires_at > now() ORDER BY email`);
     return c.json({ data: result.rows.map(row => invitationView(c, row)) }, 200);
   });

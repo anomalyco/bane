@@ -97,8 +97,10 @@ transcript (synthetic or redacted, never real mail) replays with `transcript FIL
   adapter), 2048-row pages and 5000-UID batches (too slow per step; covered by e2e), two
   gateway versions at once.
 
-## CI access to tear
+## Running tear
 
-tear is a private `anomalyco` repository. `.cargo/config.toml` makes cargo fetch with the git
-CLI; the workflow rewrites the URL with the `TEAR_READ_TOKEN` secret (a read-only token for
-`anomalyco/tear`). Until tear is published, that secret is required for the gateway job.
+tear runs locally, not in CI (decision 2026-11-12): run `cargo run --release -- ci` here before
+merging changes to the gateway, and the deeper commands above for larger changes. Every bug it
+found also has an ordinary regression test in the Rust tests or `api/api.acceptance.test.ts`,
+and those run in CI. tear is a private `anomalyco` repository; `.cargo/config.toml` makes cargo
+fetch it with the git CLI, so a local checkout needs read access to it.

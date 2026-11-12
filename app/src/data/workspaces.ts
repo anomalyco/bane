@@ -1,10 +1,10 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { request } from './live'
-import type { WorkspaceInvitation, WorkspaceInvitationPreview, WorkspaceMember, WorkspaceMembership, WorkspaceRole } from './types'
+import type { Identity, WorkspaceInvitation, WorkspaceInvitationPreview, WorkspaceMember, WorkspaceMembership, WorkspaceRole } from './types'
 
-// Multi-tenant workspace administration. Only reachable when /v1/me reports multiTenant.
+// Multi-tenant workspace administration. Only reachable when /v1/me reports multiTenant; the memberships come with it (identity.workspaces).
 const current = '/v1/workspaces/current'
 export const workspaceApi = {
-  list: async (signal?: AbortSignal) => (await request<{ data: WorkspaceMembership[] }>('/v1/workspaces', { signal })).data,
   create: (name: string) => request<WorkspaceMembership>('/v1/workspaces', { method: 'POST', body: { name } }),
   rename: (name: string) => request<WorkspaceMembership>(current, { method: 'PATCH', body: { name } }),
   members: async (signal?: AbortSignal) => (await request<{ data: WorkspaceMember[] }>(`${current}/members`, { signal })).data,
@@ -18,3 +18,11 @@ export const workspaceApi = {
   acceptInvitation: (id: string) => request<{ workspaceId: string }>(`/v1/workspaces/invitations/${encodeURIComponent(id)}/accept`, { method: 'POST', body: {} }),
 }
 export const roleLabel: Record<WorkspaceRole, string> = { owner: 'Owner', admin: 'Admin', member: 'Member' }
+// The memberships arrive with the session (GET /v1/me): keep a rename in step without another request, or reread them.
+export function useMembershipCache() {
+  const client = useQueryClient()
+  return {
+    renamed: (workspace: Pick<WorkspaceMembership, 'id' | 'name'>) => client.setQueryData<Identity>(['identity'], old => old && { ...old, workspaces: old.workspaces?.map(item => item.id === workspace.id ? { ...item, name: workspace.name } : item) }),
+    refresh: () => client.invalidateQueries({ queryKey: ['identity'] }),
+  }
+}

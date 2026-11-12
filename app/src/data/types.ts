@@ -231,7 +231,7 @@ export interface BaneApi {
   readonly mode: 'demo' | 'live'
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
   workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name: string }, signal?: AbortSignal): Promise<Workspace> }
-  overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview> }
+  overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview>; setup(signal?: AbortSignal): Promise<OverviewSetup> }
   senderScore: { get(signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email> }
   logs: { list(input: PageRequest & { direction?: LogDirection }, signal?: AbortSignal): Promise<PageResult<LogEntry>> }
@@ -291,9 +291,11 @@ export interface BaneApi {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number } }) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number } }) | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
+// GET /v1/overview/setup: Overview's setup and next steps in one read. A part is null where its own list would refuse the caller.
+export interface OverviewSetup { domains: Domain[] | null; apiKeys: { active: number } | null; emails: { any: boolean }; webhooks: { total: number } | null; invitations: { pending: number } | null }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }
 export type ConnectionKind = 'shared' | 'byo'
 export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'failed'

@@ -133,7 +133,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
 const KeySchema = z.object({ id: z.string(), name: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), prefix: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('ApiKey');
 const AgentTokenRecord = z.object({ id: z.string(), grantId: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string(), expiresAt: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('AgentTokenRecord');
 const KeyInput = z.object({ name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).default(['send']), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]) }).strict().openapi('CreateApiKey');
-function manageKeys(c: Parameters<typeof actor>[0]) {
+export function manageKeys(c: Parameters<typeof actor>[0]) {
   const value = actor(c, 'manage');
   if (value.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, list, or revoke API keys.');
   if (value.domains.length) throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');

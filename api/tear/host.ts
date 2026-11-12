@@ -40,8 +40,10 @@ if (!url || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)
 // Both are checked at startup and before every fixture.
 const DISPOSABLE = 'bane-tear: disposable test database, every row may be changed or deleted';
 const PUBLIC = 'http://127.0.0.1:8799';
+// Every worker (and every later run) on the database must share one auth secret: the JWKS key Better Auth stores
+// there is encrypted with it, so a per-process random secret fails every OAuth token after the first worker's.
 const env: Record<string, string> = {
-  DATABASE_URL: url, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? randomBytes(36).toString('hex'), PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
+  DATABASE_URL: url, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? 'bane-tear: fixed secret for disposable test databases only', PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
   MULTI_TENANT: 'true', GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture', AUTH_ALLOWED_DOMAINS: 'example.com', AUTH_ALLOWED_EMAILS: '',
   ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear', S3_ENDPOINT: 'http://127.0.0.1:9',
   API_RATE_LIMIT_PER_MINUTE: '100000', DEFAULT_SES_REGION: 'us-east-1', SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',

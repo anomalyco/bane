@@ -109,6 +109,7 @@ test('ritual compile limits: maximum-size comments remain valid; identifiers, to
 });
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
   const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
+  assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
@@ -1062,6 +1063,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
       const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
       assert.equal(joined.length,2);assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
+      assert.deepEqual(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaces,joined,'GET /v1/me lists the same memberships as the deprecated GET /v1/workspaces.');
       assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id,'Join selects the workspace the recipient confirmed.');
       assert.equal(ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie)).status,'accepted');
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
@@ -1107,6 +1109,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
+      assert.deepEqual(me.workspaces, [{ id: a.org.id, name: a.org.name, slug: a.org.slug, role: 'member' }], 'The joined workspace, and nothing the invitation did not grant.');
       error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
@@ -2138,6 +2141,42 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const memberRegions = ok(await local('GET', '/v1/regions', undefined, guest));
       assert.ok(memberRegions.data.some((r: Json) => r.enabled && r.region === memberRegions.defaultRegion));
       for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', `/v1/regions/${memberRegions.defaultRegion}/discovery`, `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
+      await mx.test('MX Overview setup: one read, each part as its own endpoint shows it, in a fixed number of statements', async setupTest => {
+        // What the owner's own endpoints show. The fixture mail below is a bare row listEmails can't render, so mail is read from the table.
+        const own = async () => ({
+          domains: ok(await local('GET', '/v1/domains?limit=10&refresh=false', undefined, a.cookie)),
+          apiKeys: { active: ok(await local('GET', '/v1/api-keys?includeRevoked=false&limit=100', undefined, a.cookie)).data.length },
+          emails: { any: (await pool.query('SELECT EXISTS (SELECT FROM sending_emails WHERE workspace_id=$1) AS any', [a.org.id])).rows[0].any },
+          webhooks: { total: ok(await local('GET', '/v1/webhooks?limit=100', undefined, a.cookie)).data.length },
+          invitations: { pending: ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length },
+        });
+        const kept = ok(await local('POST', '/v1/api-keys', { name: unique('setup-key'), permissions: ['send'] }, a.cookie), 201);
+        const revoked = ok(await local('POST', '/v1/api-keys', { name: unique('setup-revoked'), permissions: ['send'] }, a.cookie), 201);
+        ok(await local('POST', `/v1/api-keys/${revoked.id}/revoke`, undefined, a.cookie));
+        const pending = ok(await local('POST', `${base}/invitations`, { email: `${unique('setup-invite')}@example.com`, role: 'member' }, a.cookie), 201);
+        // Scheduled a day out so the background runner never drains it before it is removed.
+        const mail = unique('setup-mail');
+        await pool.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
+          VALUES ($1,$2,$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [mail, a.org.id, runtime.config.regions[0]]);
+        cleanup(setupTest, async () => {
+          await pool.query('DELETE FROM sending_emails WHERE id=$1 AND workspace_id=$2', [mail, a.org.id]);
+          await pool.query('DELETE FROM api_keys WHERE id = ANY($1)', [[kept.id, revoked.id]]);
+          await pool.query('DELETE FROM workspace_invitations WHERE id=$1', [pending.id]);
+        });
+        const owner = ok(await local('GET', '/v1/overview/setup', undefined, a.cookie));
+        assert.deepEqual(owner, await own());
+        assert.ok(owner.apiKeys.active >= 1 && owner.invitations.pending === 1 && owner.emails.any, 'The new key and invitation count; the revoked key does not.');
+        // A member reads mail but none of the owner/admin lists: those parts are null, exactly where their endpoints refuse.
+        assert.deepEqual(ok(await local('GET', '/v1/overview/setup', undefined, guest)), { domains: null, apiKeys: null, emails: { any: true }, webhooks: null, invitations: null });
+        // Hosted budget: the domain page and one statement of counts, so one more than a single-row read with the same session.
+        const statements = async (path: string) => {
+          const spy = setupTest.mock.method(pool, 'query');
+          try { ok(await local('GET', path, undefined, a.cookie)); return spy.mock.callCount(); } finally { spy.mock.restore(); }
+        };
+        const single = await statements('/v1/settings/workspace'), setup = await statements('/v1/overview/setup');
+        setupTest.diagnostic(`Overview setup: ${setup} pg statements including dashboard auth (a one-row read: ${single})`);
+        assert.equal(setup - single, 1);
+      });
       error(await local('PUT', `/v1/regions/${memberRegions.defaultRegion}`, { enabled: true }, guest), 403, 'PERMISSION_DENIED');
       error(await local('POST', '/v1/campaigns/nope/send', { revision: 1 }, guest), 403, 'PERMISSION_DENIED');
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
@@ -5140,6 +5179,21 @@ describe('Operational configuration and public event boundaries', () => {
     assert.ok(catalog.data.some((entry: Json) => entry.region === catalog.defaultRegion && entry.enabled && entry.isDefault));
     error(await http('GET', '/v1/domains', key.secret), 503, 'SES_NOT_CONFIGURED');
     error(await http('POST', '/v1/domains', key.secret, { name: `${unique('acceptance')}.example.com`, region: REGION }), 503, 'SES_NOT_CONFIGURED');
+    // Overview's setup in one read. listDomains is unavailable without live SES, so domains is null instead of failing the
+    // read; self-hosted has no invitations; an API key belongs to one workspace and lists no memberships.
+    const setup = ok(await http('GET', '/v1/overview/setup', key.secret));
+    assert.equal(setup.domains, null); assert.equal(setup.invitations, null);
+    assert.ok(setup.apiKeys.active >= 1 && Number.isInteger(setup.webhooks.total) && typeof setup.emails.any === 'boolean');
+    assert.equal(ok(await http('GET', '/v1/me', key.secret)).workspaces, null);
+    // Each part keeps its own endpoint's rule: a reader can't list keys (manage), a domain-restricted key can't list webhooks.
+    const readerSetup = ok(await http('GET', '/v1/overview/setup', reader.secret));
+    assert.equal(readerSetup.apiKeys, null); assert.equal(typeof readerSetup.webhooks.total, 'number');
+    const scoped = await keyFixture(t, { domains: ['setup.example.com'] });
+    const scopedSetup = ok(await http('GET', '/v1/overview/setup', scoped.secret));
+    assert.deepEqual([scopedSetup.apiKeys, scopedSetup.webhooks], [null, null]);
+    assert.equal(scopedSetup.emails.any, ok(await http('GET', '/v1/emails?limit=1', scoped.secret)).data.length > 0);
+    const sender = await keyFixture(t, { permissions: ['send'] });
+    error(await http('GET', '/v1/overview/setup', sender.secret), 403, 'PERMISSION_DENIED');
   });
 
   test('SES Auto Validation feedback records its subtype and suppresses the contact distinctly from a hard bounce', { skip: DATABASE_FIXTURE_SKIP }, async t => {
