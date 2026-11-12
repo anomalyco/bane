@@ -135,13 +135,15 @@ function AccountRows() {
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
   </div>
 }
-// Members and invitations appear together once both are known, so the second table never pushes down.
+// Members and invitations appear together once both are known, so the second table never pushes down. Gated on the
+// first answer (isFetched), not isPending: the tables below retry a failed read when they mount, and a retry with no
+// data is pending again, so gating on isPending unmounted them and remounted them in a loop of requests.
 function Team() {
   const access = useWorkspaceAccess()
   const [inviting, setInviting] = useState(false)
   const members = useApiDef(queries.workspaceMembers())
   const invitations = useApiDef(queries.workspaceInvitations())
   const owner = access.role === 'owner'
-  if (members.isPending || invitations.isPending) return <div className="settings-team-skeleton" aria-busy="true"><SectionHeader title="Members" /></div>
+  if (!members.isFetched || !invitations.isFetched) return <div className="settings-team-skeleton" aria-busy="true"><SectionHeader title="Members" /></div>
   return <><Members owner={owner} onInvite={() => setInviting(true)} /><Invitations owner={owner} /><InviteDialog open={inviting} owner={owner} onOpenChange={setInviting} /></>
 }
