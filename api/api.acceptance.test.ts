@@ -345,7 +345,7 @@ test('OIDC migration preserves connected subjects and requires a verified, appro
   await db.query('BEGIN');
   try {
     await db.query(`CREATE SCHEMA ${schema}; SET LOCAL search_path TO ${schema}`);
-    for (const file of ['006_google_auth', '042_workspace_selection']) {
+    for (const file of ['006_google_auth', '038_workspaces', '042_workspace_selection']) {
       await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
     }
     await db.query(`INSERT INTO auth_user(id, name, email, email_verified) VALUES
