@@ -643,11 +643,22 @@ impl Imap {
                             .max()
                             .unwrap_or_default();
                         let mut text = String::from("* SEARCH");
+                        let scans = criteria
+                            .as_ref()
+                            .iter()
+                            .map(search::scan_count)
+                            .sum::<usize>();
+                        let mut bytes_left = 64usize << 20;
                         for (i, (u, _)) in sel.view.iter().enumerate() {
                             if let Ok(j) = f.entries.binary_search_by_key(u, |e| e.uid) {
                                 s.budget()?;
                                 let mem;
                                 let entry = &f.entries[j];
+                                if need == search::Need::Body
+                                    && entry.size.saturating_mul(scans) > bytes_left
+                                {
+                                    return Err(Error::Limit);
+                                }
                                 let loaded = match need {
                                     search::Need::Meta => entry,
                                     search::Need::Header => {
@@ -659,6 +670,9 @@ impl Imap {
                                         &mem
                                     }
                                 };
+                                bytes_left = bytes_left
+                                    .checked_sub(loaded.raw.len().saturating_mul(scans))
+                                    .ok_or(Error::Limit)?;
                                 if criteria.as_ref().iter().all(|k| {
                                     search::matches(
                                         k,

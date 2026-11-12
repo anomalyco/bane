@@ -8,7 +8,7 @@ import { ApiError, type App, type Runtime } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { passwordDigest } from './inbox-passwords.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
-import { withMailObjects } from './mail-objects.js';
+import { readMailBytes, withMailObjects } from './mail-objects.js';
 
 const bad = () => new ApiError(403, 'PROTOCOL_DENIED', 'Protocol access denied.');
 const name = z.string().max(255),
@@ -132,6 +132,13 @@ export function registerMailGateway(app: App) {
         o.get(v.key, p.headers ? { offset: 0, length } : undefined),
       );
       if (!stream) throw new ApiError(404, 'MISSING_BODY', 'Body unavailable.');
+      if (p.headers && v.header === null) {
+        const bytes=Buffer.from(await readMailBytes(stream,length,65536));
+        const end=bytes.indexOf('\r\n\r\n');
+        if (end<0 && v.size>length && !bytes.subarray(0,2).equals(Buffer.from('\r\n'))) throw new ApiError(413,'HEADER_LIMIT','Header too large.');
+        const n=bytes.subarray(0,2).equals(Buffer.from('\r\n'))?2:end<0?length:end+4;
+        return new Response(bytes.subarray(0,n),{headers:{'content-type':'application/octet-stream'}});
+      }
       return new Response(stream, { headers: { 'content-type': 'application/octet-stream' } });
     }
     if (p.op === 'submit') {

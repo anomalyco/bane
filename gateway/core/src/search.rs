@@ -131,3 +131,18 @@ pub fn bounded(k: &K<'_>) -> bool {
         _ => true,
     }
 }
+
+/// Upper bound on repeated scans of a candidate message, independent of short-circuiting.
+pub fn scan_count(k: &K<'_>) -> usize {
+    match k {
+        K::Not(q) => scan_count(q),
+        K::Or(a, b) => scan_count(a).saturating_add(scan_count(b)),
+        K::And(v) => v
+            .as_ref()
+            .iter()
+            .map(scan_count)
+            .fold(0, usize::saturating_add),
+        K::From(_) | K::To(_) | K::Cc(_) | K::Bcc(_) => 3,
+        _ => usize::from(need(k) != Need::Meta),
+    }
+}
