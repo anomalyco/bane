@@ -3,7 +3,7 @@ use imap_codec::{CommandCodec, decode::Decoder, imap_types::command::Command};
 use std::borrow::Cow;
 use zeroize::Zeroizing;
 
-pub const MAX_APPEND: usize = 40 << 20;
+pub const MAX_APPEND: usize = 8 << 20;
 pub const MAX_LINE: usize = 64 << 10;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -17,6 +17,7 @@ pub enum Error {
 pub enum Event {
     More,
     Continue,
+    AppendBody { len: usize, sync: bool },
     Complete(Zeroizing<Vec<u8>>),
 }
 
@@ -37,6 +38,17 @@ impl Frame {
         src: &mut &[u8],
         imap: bool,
         allow_append: bool,
+    ) -> Result<Event, Error> {
+        self.consume_mode(src, imap, allow_append, false)
+    }
+    /// For the network adapter, divert only the final APPEND message literal. Validate
+    /// the entire prefix with the command codec; mailbox/name literals stay in the frame.
+    pub fn consume_mode(
+        &mut self,
+        src: &mut &[u8],
+        imap: bool,
+        allow_append: bool,
+        stream: bool,
     ) -> Result<Event, Error> {
         while !src.is_empty() {
             if self.literal != 0 {
@@ -86,6 +98,27 @@ impl Frame {
                     if len > max || self.bytes.len() + len > max + MAX_LINE {
                         return Err(Error::Limit);
                     }
+                    if stream && append {
+                        let cut = self.bytes.len() - marker.len() - 4;
+                        let mut empty = self.bytes[..cut].to_vec();
+                        empty.extend_from_slice(b"{0+}\r\n\r\n");
+                        if matches!(
+                            crate::wire::imap(&empty),
+                            Ok(Command {
+                                body: imap_codec::imap_types::command::CommandBody::Append { .. },
+                                ..
+                            })
+                        ) {
+                            let sync = marker == digits;
+                            empty.truncate(empty.len() - 2);
+                            self.bytes = Zeroizing::new(empty);
+                            self.start = self.bytes.len();
+                            return Ok(Event::AppendBody { len, sync });
+                        }
+                        if self.bytes.len() + len > MAX_LINE {
+                            return Err(Error::Limit);
+                        }
+                    }
                     self.literal = len;
                     self.start = self.bytes.len();
                     if marker == digits {
@@ -120,6 +153,33 @@ pub fn smtp(bytes: &[u8]) -> Result<smtp_proto::Request<Cow<'_, str>>, Error> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    #[test]
+    fn streamed_append_leaves_payload_to_its_owner() {
+        for (marker, sync) in [("{5}", true), ("{5+}", false)] {
+            let line = format!("a APPEND INBOX {marker}\r\nhello\r\nb NOOP\r\n");
+            let mut rest = line.as_bytes();
+            let mut f = Frame::default();
+            assert!(
+                matches!(f.consume_mode(&mut rest,true,true,true),Ok(Event::AppendBody{len:5,sync:s}) if s==sync)
+            );
+            assert_eq!(rest, b"hello\r\nb NOOP\r\n");
+            rest = &rest[5..];
+            let Ok(Event::Complete(metadata)) = f.consume_mode(&mut rest, true, true, true) else {
+                panic!("missing append metadata")
+            };
+            assert!(wire_append(&metadata));
+            assert_eq!(rest, b"b NOOP\r\n");
+        }
+        fn wire_append(bytes: &[u8]) -> bool {
+            matches!(
+                imap(bytes),
+                Ok(Command {
+                    body: imap_codec::imap_types::command::CommandBody::Append { .. },
+                    ..
+                })
+            )
+        }
+    }
     proptest! {
         #[test]
         fn literal_chunk_boundaries(body in prop::collection::vec(any::<u8>(), 0..4096), chunk in 1..100usize) {

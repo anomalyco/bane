@@ -61,7 +61,10 @@ impl Submitter for Sink<'_> {
         if c.month.0 != month {
             c.month = (month, 0)
         }
-        if c.day.1 >= c.daily || c.month.1 >= c.monthly {
+        let recipients = u32::try_from(s.recipients.len()).map_err(|_| SubmitError::Cap)?;
+        if recipients > c.daily.saturating_sub(c.day.1)
+            || recipients > c.monthly.saturating_sub(c.month.1)
+        {
             return Err(SubmitError::Cap);
         }
         let raw = remove_bcc(s.raw);
@@ -76,8 +79,8 @@ impl Submitter for Sink<'_> {
                 },
             )
             .map_err(|_| SubmitError::Unavailable)?;
-        c.day.1 += 1;
-        c.month.1 += 1;
+        c.day.1 += recipients;
+        c.month.1 += recipients;
         Ok(())
     }
 }
@@ -126,6 +129,9 @@ pub struct Smtp {
     rcpt: Vec<String>,
 }
 impl Smtp {
+    pub fn receiving_data(&self) -> bool {
+        matches!(self.phase, Phase::Data(_) | Phase::Oversize)
+    }
     pub fn new(tls: bool) -> Self {
         Self {
             tls,
@@ -372,7 +378,7 @@ mod tests {
             .submit(Submission {
                 principal: &a,
                 sender: "",
-                recipients: &[],
+                recipients: &["reader@example.invalid".into()],
                 raw: b"Subject: test\r\n\r\nfixture",
                 date: t.parse().unwrap(),
             })
