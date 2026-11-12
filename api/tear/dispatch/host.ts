@@ -4,7 +4,7 @@
 // open/close to the `reset` and `end` actions, so the API modules load once. It drives
 // the real code (admission, campaign controls and run job, runDispatcher, the
 // interrupted-attempt sweep) against a dedicated, migrated PostgreSQL database that its creator
-// marked disposable (tear/disposable.ts: the rule every tear host shares).
+// marked disposable (../disposable.ts: the rule every tear host shares).
 //
 // Determinism:
 // - Time is virtual. PostgreSQL's now(), clock_timestamp() and statement_timestamp() are
@@ -48,10 +48,10 @@ globalThis.Date = VirtualDate as DateConstructor;
 
 // Before any module that connects: a loopback URL nothing can redirect, then the marker and
 // the data check, before the first write. Refusals exit 1 with the reason on stderr.
-const { disposableUrl, assertDisposable } = await import('./disposable.js');
+const { disposableUrl, assertDisposable } = await import('../disposable.js');
 const url = await (async () => {
   try {
-    const checked = disposableUrl(process.env.TEAR_DATABASE_URL);
+    const checked = disposableUrl(process.env.TEAR_DATABASE_URL, 'TEAR_DATABASE_URL');
     const { default: pg } = await import('pg');
     const client = new pg.Client({ connectionString: checked });
     await client.connect();
@@ -72,11 +72,11 @@ const env = {
 };
 
 const [{ nodeRuntime }, { createApp }, { sql }, { runDispatcher, initialGate }, { dispatchPartitions, drainJobs }, { SESv2Client }, { ensureRegionSettings }] = await Promise.all([
-  import('../src/adapters/node.js'), import('../src/app.js'), import('drizzle-orm'), import('../src/dispatcher.js'), import('../src/dispatch.js'),
-  import('@aws-sdk/client-sesv2'), import('../src/ses-region-state.js'),
+  import('../../src/adapters/node.js'), import('../../src/app.js'), import('drizzle-orm'), import('../../src/dispatcher.js'), import('../../src/dispatch.js'),
+  import('@aws-sdk/client-sesv2'), import('../../src/ses-region-state.js'),
 ]);
-type GateState = import('../src/dispatcher.js').GateState;
-type Runtime = import('../src/core.js').Runtime;
+type GateState = import('../../src/dispatcher.js').GateState;
+type Runtime = import('../../src/core.js').Runtime;
 
 const { runtime, close: closePool } = nodeRuntime(env);
 const db = runtime.db;

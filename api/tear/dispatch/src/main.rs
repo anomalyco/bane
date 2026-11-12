@@ -1,6 +1,6 @@
 //! tear model check of Bane's send path (admission, campaigns, dispatcher, recovery).
 //!
-//! The reference model (`model.rs`) predicts every step; the host (`../host.ts`, one long-lived
+//! The reference model (`model.rs`) predicts every step; the host (`host.ts`, one long-lived
 //! Node process over an isolated PostgreSQL database) runs the real API code. tear's runTrace
 //! compares them step by step and minimizeTrace reduces each distinct mismatch.
 //!
@@ -123,10 +123,10 @@ struct Check {
 }
 impl Check {
     fn open() -> R<Check> {
-        let api = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let api = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let url = std::env::var("TEAR_DATABASE_URL").map_err(|_| Error::new("set TEAR_DATABASE_URL to an isolated local database"))?;
         let mut command = Command::new("node");
-        command.args(["--import", "tsx", "tear/host.ts"]).current_dir(api).env("TEAR_DATABASE_URL", url);
+        command.args(["--import", "tsx", "tear/dispatch/host.ts"]).current_dir(api).env("TEAR_DATABASE_URL", url);
         let fixture = StdioFixture::open(&mut command, Duration::from_secs(60))?;
         Ok(Check { fixture, cfg: configs()[0].clone(), at: 0, traces: 0, temporal: Temporal::default() })
     }

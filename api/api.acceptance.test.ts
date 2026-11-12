@@ -5479,7 +5479,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 
 // Review of #52 (P1): the tear host accepted any URL whose authority was loopback, though
 // node-postgres lets query parameters redirect it, and never established that the database was
-// disposable. tear/disposable.ts is the rule every tear host shares.
+// disposable. tear/disposable.ts is the rule every tear host imports.
 test('a tear host refuses redirecting URLs, databases not marked disposable and databases holding foreign data', async t => {
   const { disposableUrl, assertDisposable, DISPOSABLE } = await import('./tear/disposable.js');
   const { execFile } = await import('node:child_process'), { fileURLToPath } = await import('node:url');
@@ -5501,7 +5501,7 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
   } finally { await client.query('ROLLBACK'); }
   // The real host process refuses before connecting with app modules or writing: exit 1, reason on stderr.
   const host = (url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    const child = execFile('node', ['--import', 'tsx', 'tear/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
+    const child = execFile('node', ['--import', 'tsx', 'tear/dispatch/host.ts'], { cwd: fileURLToPath(new URL('.', import.meta.url)), timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
     child.stdin!.end('{"v":1,"id":1,"op":"open"}\n');
@@ -5979,7 +5979,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
     });
   });
-  // tear witness (api/tear): send ok, send ok, then a one-row dispatcher stepped through
+  // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
   // lease, claim, send, record and the next lease, which found nothing and ended the run.
   test('a dispatcher lease that passes the last owner wraps to the first, so a run never stops with mail due', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
