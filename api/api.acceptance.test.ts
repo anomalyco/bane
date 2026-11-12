@@ -2607,6 +2607,23 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  // tear witness (7 steps): mint grant; A begin apikey grant k1; A step; A step; revoke grant; A step; A step -> 500 INTERNAL_ERROR.
+  test('a grant-derived key create racing the approval revoke is refused as unauthorized, not a 500',async t=>{
+    await simulatedSesFixture(t,async({db,request})=>{
+      const {token,consentId}=await oauthGrant(t,db,writableScope,request);
+      const query=pg.Client.prototype.query as (...args:unknown[])=>Promise<unknown>;let revoked=false;
+      // The revoke commits between this request's authorization and the row that ties the new key to the approval.
+      const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM oauth_consent WHERE id=$1',[consentId]).then(()=>query.apply(this,args));}
+        return query.apply(this,args);} as typeof pg.Client.prototype.query);
+      let result:Json;
+      try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
+      assert.equal(revoked,true);assert.equal(result.isError,true,redact(result));assert.equal(result._meta.status,401);assert.equal(result.structuredContent.error.code,'AUTH_INVALID');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM api_keys WHERE name='tear raced key'")).rows[0].n,0);
+    });
+  });
+
   test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
