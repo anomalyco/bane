@@ -47,7 +47,7 @@ const receivedStatus = (status: string | undefined): status is (typeof receivedS
 const LogQuery = PageQuery.extend({
   direction: z.enum(['all', 'sent', 'received']).default('all'),
   search: z.string().trim().min(1).max(200).optional().describe('Sent mail: a literal, case-insensitive substring of the sender, recipients, subject or IDs. Received mail: a full-text match on sender, recipients, subject and body.'),
-  status: LogStatus.optional().describe('A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so other credentials get none). Either leaves sent mail out.'),
+  status: LogStatus.optional().describe('A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received.'),
   kind: z.enum(['transactional', 'marketing']).optional().describe('Sent mail only; received mail is left out when set.'),
   campaignId: z.string().max(120).optional().describe('Sent mail only; received mail is left out when set.'),
   region: z.string().min(1).max(40).optional(),
@@ -75,10 +75,11 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     request: { query: LogQuery }, responses: { 200: response(LogPage), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query');
     if (q.region) region(c.env, q.region);
-    const access = mailAccess(a);
-    if (q.direction === 'received' && !access) throw a.domains.length ? new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Received mail requires a credential without domain restrictions.') : new ApiError(403, 'ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.');
+    const access = mailAccess(a), onlyReceived = receivedStatus(q.status);
+    // direction=received and the Received/Spam filters ask for received mail alone: refuse them to a credential that can't
+    // read it, rather than answer with sent mail it didn't ask for or with nothing to query.
+    if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Received mail requires a credential without domain restrictions.') : new ApiError(403, 'ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.');
     const binding = await pageBinding(a, 'logs', q), after = readCursor(q.cursor, binding), n = q.limit + 1;
-    const onlyReceived = receivedStatus(q.status);
     const sent = q.direction !== 'received' && !onlyReceived, received = q.direction !== 'sent' && !!access && !(q.kind || q.campaignId) && (!q.status || onlyReceived);
 
     const sentPage = sent ? sql`(SELECT 'sent'::text AS direction, ${sentUntrustedContent} AS untrusted, ${emails.id} AS id, ${emails.createdAt} AS sort_at, ${precise(emails.createdAt)} AS at, ${emails.status} AS status,

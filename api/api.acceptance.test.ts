@@ -4736,6 +4736,12 @@ describe('Dashboard API capabilities', () => {
       assert.equal(error(await request('GET', '/v1/logs?direction=received', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const readerPage = ok(await request('GET', '/v1/logs', reader.secret)); assert.deepEqual([ids(readerPage), readerPage.received], [[s2, s1], false]);
       assert.equal(error(await request('GET', '/v1/logs?direction=received', reader.secret), 403).code, 'ADMIN_REQUIRED');
+      // PR92 P3: the Received and Spam filters ask for received mail too, so a credential that can't read it is refused the same
+      // way instead of reaching an empty UNION (a 500).
+      for (const status of ['received', 'spam']) for (const direction of ['all', 'received']) {
+        assert.equal(error(await request('GET', `/v1/logs?direction=${direction}&status=${status}`, reader.secret), 403).code, 'ADMIN_REQUIRED', `${direction} ${status}`);
+        assert.equal(error(await request('GET', `/v1/logs?direction=${direction}&status=${status}`, scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED', `${direction} ${status}`);
+      }
       assert.deepEqual(ids(ok(await request('GET', '/v1/logs', manager_.secret))), [s2, r2, r1, s1]);
       // Lists redact unsubscribe capability tokens from subjects for non-manage callers, like getEmailDetail does.
       const token = `u_${'ab'.repeat(32)}`;

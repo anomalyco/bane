@@ -17303,7 +17303,7 @@ export type ListLogsData = {
          */
         search?: string;
         /**
-         * A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so other credentials get none). Either leaves sent mail out.
+         * A sent-mail status lists sent mail only. received lists received mail that is not flagged as spam; spam lists received mail flagged as spam (spam is visible to administrators only, so dashboard members get none). Either leaves sent mail out, and is refused (403) to credentials that cannot read received mail, like direction=received.
          */
         status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated' | 'received' | 'spam';
         /**
