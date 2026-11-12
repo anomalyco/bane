@@ -447,7 +447,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
   const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
   const db = await fixtureDatabase(t);
   const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
-  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_EMAILS:AUTH_EMAIL, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
     storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
   const signer = generateKeyPairSync('ec', {namedCurve:'P-256'}), holder = generateKeyPairSync('ec', {namedCurve:'P-256'});
   const jwk = holder.publicKey.export({format:'jwk'});
