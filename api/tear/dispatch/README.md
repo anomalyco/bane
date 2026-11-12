@@ -30,7 +30,7 @@ Turn off `fsync` and `synchronous_commit` on that cluster. Commit stalls otherwi
 cd api/tear/dispatch && cargo run --release -- ci
 ```
 
-The run covers the 25 scenarios, 100 random walks of 24 steps over the exact configurations, 30 quota-profile walks, and every edge of the dispatch profile's model graph to depth 3. It also covers 30 two-owner walks. It prints a JSON report on stdout and exits 1 when any trace mismatches or errors; the reasons go to stderr. Each distinct mismatch appears under `witnesses` with its reduced trace, and `coverage` counts every edge case reached. `cargo test` checks that exit rule.
+The run covers the 31 scenarios, 100 random walks of 24 steps over the exact configurations, 30 quota-profile walks, and every edge of the dispatch profile's model graph to depth 3. It also covers 30 two-owner walks and 40 allowance walks (an exact SES quota with envelopes larger than the marketing allowance, for one owner and for two). It prints a JSON report on stdout and exits 1 when any trace mismatches or errors; the reasons go to stderr. Each distinct mismatch appears under `witnesses` with its reduced trace, and `coverage` counts every edge case reached. `cargo test` checks that exit rule.
 
 ## Deeper runs
 
@@ -38,6 +38,8 @@ The run covers the 25 scenarios, 100 random walks of 24 steps over the exact con
 cargo run --release -- random 2000 40 --seed 1000          # all profiles, about 13 min
 cargo run --release -- random 1000 40 --profile campaign   # about 2 min
 cargo run --release -- random 500 30 --profile quota        # SES quota and two shards, about 2 min
+cargo run --release -- random 400 20 --profile allowance    # exact quota, one owner, under 1 min
+cargo run --release -- random 400 20 --profile allowance2   # exact quota, two owners, under 1 min
 cargo run --release -- edges 5 --profile dispatch           # every edge to depth 5
 cargo run --release -- edges 4 --profile campaign
 cargo run --release -- trace --cfg 2 "launch" "jobs" "D1 step" …   # replay one witness
