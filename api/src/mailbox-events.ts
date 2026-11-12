@@ -13,6 +13,8 @@ export const webhookSecretBinding = (workspaceId: string, webhookId: string) => 
 
 // Both ingest and outbound sync append the same immutable event and webhook snapshots. Take the
 // workspace lanes in a consistent order before allocating sequence numbers, so cursors never skip a commit.
+// A paused subscription holds its copy (the claim parks it, unpause resumes it): active ones first,
+// at most 32 of them, then up to 32 paused ones.
 export function mailboxEventCtes(source:SQL) {
   return sql`items AS MATERIALIZED (${source}), lanes AS (
     INSERT INTO mailbox_write_lanes(workspace_id,lane) SELECT DISTINCT workspace_id,'events' FROM items ORDER BY workspace_id
@@ -21,9 +23,9 @@ export function mailboxEventCtes(source:SQL) {
     SELECT workspace_id,type,mailbox_id,thread_id,message_id,data FROM items JOIN lanes USING(workspace_id) ORDER BY workspace_id,ord RETURNING *
   ), deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,payload)
     SELECT 'mwd_'||gen_random_uuid(),e.workspace_id,h.id,e.seq,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',e.type,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',e.data)
-    FROM events e JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND NOT h.paused
+    FROM events e CROSS JOIN LATERAL (SELECT h.id FROM mailbox_webhooks h WHERE h.workspace_id=e.workspace_id
       AND (h.mailbox_ids IS NULL OR (e.type<>'message.stored' AND h.mailbox_ids ? e.mailbox_id))
-      AND h.event_types ? e.type RETURNING id,workspace_id
+      AND h.event_types ? e.type ORDER BY h.paused,h.id LIMIT 64) h RETURNING id,workspace_id
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries RETURNING 1)`;
 }
 
@@ -80,10 +82,13 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Mailbox webhook delivery failed; it will be retried.', undefined, retry);
 };
 
+// Deliveries are kept 30 days. One still held for a paused endpoint after that is dead-lettered with
+// ENDPOINT_PAUSED_EXPIRED (unpause no longer resumes it) and kept 7 more days so the reason is seen.
 export async function pruneMailboxEvents(runtime: Runtime) {
   await runtime.db.execute(sql`WITH expired AS (DELETE FROM mailbox_events WHERE seq IN (SELECT seq FROM mailbox_events WHERE created_at<now()-interval '30 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
-    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
-    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed','paused') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
+    ignored AS (DELETE FROM mail_ignored_staging WHERE (bucket,ses_message_id) IN (SELECT bucket,ses_message_id FROM mail_ignored_staging WHERE created_at<now()-interval '3 days' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)),
+    held AS (UPDATE mailbox_webhook_deliveries SET status='failed',last_error='ENDPOINT_PAUSED_EXPIRED',updated_at=now() WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status='paused' ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED))
+    DELETE FROM mailbox_webhook_deliveries WHERE id IN (SELECT id FROM mailbox_webhook_deliveries WHERE created_at<now()-interval '30 days' AND status IN ('delivered','failed') AND (last_error IS DISTINCT FROM 'ENDPOINT_PAUSED_EXPIRED' OR updated_at<now()-interval '7 days') ORDER BY created_at LIMIT 5000 FOR UPDATE SKIP LOCKED)`);
   log('info', { code: 'MAILBOX_EVENTS_PRUNED' });
 }
 

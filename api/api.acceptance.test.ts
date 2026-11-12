@@ -10142,6 +10142,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(posts,2);assert.deepEqual(await state(resumed),{status:'delivered',generation:1});
         }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
       });
+      await t.test('delivery: a paused endpoint holds mail that arrives during the pause and sends it on unpause, until retention dead-letters it',async()=>{
+        // tear/delivery witnesses: pause W, ingest m1 a, run K m1:W, unpause W, run K m1:W, reply K 200;
+        // ingest m1 a, pause W, run K m1:W, age m1:W, prune.
+        const {mailboxEventJobs,pruneMailboxEvents}=await import('./src/mailbox-events.js');
+        await call('POST','/v1/endpoints',{type:'webhook',name:'held-w',url:'https://hooks.example.org/held-w'},201);
+        const hookId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='held-w'",[wid])).rows[0].id;
+        await route('held@receive.example',['webhook:held-w'],'held-route');
+        const sub=await call('POST','/v1/inbound/webhooks',{url:'https://hooks.example.org/held-sub',addressIds:[box.id],key:'held-sub',paused:true},201);
+        await call('PATCH','/v1/endpoints/held-w',{paused:true});
+        const prev=runtime.webhookFetch;const posts:string[]=[];runtime.webhookFetch=async url=>{posts.push(new URL(url).pathname);return {status:204}};
+        const rows=async(mid:string)=>(await db.query("SELECT d.id,d.webhook_id,d.status,d.last_error,d.generation FROM mailbox_webhook_deliveries d WHERE d.webhook_id=ANY($1) AND d.payload->>'messageId'=$2 ORDER BY d.webhook_id",[[hookId,sub.id],mid])).rows;
+        const runAll=async(mid:string)=>{for(const d of await rows(mid))await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id,generation:d.generation},{id:unique('job'),workspaceId:wid,attempts:1});};
+        try{
+          const m=await ingest('held-mail',[box.address,'held@receive.example']);
+          assert.equal((await rows(m.id)).length,2,'the routed endpoint and the subscription each queue a copy while paused');
+          await runAll(m.id);
+          assert.deepEqual(posts,[]);
+          assert.deepEqual((await rows(m.id)).map(r=>[r.status,r.last_error]),[['paused','ENDPOINT_PAUSED'],['paused','ENDPOINT_PAUSED']]);
+          await call('PATCH','/v1/endpoints/held-w',{paused:false});await call('PATCH',`/v1/inbound/webhooks/${sub.id}`,{paused:false});
+          for(const hook of [hookId,sub.id])await mailboxEventJobs['mailbox.resumeDeliveries']!(runtime,{hook},{id:unique('job'),workspaceId:wid,attempts:1});
+          await runAll(m.id);
+          assert.deepEqual(posts.sort(),['/held-sub','/held-w']);
+          assert.deepEqual((await rows(m.id)).map(r=>r.status),['delivered','delivered']);
+          // Held past the 30-day retention: dead-lettered with a reason, kept for a while, not deleted.
+          await call('PATCH','/v1/endpoints/held-w',{paused:true});
+          const old=await ingest('held-old',['held@receive.example']);await runAll(old.id);
+          await db.query("UPDATE mailbox_webhook_deliveries SET created_at=now()-interval '31 days' WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,old.id]);
+          await pruneMailboxEvents(runtime);await pruneMailboxEvents(runtime);
+          assert.deepEqual((await rows(old.id)).map(r=>[r.status,r.last_error]),[['failed','ENDPOINT_PAUSED_EXPIRED']]);
+        }finally{runtime.webhookFetch=prev;await call('DELETE',`/v1/inbound/webhooks/${sub.id}`);await call('DELETE',`/v1/inbound/webhooks/${hookId}?detach=true`);}
+      });
       await t.test('create idempotency: every create replays by Idempotency-Key, conflicts on a new body, frees the key on failure and withholds secrets',async()=>{
         const post=(path:string,body:Json,key:string)=>local('POST',path,body,'live',{'idempotency-key':key});
         const importer=runtime.importPublicImage;let imports=0;

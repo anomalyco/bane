@@ -94,7 +94,7 @@ export function matchRouting(input: RoutingInput, addresses: string[], messageJu
       else if (hook && held) warnings.push(`${id} skipped: an inbox on this route requires DMARC to pass.`);
       else if (hook && junk && hook !== 'include') warnings.push(`${id} skipped: the message is junk and this webhook's junk setting is skip.`);
       else if (hook) take('webhooks', id);
-      else warnings.push(`${id} is unavailable: it was deleted, has expired or is paused.`);
+      else warnings.push(`${id} is unavailable: it was deleted or has expired.`);
     }
     return {
       address,

@@ -160,6 +160,12 @@ const REGRESSIONS: &[(u32, &[&str])] = &[
     // A runner whose claim went stale still sent a delivery that had settled or been resumed.
     (1, &["ingest m1 a", "claim K m1:W", "expire m1:W", "run L m1:W", "reply L 400", "go K"]),
     (1, &["ingest m1 z", "claim K m1:V", "pause V", "expire m1:V", "run L m1:V", "unpause V", "go K"]),
+    // Review of #58. Mail arriving while an endpoint was paused was dropped, not held.
+    (1, &["pause W", "ingest m1 a", "run K m1:W", "unpause W", "run K m1:W", "reply K 200"]),
+    (1, &["pause S", "rituals slack", "ingest m1 b", "run K m1:S", "unpause S", "run K m1:S", "reply K 200"]),
+    (1, &["pause U", "ingest m1 b", "run K m1:U", "unpause U", "run K m1:U", "reply K 200"]),
+    // A delivery held past retention was deleted silently; it is dead-lettered with a reason.
+    (1, &["ingest m1 a", "pause W", "run K m1:W", "age m1:W", "prune", "prune"]),
     // Boundary: backoff 15 s x 4^n reaches its 12 h cap at the seventh attempt (retryAttempts 9).
     (9, &["ingest m1 a", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503",
         "run K m1:W", "reply K 503", "run K m1:W", "reply K 503", "run K m1:W", "reply K 503"]),
