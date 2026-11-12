@@ -558,6 +558,18 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Bane',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
     assert.deepEqual(await (await run(token())).json(),['read']);
     for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
+    assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
+    // Google-only covers MCP: every access token, refreshed ones included, must carry the configured acr.
+    runtime.config.accountRequiredAcr='urn:anomaly:acr:google';
+    for(const acr of [undefined,'urn:anomaly:acr:passkey','urn:anomaly:acr:github','urn:anomaly:acr:google ']) {
+      const refused=await run(token({acr,jti:randomUUID()}));
+      assert.equal(refused.status,401);
+      assert.match(refused.headers.get('www-authenticate')!,/^Bearer error="insufficient_user_authentication".*acr_values="urn:anomaly:acr:google"$/);
+      const body=await refused.json() as {jsonrpc:string;error:{code:number;message:string}};
+      assert.equal(body.jsonrpc,'2.0');assert.equal(body.error.code,-32000);assert.match(body.error.message,/Google/);
+    }
+    assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
+    runtime.config.accountRequiredAcr=undefined;
     assert.equal((await run(token({scope:'openid'}))).status,403);
     const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
     const bound=token({cnf:{jkt:thumbprint}});
@@ -575,7 +587,10 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
     assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
     assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A new JWT cannot restore a revoked client');
-    const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);assert.match(await denied.text(),/Reconnect/);
+    const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);
+    // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
+    const deniedBody=await denied.json() as {jsonrpc:string;id:null;error:{code:number;message:string}};
+    assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
   } finally { await db.query('ROLLBACK'); }
 });
 
