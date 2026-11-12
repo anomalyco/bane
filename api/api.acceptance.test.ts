@@ -8291,11 +8291,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await f.pause(); denied = true; await tenantStatusJob(runtime, {}, job); denied = false;
       assert.deepEqual(await f.applied(), []);
       assert.deepEqual((await f.resume(100)).rows.map(r => r.pending), [false]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM hosted_tenant_ownership WHERE workspace_id=$1', [f.wid])).rows[0].n, 0, 'A denied call learns nothing.');
       // Race 1: a resume lands while the disable is in flight, with the job row running (the runner holds it).
       await f.pause(); await db.query(`UPDATE jobs SET status='running' WHERE id=$1`, [jobId]);
       during = () => f.resume(100);
       await tenantStatusJob(runtime, {}, job);
       assert.deepEqual(await settled(), { paused: false, pending: false, aws: { [REGION]: 'ENABLED' } }, 'The job saw the new generation, enabled the tenant and finished the resume it was holding.');
+      assert.deepEqual((await db.query('SELECT region,arn FROM hosted_tenant_ownership WHERE workspace_id=$1', [f.wid])).rows, [{ region: REGION, arn: `arn:aws:ses:${REGION}:${f.pool}:tenant/bane-probation-fixture/t-1` }], 'The tenant ARN is recorded from the pool account.');
       // Race 2: the job finished, then a pause landed before the runner marked the row complete: the enqueue was refused.
       await f.pause();
       assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [jobId])).rows[0].status, 'running');
@@ -9330,14 +9332,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Real names are bane-probation-ws_<32 hex>; the fixture workspace ID is longer than SES allows in a tenant name.
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','bane-probation-fixture')`, [wid, REGION, pool]);
       const arn = `arn:aws:ses:${REGION}:${pool}:tenant/bane-probation-fixture/tn-1`;
-      const item = (status: string, origin: string, cause: string, account = pool) => ({ region: REGION, topicArn, messageId: unique('sns'), message: { version: '0', id: unique('eb'), 'detail-type': status === 'ENABLED' ? 'Sending Status Enabled' : 'Sending Status Disabled',
-        source: 'aws.ses', account, time: new Date().toISOString(), region: REGION, resources: [arn], detail: { version: '1.0.0', data: { origin, record: { status, cause } } } } });
+      await db.query(`INSERT INTO hosted_tenant_ownership(workspace_id,region,arn) VALUES($1,$2,$3)`, [wid, REGION, arn]);
+      const item = (status: string, origin: string, cause: string, account = pool, target = arn, topic = topicArn, topicKind: 'shared' | 'byo' = 'shared') => ({ region: REGION, topicArn: topic, topicKind, messageId: unique('sns'), message: { version: '0', id: unique('eb'), 'detail-type': status === 'ENABLED' ? 'Sending Status Enabled' : 'Sending Status Disabled',
+        source: 'aws.ses', account, time: new Date().toISOString(), region: REGION, resources: [target], detail: { version: '1.0.0', data: { origin, record: { status, cause } } } } });
       const pause = async () => ok(await local('GET', '/v1/me')).connection.sendingPause;
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'x', '999999999999')]), [{ ok: false, error: 'SES_ACCOUNT_MISMATCH' }]);
+      // Review of #115: a signed notification on a customer's BYO topic, in that customer's account, naming this
+      // workspace's tenant, used to pause it. Every forged or unbound variant is refused and changes nothing.
+      const byo = '444455556666', byoTopic = `arn:aws:sns:${REGION}:${byo}:customer-feedback`;
+      const forged = [
+        item('DISABLED', 'AWS_SES', 'forged', byo, `arn:aws:ses:${REGION}:${byo}:tenant/bane-probation-fixture/tn-1`, byoTopic, 'byo'),
+        item('DISABLED', 'AWS_SES', 'forged', pool, arn, topicArn, 'byo'),
+        item('DISABLED', 'AWS_SES', 'name only', pool, `arn:aws:ses:${REGION}:${pool}:tenant/bane-probation-fixture/tn-other`),
+        item('DISABLED', 'AWS_SES', 'wrong region', pool, `arn:aws:ses:eu-west-1:${pool}:tenant/bane-probation-fixture/tn-1`),
+        item('DISABLED', 'AWS_SES', 'other shared topic', pool, arn, `arn:aws:sns:${REGION}:${pool}:not-a-bane-topic`),
+      ];
+      assert.deepEqual((await ingestFeedbackBatch(runtime, forged)).map(o => o.error), ['SNS_TOPIC_NOT_ALLOWED', 'SNS_TOPIC_NOT_ALLOWED', 'SES_TENANT_NOT_OWNED', 'SES_TENANT_NOT_OWNED', 'SES_TENANT_NOT_OWNED']);
+      assert.equal(await pause(), null, 'No forged event pauses the workspace.');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1`, [wid])).rows[0].n, 0);
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'CUSTOMER_MANAGED', 'Status manually updated.')]), [{ ok: true }]);
       assert.equal(await pause(), null, 'Bane\'s own switch is not an AWS pause.');
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'Trust and Safety review.')]), [{ ok: true }]);
       assert.match((await pause()).reason, /AWS paused this workspace’s SES tenant/);
+      assert.deepEqual((await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [wid])).rows.map(r => [r.payload.code, r.payload.tenant, r.payload.exempt]), [['SES_TENANT_PAUSED', arn, false]], 'The operators are alerted.');
       const standing = (await db.query(`SELECT step,pause_kind,reasons FROM sender_standing WHERE workspace_id=$1`, [wid])).rows[0];
       assert.deepEqual([standing.step, standing.pause_kind, standing.reasons[0].code], ['pause', 'full', 'SES_TENANT_PAUSED']);
       await ingestFeedbackBatch(runtime, [item('REINSTATED', 'AWS_SES', 'Reinstated.')]);

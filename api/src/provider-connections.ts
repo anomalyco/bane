@@ -283,7 +283,10 @@ export async function ensureTenant(runtime: Runtime, wid: string, connectionId: 
   if (!row || row.tenant_state === 'ready') return;
   if (!row.pool_account) throw new ApiError(503, 'POOL_NOT_READY', 'The shared sending pool for this region is not ready yet.', undefined, true);
   await platformIdentity(runtime, row.pool_account);
-  await provisionTenant(runtime, row.region, row.pool_account, wid,row.managed_tenant,row.namespace,row.pool_tenant_name);
+  // Record the tenant's ARN: AWS tenant status events are trusted only for a recorded, owned ARN (src/standing.ts).
+  const { rows: [owned] } = await runtime.db.execute<{ arn: string }>(sql`SELECT arn FROM hosted_tenant_ownership WHERE workspace_id=${wid} AND region=${row.region}`);
+  await provisionTenant(runtime, row.region, row.pool_account, wid,row.managed_tenant,row.namespace,row.pool_tenant_name, { arn: owned?.arn ?? null,
+    created: async arn => { await runtime.db.execute(sql`INSERT INTO hosted_tenant_ownership(workspace_id,region,arn) VALUES(${wid},${row.region},${arn}) ON CONFLICT DO NOTHING`); }, fence: async () => {} });
   await runtime.db.execute(setTenantState(row.id, 'ready', row.pool_account));
 }
 export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
@@ -328,7 +331,8 @@ export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime,
       const { setTenantSendingStatus, mxResourceName } = await wrapModuleLoad(() => import('./ses-setup.js'));
       for (const row of work) {
         if (desired === 'DISABLED') await record(row.region, 'DISABLING');
-        try { await setTenantSendingStatus(runtime, row.region, row.tenant ?? (row.managed_tenant ? mxResourceName(wid) : `bane-${wid}`), row.arn, desired); }
+        let arn: string;
+        try { arn = await setTenantSendingStatus(runtime, row.region, row.tenant ?? (row.managed_tenant ? mxResourceName(wid) : `bane-${wid}`), row.arn, desired); }
         catch (error) {
           if (error instanceof ApiError && error.code === 'AWS_ACCESS_DENIED') {
             if (desired === 'DISABLED') await restore(row);
@@ -337,6 +341,8 @@ export const tenantStatusJob: JobHandler = retryDatabaseFailures(async (runtime,
           throw error; // Unknown outcome: the journal keeps "possibly disabled"; the job retries.
         }
         await record(row.region, desired);
+        // A tenant provisioned before ARNs were recorded gets its ARN here (GetTenant in the pool account).
+        if (!row.arn) await runtime.db.execute(sql`INSERT INTO hosted_tenant_ownership(workspace_id,region,arn) VALUES(${wid},${row.region},${arn}) ON CONFLICT DO NOTHING`);
       }
     }
     // A resume that waited for its tenants restarts sending once no ready tenant may still be disabled, fenced on its generation.

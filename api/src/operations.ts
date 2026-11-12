@@ -1274,6 +1274,17 @@ function registerPublicEvents(app: App) {
       if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
+    // An SES tenant status event (EventBridge) has no mail object: it is judged by its topic, account, region and an
+    // owned tenant ARN (src/standing.ts), before the mail checks below; both ingress paths use the same check.
+    const tenantEvent = c.env.config.multiTenant && (message as { source?: unknown } | null)?.source === 'aws.ses' ? (await import('./standing.js')).tenantStatusEvent(message as Record<string, unknown>) : null;
+    if (tenantEvent) {
+      if (binding?.kind !== 'shared') throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'SES tenant status events are accepted only from a Bane-owned shared feedback topic.');
+      const tenantItem = { message: message as Record<string, unknown>, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region, topicKind: 'shared' as const };
+      if (c.env.feedback) { await c.env.feedback.enqueue([tenantItem]); return c.json({ accepted: true }, 202); }
+      const refused = await (await import('./standing.js')).ingestTenantStatus(c.env, tenantEvent, tenantItem);
+      if (refused) throw new ApiError(403, refused, 'This SES tenant status event does not match a tenant Bane owns on this topic.');
+      return c.json({ accepted: true }, 202);
+    }
     verifySesAccount(c.env, message, envelope.TopicArn);
     if (binding?.kind==='byo' && c.env.allowFeedbackTopic && !await c.env.allowFeedbackTopic(envelope.TopicArn))
       throw new ApiError(503,'FEEDBACK_TOPIC_BUSY','Feedback for this topic is temporarily rate limited; retry.',undefined,true);
@@ -1498,9 +1509,8 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
     const standing = runtime.config.multiTenant && !simulatedTopic(item.topicArn) && item.message?.source === 'aws.ses' ? await import('./standing.js') : null;
     const tenantEvent = standing?.tenantStatusEvent(item.message);
     if (standing && tenantEvent) {
-      if (tenantEvent.account !== item.topicArn.split(':')[4]) { outcomes[index] = { ok: false, error: 'SES_ACCOUNT_MISMATCH' }; continue; }
-      await standing.ingestTenantStatus(runtime, tenantEvent);
-      outcomes[index] = { ok: true }; continue;
+      const refused = await standing.ingestTenantStatus(runtime, tenantEvent, item);
+      outcomes[index] = refused ? { ok: false, error: refused } : { ok: true }; continue;
     }
     try {
       if (simulatedTopic(item.topicArn)) assertSimulatedFeedback(runtime, item);

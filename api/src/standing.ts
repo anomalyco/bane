@@ -312,18 +312,32 @@ export function tenantStatusEvent(message: Record<string, unknown>) {
   const arn = Array.isArray(m.resources) ? m.resources[0] : null, origin = m.detail?.data?.origin, status = m.detail?.data?.record?.status;
   if (typeof arn !== 'string' || !/^arn:aws:ses:[a-z0-9-]+:\d{12}:tenant\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9-]+$/.test(arn) || (origin !== 'AWS_SES' && origin !== 'CUSTOMER_MANAGED')
     || (status !== 'ENABLED' && status !== 'DISABLED' && status !== 'REINSTATED') || typeof m.account !== 'string') return null;
-  return { arn, account: m.account, tenant: arn.split('/')[1]!, origin, status, cause: typeof m.detail?.data?.record?.cause === 'string' ? m.detail.data.record.cause.slice(0, 300) : null } as const;
+  return { arn, account: m.account, region: typeof m.region === 'string' ? m.region : null, tenant: arn.split('/')[1]!, origin, status, cause: typeof m.detail?.data?.record?.cause === 'string' ? m.detail.data.record.cause.slice(0, 300) : null } as const;
 }
 /**
  * Mirrors AWS's own tenant pauses. A DISABLED from AWS (or from the strict reputation policy, which sets the
  * customer-managed status with its own cause) pauses the workspace (SES_TENANT_PAUSED): only an operator resumes it,
  * after AWS reinstates the tenant. Bane's own switch ("Status manually updated.") and every enable are timeline only.
+ *
+ * A valid SNS signature proves which topic published the bytes, not that SES wrote them: a BYO account controls what
+ * its own topic publishes. So an event counts only when it arrived on a Bane-owned shared topic (topicKind, set by the
+ * ingress from the topic's registration), its account, the tenant ARN's account and the topic's account agree, the
+ * ARN's region is the topic's region, and the ARN is a tenant Bane recorded as owned (hosted_tenant_ownership) by a
+ * shared connection whose pool or regional topic is that topic. A name never authorizes a target. Returns the refusal
+ * code, or null when accepted.
  */
-export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<ReturnType<typeof tenantStatusEvent>>) {
-  const { rows: [owner] } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT c.workspace_id FROM provider_connections c
-    LEFT JOIN provider_connection_regions r ON r.connection_id=c.id LEFT JOIN hosted_tenant_ownership o ON o.workspace_id=c.workspace_id
-    WHERE c.kind='shared' AND (o.arn=${event.arn} OR c.pool_tenant_name=${event.tenant} OR r.pool_tenant_name=${event.tenant} OR 'bane-'||c.workspace_id=${event.tenant}) LIMIT 1`);
-  if (!owner) { log('warn', { code: 'SES_TENANT_STATUS_UNKNOWN_TENANT', tenant: event.tenant, status: event.status }); return; }
+export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<ReturnType<typeof tenantStatusEvent>>, source: { topicArn: string; region: string; topicKind?: 'byo' | 'shared' }) {
+  const [, , , topicRegion, topicAccount] = source.topicArn.split(':'), [, , , arnRegion, arnAccount] = event.arn.split(':');
+  const refuse = (code: string) => { log('warn', { code: 'SES_TENANT_STATUS_REFUSED', reason: code, tenant: event.arn, topic: source.topicArn, status: event.status }); return code; };
+  if (source.topicKind !== 'shared') return refuse('SNS_TOPIC_NOT_ALLOWED');
+  if (event.account !== topicAccount || arnAccount !== topicAccount) return refuse('SES_ACCOUNT_MISMATCH');
+  if (arnRegion !== topicRegion || source.region !== topicRegion || (event.region !== null && event.region !== topicRegion)) return refuse('SES_TENANT_NOT_OWNED');
+  const { rows: [owner] } = await runtime.db.execute<{ workspace_id: string }>(sql`SELECT c.workspace_id FROM hosted_tenant_ownership o
+    JOIN provider_connections c ON c.workspace_id=o.workspace_id AND c.kind='shared'
+    WHERE o.arn=${event.arn} AND o.region=${arnRegion} AND (
+      EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=${source.topicArn} AND p.region=${arnRegion} AND p.aws_account_id=${arnAccount})
+      OR EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=c.id AND r.region=${arnRegion} AND r.feedback_topic_arn=${source.topicArn} AND c.aws_account_id=${arnAccount}))`);
+  if (!owner) return refuse('SES_TENANT_NOT_OWNED');
   const ours = event.origin === 'CUSTOMER_MANAGED' && event.cause === 'Status manually updated.';
   const pause = event.status === 'DISABLED' && !ours;
   await runtime.db.transaction(tx => applyChange(tx, { workspaceId: owner.workspace_id, actor: { kind: 'system', via: 'ses' }, kind: 'tenant',
@@ -334,6 +348,7 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
   // AWS's pause applies to every workspace, exempt (first-party) ones included: alert the operators loudly, once per tenant a day.
   if (pause) await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant-paused:'||${event.arn}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${owner.workspace_id},
     jsonb_build_object('code','SES_TENANT_PAUSED','tenant',${event.arn}::text,'cause',${event.cause}::text,'exempt',w.exempt_hosted_quotas) FROM workspaces w WHERE w.id=${owner.workspace_id} ON CONFLICT(id) DO NOTHING`);
+  return null;
 }
 
 // ---------- owner emails ----------
