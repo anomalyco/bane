@@ -31,7 +31,16 @@ export function AccountSwitcher() {
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
   const list = useAccounts(open)
-  const intent = () => { void client.prefetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 }) }
+  const load = () => client.fetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 })
+  const intent = () => { void load().catch(() => {}) }
+  // The phone's sheet is anchored to the bottom of the screen and would grow upwards when the list arrived, so it opens
+  // with the list already there (it is usually warm from the touch that started the tap).
+  async function openSheet() {
+    if (busy) return
+    setBusy(true)
+    try { await load() } catch { /* The sheet still opens with this tab's account. */ } finally { setBusy(false) }
+    setOpen(true)
+  }
   if (!identity) return null
   const self: ConnectedAccount = { id: identity.id, name: identity.name ?? '', email: identity.email, workspaces: identity.workspaces ?? [] }
   // The tab's own account comes with the session (GET /v1/me), so the menu opens complete even before the list arrives;
@@ -61,7 +70,7 @@ export function AccountSwitcher() {
     ...accounts.length > 1 ? [{ key: 'sign-out-all', text: 'Sign out of all accounts', label: 'Sign out of all accounts', icon: <LogOut />, destructive: true, onSelect: () => void run(() => session!.signOutAll(), 'Couldn’t sign out.') }] : [],
   ])
   const trigger = <button type="button" id="sidebar-workspace" className="ui-input ui-select-trigger account-switcher" disabled={busy}
-    aria-label={`${self.name || 'Account'}, ${workspace?.name ?? 'workspace'}. Switch account or workspace`} onPointerEnter={intent} onFocus={intent} onClick={phone ? () => setOpen(true) : undefined}>
+    aria-label={`${self.name || 'Account'}, ${workspace?.name ?? 'workspace'}. Switch account or workspace`} onPointerEnter={intent} onPointerDown={intent} onFocus={intent} onClick={phone ? () => void openSheet() : undefined}>
     <span className="account-switcher__current"><AccountAvatar name={self.name} email={self.email} size="sm" /><span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span></span>
     <span><ChevronDown size={14} aria-hidden="true" /></span>
   </button>

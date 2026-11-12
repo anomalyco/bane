@@ -3905,69 +3905,6 @@ export type ListMcpConnectionsResponses = {
 
 export type ListMcpConnectionsResponse = ListMcpConnectionsResponses[keyof ListMcpConnectionsResponses];
 
-export type GetMcpConnectionData = {
-    body?: never;
-    path: {
-        id: string;
-    };
-    query?: never;
-    url: '/v1/mcp-connections/{id}';
-};
-
-export type GetMcpConnectionErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type GetMcpConnectionError = GetMcpConnectionErrors[keyof GetMcpConnectionErrors];
-
-export type GetMcpConnectionResponses = {
-    /**
-     * Success
-     */
-    200: McpConnection;
-};
-
-export type GetMcpConnectionResponse = GetMcpConnectionResponses[keyof GetMcpConnectionResponses];
-
 export type BindMcpConnectionData = {
     body: McpConnectionBinding;
     path: {

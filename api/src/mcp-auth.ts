@@ -56,13 +56,6 @@ export function registerMcpAuth(app:App) {
     const {rows}=await c.env.db.execute<Row>(sql`${approvals(user,cursor?sql`WHERE a.id>${cursor}`:sql``)} ORDER BY a.id LIMIT ${limit+1}`);
     return c.json({data:rows.slice(0,limit).map(view),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
   });
-  // One approval of the signed-in account (another account's is not found): the page a pending approval's 403 links to.
-  app.openapi(createRoute({method:'get',path:'/v1/mcp-connections/{id}',operationId:'getMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(Connection),...errors}}),async c=>{
-    const user=owner(c),{id}=c.req.valid('param');
-    const {rows:[row]}=await c.env.db.execute<Row>(approvals(user,sql`WHERE a.id=${id}`));
-    if(!row) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
-    return c.json(view(row),200);
-  });
   // Chooses (or changes) the workspace an approval acts in. Credentials it created elsewhere stop at their next
   // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/workspace',operationId:'bindMcpConnection',tags:['Auth'],security,request:{params:IdParams,body:{required:true,content:{'application/json':{schema:Binding}}}},responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),receiving:z.boolean()})),...errors}}),async c=>{

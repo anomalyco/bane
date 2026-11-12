@@ -148,14 +148,14 @@ function AccountRows() {
 export const connectionTitle = (app: Pick<McpConnection, 'name' | 'clientId' | 'profile'>) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
 // Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools
 // need an owner or admin there. Save keeps its place whether or not it is shown, so choosing never moves the row.
-export function McpApproval({ app, workspaces, onRevoke }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void }) {
+export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
   const [receiving, setReceiving] = useState(app.receiving ?? false)
   const bind = useApiMutation((api, input: { workspaceId: string; receiving: boolean }) => api.credentials.bindMcpConnection(app.id, input), 'Saved')
   const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
   const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
   const name = connectionTitle(app)
-  return <Row title={name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
+  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
     <span className="settings-mcp">
       <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}
         options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={id => { setWorkspaceId(id); if (!admin(id)) setReceiving(false) }} />

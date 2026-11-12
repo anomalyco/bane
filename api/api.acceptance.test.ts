@@ -969,8 +969,6 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
     assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',work.workspace]]);
     assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,personal.workspace]]);
-    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}`,personal)).status,404,'Another account’s approval is not found');
-    assert.equal(((await (await browser(`/v1/mcp-connections/${second.body.keyId}`,work)).json()) as {profile:string}).profile,'Work script laptop');
     // The approval page learns which connected account owns a connection, so it acts as that account.
     const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
     assert.equal(owner.connection.account,work.user);

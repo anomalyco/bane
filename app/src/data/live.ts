@@ -267,7 +267,12 @@ export function createLiveApi(): BaneApi {
       agentTokens: async (includeInactive = false, signal) => (await call(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
       revokeAgentToken: async (id, signal) => { await call(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       mcpConnections: async signal => (await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
-      mcpConnection: (id, signal) => call<McpConnection>(`/mcp-connections/${idPath(id)}`, 'GET', undefined, signal),
+      // One approval of this tab's account, from its list (another account's is not in it).
+      mcpConnection: async (id, signal) => {
+        const found = ((await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data as McpConnection[]).find(connection => connection.id === id)
+        if (!found) throw new ApiError('MCP connection was not found.', 'NOT_FOUND', {}, undefined, 404)
+        return found
+      },
       revokeMcpConnection: async (id, signal) => { await call(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       bindMcpConnection: async (id, input, signal) => { await call(`/mcp-connections/${idPath(id)}/workspace`, 'POST', input, signal) },
     },

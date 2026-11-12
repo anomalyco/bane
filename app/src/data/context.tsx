@@ -243,8 +243,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     else void cache.invalidateQueries({ queryKey: accountsKey })
   }))
   // A request answered that this tab's account is signed out in this browser (expired or revoked): move to another.
+  // Several requests can learn it at once: leave once.
+  const leaving = useRef(false)
   useEffect(() => {
-    const gone = () => { void enter(null, { path: sectionPath() }).then(() => toast('That account was signed out', 'info'), () => {}) }
+    const gone = () => {
+      if (leaving.current) return
+      leaving.current = true
+      void enter(null, { path: sectionPath() }).then(() => toast('That account was signed out', 'info'), () => {}).finally(() => { leaving.current = false })
+    }
     window.addEventListener('bane:account-signed-out', gone)
     return () => window.removeEventListener('bane:account-signed-out', gone)
   })

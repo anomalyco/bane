@@ -21,6 +21,32 @@ To narrow either listing, add `toolsets=inboxes,routing` (or choose from `ritual
 
 In OpenCode, run `opencode2 mcp add bane --global --url 'https://YOUR_BANE_DOMAIN/mcp?codemode=true'`, then select Bane in `/mcps` and sign in. In Claude Code or Codex, use the same Code Mode URL for the remote HTTP server.
 
+### Several accounts (profiles)
+
+One MCP connection is one Bane account: the account you choose at Anomaly account when the client signs in, acting in the workspace you pick in Bane. To use a personal and a work account from one agent, add the server twice under two names. Both entries use the same endpoint. `?profile=` is only a label: Bane shows it on the connection's approval page and in Settings → Account so the two entries are easy to tell apart. It never chooses an account, a workspace or any access.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "bane-personal": { "type": "remote", "url": "https://bane.mx/mcp?codemode=true&profile=personal" },
+      "bane-work": { "type": "remote", "url": "https://bane.mx/mcp?codemode=true&profile=work" }
+    }
+  }
+}
+```
+
+OpenCode stores each entry's tokens under its own name, and Bane keeps one approval per account and client, so the two entries never share access. Sign each one in with its own account:
+
+1. Run `opencode2 mcp auth bane-personal` and pick your personal account in Anomaly account's chooser.
+2. Run `opencode2 mcp auth bane-work` and pick your work account.
+3. If that account belongs to several workspaces, the first request returns a link to the connection's page in Bane (`/settings/mcp/<id>`). It marks the account the connection signed in as and acts only as that account, never as whichever account the tab shows; choose the workspace there.
+
+Anomaly account shows its chooser when more than one account is signed in there. If it signs you straight in as the wrong account, add the other account in Bane first (**Add account** in the account menu, which signs it in at Anomaly account too). Then re-authorise the entry: `opencode2 mcp logout bane-work`, then `opencode2 mcp auth bane-work`, and pick the right account.
+
+Two entries signed in as the same account share that account's one approval and workspace. Revoking an entry in Settings → Account, signed in as its account, leaves the other entry working.
+
 ## Permissions
 
 OAuth scopes map to the existing API permissions:

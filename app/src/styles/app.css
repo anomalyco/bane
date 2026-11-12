@@ -250,3 +250,6 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .account-sheet__account { min-height: 60px; }
 .account-sheet__account[aria-current] { cursor: default; }
 .account-sheet__workspace { padding-left: calc(var(--space-16) + 28px + var(--space-12)); }
+/* The open menu has focus as a whole; an address in it shows only while its own row is pointed at or highlighted. */
+.account-menu:focus-visible .private-address__rest, .account-sheet :focus-visible .private-address__rest { filter: blur(4px); }
+.account-menu [data-highlighted] .private-address__rest, .account-menu .private-address:hover .private-address__rest { filter: blur(0); }
