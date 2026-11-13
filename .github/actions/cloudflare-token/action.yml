@@ -1,7 +1,7 @@
 name: Cloudflare token
 description: Mint a short-lived, stage-scoped Cloudflare API token from the AWS_IAM token issuer
 
-# The caller must already have assumed its arn:aws:iam::604439173067:role/github/bane-<stage>
+# The caller must already have assumed its arn:aws:iam::604439173067:role/github/nightmail-<stage>
 # role in the stage's GitHub environment. Lambda identifies the caller from that
 # role, so the request carries no scope: the stage in anomalyco/secrets config.ts
 # is the only thing that decides the permissions, zones, buckets, Workers and TTL.
