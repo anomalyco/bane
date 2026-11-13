@@ -66,6 +66,7 @@ const LegacyMailboxWebhookRedirect = inbound.page(m => m.LegacyMailboxWebhookRed
 const OverviewPage = overview.page(m => m.OverviewPage)
 const OperatorPage = operator.page(m => m.OperatorPage)
 const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
+const OperatorNotesPage = operator.page(m => m.OperatorNotesPage)
 const OnboardingPage = onboarding.page(m => m.OnboardingPage)
 const LegalPage = legal.page(m => m.LegalPage)
 
@@ -137,7 +138,7 @@ export function App() {
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="developer" element={<Moved to={() => '/docs'} />} />
-    <Route path="operator" element={<OperatorPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
+    <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

@@ -1,0 +1,92 @@
+/* UI notes mode: every part is fixed to the viewport, so the page under it never moves. The layer adds no box of its
+   own; its parts stack above the page (sidebar 20, tab bar 30, Help 41) and below dialogs (80), except the note panel. */
+.uin-layer { display: contents; }
+.uin-outline, .uin-highlight { position: fixed; top: 0; left: 0; z-index: 62; pointer-events: none; border-radius: 3px; }
+.uin-outline { outline: 1.5px solid var(--color-accent); outline-offset: 1px; background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
+.uin-highlight { outline: 1.5px dashed var(--color-accent); outline-offset: 2px; }
+/* Over a secret (data-sensitive), which can't have a note. */
+.uin-outline[data-blocked] { outline-color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 7%, transparent); }
+html[data-ui-notes-armed] [data-sensitive], html[data-ui-notes-armed] [data-sensitive] * { cursor: not-allowed !important; }
+.uin-outline[hidden], .uin-highlight[hidden], .uin-pin[hidden] { display: none; }
+html[data-ui-notes-armed], html[data-ui-notes-armed] * { cursor: crosshair !important; }
+/* A long press notes the element instead of selecting text or opening the browser's callout. */
+@media (pointer: coarse) {
+  html[data-ui-notes-mode] { -webkit-touch-callout: none; }
+  html[data-ui-notes-mode] body { -webkit-user-select: none; user-select: none; }
+  html[data-ui-notes-mode] :is(input, textarea, [contenteditable='true']) { -webkit-user-select: text; user-select: text; }
+}
+
+/* Pins: a numbered dot on the element's top-left corner. Its hit area is 44 px on a touch screen; with a mouse it stays
+   small, so it never covers what is next to it. */
+.uin-pin { position: fixed; top: 0; left: 0; z-index: 63; display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border: 0; border-radius: 9px; background: var(--color-contrast); color: var(--color-on-contrast);
+  box-shadow: var(--shadow-popover); font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 18px; font-variant-numeric: tabular-nums; transition: scale 120ms var(--ease-out-strong), background-color 100ms ease-out; }
+.uin-pin::before { content: ''; position: absolute; inset: -4px; }
+@media (pointer: coarse) { .uin-pin::before { inset: -13px; } }
+.uin-pin[data-status='in_progress'], .uin-number[data-status='in_progress'] { background: var(--color-accent); color: var(--color-on-accent); }
+.uin-pin:active { scale: .9; }
+@media (hover: hover) and (pointer: fine) { .uin-pin:hover { background: var(--color-contrast-hover); transition-duration: 0ms; } }
+
+/* The note panel: beside its element, growing from the side that faces it. */
+.uin-panel { position: fixed; top: 0; left: 0; z-index: 95; width: min(344px, calc(100vw - 24px)); padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: var(--shadow-popover);
+  color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); transform-origin: top left; animation: uin-pop 160ms var(--ease-out-strong); transition: background-color 200ms ease-out; }
+.uin-panel[data-side='top'] { transform-origin: bottom left; }
+.uin-panel:has(.uin-confirm) { background: color-mix(in srgb, var(--color-danger) 10%, var(--color-layer-1)); }
+.uin-form { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.uin-head { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 24px; }
+.uin-where { overflow: hidden; font-weight: var(--font-weight-bold); text-overflow: ellipsis; white-space: nowrap; }
+.uin-route, .uin-kind { flex: 1; min-width: 0; overflow: hidden; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.uin-route { text-align: right; }
+.uin-kind { font-family: var(--font-body); }
+.ui-textarea.uin-text { min-height: 76px; }
+.uin-body { max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.uin-meta { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.uin-meta a { display: inline-flex; align-items: center; gap: 2px; color: var(--color-accent); text-decoration: none; }
+.uin-moved { color: var(--color-warning); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.uin-moved a { color: inherit; }
+.uin-error { color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.uin-chips { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.uin-chip { height: 24px; padding: 0 var(--space-8); border: 0; border-radius: 4px; background: var(--color-layer-2); color: var(--color-muted); font-size: var(--text-xs); line-height: 24px; white-space: nowrap;
+  transition: background-color 100ms ease-out, color 100ms ease-out, scale 120ms var(--ease-out-strong); }
+.uin-chip[aria-pressed='true'] { background: var(--color-contrast); color: var(--color-on-contrast); }
+.uin-chip:active { scale: .96; }
+@media (hover: hover) and (pointer: fine) { .uin-chip:hover:not([aria-pressed='true']) { background: var(--color-layer-3); color: var(--color-text); transition-duration: 0ms; } }
+.uin-foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-6); min-height: 28px; margin-top: var(--space-4); }
+.uin-hint, .uin-confirm { margin-right: auto; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
+.uin-confirm { color: var(--color-danger); font-family: var(--font-body); }
+.ui-button.uin-delete { margin-right: auto; }
+.uin-number { display: inline-grid; flex: none; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--color-contrast); color: var(--color-on-contrast); font-family: var(--font-mono); font-size: 11px; font-weight: 700; line-height: 18px; font-variant-numeric: tabular-nums; }
+.uin-number[data-status='fixed'], .uin-number[data-status='wontfix'] { background: var(--color-layer-3); color: var(--color-muted); }
+.uin-sheet .uin-form { padding-top: var(--space-4); }
+
+/* The tray: a pill at the bottom left that says notes mode is on, and the page's notes above it. */
+.uin-tray { position: fixed; left: calc(var(--sidebar-width) + var(--page-inset) + var(--space-16)); bottom: var(--launcher-inset); z-index: 64; }
+.uin-pill { display: inline-flex; align-items: center; gap: var(--space-6); height: var(--launcher-size); padding: 0 var(--space-12) 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-1); color: var(--color-text);
+  box-shadow: var(--shadow-popover); font-weight: var(--font-weight-bold); white-space: nowrap; transition: scale 120ms var(--ease-out-strong); }
+.uin-pill:active { scale: .97; }
+.uin-pill__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
+.uin-pill__count { min-width: 1ch; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.uin-pill__hint { margin-left: var(--space-4); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-weight: var(--font-weight-regular); }
+.uin-tray__panel { position: absolute; bottom: calc(100% + var(--space-8)); left: 0; display: flex; flex-direction: column; width: min(344px, calc(100vw - 24px)); max-height: min(420px, 60dvh); padding: var(--space-4);
+  border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: var(--shadow-popover); transform-origin: bottom left; animation: uin-pop 160ms var(--ease-out-strong); }
+.uin-list { flex: 1; min-height: 0; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.uin-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); width: 100%; min-height: 32px; padding: var(--space-4) var(--space-8); border: 0; border-radius: 4px; background: transparent; text-align: left; }
+.uin-row[data-resolved] { color: var(--color-muted); }
+@media (hover: hover) and (pointer: fine) { .uin-row:hover { background: var(--color-hover); transition-duration: 0ms; } }
+.uin-row__body { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.uin-row__tag { color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
+.uin-tray__empty { padding: var(--space-8); color: var(--color-muted); }
+.uin-tray__foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); margin-top: var(--space-4); padding: var(--space-4) var(--space-4) 0 var(--space-8); border-top: 1px solid var(--color-border-muted); }
+.uin-tray__foot a { color: var(--color-accent); text-decoration: none; }
+@media (max-width: 899px) {
+  .uin-tray { left: var(--space-12); bottom: calc(var(--tab-bar-height, 56px) + env(safe-area-inset-bottom) + var(--space-12)); }
+}
+@media (pointer: coarse) { .uin-pill__hint, .uin-hint { display: none; } }
+
+.uin-pin[data-fresh] { animation: uin-pin-in 280ms var(--ease-out-strong); }
+@keyframes uin-pop { from { opacity: 0; scale: .96; } }
+@keyframes uin-pin-in { from { opacity: 0; scale: .5; } }
+@media (prefers-reduced-motion: reduce) {
+  .uin-panel, .uin-tray__panel, .uin-pin[data-fresh] { animation: ui-appear 150ms ease-out; }
+  .uin-pin, .uin-chip, .uin-pill { transition: background-color 100ms ease-out, color 100ms ease-out; }
+  .uin-pin:active, .uin-chip:active, .uin-pill:active { scale: none; }
+}

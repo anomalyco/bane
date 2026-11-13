@@ -17,28 +17,33 @@ const cx = (...values: (string | false | null | undefined)[]) => values.filter(B
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
 export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'ghost' | 'danger'; size?: 'sm' | 'md'; loading?: boolean };
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = 'secondary', size = 'md', loading, disabled, className, children, type = 'button', ...props }, ref) {
-  return <button {...props} ref={ref} type={type} disabled={disabled || loading} aria-busy={loading || undefined} className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, className)}>{loading && <LoaderCircle className="ui-spinner" size={14} aria-hidden="true" />}{children}</button>;
+  return <button data-component="Button" {...props} ref={ref} type={type} disabled={disabled || loading} aria-busy={loading || undefined} className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, className)}>{loading && <LoaderCircle className="ui-spinner" size={14} aria-hidden="true" />}{children}</button>;
 });
 export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: string }>(function IconButton({ label, className, variant = 'ghost', loading, children, ...props }, ref) {
   // A caller's title (for example why the action is unavailable) wins over the label.
-  return <Button {...props} ref={ref} variant={variant} loading={loading} aria-label={label} title={props.title ?? label} className={cx('ui-icon-button', className)}>{loading ? null : children}</Button>;
+  return <Button data-component="IconButton" {...props} ref={ref} variant={variant} loading={loading} aria-label={label} title={props.title ?? label} className={cx('ui-icon-button', className)}>{loading ? null : children}</Button>;
 });
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...props }, ref) {
-  return <input {...props} ref={ref} className={cx('ui-input', className)} />;
+  return <input data-component="Input" {...props} ref={ref} className={cx('ui-input', className)} />;
+});
+// A field for a secret or a write-only capability (an endpoint URL with its token, a header value): marked so staff UI
+// notes refuse it and black it out (features/ui-notes), and kept out of autofill.
+export const SecretInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function SecretInput(props, ref) {
+  return <Input data-sensitive autoComplete="off" spellCheck={false} {...props} ref={ref} />;
 });
 // A list's search box: the magnifier, type=search and the shared width (.search-box). Props go to the input.
 export const SearchField = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>>(function SearchField({ className, ...props }, ref) {
-  return <div className={cx('search-box', className)}><Search size={16} aria-hidden="true" /><Input {...props} ref={ref} type="search" /></div>;
+  return <div data-component="SearchField" className={cx('search-box', className)}><Search size={16} aria-hidden="true" /><Input {...props} ref={ref} type="search" /></div>;
 });
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(function Textarea({ className, ...props }, ref) {
-  return <textarea {...props} ref={ref} className={cx('ui-input', 'ui-textarea', className)} />;
+  return <textarea data-component="Textarea" {...props} ref={ref} className={cx('ui-input', 'ui-textarea', className)} />;
 });
 export function Field({ label, htmlFor, error, hint, children }: { label: ReactNode; htmlFor?: string; error?: ReactNode; hint?: ReactNode; children: ReactNode }) {
   const generatedId = useId();
   const onlyChild = Children.count(children) === 1 && isValidElement(children) && children.type !== Fragment && !(typeof children.type === 'string' && ['div', 'span', 'section'].includes(children.type)) ? children as ReactElement<{ id?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean }> : null;
   const id = htmlFor ?? onlyChild?.props.id ?? generatedId;
   const descriptionId = `${id}-description`;
-  return <div className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
+  return <div data-component="Field" className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
 }
 export type SelectProps = { value: string; onValueChange: (value: string) => void; options: { value: string; label: string; disabled?: boolean }[]; placeholder?: string; id?: string; name?: string; disabled?: boolean; required?: boolean; 'aria-label'?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean; className?: string };
 export function Select({ value, onValueChange, options, placeholder = 'Select…', id, name, disabled, required, className, ...aria }: SelectProps) {
@@ -47,20 +52,20 @@ export function Select({ value, onValueChange, options, placeholder = 'Select…
   // Touch screens get the platform's own picker (the iOS wheel, Android's list): bigger targets, no zoom, no popover.
   if (useTouch()) {
     const known = options.some(option => option.value === value);
-    return <select {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>;
+    return <select data-component="Select" {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>;
   }
-  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
+  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger data-component="Select" {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
 }
 type CheckProps = { checked: boolean; onCheckedChange: (checked: boolean) => void; label: ReactNode; disabled?: boolean; id?: string; name?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean };
 export function Checkbox({ checked, onCheckedChange, label, disabled, id: suppliedId, ...props }: CheckProps) {
   const generatedId = useId();
   const id = suppliedId ?? generatedId;
-  return <div className="ui-check-field"><CheckboxPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={value => onCheckedChange(value === true)} disabled={disabled} className="ui-checkbox"><CheckboxPrimitive.Indicator><Check size={12} strokeWidth={2} /></CheckboxPrimitive.Indicator></CheckboxPrimitive.Root><label htmlFor={id}>{label}</label></div>;
+  return <div data-component="Checkbox" className="ui-check-field"><CheckboxPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={value => onCheckedChange(value === true)} disabled={disabled} className="ui-checkbox"><CheckboxPrimitive.Indicator><Check size={12} strokeWidth={2} /></CheckboxPrimitive.Indicator></CheckboxPrimitive.Root><label htmlFor={id}>{label}</label></div>;
 }
 export function Switch({ checked, onCheckedChange, label, disabled, id: suppliedId, ...props }: CheckProps) {
   const generatedId = useId();
   const id = suppliedId ?? generatedId;
-  return <div className="ui-check-field"><SwitchPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="ui-switch"><SwitchPrimitive.Thumb className="ui-switch__thumb" /></SwitchPrimitive.Root><label htmlFor={id}>{label}</label></div>;
+  return <div data-component="Switch" className="ui-check-field"><SwitchPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="ui-switch"><SwitchPrimitive.Thumb className="ui-switch__thumb" /></SwitchPrimitive.Root><label htmlFor={id}>{label}</label></div>;
 }
 export function Tabs({ value, onValueChange, items, label = 'Sections', disabled = false }: { value: string; onValueChange: (value: string) => void | boolean | Promise<void | boolean>; items: { value: string; label: string; count?: number }[]; label?: string; disabled?: boolean }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -81,17 +86,19 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
       setFocusTarget(accepted === false ? value : items[index].value);
     } finally { activating.current = false; }
   }
-  return <div className="ui-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
+  return <div data-component="Tabs" className="ui-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
 }
-export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string };
-export function Dialog({ open, onOpenChange, title, description, children, footer, className }: DialogProps) {
+// `sensitive`: the dialog shows a secret (a one-time key, a signing secret, an invitation link). Staff UI notes can't be
+// left inside it and capture none of it (features/ui-notes).
+export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string; sensitive?: boolean };
+export function Dialog({ open, onOpenChange, title, description, children, footer, className, sensitive }: DialogProps) {
   const returnFocus = useRef<HTMLElement | null>(null);
   const descriptionId = useId();
   // On a phone the dialog is a bottom sheet: in thumb reach, above the keyboard, swiped down to close.
   const sheet = usePhone();
   const drag = useSheetDrag(() => onOpenChange(false), sheet);
   // Native input autofocus can precede Radix's callback; retain the external opener, not the mounted input.
-  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
+  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content data-component="Dialog" data-sensitive={sensitive || undefined} {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
 export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
   const [busy, setBusy] = useState(false);
@@ -167,7 +174,7 @@ function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, rowHref
   const navigate = useNavigate()
   const own = (event: { target: EventTarget }) => Boolean((event.target as HTMLElement).closest('button, a, input, select, [role="checkbox"], [role="switch"]'))
   const follow = (href: string, event: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; button: number }) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.button === 1) window.open(href, '_blank', 'noopener'); else navigate(href) }
-  return <div ref={tableRef} className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
+  return <div ref={tableRef} data-component="DataTable" className={cx('ui-table-scroll', className)} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
     <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} data-col={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
       <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-col={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row), href = rowHref?.(row) || undefined, clickable = Boolean(href || onRowClick); return <tr key={id} data-selected={selectedId === id || undefined} className={href ? 'ui-table__clickable ui-table__linked' : onRowClick ? 'ui-table__clickable' : undefined} tabIndex={!href && onRowClick ? 0 : undefined} onClick={event => { if (own(event)) return; if (href) follow(href, event); else onRowClick?.(row); }} onAuxClick={event => { if (href && event.button === 1 && !own(event)) follow(href, event); }} onKeyDown={event => { if (!href && onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }} onPointerEnter={onRowIntent && (() => rest(row))} onPointerLeave={onRowIntent && (() => window.clearTimeout(intent.current))} onFocus={onRowIntent && (() => onRowIntent(row))} data-clickable={clickable || undefined}>{columns.map((column, index) => <td key={column.key} data-col={column.key} style={{ textAlign: column.align }}>{href && index === 0 ? <Link className="ui-row-link" to={href}>{column.render(row)}</Link> : column.render(row)}</td>)}</tr>; })}
@@ -180,7 +187,7 @@ function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, 
   const shape = cardShape(columns), height = cardHeight(shape);
   const cell = (column: Column<T>, row: T) => (column.cardRender ?? column.render)(row);
   const style = { '--table-row-height': `${height}px` } as CSSProperties;
-  return <div ref={tableRef} className={cx('ui-cards', className)} style={style} aria-busy={loading || undefined}>
+  return <div ref={tableRef} data-component="DataTable" className={cx('ui-cards', className)} style={style} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading list</span>}
     {(loading || rows.length > 0) && <ul className="ui-cards__list">{loading ? Array.from({ length: skeletonRows }, (_, index) => <li key={index} className="ui-card" aria-hidden="true">
       <div className="ui-card__main"><div className="ui-card__head"><span className="ui-card__title"><SkeletonText width="62%" /></span>{shape.aside.length > 0 && <span className="ui-card__aside"><SkeletonText width={56} /></span>}</div>
@@ -232,10 +239,10 @@ function BackLink({ to }: { to: string }) {
   }}><ArrowLeft size={16} /></Link>
 }
 export function PageHeader({ title, actions, backTo }: { title: ReactNode; actions?: ReactNode; backTo?: string }) {
-  return <header className="ui-page-header"><div className="cluster">{backTo && <BackLink to={backTo} />}<h1>{title}</h1></div>{actions && <div className="cluster">{actions}</div>}</header>;
+  return <header data-component="PageHeader" className="ui-page-header"><div className="cluster">{backTo && <BackLink to={backTo} />}<h1>{title}</h1></div>{actions && <div className="cluster">{actions}</div>}</header>;
 }
 export function SectionHeader({ title, actions }: { title: ReactNode; actions?: ReactNode }) {
-  return <div className="ui-section-header"><h2>{title}</h2>{actions && <div className="cluster">{actions}</div>}</div>;
+  return <div data-component="SectionHeader" className="ui-section-header"><h2>{title}</h2>{actions && <div className="cluster">{actions}</div>}</div>;
 }
 function statusTone(status: string): Tone {
   const value = status.trim().toLowerCase().replaceAll(' ', '_');
@@ -245,7 +252,7 @@ function statusTone(status: string): Tone {
   return 'neutral';
 }
 export function StatusBadge({ status, tone = statusTone(status) }: { status: string; tone?: Tone }) {
-  return <span className={cx('ui-status', `ui-tone--${tone}`)}><span className="ui-status__dot" aria-hidden="true" />{formatLabel(status)}</span>;
+  return <span data-component="StatusBadge" className={cx('ui-status', `ui-tone--${tone}`)}><span className="ui-status__dot" aria-hidden="true" />{formatLabel(status)}</span>;
 }
 // A status as one quiet line of a table cell: the tone's dot, the value itself (a host, say) and an optional muted note.
 // The note gives way first when the cell is narrow; `title` carries the whole text for whatever is clipped.
@@ -253,10 +260,10 @@ export function StatusDot({ tone, children, note, title, muted = false }: { tone
   return <span className={cx('ui-status-dot', `ui-tone--${tone}`, muted && 'ui-status-dot--muted')} title={title}><span className="ui-status__dot" aria-hidden="true" /><span className="ui-status-dot__value">{children}</span>{note && <span className="ui-status-dot__note">{note}</span>}</span>;
 }
 export function Alert({ tone = 'neutral', title, children, onDismiss }: { tone?: Tone; title?: ReactNode; children: ReactNode; onDismiss?: () => void }) {
-  return <div className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}</div>;
+  return <div data-component="Alert" className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}</div>;
 }
 export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
-  return <div className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
+  return <div data-component="EmptyState" className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
 }
 export function LoadingState({ rows = 5 }: { rows?: number }) {
   return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;
@@ -288,6 +295,10 @@ export function useToast(): ToastFn {
   const toast = useContext(ToastContext);
   if (!toast) throw new Error('useToast must be used inside ToastProvider');
   return toast;
+}
+/** A secret shown in full (a key, signing secret or link that grants access): marked so UI notes never capture it. */
+export function SecretCode({ children, className }: { children: ReactNode; className?: string }) {
+  return <code data-sensitive className={className}>{children}</code>;
 }
 export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);

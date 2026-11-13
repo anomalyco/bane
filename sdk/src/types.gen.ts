@@ -5757,6 +5757,10 @@ export type GetCurrentIdentityResponses = {
          */
         operator?: 'operator' | 'operator:read' | null;
         /**
+         * Bane staff only: this session may use staff UI notes. False for everyone else.
+         */
+        uiNotes?: boolean;
+        /**
          * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
          */
         billing?: {
