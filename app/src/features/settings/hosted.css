@@ -63,7 +63,7 @@
 }
 @media (max-width: 640px) {
   .settings-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-12); height: auto; min-height: 53px; padding-block: var(--space-8); }
-  .settings-row__label > span { overflow: visible; white-space: normal; }
+  .settings-rows:not(.usage-rows) .settings-row__label > span { overflow: visible; white-space: normal; }
   .settings-row__label a { position: relative; }
   .settings-row__label a::after { content: ''; position: absolute; inset-block: -14px; inset-inline: 0; }
   .settings-score { min-height: 44px; }
