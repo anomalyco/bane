@@ -1,4 +1,4 @@
-import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 
 // Swipe a bottom sheet down to close it: past a quarter of its height, or a quick flick at any distance. Dragging up
@@ -57,12 +57,13 @@ export function useKeyboardInset() {
   }, [])
 }
 
-/** A bottom sheet on Radix Dialog: focus trapped, Esc and a swipe down close it, focus returns to the opener. */
-export function Sheet({ open, onOpenChange, title, description, children, className, hideTitle = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; className?: string; hideTitle?: boolean }) {
+/** A bottom sheet on Radix Dialog: focus trapped, Esc and a swipe down close it, focus returns to the opener. A sheet
+ *  opened by a plain button (no Radix trigger) names it in `returnFocus`: a tap doesn't always focus the button first. */
+export function Sheet({ open, onOpenChange, title, description, children, className, hideTitle = false, returnFocus }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; className?: string; hideTitle?: boolean; returnFocus?: RefObject<HTMLElement | null> }) {
   const handlers = useSheetDrag(() => onOpenChange(false))
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className="ui-dialog-overlay ui-sheet-overlay" />
-    <DialogPrimitive.Content data-component="Sheet" className={['ui-sheet', className].filter(Boolean).join(' ')} aria-describedby={undefined} {...handlers}>
+    <DialogPrimitive.Content data-component="Sheet" className={['ui-sheet', className].filter(Boolean).join(' ')} aria-describedby={undefined} onCloseAutoFocus={event => { const opener = returnFocus?.current; if (opener?.isConnected) { event.preventDefault(); opener.focus(); } }} {...handlers}>
       <SheetOpenEffects />
       <div className="ui-sheet__grab" aria-hidden="true"><span /></div>
       <DialogPrimitive.Title className={hideTitle ? 'sr-only' : 'ui-sheet__title'}>{title}</DialogPrimitive.Title>

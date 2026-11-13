@@ -1,4 +1,4 @@
-import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type InputHTMLAttributes, type ReactElement, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type HTMLAttributes, type InputHTMLAttributes, type ReactElement, type ReactNode, type RefObject, type TextareaHTMLAttributes } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
@@ -54,7 +54,7 @@ export function Select({ value, onValueChange, options, placeholder = 'Select…
     const known = options.some(option => option.value === value);
     return <select data-component="Select" {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>;
   }
-  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger data-component="Select" {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
+  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger data-component="Select" {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)} onPointerEnter={event => { const shown = event.currentTarget.firstElementChild; event.currentTarget.title = shown && shown.scrollWidth > shown.clientWidth ? shown.textContent ?? '' : ''; }}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
 }
 type CheckProps = { checked: boolean; onCheckedChange: (checked: boolean) => void; label: ReactNode; disabled?: boolean; id?: string; name?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean };
 export function Checkbox({ checked, onCheckedChange, label, disabled, id: suppliedId, ...props }: CheckProps) {
@@ -115,16 +115,18 @@ export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; 
 export function DropdownMenu({ items, label = 'More actions', trigger, title }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode }) {
   const phone = usePhone();
   const [open, setOpen] = useState(false);
+  const opener = useRef<HTMLElement | null>(null);
   // A phone gets an action sheet: full-width rows at the bottom of the screen, and Cancel.
   if (phone) {
-    const button = trigger && isValidElement(trigger) ? cloneElement(trigger as ReactElement<{ onClick?: () => void }>, { onClick: () => setOpen(true) }) : <IconButton label={label} onClick={() => setOpen(true)}><MoreHorizontal size={16} /></IconButton>;
-    return <>{button}<ActionSheet open={open} onOpenChange={setOpen} title={title ?? label} items={items} /></>;
+    const show = (event: { currentTarget: HTMLElement }) => { opener.current = event.currentTarget; setOpen(true); };
+    const button = trigger && isValidElement(trigger) ? cloneElement(trigger as ReactElement<{ onClick?: (event: { currentTarget: HTMLElement }) => void }>, { onClick: show }) : <IconButton label={label} onClick={show}><MoreHorizontal size={16} /></IconButton>;
+    return <>{button}<ActionSheet open={open} onOpenChange={setOpen} title={title ?? label} items={items} returnFocus={opener} /></>;
   }
   return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align="end" sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
 }
 // The actions run once the sheet has started closing, so a confirmation they open takes focus cleanly.
-export function ActionSheet({ open, onOpenChange, title, items }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; items: MenuItem[] }) {
-  return <Sheet open={open} onOpenChange={onOpenChange} title={title} className="ui-action-sheet">
+export function ActionSheet({ open, onOpenChange, title, items, returnFocus }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; items: MenuItem[]; returnFocus?: RefObject<HTMLElement | null> }) {
+  return <Sheet open={open} onOpenChange={onOpenChange} title={title} className="ui-action-sheet" returnFocus={returnFocus}>
     <div className="ui-action-sheet__items" role="group">{items.map((item, index) => <button key={`${item.label}-${index}`} type="button" disabled={item.disabled} className={cx('ui-action-sheet__item', item.destructive && 'ui-action-sheet__item--danger')} onClick={() => { onOpenChange(false); setTimeout(item.onSelect, 0); }}>{item.icon && <span className="ui-menu-icon">{item.icon}</span>}<span className="ui-action-sheet__label">{item.label}{item.hint && <span className="ui-action-sheet__hint">{item.hint}</span>}</span></button>)}</div>
     <button type="button" className="ui-action-sheet__item ui-action-sheet__cancel" onClick={() => onOpenChange(false)}>Cancel</button>
   </Sheet>;
@@ -251,18 +253,19 @@ function statusTone(status: string): Tone {
   if (['failed', 'complaint', 'error', 'rejected', 'suppressed', 'shutdown'].includes(value)) return 'danger';
   return 'neutral';
 }
+// A badge in a cell narrower than its label shortens the label with an ellipsis and says the whole of it on hover.
 export function StatusBadge({ status, tone = statusTone(status) }: { status: string; tone?: Tone }) {
   const text = formatLabel(status);
   return <span data-component="StatusBadge" className={cx('ui-status', `ui-tone--${tone}`)} onPointerEnter={event => { const label = event.currentTarget.lastElementChild; event.currentTarget.title = label && label.scrollWidth > label.clientWidth ? text : ''; }}><span className="ui-status__dot" aria-hidden="true" /><span className="ui-status__label">{text}</span></span>;
-// A badge in a cell narrower than its label shortens the label with an ellipsis and says the whole of it on hover.
 }
 // A status as one quiet line of a table cell: the tone's dot, the value itself (a host, say) and an optional muted note.
 // The note gives way first when the cell is narrow; `title` carries the whole text for whatever is clipped.
 export function StatusDot({ tone, children, note, title, muted = false }: { tone: Tone; children: ReactNode; note?: ReactNode; title?: string; muted?: boolean }) {
   return <span className={cx('ui-status-dot', `ui-tone--${tone}`, muted && 'ui-status-dot--muted')} title={title}><span className="ui-status__dot" aria-hidden="true" /><span className="ui-status-dot__value">{children}</span>{note && <span className="ui-status-dot__note">{note}</span>}</span>;
 }
-export function Alert({ tone = 'neutral', title, children, onDismiss }: { tone?: Tone; title?: ReactNode; children: ReactNode; onDismiss?: () => void }) {
-  return <div data-component="Alert" className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}</div>;
+// `timer`: a notice that dismisses itself shows the time it has left as a thin bar that empties (paused while `paused`).
+export function Alert({ tone = 'neutral', title, children, onDismiss, timer, ...rest }: { tone?: Tone; title?: ReactNode; children: ReactNode; onDismiss?: () => void; timer?: { duration: number; paused: boolean } } & Omit<HTMLAttributes<HTMLDivElement>, 'title' | 'children'>) {
+  return <div data-component="Alert" {...rest} className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}{timer && <span className="ui-alert__timer" aria-hidden="true" style={{ animationDuration: `${timer.duration}ms`, animationPlayState: timer.paused ? 'paused' : 'running' }} />}</div>;
 }
 export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
   return <div data-component="EmptyState" className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
@@ -285,13 +288,24 @@ type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
 const ToastContext = createContext<ToastFn | null>(null);
 const KEPT_TOASTS = 'bane.kept-toasts';
+const TOAST_MS = 6000;
+// A toast stays 6 s, and the time stops while a pointer rests on it or focus is inside it.
+function Toast({ id, tone, message, dismiss }: { id: number; tone: ToastTone; message: string; dismiss: (id: number) => void }) {
+  const [paused, setPaused] = useState(false);
+  const onDismiss = useCallback(() => dismiss(id), [dismiss, id]);
+  const left = useRef(TOAST_MS);
+  useEffect(() => {
+    if (paused) return;
+    const started = Date.now(), timer = setTimeout(onDismiss, left.current);
+    return () => { clearTimeout(timer); left.current -= Date.now() - started; };
+  }, [paused, onDismiss]);
+  return <Alert tone={tone === 'error' ? 'danger' : tone} onDismiss={onDismiss} timer={{ duration: TOAST_MS, paused }} onPointerEnter={() => setPaused(true)} onPointerLeave={() => setPaused(false)} onFocus={() => setPaused(true)} onBlur={() => setPaused(false)}>{message}</Alert>;
+}
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<{ id: number; message: string; tone: ToastTone }[]>([]);
   const sequence = useRef(0);
-  const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
-  const dismiss = useCallback((id: number) => { clearTimeout(timers.current.get(id)); timers.current.delete(id); setToasts(current => current.filter(toast => toast.id !== id)); }, []);
-  const toast = useCallback<ToastFn>((message, tone = 'info') => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone }]); timers.current.set(id, setTimeout(() => dismiss(id), 6000)); }, [dismiss]);
-  useEffect(() => { const current = timers.current; return () => current.forEach(clearTimeout); }, []);
+  const dismiss = useCallback((id: number) => setToasts(current => current.filter(toast => toast.id !== id)), []);
+  const toast = useCallback<ToastFn>((message, tone = 'info') => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone }]); }, []);
   // A reload for a new build (lib/preloadable.ts) keeps what was just confirmed, such as "Joined <workspace>".
   const shown = useRef(toasts); shown.current = toasts;
   useEffect(() => {
@@ -300,7 +314,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     window.addEventListener('bane:reloading', keep);
     return () => window.removeEventListener('bane:reloading', keep);
   }, [toast]);
-  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Alert key={item.id} tone={item.tone === 'error' ? 'danger' : item.tone} onDismiss={() => dismiss(item.id)}>{item.message}</Alert>)}</div></ToastContext.Provider>;
+  return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} dismiss={dismiss} />)}</div></ToastContext.Provider>;
 }
 export function useToast(): ToastFn {
   const toast = useContext(ToastContext);
