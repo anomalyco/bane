@@ -95,7 +95,8 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
   </div></main>
 }
 /** Pages anyone can open, signed in or not. */
-export const isPublicPath = (path: string) => path === '/docs' || path === '/legal' || path.startsWith('/legal/')
+// The MCP consent and device pages handle their own sign-in, as any of the browser's accounts (features/oauth).
+export const isPublicPath = (path: string) => path === '/docs' || path === '/legal' || path.startsWith('/legal/') || path === '/device' || path === '/consent' || path.startsWith('/consent/')
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
   // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const publicRoute = isPublicPath(useLocation().pathname)

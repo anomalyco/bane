@@ -14,6 +14,7 @@ import { settingsColumns } from './skeletons'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton } from '../docs/connect-agent'
+import { McpKeyButton } from './mcp-key'
 import { guides } from '../inbound/concepts'
 import { Link } from 'react-router'
 
@@ -99,8 +100,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
       </section>
       {showConnected && <section className="section stack">
         <div className="keys-head">
-          <SectionHeader title="Connected agents" actions={<ConnectAgentButton size="sm" />} />
-          <p className="muted">Agents signed in as someone in this workspace over MCP, and the short-lived agent tokens they made. Revoking a sign-in also revokes its tokens.</p>
+          <SectionHeader title="Connected agents" actions={<div className="cluster"><McpKeyButton size="sm" /><ConnectAgentButton size="sm" /></div>} />
+          <p className="muted">Agents signed in as you over MCP, your MCP keys, and the short-lived agent tokens they made. Revoking a connection also revokes its tokens.</p>
         </div>
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id}
           empty={<EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with a Revoke button." />} columns={[
@@ -112,8 +113,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
             ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)} second={row.item.scopes.map(scope => scope.replace('bane:', '').replaceAll('_', ' ')).join(', ')} />
             : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} />,
             cardRender: row => row.kind === 'mcp' ? `MCP · ${accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)}` : `Agent token · ${accessLabel(row.item.permissions, false)}` },
-          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? row.item.status==='expired'?'Expired':row.item.status==='revoked'?'Revoked':`Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
-          { key: 'used', label: 'Last used', card: 'hide', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
+          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? row.item.status==='expired'?'Expired':row.item.status==='revoked'?'Revoked':row.item.kind==='key'&&row.item.expiresAt?`Key · expires ${date(row.item.expiresAt)}`:`Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
+          { key: 'used', label: 'Last used', card: 'hide', render: row => lastUsed(row.item.lastUsedAt ?? null) },
           { key: 'actions', label: '', align: 'right', width: 100, card: 'end', render: row => row.kind === 'mcp'
             ? <Button variant="danger" disabled={row.item.status==='expired'||row.item.status==='revoked'} aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
             : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button>,

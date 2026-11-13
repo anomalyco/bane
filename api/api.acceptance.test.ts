@@ -605,7 +605,8 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
     const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
     await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
-    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
+    // A Google sign-in, as hosted and CI require (ACCOUNT_REQUIRED_ACR): the session can approve MCP clients.
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,acr,expires_at) VALUES($1,$2,$3,$2,$4,'urn:anomaly:acr:google',now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
@@ -1052,183 +1053,293 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE issuer=$1 AND expires_at>now()',[issuer])).rows[0].n,0);
 });
 
-// MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
-// approvals, each acting only in its own account's workspace; `?profile=` is a label and never selects anything.
-test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {
+// Bane is the authorization server of its own /mcp (src/oauth-server.ts): the account service only signs people in to the
+// dashboard. A client is discovered from the resource metadata, identified by its metadata document (CIMD) or a
+// registration (DCR), approved on the consent page as one of the browser's accounts, and gets Bane's own tokens.
+test('MCP authorization server: discovery, CIMD and DCR clients, PKCE, consent as one of two accounts, refresh rotation, device grant, keys and revocation', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
-  const {authorizeResource} = await import('./src/oidc-resource.js');
   const {createApp} = await import('./src/app.js');
   const db = await fixtureDatabase(t), app = createApp();
-  const issuer = 'https://mcp-profiles.example.org', origin = 'https://bane.example.org', resource = origin+'/mcp';
-  const runtime: import('./src/core.js').Runtime = { config:{...loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_ROOT_SECRET:'fixture-only-'.repeat(4)}),accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}},
+  const origin = 'https://bane.example.org', issuer = `https://accounts-${randomUUID().slice(0, 8)}.example.org`, google = 'urn:anomaly:acr:google';
+  const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard', ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}),
+    MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:google, BANE_ROOT_SECRET:'fixture-only-'.repeat(4)}),
     db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
-  const signer = generateKeyPairSync('ec',{namedCurve:'P-256'});
-  t.mock.method(globalThis,'fetch',async (url: string|URL) => {
-    assert.equal(new URL(url).origin,issuer);
-    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) : Response.json({issuer,jwks_uri:issuer+'/keys'});
+  // Client metadata documents, served by the clients' own sites. Bane fetches them without following redirects.
+  const docs = new Map<string, () => Response>(), fetched: string[] = [], dir = 'https://agent.example.com/oauth/';
+  const cimd = dir + 'client.json', doc = (id: string, extra: object = {}) => Response.json({client_id:id, client_name:'Fixture‮ Agent', redirect_uris:['http://127.0.0.1/callback','http://localhost/callback'],
+    grant_types:['authorization_code','refresh_token'], response_types:['code'], token_endpoint_auth_method:'none', application_type:'native', ...extra});
+  docs.set(cimd, () => doc(cimd));
+  docs.set(dir + 'moved.json', () => new Response(null, {status:302, headers:{location:cimd}}));
+  docs.set(dir + 'other.json', () => doc(cimd));
+  docs.set(dir + 'secret.json', () => doc(dir + 'secret.json', {client_secret:'shared'}));
+  docs.set(dir + 'web.json', () => doc(dir + 'web.json', {redirect_uris:['http://agent.example.com/callback']}));
+  docs.set(dir + 'large.json', () => new Response(JSON.stringify({client_id:dir + 'large.json', client_name:'x'.repeat(20_000), redirect_uris:['http://127.0.0.1/callback']}), {headers:{'content-type':'application/json'}}));
+  docs.set(dir + 'html.json', () => new Response('<html></html>', {headers:{'content-type':'text/html'}}));
+  t.mock.method(globalThis,'fetch',async (input: string|URL|Request, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url === issuer + '/.well-known/openid-configuration') return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',response_modes_supported:['query']});
+    fetched.push(url);
+    assert.equal(init?.redirect, 'manual', 'A metadata document fetch never follows a redirect');
+    const make = docs.get(url);
+    if (!make) throw Error(`unexpected fetch ${url}`);
+    return make();
   });
-  const now = Math.floor(Date.now()/1000);
-  let tick = 0;
-  const token = (subject: string) => {
-    const body = [{alg:'ES256',typ:'at+jwt',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:'opencode',iat:now+tick++,exp:now+300,jti:randomUUID(),scope:'bane:read bane:send',acr:'urn:anomaly:acr:google'}].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
-    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  // Two accounts signed in to one browser (#149), each owning a workspace; the work account is also a member of the
+  // personal one. A third session, in another browser, signed in without Google.
+  const P = unique('oauth-personal'), W = unique('oauth-work'), jar: string[] = [], users: string[] = [];
+  cleanup(t, async () => {
+    await db.query('DELETE FROM bane_oauth_requests WHERE client_id LIKE $1 OR client_id IN (SELECT id FROM bane_oauth_clients WHERE name IN ($2,$3))', [dir + '%', 'Device CLI', 'Server']);
+    await db.query('DELETE FROM bane_oauth_clients WHERE name IN ($1,$2)', ['Device CLI', 'Server']);
+    await db.query('DELETE FROM bane_users WHERE id = ANY($1)', [users]);
+    await db.query('DELETE FROM workspaces WHERE id = ANY($1)', [[P, W]]);
+    await db.query('DELETE FROM bane_login_flows WHERE issuer=$1', [issuer]);
+  });
+  const session = async (user: string, acr: string | null) => {
+    const token = createHash('sha256').update(randomUUID()).digest('base64url');
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,acr,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),user,issuer,acr]);
+    return token;
   };
-  const mcp = async (subject: string, profile?: string) => {
-    const response = await authorizeResource(runtime,new Request(resource+(profile?`?profile=${encodeURIComponent(profile)}`:''),{method:'POST',headers:{authorization:`Bearer ${token(subject)}`}}),async a=>Response.json({workspaceId:a.workspaceId,keyId:a.keyId}));
-    return {status:response.status,body:await response.json() as {workspaceId:string;keyId:string}};
+  for (const workspace of [P, W]) await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [workspace]);
+  const account = async (name: string, owns: string) => {
+    const user = unique(`oauth-${name}`); users.push(user);
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)', [user, name, `${user}@example.org`]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)', [issuer, user]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), user, owns]);
+    jar.push(`__Host-bane.session_token${jar.length ? '.' + jar.length : ''}=${await session(user, google)}`);
+    return user;
   };
-  // Two accounts, each in its own workspace, both signed in to one browser.
-  const jar: string[] = [], accounts: {user:string;subject:string;workspace:string}[] = [];
-  await db.query('BEGIN');
-  try {
-    for (const [slot,name] of ['personal','work'].entries()) {
-      const user = unique('mcp-profile'), workspace = unique('mcp-profile-ws'), session = createHash('sha256').update(randomUUID()).digest('base64url');
-      await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,name,`${user}@example.org`]);
-      await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[issuer,user]);
-      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[workspace]);
-      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),user,workspace]);
-      await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
-      jar.push(`__Host-bane.session_token${slot?'.'+slot:''}=${session}`);
-      accounts.push({user,subject:user,workspace});
-    }
-    const [personal, work] = accounts as [typeof accounts[number], typeof accounts[number]];
-    // Each entry's token acts in its own account's workspace, whatever its label says.
-    const first = await mcp(personal.subject,'personal'), second = await mcp(work.subject,'work');
-    assert.deepEqual([first.status,first.body.workspaceId,second.status,second.body.workspaceId],[200,personal.workspace,200,work.workspace]);
-    assert.notEqual(first.body.keyId,second.body.keyId);
-    const swapped = await mcp(personal.subject,'work');
-    assert.deepEqual([swapped.status,swapped.body.workspaceId,swapped.body.keyId],[200,personal.workspace,first.body.keyId],'A label never selects another approval');
-    const grants = (await db.query('SELECT user_id,profile FROM bane_resource_grants WHERE client_id=$1 AND user_id=ANY($2)',['opencode',[personal.user,work.user]])).rows;
-    assert.equal(grants.length,2,'One approval per account and client');
-    assert.deepEqual(Object.fromEntries(grants.map(g=>[g.user_id,g.profile])),{[personal.user]:'work',[work.user]:'work'},'The label follows the entry that last connected; it is not part of the approval');
-    // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
-    await mcp(work.subject,'  Work <script>  laptop  ');
-    const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
-    const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
-    assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',work.workspace]]);
-    assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,personal.workspace]]);
-    // The approval page learns which connected account owns a connection, so it acts as that account.
-    const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
-    assert.equal(owner.connection.account,work.user);
-    // Revoking one entry, as its own account, leaves the other entry working; the wrong account can't revoke it.
-    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,personal,'POST')).status,404);
-    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,work,'POST')).status,200);
-    assert.equal((await mcp(work.subject,'work')).status,403);
-    assert.deepEqual([(await mcp(personal.subject,'personal')).status,(await mcp(personal.subject)).body.workspaceId],[200,personal.workspace]);
-  } finally { await db.query('ROLLBACK'); }
-});
+  const personal = await account('personal', P), work = await account('work', W);
+  await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'member')", [randomUUID(), work, P]);
+  const stale = `__Host-bane.session_token=${await session(personal, null)}`;
 
-test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
-  const { drizzle } = await import('drizzle-orm/node-postgres');
-  const { loadConfig } = await import('./src/config.js');
-  const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
-  const db = await fixtureDatabase(t);
-  const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
-  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_SUBJECTS:`subject,${AUTH_SUBJECT}`, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
-    storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
-  const signer = generateKeyPairSync('ec', {namedCurve:'P-256'}), holder = generateKeyPairSync('ec', {namedCurve:'P-256'});
-  const jwk = holder.publicKey.export({format:'jwk'});
-  t.mock.method(globalThis, 'fetch', async (url: string | URL) => {
-    assert.equal(new URL(url).origin, issuer);
-    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) :
-      Response.json({issuer, jwks_uri:issuer+'/keys'});
-  });
-  const jwt = (key: typeof signer.privateKey, header: object, claims: object) => {
-    const body = [header, claims].map(part=>Buffer.from(JSON.stringify(part)).toString('base64url')).join('.');
-    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  const browser = (path: string, as?: string, init: { method?: string; body?: object; cookie?: string; origin?: string } = {}) => app.fetch(new Request(origin + path, { method: init.method ?? 'GET', redirect: 'manual',
+    headers: { cookie: init.cookie ?? jar.join('; '), 'x-bane-client-ip': '192.0.2.10', ...(init.method === 'POST' ? { origin: init.origin ?? origin } : {}), ...(as ? { 'x-bane-account': as } : {}), ...(init.body ? { 'content-type': 'application/json' } : {}) },
+    body: init.body ? JSON.stringify(init.body) : undefined }), runtime);
+  const form = (path: string, params: Record<string, string>, headers: Record<string, string> = {}) => app.fetch(new Request(origin + path, { method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-bane-client-ip': '198.51.100.7', ...headers }, body: new URLSearchParams(params) }), runtime);
+  const json = async (response: Response | Promise<Response>) => (await response).json() as Promise<any>;
+  const errorCode = async (response: Response | Promise<Response>) => (await json(response)).error as string;
+  const loopback = (port: number, host = '127.0.0.1') => `http://${host}:${port}/callback`;
+  const pkce = () => { const verifier = (randomUUID() + randomUUID()).replaceAll('-', ''); return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') }; };
+  async function authorize(clientId: string, redirect: string, extra: Record<string, string> = {}, cookie?: string) {
+    const { verifier, challenge } = pkce(), state = randomUUID();
+    const response = await browser('/oauth/authorize?' + new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256', state,
+      scope: 'bane:read bane:send bane:manage offline_access', resource: origin + '/mcp?codemode=true', ...extra }), undefined, { cookie });
+    const location = response.headers.get('location')!;
+    return { response, location, verifier, state, id: /\/consent\/(oar_[0-9a-f]{32})$/.exec(location)?.[1] ?? '' };
+  }
+  const approve = (id: string, as: string, body: object, init: { origin?: string; cookie?: string } = {}) => browser(`/api/oauth/requests/${id}/approve`, as, { method: 'POST', body, ...init });
+  const exchange = (code: string, redirect: string, verifier: string, clientId = cimd, extra: Record<string, string> = {}, headers: Record<string, string> = {}) =>
+    form('/oauth/token', { grant_type: 'authorization_code', code, redirect_uri: redirect, code_verifier: verifier, client_id: clientId, ...extra }, headers);
+  const refresh = (token: string, extra: Record<string, string> = {}, clientId = cimd) => form('/oauth/token', { grant_type: 'refresh_token', refresh_token: token, client_id: clientId, ...extra });
+  const mcp = (token: string, scheme = 'Bearer', headers: Record<string, string> = {}, path = '/mcp?codemode=false') => app.fetch(new Request(origin + path, { method: 'POST',
+    headers: { authorization: `${scheme} ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'getCurrentIdentity', arguments: {} } }) }), runtime);
+  const identity = async (token: string) => { const response = await mcp(token); assert.equal(response.status, 200, await response.clone().text()); return (await response.json() as any).result.structuredContent as { workspaceId: string; permissions: string[] }; };
+  const grantOf = async (access: string) => (await db.query('SELECT grant_id FROM bane_oauth_tokens WHERE hash=$1', [createHash('sha256').update(access).digest('hex')])).rows[0]?.grant_id as string;
+  /** One whole sign-in: authorize, approve as `as`, exchange the code. */
+  async function signIn(as: string, workspaceId: string, scopes: string[], clientId = cimd, port = 54321, extra: Record<string, string> = {}) {
+    const started = await authorize(clientId, loopback(port), extra);
+    const back = new URL((await json(approve(started.id, as, { workspaceId, scopes }))).redirect);
+    return json(exchange(back.searchParams.get('code')!, loopback(port), started.verifier, clientId));
+  }
+
+  // Discovery: the resource names Bane itself as its authorization server, byte for byte, and the challenge asks for every scope.
+  const prm = await json(app.fetch(new Request(origin + '/.well-known/oauth-protected-resource/mcp'), runtime));
+  assert.deepEqual([prm.resource, prm.authorization_servers, prm.scopes_supported], [origin + '/mcp', [origin], ['bane:read', 'bane:send', 'bane:manage']]);
+  const metadata = await json(app.fetch(new Request(origin + '/.well-known/oauth-authorization-server'), runtime));
+  assert.equal(metadata.issuer, prm.authorization_servers[0]);
+  assert.deepEqual([metadata.client_id_metadata_document_supported, metadata.code_challenge_methods_supported, metadata.authorization_response_iss_parameter_supported], [true, ['S256'], true]);
+  assert.ok(metadata.token_endpoint_auth_methods_supported.includes('none'));
+  assert.deepEqual(metadata.grant_types_supported, ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code']);
+  for (const [name, path] of [['authorization_endpoint', 'authorize'], ['token_endpoint', 'token'], ['registration_endpoint', 'register'], ['revocation_endpoint', 'revoke'], ['device_authorization_endpoint', 'device_authorization']])
+    assert.equal(metadata[name], `${origin}/oauth/${path}`);
+  const challenge = await app.fetch(new Request(origin + '/mcp?codemode=false', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), runtime);
+  assert.equal(challenge.status, 401);
+  assert.equal(challenge.headers.get('www-authenticate'), `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="bane:read bane:send bane:manage"`);
+
+  // A browser without a Bane session signs in at the account service first and comes back to the consent page.
+  const signedOut = await authorize(cimd, loopback(54321), {}, '');
+  assert.ok(signedOut.location.startsWith(issuer + '/authorize?'), signedOut.location);
+  assert.ok(signedOut.response.headers.getSetCookie().some(line => line.startsWith('__Host-bane.login=')));
+  assert.match((await db.query('SELECT return_url FROM bane_login_flows WHERE issuer=$1 ORDER BY expires_at DESC LIMIT 1', [issuer])).rows[0].return_url, /^https:\/\/bane\.example\.org\/consent\/oar_[0-9a-f]{32}$/);
+
+  // CIMD: the metadata document identifies the client. Its loopback redirect matches any port (OpenCode picks one per sign-in).
+  const first = await authorize(cimd, loopback(54321));
+  assert.equal(first.response.status, 303);
+  assert.ok(first.id, first.location);
+  const view = await json(browser(`/api/oauth/requests/${first.id}`, personal));
+  assert.deepEqual([view.flow, view.client.name, view.client.domain, view.scopes, view.redirect, view.device], ['code', 'Fixture Agent', 'agent.example.com', ['bane:read', 'bane:send', 'bane:manage'], { kind: 'loopback', host: '127.0.0.1:54321' }, null]);
+  assert.equal((await browser(`/api/oauth/requests/${first.id}`, undefined, { cookie: '' })).status, 401, 'Only a signed-in browser reads a request');
+  assert.equal(fetched.filter(url => url === cimd).length, 1, 'The document is cached');
+  // Consent: from the dashboard only, as the chosen account, in a workspace of that account, narrowing what was asked.
+  assert.equal((await json(approve(first.id, personal, { workspaceId: P, scopes: ['bane:read'] }, { origin: 'https://evil.example' }))).error.code, 'CSRF_ORIGIN_INVALID');
+  assert.equal((await json(approve(first.id, personal, { workspaceId: W, scopes: ['bane:read'] }))).error.code, 'PERMISSION_DENIED');
+  assert.equal((await json(approve(first.id, work, { workspaceId: P, scopes: ['bane:read', 'bane:manage'] }))).error.code, 'ADMIN_REQUIRED');
+  assert.equal((await json(approve(first.id, personal, { workspaceId: P, scopes: ['bane:read'], receiving: true }))).error.code, 'VALIDATION_FAILED');
+  // The person must have signed in with Google (ACCOUNT_REQUIRED_ACR); the approval records how they did.
+  assert.equal((await json(approve(first.id, personal, { workspaceId: P, scopes: ['bane:read'] }, { cookie: stale }))).error.code, 'REAUTHENTICATION_REQUIRED');
+  const approved = await json(approve(first.id, personal, { workspaceId: P, scopes: ['bane:read', 'bane:send'] }));
+  const back = new URL(approved.redirect);
+  assert.deepEqual([`${back.origin}${back.pathname}`, back.searchParams.get('state'), back.searchParams.get('iss')], [loopback(54321), first.state, origin]);
+  assert.equal((await approve(first.id, personal, { workspaceId: P, scopes: ['bane:read'] })).status, 404, 'A request is answered once');
+  const code = back.searchParams.get('code')!;
+  // PKCE: another verifier, redirect URI (even the same loopback on another port), client or resource gets nothing.
+  for (const [wrong, expected] of [[{ code_verifier: pkce().verifier }, 'invalid_grant'], [{ redirect_uri: loopback(54322) }, 'invalid_grant'], [{ client_id: dir + 'other.json' }, 'invalid_grant'], [{ resource: origin + '/v1' }, 'invalid_target']] as const)
+    assert.equal(await errorCode(exchange(code, loopback(54321), first.verifier, cimd, wrong as Record<string, string>)), expected, JSON.stringify(wrong));
+  // The resource names /mcp with any query (OpenCode sends its configured URL); the audience is /mcp.
+  const issued = await json(exchange(code, loopback(54321), first.verifier, cimd, { resource: origin + '/mcp?codemode=false' }));
+  assert.deepEqual([issued.token_type, issued.expires_in, issued.scope], ['Bearer', 300, 'bane:read bane:send']);
+  assert.match(issued.access_token, /^bane_at_[0-9a-f]{64}$/); assert.match(issued.refresh_token, /^bane_rt_[0-9a-f]{96}$/);
+  const me = await identity(issued.access_token);
+  assert.deepEqual([me.workspaceId, me.permissions], [P, ['read', 'send']]);
+  const grantA = await grantOf(issued.access_token);
+  assert.deepEqual((await db.query('SELECT kind,acr,client_name,user_id FROM bane_resource_grants WHERE id=$1', [grantA])).rows[0], { kind: 'oauth', acr: google, client_name: 'Fixture Agent', user_id: personal });
+
+  // Refresh rotates. Within a minute the previous token returns the same new pair (a lost response, two at once).
+  const r1 = await json(refresh(issued.refresh_token));
+  assert.notEqual(r1.refresh_token, issued.refresh_token);
+  const again = await json(refresh(issued.refresh_token));
+  assert.deepEqual([again.access_token, again.refresh_token], [r1.access_token, r1.refresh_token]);
+  assert.ok(again.expires_in > 0 && again.expires_in <= 300);
+  // A narrower scope narrows the access token only.
+  const r2 = await json(refresh(r1.refresh_token, { scope: 'bane:read' }));
+  assert.deepEqual([r2.scope, (await identity(r2.access_token)).permissions], ['bane:read', ['read']]);
+  assert.equal(await errorCode(refresh(r2.refresh_token, {}, dir + 'other.json')), 'invalid_grant', 'Another client cannot use it');
+  // After the window, the previous token is a reuse: the approval ends with all its tokens.
+  await db.query("UPDATE bane_oauth_refresh SET rotated_at=now()-interval '2 minutes' WHERE grant_id=$1", [grantA]);
+  assert.equal(await errorCode(refresh(r1.refresh_token)), 'invalid_grant');
+  assert.equal((await mcp(r2.access_token)).status, 401);
+  assert.equal(await errorCode(refresh(r2.refresh_token)), 'invalid_grant');
+  assert.equal((await db.query('SELECT revoked FROM bane_resource_grants WHERE id=$1', [grantA])).rows[0].revoked, true);
+
+  // A code used twice ends the approval it created.
+  const second = await authorize(cimd, loopback(40001));
+  const secondCode = new URL((await json(approve(second.id, personal, { workspaceId: P, scopes: ['bane:read'] }))).redirect).searchParams.get('code')!;
+  const secondTokens = await json(exchange(secondCode, loopback(40001), second.verifier));
+  assert.equal(await errorCode(exchange(secondCode, loopback(40001), second.verifier)), 'invalid_grant');
+  assert.equal((await mcp(secondTokens.access_token)).status, 401);
+
+  // Authorization errors go back to the client with state and iss once its redirect URI is known to be its own.
+  const backError = (location: string) => { const url = new URL(location); return [url.searchParams.get('error'), url.searchParams.has('state'), url.searchParams.get('iss')]; };
+  for (const [extra, error] of [[{ code_challenge: '' }, 'invalid_request'], [{ code_challenge_method: 'plain' }, 'invalid_request'], [{ resource: 'https://other.example.org/mcp' }, 'invalid_target'],
+    [{ resource: origin + '/mcp#tools' }, 'invalid_target'], [{ scope: 'bane:admin' }, 'invalid_scope'], [{ response_type: 'token' }, 'unsupported_response_type'], [{ prompt: 'none' }, 'consent_required']] as const)
+    assert.deepEqual(backError((await authorize(cimd, loopback(40002), extra as Record<string, string>)).location), [error, true, origin], JSON.stringify(extra));
+  // An unknown or unsafe client, or a redirect URI it didn't register, is explained on Bane's page and never redirected to.
+  const before = fetched.length;
+  for (const id of ['http://agent.example.com/oauth/client.json', 'https://127.0.0.1/client.json', 'https://localhost/client.json', 'https://agent.example.com/', 'https://agent.example.com:8443/client.json',
+    'https://agent.example.com/client.json?v=1', 'https://AGENT.example.com/oauth/client.json', 'https://agent.internal/client.json', 'https://agent.example.com/oauth/../client.json', 'bcl_' + '0'.repeat(32), 'opencode'])
+    assert.equal((await authorize(id, loopback(5000))).location, origin + '/consent?error=client', id);
+  assert.equal(fetched.length, before, 'Nothing is fetched for a URL that cannot be a metadata document');
+  for (const name of ['moved', 'other', 'secret', 'web', 'large', 'html']) assert.equal((await authorize(dir + name + '.json', loopback(5000))).location, origin + '/consent?error=client', name);
+  assert.equal((await authorize(cimd, 'http://127.0.0.1:5000/elsewhere')).location, origin + '/consent?error=redirect');
+  assert.equal((await authorize(cimd, 'https://attacker.example/callback')).location, origin + '/consent?error=redirect');
+
+  // DCR for clients without a document: open, but only safe redirect URIs.
+  const register = (body: object) => app.fetch(new Request(origin + '/oauth/register', { method: 'POST', headers: { 'content-type': 'application/json', 'x-bane-client-ip': '198.51.100.7' }, body: JSON.stringify(body) }), runtime);
+  for (const uris of [['http://agent.example.com/callback'], ['https://agent.example.com/cb#frag'], ['javascript:alert(1)'], []])
+    assert.equal((await register({ client_name: 'Server', redirect_uris: uris, token_endpoint_auth_method: 'none' })).status, 400, JSON.stringify(uris));
+  const cli = await json(register({ client_name: 'Device CLI', redirect_uris: ['http://127.0.0.1/callback'], grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'], token_endpoint_auth_method: 'none' }));
+  assert.match(cli.client_id, /^bcl_[0-9a-f]{32}$/); assert.equal(cli.client_secret, undefined);
+  // A registered loopback redirect also matches any port (OpenCode reuses its registration with a new port).
+  for (const port of [61001, 61002]) assert.ok((await authorize(cli.client_id, loopback(port))).id, String(port));
+  assert.equal((await authorize(cli.client_id, loopback(61003, 'localhost'))).location, origin + '/consent?error=redirect');
+  const server = await json(register({ client_name: 'Server', redirect_uris: ['https://agent.example.com/cb'], token_endpoint_auth_method: 'client_secret_basic' }));
+  assert.match(server.client_secret, /^bane_cs_[0-9a-f]{64}$/);
+  const serverTokens = async (secret: string) => {
+    const started = await authorize(server.client_id, 'https://agent.example.com/cb');
+    const serverCode = new URL((await json(approve(started.id, personal, { workspaceId: P, scopes: ['bane:read'] }))).redirect).searchParams.get('code')!;
+    return exchange(serverCode, 'https://agent.example.com/cb', started.verifier, '', {}, { authorization: 'Basic ' + Buffer.from(`${server.client_id}:${secret}`).toString('base64') });
   };
-  const now = Math.floor(Date.now()/1000);
-  const claims = {iss:issuer, aud:resource, sub:'subject', client_id:'fixture', iat:now, exp:now+300, jti:randomUUID(), scope:'bane:read'};
-  const token = (extra: object = {}) => jwt(signer.privateKey,{alg:'ES256',typ:'at+jwt',kid:'fixture'},{...claims,...extra});
-  const run = (access: string, proof?: string) => authorizeResource(runtime, new Request(resource,{method:'POST',headers:{authorization:`${proof?'DPoP':'Bearer'} ${access}`,...(proof?{DPoP:proof}:{})}}),async a=>Response.json(a.permissions));
-  await db.query('BEGIN');
-  try {
-    assert.ok(manager);
-    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
-    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Bane',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
-    assert.deepEqual(await (await run(token())).json(),['read']);
-    for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
-    assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
-    // Google-only covers MCP: every access token, refreshed ones included, must carry the configured acr.
-    runtime.config.accountRequiredAcr='urn:anomaly:acr:google';
-    for(const acr of [undefined,'urn:anomaly:acr:passkey','urn:anomaly:acr:github','urn:anomaly:acr:google ']) {
-      const refused=await run(token({acr,jti:randomUUID()}));
-      assert.equal(refused.status,401);
-      assert.match(refused.headers.get('www-authenticate')!,/^Bearer error="insufficient_user_authentication".*acr_values="urn:anomaly:acr:google"$/);
-      const body=await refused.json() as {jsonrpc:string;error:{code:number;message:string}};
-      assert.equal(body.jsonrpc,'2.0');assert.equal(body.error.code,-32000);assert.match(body.error.message,/Google/);
-    }
-    assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
-    runtime.config.accountRequiredAcr=undefined;
-    // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
-    await db.query('UPDATE bane_users SET email_verified=false WHERE id=$1',[manager.userId]);
-    assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read']);
-    await db.query('UPDATE bane_users SET email_verified=true WHERE id=$1',[manager.userId]);
-    assert.equal((await run(token({scope:'openid'}))).status,403);
-    const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
-    const bound=token({cnf:{jkt:thumbprint}});
-    assert.equal((await run(bound)).status,401);
-    const proof=jwt(holder.privateKey,{typ:'dpop+jwt',alg:'ES256',jwk},{iat:now,jti:randomUUID(),htm:'POST',htu:resource,ath:createHash('sha256').update(bound).digest('base64url')});
-    assert.equal((await run(bound,proof)).status,200);
-    assert.equal((await run(bound,proof)).status,401);
-    assert.equal((await run(token({jti:randomUUID()}))).status,200);
-    const grants=await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,claims.client_id]);
-    assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
-    const {createApp}=await import('./src/app.js');const app=createApp();
-    const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
-    const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
-    const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
-    assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
-    assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
-    assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A new JWT cannot restore a revoked client');
-    const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);
-    // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
-    const deniedBody=await denied.json() as {jsonrpc:string;id:null;error:{code:number;message:string}};
-    assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
-    const bind=(id:string,body:object,cookie?:string,env?:typeof dashboard)=>call(`/v1/mcp-connections/${id}/workspace`,'POST',body,cookie,env);
-    assert.equal((await bind(grants.rows[0].id,{workspaceId:'default',receiving:false})).status,409,'A revoked approval cannot be rebound');
-    // With several workspaces, a new client's approval waits unbound until the user chooses one in Bane.
-    const suffix=randomUUID().slice(0,8);
-    for(const [workspace,role] of [['mcp-admin','admin'],['mcp-member','member']]) {
-      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$2)',[workspace+suffix,workspace+suffix]);
-      await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),manager.userId,workspace+suffix,role]);
-    }
-    let tick=2;const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++});
-    const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
-    const pending=await run(multi());
-    assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
-    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:`Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/mcp/${(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id}`},id:null});
-    const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
-    assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
-    const multiId=unbound.rows[0].id as string;
-    const listed=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
-    assert.deepEqual([listed?.workspaceId,listed?.receiving],[null,false]);
-    assert.equal((await bind(multiId,{workspaceId:'mcp-member'+suffix,receiving:true})).status,403,'Receiving needs an owner or admin');
-    assert.equal((await bind(multiId,{workspaceId:'missing'+suffix,receiving:false})).status,403);
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:false,extra:true})).status,422);
-    const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
-    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
-    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
-    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
-    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
-    const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
-    assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can bind it');
-    assert.equal((await run(multi())).status,403);
-    const chosen=await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:false});
-    assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-admin'+suffix,receiving:false});
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true})).status,200);
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'default',receivingConsent:true});
-    const after=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
-    assert.deepEqual([after?.workspaceId,after?.receiving],['default',true]);
-    // Once a single membership remains, an unbound approval (here: its workspace was deleted) binds by itself,
-    // without the receiving consent given for the old workspace.
-    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-admin'+suffix]);
-    await db.query("UPDATE bane_resource_grants SET workspace_id=NULL WHERE id=$1",[multiId]);
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
-  } finally { await db.query('ROLLBACK'); }
+  const wrongSecret = await serverTokens('bane_cs_' + '0'.repeat(64));
+  assert.deepEqual([wrongSecret.status, (await wrongSecret.json() as any).error], [401, 'invalid_client']);
+  assert.equal((await json(serverTokens(server.client_secret))).token_type, 'Bearer');
+
+  // Device grant (RFC 8628) for clients without a browser: a short code, approved on /device with the same consent.
+  const device = await json(form('/oauth/device_authorization', { client_id: cli.client_id, scope: 'bane:read', resource: origin + '/mcp' }));
+  assert.match(device.user_code, /^[CDFGHJKLMNPQRTVWX2346789]{4}-[CDFGHJKLMNPQRTVWX2346789]{4}$/);
+  assert.deepEqual([device.verification_uri, device.verification_uri_complete, device.expires_in, device.interval], [origin + '/device', `${origin}/device?code=${device.user_code}`, 600, 5]);
+  assert.equal(await errorCode(form('/oauth/device_authorization', { client_id: cimd })), 'unauthorized_client', 'A client that did not list the device grant (OpenCode) cannot start one');
+  const poll = (deviceCode = device.device_code) => errorCode(form('/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: deviceCode, client_id: cli.client_id }));
+  assert.equal(await poll(), 'authorization_pending');
+  assert.equal(await poll(), 'slow_down');
+  const lookup = (value: string) => browser('/api/oauth/device', personal, { method: 'POST', body: { code: value } });
+  assert.equal((await json(lookup('CDFG-HJKL'))).error.code, 'DEVICE_CODE_INVALID');
+  const found = await json(lookup(device.user_code.toLowerCase().replace('-', ' ')));
+  const deviceView = await json(browser(`/api/oauth/requests/${found.id}`, personal));
+  assert.deepEqual([deviceView.flow, deviceView.client.name, deviceView.client.domain, deviceView.redirect, deviceView.device.userCode, deviceView.device.ip, deviceView.device.country],
+    ['device', 'Device CLI', null, null, device.user_code, '198.51.100.7', null]);
+  assert.deepEqual(await json(approve(found.id, personal, { workspaceId: P, scopes: ['bane:read'] })), { done: true });
+  await db.query("UPDATE bane_oauth_requests SET polled_at=now()-interval '1 minute' WHERE id=$1", [found.id]);
+  const deviceTokens = await json(form('/oauth/token', { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: device.device_code, client_id: cli.client_id }));
+  assert.deepEqual([deviceTokens.token_type, deviceTokens.scope, (await identity(deviceTokens.access_token)).workspaceId], ['Bearer', 'bane:read', P]);
+  assert.equal(await poll(), 'invalid_grant', 'A device code works once');
+  const refused = await json(form('/oauth/device_authorization', { client_id: cli.client_id }));
+  await browser(`/api/oauth/requests/${(await json(lookup(refused.user_code))).id}/deny`, personal, { method: 'POST', body: {} });
+  assert.equal(await poll(refused.device_code), 'access_denied');
+  const late = await json(form('/oauth/device_authorization', { client_id: cli.client_id }));
+  await db.query("UPDATE bane_oauth_requests SET expires_at=now() WHERE device_hash=$1", [createHash('sha256').update(late.device_code).digest('hex')]);
+  assert.equal(await poll(late.device_code), 'expired_token');
+
+  // Two accounts in one browser: the same client approved by the work account acts only as it, in its workspace, and
+  // each account lists only its own approvals. `profile` in the resource only labels the entry.
+  const workTokens = await signIn(work, W, ['bane:read', 'bane:send', 'bane:manage'], cimd, 54400, { resource: origin + '/mcp?codemode=false&profile=Work laptop' });
+  assert.deepEqual((await identity(workTokens.access_token)).workspaceId, W);
+  const memberTokens = await signIn(work, P, ['bane:read'], cimd, 54401);
+  assert.deepEqual(await identity(memberTokens.access_token).then(me => [me.workspaceId, me.permissions]), [P, ['read']]);
+  const listed = async (as: string) => (await json(browser('/v1/mcp-connections?limit=100', as))).data as { id: string; profile: string | null; workspaceId: string; kind: string; name: string }[];
+  const [personalList, workList] = [await listed(personal), await listed(work)];
+  assert.equal(personalList.filter(c => workList.some(w => w.id === c.id)).length, 0);
+  const workGrant = await grantOf(workTokens.access_token);
+  assert.deepEqual(workList.find(c => c.id === workGrant), { ...workList.find(c => c.id === workGrant)!, profile: 'Work laptop', workspaceId: W, kind: 'oauth', name: 'Fixture Agent' });
+  assert.equal((await browser(`/v1/mcp-connections/${workGrant}/revoke`, personal, { method: 'POST' })).status, 404, 'Another account cannot revoke it');
+
+  // A demotion below what was approved (manage) or a removal from the workspace ends an approval at its next use.
+  await db.query("UPDATE workspace_members SET role='member' WHERE user_id=$1 AND workspace_id=$2", [work, W]);
+  assert.equal((await mcp(workTokens.access_token)).status, 401);
+  assert.equal(await errorCode(refresh(workTokens.refresh_token)), 'invalid_grant');
+  await db.query("DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id=$2", [work, P]);
+  assert.equal((await mcp(memberTokens.access_token)).status, 401);
+
+  // Revoking in Settings, or the client revoking its refresh token (signing out), ends the approval and its tokens.
+  const settings = await signIn(personal, P, ['bane:read'], cimd, 54402);
+  const settingsGrant = await grantOf(settings.access_token);
+  assert.equal((await browser(`/v1/mcp-connections/${settingsGrant}/revoke`, personal, { method: 'POST' })).status, 200);
+  assert.equal((await mcp(settings.access_token)).status, 401);
+  assert.equal(await errorCode(refresh(settings.refresh_token)), 'invalid_grant');
+  const signOut = await signIn(personal, P, ['bane:read'], cimd, 54403);
+  assert.equal((await form('/oauth/revoke', { token: signOut.refresh_token, client_id: cimd })).status, 200);
+  assert.equal((await mcp(signOut.access_token)).status, 401);
+
+  // DPoP is optional: a client that proves a key at the token endpoint gets tokens bound to it.
+  const holder = generateKeyPairSync('ec', { namedCurve: 'P-256' }), jwk = holder.publicKey.export({ format: 'jwk' });
+  const proof = (htm: string, htu: string, ath?: string) => {
+    const body = [{ typ: 'dpop+jwt', alg: 'ES256', jwk }, { jti: randomUUID(), htm, htu, iat: Math.floor(Date.now() / 1000), ...(ath ? { ath } : {}) }].map(part => Buffer.from(JSON.stringify(part)).toString('base64url')).join('.');
+    return body + '.' + Buffer.from(sign('sha256', Buffer.from(body), { key: holder.privateKey, dsaEncoding: 'ieee-p1363' })).toString('base64url');
+  };
+  const bound = await authorize(cimd, loopback(54404));
+  const boundCode = new URL((await json(approve(bound.id, personal, { workspaceId: P, scopes: ['bane:read'] }))).redirect).searchParams.get('code')!;
+  const dpop = await json(exchange(boundCode, loopback(54404), bound.verifier, cimd, {}, { dpop: proof('POST', origin + '/oauth/token') }));
+  assert.equal(dpop.token_type, 'DPoP');
+  const ath = createHash('sha256').update(dpop.access_token).digest('base64url'), mcpProof = proof('POST', origin + '/mcp', ath);
+  assert.equal((await mcp(dpop.access_token)).status, 401, 'A bound token needs its proof');
+  assert.equal((await mcp(dpop.access_token, 'DPoP', { dpop: mcpProof })).status, 200);
+  assert.equal((await mcp(dpop.access_token, 'DPoP', { dpop: mcpProof })).status, 401, 'A proof is used once');
+  assert.equal(await errorCode(refresh(dpop.refresh_token)), 'invalid_grant', 'A bound refresh token needs its proof');
+
+  // MCP keys (Settings → Connected apps): a bearer for an approval, for clients that can't sign in. /mcp only.
+  const created = await json(browser('/v1/mcp-connections', personal, { method: 'POST', body: { name: 'Build server', workspaceId: P, scopes: ['bane:read'], expiresInDays: 30 } }));
+  assert.match(created.key, /^bane_mcp_[0-9a-f]{64}$/);
+  assert.deepEqual([created.connection.kind, created.connection.name, created.connection.status], ['key', 'Build server', 'active']);
+  assert.ok(Math.abs(Date.parse(created.connection.expiresAt) - Date.now() - 30 * 86_400_000) < 60_000);
+  assert.equal((await identity(created.key)).workspaceId, P);
+  assert.equal((await app.fetch(new Request(origin + '/v1/me', { headers: { authorization: `Bearer ${created.key}` } }), runtime)).status, 401, 'Keys work only at /mcp');
+  assert.equal((await json(browser('/v1/mcp-connections', work, { method: 'POST', body: { name: 'Nope', workspaceId: P, scopes: ['bane:read'] } }))).error.code, 'PERMISSION_DENIED');
+  // Whoever holds a key can revoke it (a key that leaked).
+  assert.equal((await form('/oauth/revoke', { token: created.key })).status, 200);
+  assert.equal((await mcp(created.key)).status, 401);
 });
 
 test('MCP cutover expires legacy approvals and tokens but keeps the objects they created',async t=>{
@@ -2948,16 +3059,42 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
     });
 });
 
+// One MCP sign-in through Bane's authorization server, as the manager: a registered public client (one per transport),
+// a loopback redirect, consent in the manager's current workspace with the bane scopes asked for, and the code exchange.
+const mcpClients = new WeakMap<typeof http, string>();
+async function mcpSignIn(request: typeof http, scope: string) {
+  let clientId = mcpClients.get(request);
+  if (!clientId) {
+    clientId = ok(await request('POST','/oauth/register',undefined,{client_name:'Acceptance agent',redirect_uris:['http://127.0.0.1/callback'],grant_types:['authorization_code','refresh_token'],token_endpoint_auth_method:'none'}),201).client_id as string;
+    mcpClients.set(request, clientId);
+  }
+  const redirect = 'http://127.0.0.1:49152/callback', verifier = (randomUUID()+randomUUID()).replaceAll('-',''), state = randomUUID();
+  const query = new URLSearchParams({response_type:'code',client_id:clientId,redirect_uri:redirect,code_challenge:createHash('sha256').update(verifier).digest('base64url'),code_challenge_method:'S256',state,scope,resource:`${PUBLIC_ORIGIN}/mcp`});
+  const started = await request('GET',`/oauth/authorize?${query}`,MANAGER);
+  const requestId = /\/consent\/(oar_[0-9a-f]{32})$/.exec(started.headers.get('location') ?? '')?.[1];
+  assert.ok(requestId, diagnostic(started));
+  const workspaceId = ok(await request('GET','/v1/me',MANAGER)).workspaceId as string;
+  const scopes = scope.split(' ').filter(word => /^bane:(?:read|send|manage)$/.test(word));
+  const back = new URL(ok(await request('POST',`/api/oauth/requests/${requestId}/approve`,MANAGER,{workspaceId,scopes,receiving:false})).redirect);
+  assert.equal(back.searchParams.get('state'), state);
+  const tokens = ok(await request('POST','/oauth/token',undefined,new URLSearchParams({grant_type:'authorization_code',code:back.searchParams.get('code')!,redirect_uri:redirect,code_verifier:verifier,client_id:clientId}),{'content-type':'application/x-www-form-urlencoded'}));
+  secrets.add(tokens.access_token); secrets.add(tokens.refresh_token);
+  return { token: tokens.access_token as string, refresh: tokens.refresh_token as string, clientId };
+}
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
   const writableScope = 'bane:read bane:manage offline_access';
   const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
+  // An approval made the way a client gets one: authorize (a registered client, a loopback redirect), approve on the
+  // consent page as the manager in their current workspace, and exchange the code with PKCE (src/oauth-server.ts).
   async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope, request = http) {
-    const { mintResourceToken } = await import('./scripts/fixture-issuer.js');
-    const issued = mintResourceToken(resourceUrl,manager!.userId,scope);
+    const signedIn = await mcpSignIn(request, scope);
+    // The approval behind the token (its grant_key, `consentId` in these tests).
+    const grant = (await db.query('SELECT grant_id FROM bane_oauth_tokens WHERE hash=$1',[createHash('sha256').update(signedIn.token).digest('hex')])).rows[0].grant_id as string;
+    const issued = { ...signedIn, consentId: grant.slice(4) };
+    cleanup(t,async()=>{ await db.query('DELETE FROM bane_resource_grants WHERE grant_key=$1',[issued.consentId]); });
     const first=await request('POST','/mcp',issued.token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
     assert.equal(first.status,200,diagnostic(first));
-    cleanup(t,async()=>{ await db.query('DELETE FROM bane_resource_grants WHERE grant_key=$1',[issued.consentId]); });
     return issued;
   }
   async function rpc(token: string, method: string, params: Json = {}, path = '/mcp?codemode=true'): Promise<Json> {
@@ -2989,8 +3126,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
-    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, defaults);
-    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
+    // One tool per operation for clients that run Code Mode or tool search: ?codemode=false (what OpenCode adds to a remote
+    // URL, Cloudflare's convention), and the older ?codemode=true and ?toolsets=all. Plain /mcp is the grouped catalog.
+    for (const path of ['/mcp?codemode=false', '/mcp?toolsets=all']) assert.deepEqual((await rpc(token, 'tools/list', {}, path)).tools, catalog.tools, path);
+    assert.notDeepEqual(defaults, catalog.tools);
     assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool'));
     assert.ok(defaults.every((tool:Json)=>(tool.name==='describe_tool' || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
     const listContactsBranch = defaults.find((tool:Json)=>tool.name==='contacts').inputSchema.oneOf.find((b:Json)=>b.properties.action.const==='list');
@@ -3278,8 +3417,9 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await db.query('SELECT FROM mail_grant_objects WHERE grant_id=$1',[consentId])).rowCount,0);
     assert.equal((await db.query('SELECT id FROM api_keys WHERE id=ANY($1) AND revoked_at IS NOT NULL',[grantKeys])).rowCount,2,'Both credential generations are revoked with their approval.');
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
+    // A revoked approval's token is invalid (401), so the client signs in again rather than retrying it.
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revokedConnection.status, 403, diagnostic(revokedConnection));
+    assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
   });
 
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
@@ -3313,7 +3453,7 @@ describe('Hosted MCP OAuth and tools', () => {
       runtime.config.multiTenant=true;
       try{
         const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
-        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
+        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
           return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
         for(const codemode of [true,false]){
           const ops=await listed(codemode);
@@ -3357,7 +3497,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('inbound overview: REST and both MCP listings require manage and explicit receiving consent', async t => {
     await simulatedSesFixture(t, async ({ db, request, runtime }) => {
       const { resourceInventory } = await import('./src/mcp-resources.js'); const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
-      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', `/mcp?codemode=${codemode}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
+      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', codemode?'/mcp?codemode=false':'/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
         return new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => ((x.inputSchema?.properties?.action?.enum ?? []) as string[]).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))); };
       const offered = async (token: string) => [await listed(token, true), await listed(token, false)].map(set => set.has('getInboundOverview'));
       const mint = async (token: string, name: 'createApiKey' | 'createAgentToken') => {
@@ -3393,7 +3533,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t,async({db,request})=>{
       const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
       const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
-      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
+      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
       const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
       const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
       for(const ops of [code,plain]){assert.ok(ops.has('getCurrentIdentity'));assert.ok(ops.has('sendEmail'));assert.ok(!ops.has('listContacts'),'read-level reads need read');}
@@ -4575,9 +4715,9 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
-      const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      const manager = await oauthGrant(t, db, writableScope, request);
       await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[manager.consentId]);
-      const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
+      const reader = await oauthGrant(t, db, 'bane:read offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
       await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4), ($5,$2,'example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
@@ -4632,7 +4772,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      const { token,consentId } = await oauthGrant(t, db, writableScope, request);
       await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
@@ -4784,7 +4924,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('hosted MCP read-only OAuth hides state changes except read-only delegation, offers REST read operations, and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
-    const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
+    const { token, consentId, refresh, clientId } = await oauthGrant(t, db, 'bane:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
@@ -4867,9 +5007,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(hidden.structuredContent.error.code, 'TOOL_UNAVAILABLE');
     const deletion = await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER);
     assert.equal(deletion.status, 200, diagnostic(deletion));
+    // 401, not 403: the client refreshes once, gets invalid_grant (the chain went with the approval) and asks the person to
+    // sign in again, instead of retrying a token that will never work.
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revoked.status, 403, diagnostic(revoked));
-    assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+    assert.equal(revoked.status, 401, diagnostic(revoked));
+    assert.match(revoked.headers.get('www-authenticate') ?? '', /^Bearer error="invalid_token".*resource_metadata=/);
+    const refreshed = await http('POST', '/oauth/token', undefined, new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: clientId }), { 'content-type': 'application/x-www-form-urlencoded' });
+    assert.deepEqual([refreshed.status, refreshed.body.error], [400, 'invalid_grant']);
     assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
     const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
@@ -8980,12 +9124,8 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.config.simulatedSes.latencyMs = 0;
   const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
-  const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
-  t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
-    const url=new URL(input instanceof Request?input.url:String(input));
-    if(url.origin===process.env.ACCOUNT_ISSUER && url.hostname==='127.0.0.1') return fetchIssuer(input,init);
-    unexpectedNetwork++; throw Error('Network is forbidden in simulated SES acceptance scenarios.');
-  });
+  let unexpectedNetwork=0;
+  t.mock.method(globalThis,'fetch',async ()=>{ unexpectedNetwork++; throw Error('Network is forbidden in simulated SES acceptance scenarios.'); });
   try {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
@@ -9024,7 +9164,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         }
       }
       await scenario({ runtime, db, local, run, jobs, request, fetch: req => Promise.resolve(app.fetch(req, runtime)) });
-      assert.equal(unexpectedNetwork,0,'Only the loopback fixture issuer may be contacted.');
+      assert.equal(unexpectedNetwork,0,'Simulated SES scenarios make no network calls.');
       throw rollback;
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
@@ -13444,11 +13584,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('MCP login and consent share identity admission and OAuth state expires under a durable cap',async t=>{
+  test('Sign-in and MCP authorization entry share identity admission and OAuth state expires under a durable cap',async t=>{
     const {guardPublicRequest}=await import('./src/core.js');
     let reads=0; const peer=unique('identity-entry'),work=async()=>{reads++;return new Response(null,{status:200});};
-    for(let i=0;i<40;i++) assert.equal((await guardPublicRequest(i%2?'/api/auth/sign-in/social':'/mcp/login',new Headers(),peer,work)).status,200);
-    for(const path of ['/mcp/login','/mcp/consent']) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
+    // Starting a sign-in or an MCP authorization, registering a client and entering a device code share one budget.
+    const entries=['/api/auth/sign-in/social','/oauth/authorize','/oauth/register','/oauth/device_authorization','/api/oauth/device'];
+    for(let i=0;i<40;i++) assert.equal((await guardPublicRequest(entries[i%entries.length]!,new Headers(),peer,work)).status,200);
+    for(const path of entries) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
+    // Clients refresh tokens without spending it.
+    assert.equal((await guardPublicRequest('/oauth/token',new Headers(),peer,work)).status,200);
+    reads--;
     assert.equal(reads,40);
     await simulatedSesFixture(t,async({runtime,db})=>{
       const {reserveSignIn}=await import('./src/dashboard-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});

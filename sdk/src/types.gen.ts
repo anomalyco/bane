@@ -19,6 +19,15 @@ export type McpConnection = {
      * The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.
      */
     profile: string | null;
+    /**
+     * oauth: an MCP client that signed in and was approved on Bane’s consent page. key: an MCP key created in Settings, a bearer token for a client that can’t sign in.
+     */
+    kind: 'oauth' | 'key';
+    /**
+     * When it ends: an OAuth approval lasts 30 days past its client’s last refresh, a key until the expiry chosen at creation.
+     */
+    expiresAt: string | null;
+    lastUsedAt: string | null;
 };
 
 export type ApiError = {
@@ -39,6 +48,19 @@ export type ApiError = {
             [key: string]: unknown;
         }>;
     };
+};
+
+export type McpKey = {
+    connection: McpConnection;
+    key: string;
+};
+
+export type CreateMcpKey = {
+    name: string;
+    workspaceId: string;
+    scopes: Array<'bane:read' | 'bane:send' | 'bane:manage'>;
+    receiving?: boolean;
+    expiresInDays?: number;
 };
 
 export type McpConnectionBinding = {
@@ -5533,6 +5555,67 @@ export type ListMcpConnectionsResponses = {
 };
 
 export type ListMcpConnectionsResponse = ListMcpConnectionsResponses[keyof ListMcpConnectionsResponses];
+
+export type CreateMcpKeyData = {
+    body: CreateMcpKey;
+    path?: never;
+    query?: never;
+    url: '/v1/mcp-connections';
+};
+
+export type CreateMcpKeyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateMcpKeyError = CreateMcpKeyErrors[keyof CreateMcpKeyErrors];
+
+export type CreateMcpKeyResponses = {
+    /**
+     * Success
+     */
+    201: McpKey;
+};
+
+export type CreateMcpKeyResponse = CreateMcpKeyResponses[keyof CreateMcpKeyResponses];
 
 export type BindMcpConnectionData = {
     body: McpConnectionBinding;

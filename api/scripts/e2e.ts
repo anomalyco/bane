@@ -18,7 +18,7 @@ const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subd
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
-  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard,
+  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard, createMcpKey: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
   listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
@@ -302,6 +302,7 @@ async function devBoundaries() {
   await denied('removeWorkspaceMember',{path:fake});
   await denied('revokeMcpConnection',{path:fake});
   await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
+  await denied('createMcpKey',{body:{name:prefix,workspaceId:prefix,scopes:['bane:read']}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
   await denied('revokeAgentToken',{path:fake},404,'NOT_FOUND');
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
@@ -335,12 +336,26 @@ async function regionalSend() {
 
 async function mcpChallenge() {
   const trace = ctx.getStore()!; trace.last='POST /mcp'; trace.requestId=null;
-  // /mcp accepts an OAuth access token (ES256 JWT), not the API's delegated agent tokens.
-  const res = await fetch(new URL('/mcp',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),headers:{'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
+  // /mcp accepts tokens from Bane's own authorization server (and MCP keys), not the API's keys or agent tokens.
+  const res = await fetch(new URL('/mcp?codemode=false',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),headers:{'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
   trace.requestId=res.headers.get('x-request-id');
   const challenge=res.headers.get('www-authenticate') ?? '';
   const rpc = await res.json() as {jsonrpc?:string;error?:{code:number}};
-  check(res.status===401 && rpc.jsonrpc==='2.0' && rpc.error?.code===-32000 && challenge.includes(`${base.origin}/.well-known/oauth-protected-resource/mcp`) && /(?:bane|opensend):read/.test(challenge),'MCP OAuth discovery challenge changed');
+  check(res.status===401 && rpc.jsonrpc==='2.0' && rpc.error?.code===-32000 && challenge.includes(`resource_metadata="${base.origin}/.well-known/oauth-protected-resource/mcp"`) && challenge.includes('scope="bane:read bane:send bane:manage"'),'MCP OAuth discovery challenge changed');
+  // What an MCP client (OpenCode) needs to sign in: the resource names this origin as its authorization server, byte
+  // for byte, and the server takes metadata-document clients (CIMD) as public clients, PKCE S256, and the device grant.
+  const json = async (path: string) => { trace.last=`GET ${path}`; const r = await fetch(new URL(path,base),{redirect:'error',signal:AbortSignal.timeout(12000)}); trace.requestId=r.headers.get('x-request-id'); check(r.ok,`${path} answered ${r.status}`); return r.json() as Promise<Record<string,unknown>>; };
+  const resource = await json('/.well-known/oauth-protected-resource/mcp'), server = await json('/.well-known/oauth-authorization-server');
+  check(resource.resource===`${base.origin}/mcp` && JSON.stringify(resource.authorization_servers)===JSON.stringify([base.origin]) && server.issuer===base.origin,'MCP resource and authorization server metadata disagree');
+  check(server.client_id_metadata_document_supported===true && (server.token_endpoint_auth_methods_supported as string[]).includes('none') && JSON.stringify(server.code_challenge_methods_supported)==='["S256"]'
+    && (server.grant_types_supported as string[]).includes('urn:ietf:params:oauth:grant-type:device_code') && server.device_authorization_endpoint===`${base.origin}/oauth/device_authorization`,'MCP authorization server metadata changed');
+  // An authorization request starts (a 303 to sign-in or consent), and a client that isn't one is explained, never redirected to.
+  const authorize = async (clientId: string) => { trace.last='GET /oauth/authorize'; const r = await fetch(new URL('/oauth/authorize?'+new URLSearchParams({response_type:'code',client_id:clientId,redirect_uri:'http://127.0.0.1:1/callback',code_challenge:'E2E'.padEnd(43,'A'),code_challenge_method:'S256',state:prefix,scope:'bane:read',resource:`${base.origin}/mcp`}),base),{redirect:'manual',signal:AbortSignal.timeout(12000)}); trace.requestId=r.headers.get('x-request-id'); return r; };
+  const refused = await authorize('https://e2e.invalid/client.json');
+  check(refused.status===303 && refused.headers.get('location')===`${base.origin}/consent?error=client`,'An unknown MCP client was not refused on the consent page');
+  // OpenCode's real metadata document, fetched by the deployed Worker: accepted, with any loopback port.
+  const opencode = await authorize('https://opencode.ai/oauth/opencode/client.json');
+  check(opencode.status===303 && !(opencode.headers.get('location') ?? '').includes('error='),`OpenCode's client metadata document was refused (${opencode.headers.get('location')})`);
 }
 const idKey = (name: string) => ({ 'Idempotency-Key': `${prefix}:${name}` });
 function message(to: string): SendEmailInput {

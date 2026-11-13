@@ -126,8 +126,13 @@ export interface Runtime {
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
   webhookFetch?: WebhookFetch;
+  // A bounded GET of a public HTTPS document that never follows redirects (an MCP client's metadata document). Node
+  // supplies the same connect-time guard against private addresses; Workers use plain fetch.
+  publicGet?: PublicGet;
 }
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
+/** `text` is null when the body is longer than `limit` bytes. */
+export type PublicGet = (url: string, init: { accept: string; limit: number; signal: AbortSignal }) => Promise<{ status: number; contentType: string | null; text: string | null }>;
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
 export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
@@ -428,7 +433,8 @@ export function allowMalformedSns(peer: string) {
   failureCounts.set(key,count+1); return true;
 }
 export async function guardPublicRequest(path: string, headers: Headers, peer: string, work: () => Promise<Response>) {
-  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path) || path==='/mcp/login' || path==='/mcp/consent';
+  // Starting a sign-in or an authorization, registering a client or entering a device code: each request is charged.
+  const entry = /^\/(?:api\/auth|\.well-known)(?:\/|$)/.test(path) || ['/oauth/authorize','/oauth/register','/oauth/device_authorization','/api/oauth/device'].includes(path);
   const lane = entry ? 'identity-entry' : publicFailureBucket(path, 401, headers);
   if (!lane) return work();
   const minute = Math.floor(Date.now()/60000);

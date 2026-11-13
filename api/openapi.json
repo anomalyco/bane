@@ -102,6 +102,27 @@
               "null"
             ],
             "description": "The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "oauth",
+              "key"
+            ],
+            "description": "oauth: an MCP client that signed in and was approved on Bane’s consent page. key: an MCP key created in Settings, a bearer token for a client that can’t sign in."
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it ends: an OAuth approval lasts 30 days past its client’s last refresh, a key until the expiry chosen at creation."
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -115,7 +136,10 @@
           "status",
           "workspaceId",
           "receiving",
-          "profile"
+          "profile",
+          "kind",
+          "expiresAt",
+          "lastUsedAt"
         ]
       },
       "ApiError": {
@@ -164,6 +188,65 @@
         "required": [
           "error"
         ]
+      },
+      "McpKey": {
+        "type": "object",
+        "properties": {
+          "connection": {
+            "$ref": "#/components/schemas/McpConnection"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection",
+          "key"
+        ]
+      },
+      "CreateMcpKey": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bane:read",
+                "bane:send",
+                "bane:manage"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 3
+          },
+          "receiving": {
+            "type": "boolean",
+            "default": false
+          },
+          "expiresInDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 90
+          }
+        },
+        "required": [
+          "name",
+          "workspaceId",
+          "scopes"
+        ],
+        "additionalProperties": false
       },
       "McpConnectionBinding": {
         "type": "object",
@@ -18334,6 +18417,158 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/mcp-connections' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createMcpKey",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Creates an MCP key: an approval for one workspace with a bearer key that works only at /mcp, for MCP clients that can’t sign in with OAuth (a remote server). Dashboard sessions only. The key is returned once.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMcpKey"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createMcpKey } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createMcpKey({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"workspaceId\": \"workspace_123\",\n    \"scopes\": [\n      \"bane:read\"\n    ],\n    \"receiving\": false,\n    \"expiresInDays\": 90\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"workspaceId\": \"workspace_123\",\n  \"scopes\": [\n    \"bane:read\"\n  ],\n  \"receiving\": false,\n  \"expiresInDays\": 90\n}'"
           }
         ]
       }

@@ -284,6 +284,7 @@ export function createLiveApi(): BaneApi {
       },
       revokeMcpConnection: async (id, signal) => { await call(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       bindMcpConnection: async (id, input, signal) => { await call(`/mcp-connections/${idPath(id)}/workspace`, 'POST', input, signal) },
+      createMcpKey: async (input, signal) => call('/mcp-connections', 'POST', input, signal),
     },
     templates: {
       list: (input = {}, signal) => page('/templates', input, row => row as import('./types').CampaignTemplateSummary, {search: input.search, archived: input.archived === true ? 'true' : 'false', publishedOnly: input.publishedOnly === true ? 'true' : 'false'}, signal),

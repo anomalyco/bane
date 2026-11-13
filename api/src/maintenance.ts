@@ -121,9 +121,16 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
   // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
   await drain('bane_signin_attempts', batch(sql`bane_signin_attempts`, sql`last_at < now() - interval '30 days'`));
-  for (const table of ['auth_state_slots','bane_dpop_proofs','bane_sessions','bane_login_flows']) {
+  for (const table of ['auth_state_slots','bane_dpop_proofs','bane_sessions','bane_login_flows','bane_oauth_requests','bane_oauth_tokens','bane_oauth_refresh']) {
     await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
   }
+  // MCP approvals whose client never collected its tokens (approved, then abandoned), and registered clients unused for
+  // 90 days that no live approval names (oauth-server.ts).
+  await drain('bane_resource_grants',batch(sql`bane_resource_grants`,sql`kind='oauth' AND issued_at=0 AND expires_at <= now()`));
+  // A rotated refresh token's replay pair is needed for a minute; don't keep a live refresh token, even encrypted, longer.
+  await runtime.db.execute(sql`UPDATE bane_oauth_refresh SET replay=NULL WHERE replay IS NOT NULL AND rotated_at < now() - interval '5 minutes'`);
+  await drain('bane_oauth_clients',batch(sql`bane_oauth_clients`,sql`coalesce(last_used_at,created_at) < now() - interval '90 days'
+    AND NOT EXISTS(SELECT FROM bane_resource_grants g WHERE g.client_id=bane_oauth_clients.id AND NOT g.revoked AND g.expires_at > now())`));
   await runtime.db.execute(sql`SELECT mail_prune_route_versions()`);
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));

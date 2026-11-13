@@ -24,7 +24,8 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname)) return 'operator';
   if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys') return 'support';
-  if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
+  // Sign-in, the MCP authorization server (/oauth/*, its consent API /api/oauth/*, metadata) and approvals.
+  if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || /^\/(?:api\/auth|api\/oauth|oauth)(?:\/|$)/.test(pathname) || pathname.startsWith('/.well-known/')) return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
   if (pathname === '/v1/events/ses') return 'ops-events';
@@ -63,8 +64,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
     switch (group) {
       case 'auth': return registerAuth;
       case 'auth-ui': {
-        const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
-        return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); };
+        const [{ registerMcpAuth }, { registerDashboardAuth }, { registerOAuthServer }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js'), import('./oauth-server.js')]);
+        return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); registerOAuthServer(target); };
       }
       case 'audience': return (await import('./audience.js')).registerAudience;
       case 'audience-query': return (await import('./audience-query.js')).registerAudienceQuery;
@@ -316,15 +317,15 @@ export async function createOpenApiApp(): Promise<App> {
     { registerMcpAuth }, { registerDashboardAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
     { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup }, { registerOperator },
-    { registerAudit }, { registerSupport, registerSupportOperator },
+    { registerAudit }, { registerSupport, registerSupportOperator }, { registerOAuthServer },
   ] = await wrapModuleLoad(() => Promise.all([
     import('./mcp-auth.js'), import('./dashboard-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
-    import('./audit.js'), import('./support.js'),
+    import('./audit.js'), import('./support.js'), import('./oauth-server.js'),
   ]));
   const [{ registerBilling }, { registerStripeWebhook }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]));
-  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
+  registerMcpAuth(full); registerDashboardAuth(full); registerOAuthServer(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full);

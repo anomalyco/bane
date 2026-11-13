@@ -185,7 +185,7 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|oauth|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
@@ -205,6 +205,9 @@ export default {
       const headers = new Headers(request.headers);
       headers.delete('x-opensend-client-ip');
       headers.set('x-bane-client-ip', address);
+      // The country Cloudflare places the client in, shown with a device sign-in request (oauth-server.ts). Never the client's own claim.
+      const country = (request as Request & { cf?: { country?: unknown } }).cf?.country;
+      if (typeof country === 'string' && /^[A-Z0-9]{2}$/.test(country)) headers.set('x-bane-client-country', country); else headers.delete('x-bane-client-country');
       const runtimeStarted = performance.now();
       const response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)

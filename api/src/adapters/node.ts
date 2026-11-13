@@ -5,7 +5,7 @@ import { request } from 'node:https';
 import { isIPv4, type LookupFunction } from 'node:net';
 import { loadConfig } from '../config.js';
 import { ApiError, log } from '../core.js';
-import type { Runtime, WebhookFetch } from '../core.js';
+import type { PublicGet, Runtime, WebhookFetch } from '../core.js';
 import { s3Storage } from './storage.js';
 
 // Node can reach loopback, RFC1918, link-local (cloud metadata), CGNAT, ULA and other non-global
@@ -41,6 +41,19 @@ export const nodeWebhookFetch: WebhookFetch = (url, init) => new Promise((resolv
   req.on('error', reject);
   req.end(init.body);
 });
+// node:https never follows a redirect: a 3xx is returned as it is, and the caller refuses it.
+export const nodePublicGet: PublicGet = (url, init) => new Promise((resolve, reject) => {
+  const target = new URL(url);
+  if (target.protocol !== 'https:') return reject(new Error('HTTPS only'));
+  const req = request(target, { method: 'GET', headers: { accept: init.accept, 'user-agent': 'Bane' }, lookup: guardedLookup, signal: init.signal }, response => {
+    const chunks: Buffer[] = []; let size = 0, over = false;
+    response.on('data', (chunk: Buffer) => { size += chunk.length; if (size > init.limit) { over = true; response.destroy(); } else chunks.push(chunk); });
+    const done = () => resolve({ status: response.statusCode ?? 0, contentType: response.headers['content-type'] ?? null, text: over ? null : Buffer.concat(chunks).toString('utf8') });
+    response.on('end', done); response.on('close', done); response.on('error', reject);
+  });
+  req.on('error', reject);
+  req.end();
+});
 export function postgresConnection(connectionString: string | undefined) {
   if (!connectionString) throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL is required.');
   let url: URL; try { url = new URL(connectionString); } catch { throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL must be a PostgreSQL URL.'); }
@@ -57,5 +70,5 @@ export function nodeRuntime(env: Record<string, string | undefined>): { runtime:
   // pg evicts failed idle clients, but an unhandled pool error also terminates Node.
   // Keep the API/runner alive to reconnect; never log the error's client/config data.
   pool.on('error', () => log('error', { code: 'POSTGRES_POOL_ERROR', message: 'An idle PostgreSQL connection failed; the pool will reconnect.' }));
-  return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch }, close: () => pool.end() };
+  return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch, publicGet: nodePublicGet }, close: () => pool.end() };
 }

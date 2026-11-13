@@ -4,7 +4,7 @@ import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipien
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
-import type { AudiencePlan, ConsentEvent, ImportPreview } from './types'
+import type { AudiencePlan, ConsentEvent, ImportPreview, McpConnection } from './types'
 import { parseCsv } from '../features/audience/csv'
 // Demo webhook signing secrets, so revealing one shows the same value until it is rotated.
 const demoSecrets = new Map<string, string>()
@@ -972,6 +972,11 @@ export function createMockApi(): BaneApi {
         tokens.forEach(token => { if (token.grantId === connectionId) token.revokedAt ??= now() })
       }),
       bindMcpConnection: (connectionId, input, signal) => run(signal, true, s => { Object.assign(find(s.mcpConnections ??= [], connectionId, 'MCP connection'), input, { updatedAt: now() }) }),
+      createMcpKey: (input, signal) => run(signal, true, s => {
+        const connection: McpConnection = { id: `mcp_mck_demo${Date.now()}`, clientId: 'bane:mcp-key', name: input.name, userEmail: 'ryan@example.com', scopes: input.scopes, createdAt: now(), updatedAt: now(), status: 'active', workspaceId: input.workspaceId, receiving: input.receiving, profile: null, kind: 'key', expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000).toISOString(), lastUsedAt: null }
+        ;(s.mcpConnections ??= []).push(connection)
+        return { connection, key: `bane_mcp_${'0'.repeat(64)}` }
+      }),
     },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),

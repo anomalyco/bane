@@ -90,9 +90,9 @@ function summaryJson(event: AuditEvent): SQL {
     FROM jsonb_strip_nulls(jsonb_build_object(${sql.join(parts, sql`, `)})) s)`;
 }
 const text = (value: Value<string | null | undefined>, max: number) => value instanceof SQL ? sql`left(${value}, ${max})` : value == null ? sql`NULL` : sql`${value.slice(0, max)}`;
-/** The grant behind an MCP or agent-token actor is an OAuth consent; its user is the person who approved it. */
+/** The grant behind an MCP or agent-token actor is an approval (bane_resource_grants); its user is the person who made it. */
 const grantUser = (actor: AuditActor) => actor.userId ? sql`${actor.userId}` : actor.grantId?.startsWith('mcp_')
-  ? sql`(SELECT user_id FROM oauth_consent WHERE id = ${actor.grantId.slice(4)})` : sql`NULL`;
+  ? sql`(SELECT user_id FROM bane_resource_grants WHERE id = ${actor.grantId})` : sql`NULL`;
 
 /**
  * The INSERT for one audit row, to compose into the caller's own statement (a data-modifying CTE) so a change and

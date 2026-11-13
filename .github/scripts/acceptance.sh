@@ -39,9 +39,8 @@ shard() (
     if (( rc != 0 )); then tail -n 100 "$HOME"/*.log; fi
   }
   trap cleanup EXIT
-  export ACCOUNT_ISSUER="https://127.0.0.1:$((PORT+1000))" BANE_TEST_SIGNING_KEY="$HOME/fixture.pem" NODE_EXTRA_CA_CERTS="$HOME/fixture.crt"
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' -keyout "$BANE_TEST_SIGNING_KEY" -out "$NODE_EXTRA_CA_CERTS" 2>/dev/null
-  node --import tsx scripts/fixture-issuer.ts > "$HOME/issuer.log" 2>&1 & pids+=("$!")
+  # Sessions are seeded with this issuer; nothing listens there (Bane issues its own MCP tokens, src/oauth-server.ts).
+  export ACCOUNT_ISSUER="https://127.0.0.1:$((PORT+1000))"
   # The emulator normalizes bucket paths differently from the AWS SDK; like the previous fixture,
   # it checks object operations here, not SigV4 calculations.
   # This release packages the CLI module but omits its bin entry point.

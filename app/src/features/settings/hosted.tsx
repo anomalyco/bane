@@ -17,6 +17,7 @@ import { PlanUsage } from './usage'
 import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
 import { ActivitySection } from './activity'
+import { McpKeyButton } from './mcp-key'
 import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
@@ -24,12 +25,12 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account' | 'apps'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
   { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
-  { title: 'You', items: [{ key: 'account', label: 'Account' }] },
+  { title: 'You', items: [{ key: 'account', label: 'Account' }, { key: 'apps', label: 'Connected apps' }] },
 ]
 const items = groups.flatMap(group => group.items)
 
@@ -59,6 +60,7 @@ export function HostedSettings() {
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'billing' && <BillingSection row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
+          {section === 'apps' && <><SectionHeader title="Connected apps" actions={<McpKeyButton size="sm" />} /><ConnectedApps /></>}
         </>}
     </div>
   </div>
@@ -133,8 +135,6 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
-  const apps = useApiDef(queries.mcpConnections())
-  const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'MCP connection revoked')
   const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
@@ -143,12 +143,23 @@ function AccountRows() {
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
-    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
-      :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
-    {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
-    <MutationError error={revoke.error}/>
-    {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
     {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
+  </div>
+}
+// The MCP clients this account approved on Bane's consent page, and its MCP keys. Each acts in one workspace; revoking
+// one ends it and everything it created stops or pauses (mcp/README.md).
+function ConnectedApps() {
+  const session = useSession()
+  const apps = useApiDef(queries.mcpConnections())
+  const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'Connected app revoked')
+  if (!session?.identity) return null
+  return <div className="settings-rows">
+    {apps.isPending && <div className="settings-row"><Skeleton width={220} height={20} /></div>}
+    {apps.data?.length === 0 && <Row title="No connected apps" hint="Connect OpenCode, Claude Code or Cursor from Docs → Connect an agent, or create an MCP key">{null}</Row>}
+    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.kind === 'key' ? 'MCP key' : app.clientId}>{app.status==='expired'?'Expired · reconnect the client':'Revoked'}</Row>
+      :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
+    {apps.error && <p role="alert">Couldn’t load connected apps.</p>}
+    <MutationError error={revoke.error}/>
   </div>
 }
 // A client's name and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of one client
@@ -163,7 +174,9 @@ export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app:
   const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
   const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
   const name = connectionTitle(app)
-  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
+  const used = app.lastUsedAt ? `used ${new Date(app.lastUsedAt).toLocaleDateString()}` : 'not used yet'
+  const hint = !app.workspaceId ? 'Choose a workspace' : app.kind === 'key' ? `MCP key · ${used}${app.expiresAt ? ` · expires ${new Date(app.expiresAt).toLocaleDateString()}` : ''}` : `${app.clientId} · ${used}`
+  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={hint}>
     <span className="settings-mcp">
       <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}
         options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={id => { setWorkspaceId(id); if (!admin(id)) setReceiving(false) }} />

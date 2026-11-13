@@ -211,8 +211,9 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       if (!same.length && free === undefined) throw new AccountLimit();
       slot = same[0]?.slot ?? free!;
       if (same.length) await db.execute(sql`DELETE FROM bane_sessions WHERE token_hash=ANY(${sql.param(same.map(account => account.hash))}::text[])`);
-      await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
-        (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${staff},now()+interval '7 days')`);
+      // acr: how this sign-in authenticated. An MCP approval made in this session records it (oauth-server.ts).
+      await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,staff,acr,expires_at) VALUES
+        (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${staff},${typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null},now()+interval '7 days')`);
     });
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
@@ -228,11 +229,23 @@ const cookieOptions = (runtime: Runtime, maxAge: number) => ({ httpOnly:true, se
 const SESSION_SECONDS = 604800;
 
 /** The session this request acts as, or null. A tab naming an account this browser has no live session for gets null. */
-async function currentSession(runtime: Runtime, headers: Headers) {
+export async function currentSession(runtime: Runtime, headers: Headers) {
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
-  const { rows: [row] } = await runtime.db.execute<{ token_hash: string; user_id: string; subject: string; staff: boolean }>(activeSession(runtime, jar));
+  const { rows: [row] } = await runtime.db.execute<{ token_hash: string; user_id: string; issuer: string; subject: string; staff: boolean; acr: string | null }>(activeSession(runtime, jar));
   return row ?? null;
+}
+
+/** Whether this browser has a live session for any account (an MCP authorization signs in first when it has none). */
+export async function browserSignedIn(runtime: Runtime, headers: Headers) {
+  return (await connectedAccounts(runtime, await sessionJar(runtime, headers))).accounts.length > 0;
+}
+
+/** Starts a sign-in that returns to `returnUrl`, for a browser sent here by an app rather than the dashboard. */
+export async function signInRedirect(c: Ctx, returnUrl: URL) {
+  const start = await beginAccountLogin(c.env, returnUrl, c.req.header('x-bane-client-ip') ?? 'unknown');
+  setCookie(c, cookieName(c.env, 'login'), start.binding, cookieOptions(c.env, 600));
+  return start.url;
 }
 
 export async function accountSessionUser(runtime: Runtime, headers: Headers, requireCurrentEmail = false) {
