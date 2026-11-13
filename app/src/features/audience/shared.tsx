@@ -47,7 +47,7 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
   function show() { if (disabled || open) return; setOpen(true); setSearch(''); setActive(Math.max(0, items.findIndex(item => item.id === value))) }
   function move(step: number) { const next = (activeIndex + step + items.length) % items.length; setActive(next); menu.current?.querySelectorAll('[role="option"]')[next]?.scrollIntoView({ block: 'nearest' }) }
   return <div className={className ? `audience-list-picker ${className}` : 'audience-list-picker'} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setOpen(false); setSearch('') } }}>
-    <Input id={id} role="combobox" aria-label={label} aria-describedby={describedBy} aria-expanded={open} aria-controls={open ? listbox : undefined} aria-autocomplete="list" aria-activedescendant={open ? `${listbox}-${activeIndex}` : undefined} autoComplete="off" spellCheck={false} disabled={disabled}
+    <Input id={id} role="combobox" title={open ? undefined : name || undefined} aria-label={label} aria-describedby={describedBy} aria-expanded={open} aria-controls={open ? listbox : undefined} aria-autocomplete="list" aria-activedescendant={open ? `${listbox}-${activeIndex}` : undefined} autoComplete="off" spellCheck={false} disabled={disabled}
       placeholder={open ? 'Search lists by name' : value && !name ? (selected.isError ? 'List not found' : 'Loading list…') : emptyLabel} value={open ? search : name ?? ''}
       onFocus={show} onClick={show} onChange={event => { setSearch(event.target.value); setActive(event.target.value.trim() ? 1 : 0); setOpen(true) }}
       onKeyDown={event => {
@@ -58,7 +58,7 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
       }} />
     <ChevronDown size={14} aria-hidden="true" />
     {open && <div ref={menu} id={listbox} role="listbox" aria-label={label ?? 'Lists'} className="ui-popover audience-list-options"><div className="ui-popover-scroll">
-      {items.map((item, index) => <button key={item.id || 'none'} id={`${listbox}-${index}`} type="button" role="option" tabIndex={-1} aria-selected={index === activeIndex} data-current={item.id === value || undefined} className="audience-list-option" onPointerMove={() => setActive(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(item.id)}><span>{item.name}</span>{item.id === value && <Check size={14} aria-hidden="true" />}</button>)}
+      {items.map((item, index) => <button key={item.id || 'none'} id={`${listbox}-${index}`} type="button" role="option" title={item.name} tabIndex={-1} aria-selected={index === activeIndex} data-current={item.id === value || undefined} className="audience-list-option" onPointerMove={() => setActive(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(item.id)}><span>{item.name}</span>{item.id === value && <Check size={14} aria-hidden="true" />}</button>)}
       {options.isPending ? <div className="audience-list-note" role="status">Loading lists…</div> : options.isError ? <div className="audience-list-note" role="alert">Couldn’t load lists. Close and reopen to try again.</div> : search.trim() && !options.data.length ? <div className="audience-list-note">No list named “{search.trim()}”.</div> : options.data.nextCursor ? <div className="audience-list-note">More lists exist. Type to narrow them down.</div> : null}
     </div></div>}
   </div>

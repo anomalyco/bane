@@ -30,9 +30,8 @@
 .audience-legend__term { color: var(--color-text); }
 .audience-legend__toggle { display: none; }
 .audience-import-fields[hidden] { display: none; }
-/* A fixed value the person can read but not edit, in the shape of an input (the contact's email). */
-.audience-readonly { display: flex; align-items: center; min-width: 0; height: var(--control-height); padding: 0 var(--space-8); border-radius: var(--radius-sm); background: var(--color-layer-1); outline: 1px solid var(--color-border-muted); outline-offset: -1px; color: var(--color-muted); line-height: var(--leading-sm); }
-.audience-readonly .private-address__value, .audience-summary > .private-address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The contact page's summary address shortens to the line instead of running past it. */
+.audience-summary > .private-address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .audience-properties dt::first-letter { text-transform: uppercase; }
 
 /* ListPicker: an input that searches lists by name, with the shared popover surface for its options. */
@@ -56,7 +55,7 @@
 .audience-plan { display: flex; flex-direction: column; gap: var(--space-8); min-height: calc(7 * var(--leading-sm) + 6 * var(--space-8)); }
 .audience-plan p { margin: 0; }
 .audience-sample { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
-.audience-sample li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audience-sample li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px; margin: -3px; }
 
 /* Segment rule builder: one row per condition (field, operator, value, remove). */
 .audience-conditions { display: flex; flex-direction: column; gap: var(--space-8); }
