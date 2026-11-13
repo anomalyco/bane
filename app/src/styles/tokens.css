@@ -115,7 +115,7 @@
   --color-border-strong: rgb(0 0 0 / 20%);
   --color-accent: #3B5CF6;
   --color-accent-hover: #3250DF;
-  --color-brand: oklch(0.54 0.2 266); /* the mark (#3761E1): 5.1:1 on deep; docs/brand.md */
+  --color-brand: #798ABA; /* the mark, oklch(0.638 0.075 269.2): 3.3:1 on deep, 3.0:1 on layer-2; docs/brand.md */
   --color-active-bg: #F2F2F2;
   --color-contrast: #242424;
   --color-contrast-hover: #3F3F3F;
@@ -177,6 +177,10 @@
   --row-height: 44px;
   --row-height-lg: 56px;
   --sidebar-width: 232px;
+  /* The sidebar's edge padding, and the inset of content inside its boxes (workspace picker, navigation links). The logo,
+     the picker's avatar and the navigation labels share one left edge: gutter + inset. */
+  --sidebar-gutter: var(--space-12);
+  --sidebar-inset: var(--space-12);
   --page-inset: 8px;
   --page-gap: var(--space-20);
   --motion-duration: 85ms;
@@ -210,7 +214,7 @@
   --color-border-strong: rgb(255 255 255 / 20%);
   --color-accent: #A2BCFF;
   --color-accent-hover: #C3D4FD;
-  --color-brand: oklch(0.608 0.166 266); /* #537BE5: the same 5.1:1 on deep as light */
+  --color-brand: #798ABA; /* the same colour as light: 5.9:1 on deep */
   --color-active-bg: #2E2E2E;
   --color-contrast: #EDEDED;
   --color-contrast-hover: #FFFFFF;
