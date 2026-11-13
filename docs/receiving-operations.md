@@ -158,7 +158,7 @@ Order matters: the old Worker writes attachment keys the old policy refuses, and
 5. **Pulumi, then the Worker.** Preview, expect imports for the existing destinations and feedback subscriptions, creates for the two feedback queues, queue policies and alarms, and in-place updates for the topic delivery policies and the three runtime policies. Then run the normal deploy. If the Worker logs `POOL_SENDING_DRIFT … event destinations`, Pulumi has not applied the destinations; do not restore the old runtime grants.
 6. **BYO v5 customers (N1).** Received attachments need the updated `api/byo-template.yaml` stack before the new Worker serves their receiving. BYO receiving is not enabled in production.
 
-Before the first rotation, [upgrade with the current key](../infra/pulumi/README.md#runtime-credentials) so the Worker reads the bundled secret and Pulumi registers the drain hook. Rotate every 90 days, or at once on suspicion: confirm `bane-deploy` may call `iam:DeleteAccessKey` on `user/bane-runtime`, then `pulumi config set --stack "$STAGE" bane:runtimeKeyRotation "$(date +%Y-%m-%d)"` and deploy. One Worker-secret update publishes the new pair; the previous key stays valid for a five-minute drain before deletion.
+Runtime key rotation, gateway secret creation and runtime policy publication are operator-only. Complete the state-only handoff and verified credential rotation in the operator project before reopening deploys; never use a CI rotation setting.
 
 ## Redrive one failed notification
 

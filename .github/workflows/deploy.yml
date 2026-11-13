@@ -360,6 +360,18 @@ jobs:
 
       - *stage-tip
 
+      - name: Require completed operator state handoff
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: infra/pulumi
+        env:
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+        run: |
+          set -euo pipefail
+          # Removing declarations from a program is NOT a state-only transfer. Never let CI plan a delete.
+          pulumi stack export --stack "$STAGE" | jq -e 'all(.deployment.resources[];
+            ((.type == "aws:iam/accessKey:AccessKey" or .type == "aws:iam/user:User" or .type == "aws:iam/policy:Policy" or
+              .type == "aws:secretsmanager/secret:Secret" or (.urn|endswith("::worker-runtime-credentials"))) | not))' >/dev/null
+
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0

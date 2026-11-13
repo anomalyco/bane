@@ -2,7 +2,7 @@
 
 Production (`009882681002`, `https://bane.mx`) and dev (`905840579680`, `https://dev.bane.mx`) have separate dedicated accounts. No policy or key is shared between them.
 
-The [hosted Pulumi stacks](../pulumi/README.md) manage the runtime key and three identity policies. Mail controls and both permissions boundaries are operator-owned. Before deploying, complete the [fenced policy transition and live verification](../../docs/receiving-operations.md). Do not rerun the key bootstrap in these accounts. The renderer below is the policy source for both stacks and the acceptance suite.
+The stage operator manages the runtime key and three identity policy defaults; the [hosted Pulumi stacks](../pulumi/README.md) only attach existing approved policies. Mail controls and both permissions boundaries are operator-owned. Before deploying, complete the [fenced policy transition and live verification](../../docs/receiving-operations.md). Do not rerun the key bootstrap in these accounts. The renderer below is the policy source for both stacks and the acceptance suite.
 
 ## Manual bootstrap reference (non-Pulumi installations)
 

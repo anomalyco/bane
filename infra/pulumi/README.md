@@ -19,9 +19,7 @@ In addition to existing mail resources identified by the adoption inventory, eac
 
 ### Runtime credentials
 
-Each stack **creates one access key**; AWS cannot return the old key's secret. `bane:writeWorkerSecrets` defaults to **true in dev, false in production**, and `Pulumi.production.yaml` turns it on explicitly for `bane-production`. A single v5 `WorkersSecret` PUT publishes the complete key pair as `AWS_RUNTIME_CREDENTIALS`. Turning the flag off leaves the binding in place.
-
-**Upgrade before rotating:** first deploy with `runtimeKeyRotation` unchanged. This publishes the existing pair, installs the old-key drain hook, and rolls out Worker code that prefers the bundle. The two previous bindings are retained for the upgrade; don't roll back to split-binding-only code after the first rotation. On subsequent rotations Pulumi creates the new key, updates the bundle, then waits five minutes before deleting the previous key. Keep an IAM key slot free and don't overlap rotations or Worker deploys.
+The operator owns the runtime user, key, three managed policy defaults, Worker credential binding and gateway secret metadata. CI reads the existing policies/metadata and may attach only the three approved policies to the already bounded user. Never put a new key in the Bane CI checkpoint. Before switching programs, fence and back up this stage, hand off old state entries without deleting physical resources, preview without replacement, rotate the prior CI-state key through the operator procedure, and verify the existing Worker binding before retiring the previous key. An out-of-date checkpoint blocks CI rather than allowing deletions.
 
 `bane:publishDomainConnectKey` defaults to **false**. Only production may enable it, to **create** two public TXT records at `_dck1.domainconnect.bane.mx`. Verify the [public key in index.ts](index.ts) matches the signing key and the records are still absent first.
 

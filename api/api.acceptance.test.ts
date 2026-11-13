@@ -27,7 +27,7 @@ function iamAllows(statements:IamStatement[],action:string,resource:string,conte
     switch(op){
       case 'StringEquals':case 'Bool':case 'ArnEquals':return values.length>0 && values.some(v=>wanted.includes(v));
       case 'StringLike':case 'ArnLike':return values.length>0 && values.some(v=>wanted.some(w=>like(w,v)));
-      case 'StringNotEquals':return !values.some(v=>wanted.includes(v));
+      case 'StringNotEquals':case 'ArnNotEquals':return !values.some(v=>wanted.includes(v));
       case 'StringNotLike':case 'ArnNotLike':return !values.some(v=>wanted.some(w=>like(w,v)));
       case 'StringEqualsIfExists':case 'ArnEqualsIfExists':return !values.length || values.some(v=>wanted.includes(v));
       case 'ForAllValues:StringEquals':return values.every(v=>wanted.includes(v));
@@ -111,10 +111,15 @@ test('deploy role documents: mail controls, gateway roles and task publication a
   }
   assert.equal(allows('iam:PutRolePolicy',role('bane-mail-gateway-execution'),{'iam:PermissionsBoundary':boundary.gateway}),false);
   assert.equal(allows('iam:DeleteRolePolicy',role('bane-mail-gateway-execution'),{'iam:PermissionsBoundary':boundary.gateway}),false);
-  for(const name of ['bane-runtime','bane-runtime-ohio','bane-runtime-trusted']) assert.equal(allows('iam:CreatePolicyVersion',policy(name)),true,name);
-  assert.equal(allows('iam:CreateUser',user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime}),true);
-  assert.equal(allows('iam:PutUserPolicy',user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime}),true);
-  for(const action of ['iam:CreateAccessKey','iam:DeleteAccessKey','iam:ListAccessKeys','iam:GetUser']) assert.equal(allows(action,user('bane-runtime')),true,action);
+  for(const name of ['bane-runtime','bane-runtime-ohio','bane-runtime-trusted']) {
+    assert.equal(allows('iam:CreatePolicyVersion',policy(name)),false);
+    assert.equal(allows('iam:GetPolicyVersion',policy(name)),true);
+    assert.equal(allows('iam:AttachUserPolicy',user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime,'iam:PolicyARN':policy(name)}),true);
+  }
+  for(const action of ['iam:CreateAccessKey','iam:DeleteAccessKey','iam:PutUserPolicy','iam:CreateUser']) assert.equal(allows(action,user('bane-runtime'),{'iam:PermissionsBoundary':boundary.runtime}),false,action);
+  for(const action of ['iam:ListAccessKeys','iam:GetUser']) assert.equal(allows(action,user('bane-runtime')),true,action);
+  assert.equal(allows('secretsmanager:DescribeSecret',secretArn('db-url')),true);
+  assert.equal(allows('secretsmanager:CreateSecret',secretArn('db-url')),false);
   assert.equal(allows('ecs:RegisterTaskDefinition',approved),false);
   assert.equal(allows('ecs:UpdateService',ohio('ecs','service/bane-mail-gateway/bane-mail-gateway')),true);
   for(const action of ['ecs:CreateService','ecs:UpdateService']){
@@ -219,6 +224,7 @@ test('runtime boundary v3: every current runtime permission fits and mail-contro
     const type=resource.split(':').slice(5).join(':').split('/')[0];
     if(action==='ses:SendEmail')return ['identity','configuration-set'].includes(type!);
     if(action.includes('TenantResourceAssociation'))return ['identity','configuration-set','tenant'].includes(type!);
+    if(action==='ses:GetReputationEntity' || action==='ses:UpdateReputationEntityCustomerManagedStatus')return type==='tenant';
     if(action==='ses:UpdateReputationEntityPolicy')return ['tenant','reputation-policy'].includes(type!);
     if(action==='ses:TagResource')return ['identity','tenant'].includes(type!);
     if(action==='ses:ListResourceTenants')return type==='identity';

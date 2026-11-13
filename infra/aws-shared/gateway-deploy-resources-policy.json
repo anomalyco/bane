@@ -84,11 +84,16 @@
     {
       "Effect": "Allow",
       "Action": [
-        "secretsmanager:CreateSecret",
         "secretsmanager:DescribeSecret",
-        "secretsmanager:GetResourcePolicy",
-        "secretsmanager:TagResource",
-        "secretsmanager:UntagResource"
+        "secretsmanager:GetResourcePolicy"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/*"
+    },
+    {
+      "Effect": "Deny",
+      "NotAction": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetResourcePolicy"
       ],
       "Resource": "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/*"
     }

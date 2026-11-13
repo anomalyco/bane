@@ -1,8 +1,6 @@
 import * as aws from "@pulumi/aws";
 import * as cf from "@pulumi/cloudflare";
-import * as cfV5 from "@pulumi/cloudflare-v5";
 import * as pulumi from "@pulumi/pulumi";
-import { render } from "../aws-shared/runtime-policies.mjs";
 import { mailGateway } from "./mail-gateway.js";
 import { deadLetterAlarm, receivingAlarm } from './receiving-alarm.js';
 import { bucketPolicy, deliveryPolicy, feedbackPolicy, inboundPolicy, lifecycleRules, POOL_STREAMS, poolEventDestination, publicAccessBlock, receiptRule, redrivePolicy } from '../../api/src/mail-controls.js';
@@ -38,8 +36,6 @@ const roleArn = config.require("deployRoleArn");
 if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
   throw new Error(`bane:deployRoleArn must identify a role in the ${stack} account`);
 }
-const permissionsBoundary = config.get("permissionsBoundary");
-const writeWorkerSecrets = config.getBoolean("writeWorkerSecrets") ?? !production;
 const publishDomainConnectKey = config.getBoolean("publishDomainConnectKey") ?? false;
 if (!production && publishDomainConnectKey) throw new Error("Domain Connect publication is production-only");
 
@@ -169,38 +165,12 @@ const destinations = [false,true].flatMap((trusted,i)=>trusted && !trustedPublis
     eventDestination:{enabled:d.Enabled,matchingEventTypes:d.MatchingEventTypes,snsDestination:{topicArn:topic.arn}}},
     {...operatorOnly(opts(`${set}|${d.Name}`,trusted?iam:ohio)),dependsOn:[topic]});
 }));
+// Operator-owned runtime user, policy versions, keys and Worker binding. CI may
+// attach only these approved policies; lookups fail closed when bootstrap is missing.
 const runtime = "bane-runtime";
-const user = new aws.iam.User(runtime, {
-  name: runtime, path: "/", tags: { "bane:purpose": "hosted-runtime" }, permissionsBoundary,
-}, adopt(runtime, iam));
-
-const policies = render("--fresh", { account: stage.account, origin: stage.origin });
-const attachments = Object.entries(policies).map(([name, document]) => {
+const user = aws.iam.getUserOutput({ userName: runtime }, { provider: iam });
+for (const name of [runtime, "bane-runtime-ohio", "bane-runtime-trusted"]) {
   const arn = `arn:aws:iam::${stage.account}:policy/${name}`;
-  const policy = new aws.iam.Policy(name, { name, path: "/", policy: JSON.stringify(document) }, {...adopt(arn, iam),dependsOn:[route,...feedback,...destinations]});
-  return new aws.iam.UserPolicyAttachment(name, { user: user.name, policyArn: policy.arn }, adopt(`${runtime}/${arn}`, iam));
-});
-
-// The operator owns the active set; the Worker still manages identities, sets and tenants.
-
-// Never import an IAM access key: AWS returns its secret only on creation.
-// Keep the previous key active while old Worker versions and in-flight sends drain.
-const rotation = config.get("runtimeKeyRotation");
-if (rotation !== undefined && (!/^[a-z0-9-]{1,32}$/.test(rotation) || !writeWorkerSecrets)) {
-  throw new Error("bane:runtimeKeyRotation needs 1-32 lowercase letters, digits or hyphens, and bane:writeWorkerSecrets");
-}
-const drainKey = new pulumi.ResourceHook('drain-runtime-key', async () => {
-  await new Promise<void>(resolve => setTimeout(resolve, 5 * 60_000));
-});
-const key = new aws.iam.AccessKey(rotation ? `runtime-key-${rotation}` : "runtime-key", { user: user.name }, {
-  provider: iam, dependsOn: attachments, hooks: { beforeDelete: [drainKey] },
-});
-if (writeWorkerSecrets) {
-  // One PUT publishes one version containing the complete pair. Pulumi must
-  // finish this dependent update before retiring its previous key dependency.
-  const provider = new cfV5.Provider("worker-secrets", {});
-  const target = { accountId: cloudflareAccountId, scriptName: stage.worker };
-  new cfV5.WorkersSecret("worker-runtime-credentials", {
-    ...target, name: "AWS_RUNTIME_CREDENTIALS", secretText: pulumi.secret(pulumi.jsonStringify({ accessKeyId: key.id, secretAccessKey: key.secret })),
-  }, { provider, retainOnDelete: true });
+  const existing = aws.iam.getPolicyOutput({ arn }, { provider: iam });
+  new aws.iam.UserPolicyAttachment(name, { user: user.userName, policyArn: existing.arn }, adopt(`${runtime}/${arn}`, iam));
 }

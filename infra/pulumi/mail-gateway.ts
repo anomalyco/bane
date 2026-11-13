@@ -76,9 +76,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
 
   const log = new aws.cloudwatch.LogGroup(name, { name: `/ecs/${name}`, retentionInDays: 30, tags }, opts);
   const secrets = Object.entries({ DATABASE_URL: "db-url", MAILGW_CERT_PEM: "tls-cert", MAILGW_KEY_PEM: "tls-key", MAILGW_API_TOKEN: "api-token" })
-    .map(([env, key]) => ({ name: env, valueFrom: new aws.secretsmanager.Secret(`${name}-${key}`, {
-      name: `bane/${stage}/mail-gateway/${key}`, tags,
-    }, opts).arn })); // Metadata only. Never create SecretVersion or read AWSCURRENT into state.
+    .map(([env, key]) => ({ name: env, valueFrom: aws.secretsmanager.getSecretOutput({ name: `bane/${stage}/mail-gateway/${key}` }, { provider: ohio }).arn })); // Metadata only. The operator creates secrets and sets their values.
   const assumeRolePolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole",
     Principal: { Service: "ecs-tasks.amazonaws.com" }, Condition: { StringEquals: { "aws:SourceAccount": account },
       ArnLike: { "aws:SourceArn": `arn:aws:ecs:us-east-2:${account}:*` } } }] });
