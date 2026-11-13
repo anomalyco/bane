@@ -247,6 +247,11 @@ function statusTone(status: string): Tone {
 export function StatusBadge({ status, tone = statusTone(status) }: { status: string; tone?: Tone }) {
   return <span className={cx('ui-status', `ui-tone--${tone}`)}><span className="ui-status__dot" aria-hidden="true" />{formatLabel(status)}</span>;
 }
+// A status as one quiet line of a table cell: the tone's dot, the value itself (a host, say) and an optional muted note.
+// The note gives way first when the cell is narrow; `title` carries the whole text for whatever is clipped.
+export function StatusDot({ tone, children, note, title, muted = false }: { tone: Tone; children: ReactNode; note?: ReactNode; title?: string; muted?: boolean }) {
+  return <span className={cx('ui-status-dot', `ui-tone--${tone}`, muted && 'ui-status-dot--muted')} title={title}><span className="ui-status__dot" aria-hidden="true" /><span className="ui-status-dot__value">{children}</span>{note && <span className="ui-status-dot__note">{note}</span>}</span>;
+}
 export function Alert({ tone = 'neutral', title, children, onDismiss }: { tone?: Tone; title?: ReactNode; children: ReactNode; onDismiss?: () => void }) {
   return <div className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}</div>;
 }
