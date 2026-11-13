@@ -57,14 +57,14 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
 2. **Uploads bucket:** create `bane-support-dev-uploads` (production: `bane-support-uploads`) with a 90-day lifecycle rule, which matches transcript retention: `wrangler r2 bucket create <name>`, then add a rule with `wrangler r2 bucket lifecycle add` that deletes objects after 90 days. The Images binding (`IMAGES`) downscales screenshots over 1.4 MB before the model sees them. It needs no setup beyond Images being enabled on the account.
 3. **DNS:** nothing to add by hand. The Worker's Custom Domain (`support.dev.bane.mx` / `support.bane.mx`) creates its record on first deploy, as long as the zone `bane.mx` is in the same account.
 4. **The support address** in Bane's platform workspace (production `ws_90b0…`, or dev's own), through Bane's API with an admin key:
-   - create the inbound address `support@bane.mx` (dev: `support@dev.bane.mx`) and put its ID (`adr_…`) in `SUPPORT_ADDRESS_ID`;
+   - create the inbound address `support@bane.mx` (dev: `support@dev.bane.mx`) and put its ID (`mbx_…`) in `SUPPORT_ADDRESS_ID`. Give it the key `support`: routes name an inbox by its address's key;
    - create an inbox key for that address only, with read and send: this is `BANE_SUPPORT_INBOX_KEY`;
    - create a webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-inbound` (dev: `support.dev.bane.mx`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
    - add a route for the address to `["inbox:support", "webhook:<that webhook>"]`. Keep the root catch-all at `store`.
 5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`):
    - create the three inbound addresses, and one inbox key covering only those three, with read and send. This is `BANE_INTAKE_INBOX_KEY`;
    - create a second webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
-   - add a route for the three addresses to `["inbox:intake", "webhook:<that webhook>"]`. The team reads full messages and non-image attachments in that inbox;
+   - add a route for each address to its own inbox and the shared webhook, such as `abuse@bane.mx` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
    - `INTAKE_ADDRESSES` in the wrangler config lists them.
 6. **Secrets**, set with `wrangler secret put <NAME> --config wrangler.<stage>.jsonc` and never through CI:
    - `CONSOLE_GATEWAY_KEY`: the Console service key (`models:request`, budgeted). Without it, chat turns refuse with "isn't fully set up" and emails wait in the inbox.

@@ -43,7 +43,7 @@
     "DASHBOARD_ORIGINS": "https://dev.bane.mx,http://localhost:5173",
     "BANE_ORIGIN": "https://dev.bane.mx",
     "SUPPORT_ADDRESS": "support@dev.bane.mx",
-    // The inbound address ID (adr_…) of SUPPORT_ADDRESS in dev's platform workspace; set after creating it.
+    // The inbound address ID (mbx_…) of SUPPORT_ADDRESS in dev's platform workspace; set after creating it.
     "SUPPORT_ADDRESS_ID": "",
     "TICKET_TO": "ryan@anoma.ly",
     // Straight to tickets, never to the agent (src/intake.ts): their own webhook and inbox key.
