@@ -35,8 +35,8 @@ function ThreadRow({ thread, addresses, own, showAddresses, selected, onSelect }
       {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
       <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt} title={`${date(thread.lastMessageAt)} ${time(thread.lastMessageAt)} UTC`}>{when(thread.lastMessageAt)}</time>
     </span>
-    <span className="inbound-thread-row__subject">{thread.subject || '(no subject)'}</span>
-    <span className="mailbox-thread-row__snippet">{thread.snippet}</span>
+    <span className="inbound-thread-row__subject" title={thread.subject || undefined}>{thread.subject || '(no subject)'}</span>
+    <span className="mailbox-thread-row__snippet" title={thread.snippet || undefined}>{thread.snippet}</span>
     {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
   </button></li>
 }
@@ -184,7 +184,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
 function RecipientList({ label: title, values, people }: { label: string; values: string[]; people: Map<string, MailAddress> }) {
   return <p className="mailbox-composer__to inbound-recipients"><span className="inbound-recipients__label">{title}</span><span className="inbound-recipients__list">{values.map(value => {
     const name = cleanName(people.get(value)?.name)
-    return <span key={value} className="inbound-recipient">{name && <bdi className="muted">{name}</bdi>}<bdi className="inbound-recipient__address">{value}</bdi></span>
+    return <span key={value} className="inbound-recipient">{name && <bdi className="muted">{name}</bdi>}<bdi className="inbound-recipient__address"><PrivateAddress value={value} /></bdi></span>
   })}</span></p>
 }
 
@@ -234,7 +234,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
-          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi>{target.from.address}</bdi>).</p>}
+          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi><PrivateAddress value={target.from.address} /></bdi>).</p>}
         </>}
     </div>
     <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="Write a reply" disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
@@ -314,7 +314,7 @@ export function InboundPage() {
     <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
-        <div className="inbound-filter"><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
+        <div className="inbound-filter" data-address={addressId || undefined}><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
           options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => ({ value: address.id, label: address.address }))]} /></div>
         <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
         <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
@@ -323,7 +323,7 @@ export function InboundPage() {
           : threads.data.length ? <>
             <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} own={own} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/receiving">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />

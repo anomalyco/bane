@@ -8,11 +8,13 @@
 .mailbox-list .ui-tabs { flex: none; padding-top: var(--space-8); }
 .inbound-filter { padding-top: var(--space-12); }
 .inbound-filter .ui-select-trigger { width: 100%; }
+/* The chosen address is blurred until hover or focus, like every address. */
+html:not([data-privacy='off']) .inbound-filter[data-address] .ui-select-trigger:not(:hover, :focus-visible) > span:first-child { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
 .mailbox-search { width: 100%; min-width: 0; margin: var(--space-12) 0 var(--space-8); }
 .mailbox-search .ui-input { width: 100%; }
 .mailbox-list__summary { margin: 0 0 var(--space-4); font-size: var(--text-xs); }
 /* Rows bleed into the gutter so their text lines up with the search box; the unread dot sits in that gutter. */
-.mailbox-threads { display: grid; align-content: start; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)) 0 calc(-1 * var(--space-16)); padding: 0 var(--space-4) var(--space-16) 0; list-style: none; }
+.mailbox-threads { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)) 0 calc(-1 * var(--space-16)); padding: 0 var(--space-4) var(--space-16) 0; list-style: none; }
 .mailbox-thread-row { position: relative; display: grid; gap: 3px; width: 100%; padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text); text-align: left; font: inherit; cursor: pointer; transition: background var(--motion-duration, 120ms); }
 .mailbox-thread-row:hover { background: var(--color-hover); }
 .mailbox-thread-row[data-selected] { background: var(--color-active-bg, var(--color-hover)); }
@@ -31,11 +33,11 @@
 .mailbox-thread-row__snippet { color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
 .mailbox-star { flex: none; color: var(--color-warning-marker, #d4a017); fill: currentColor; }
 .mailbox-labels { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-8); }
-.mailbox-address-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
+.mailbox-address-label { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
 .mailbox-label { padding: 0 6px; border: 1px solid var(--color-border); border-radius: 4px; background: var(--color-surface); color: var(--color-muted); font-size: 11px; line-height: 18px; }
 .mailbox-thread-skeleton { display: grid; gap: var(--space-16); padding: var(--space-16) 0; }
 .mailbox-reader { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; padding: 0 3px 0 var(--space-24); }
-.mailbox-reader > .ui-empty-state { flex: 1; }
+.mailbox-reader > .ui-empty-state { flex: 1; justify-content: center; }
 
 .mailbox-conversation { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: var(--space-24); padding-top: var(--space-12); }
 .mailbox-conversation__header { display: flex; align-items: flex-start; gap: var(--space-12); }
@@ -85,8 +87,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .inbound-recipients { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: var(--space-8); margin: 0; color: var(--color-text); }
 .inbound-recipients__label { color: var(--color-muted); }
 .inbound-recipients__list { display: flex; flex-wrap: wrap; gap: 0 var(--space-12); min-width: 0; }
-.inbound-recipient { display: inline-flex; gap: var(--space-6); min-width: 0; overflow-wrap: anywhere; }
-.inbound-recipient__address { font-weight: 500; }
+.inbound-recipient { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-6); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.inbound-recipient__address { display: inline-block; min-width: 0; max-width: 100%; font-weight: 500; }
 .inbound-recipients-review > p.inbound-recipients__warning { color: var(--color-warning); }
 .inbound-recipients-review > p.mailbox-composer__to:not(.inbound-recipients) { margin: 0; }
 .mailbox-composer .ui-field { gap: var(--space-4); }
@@ -102,7 +104,13 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
   .mailbox-conversation__header { flex-wrap: wrap; }
   .mailbox-conversation__title { order: 1; flex-basis: 100%; }
   .mailbox-conversation__actions { margin-left: auto; }
+  .mailbox-page[data-thread-open] .ui-page-header .cluster > a.ui-icon-button { display: none; }
+  .mailbox-message__from { flex-wrap: wrap; gap: 0 var(--space-8); overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+  .mailbox-message__from .muted { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: visible; }
 }
+/* An address never runs past its line: masked, the blurred run is cut there; revealed, a longer one wraps inside it. */
+.mailbox-message__from .private-address__value, .inbound-recipient__address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.mailbox-message__from .private-address[data-revealed] > .private-address__value, .inbound-recipient__address .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 
 /* Inbound webhooks and keys: two-line checkbox labels align the box with the first line. */
 .mailbox-webhook-events { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
@@ -151,6 +159,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 
 /* Receiving: shared search width and one-line clipping. */
 .receiving-search { width: 240px; }
+.inbox-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receiving-clip { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .receiving-search { width: 100%; } }
 /* Route editor: the choices and the delete action. */
@@ -178,10 +187,12 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .cm-tooltip-lint .cm-diagnostic-error { border-left: 0; }
 .cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--color-active-bg); color: var(--color-text); }
 .cm-completionDetail { color: var(--color-muted); }
-.cm-tooltip.cm-completionInfo { max-width: 28rem; padding: var(--space-8); }
+.cm-tooltip.cm-completionInfo { max-width: min(28rem, calc(100vw - 2rem)); padding: var(--space-8); }
 .ritual-pickers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-16); }
 .ritual-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
 .ritual-settings textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
+/* The senders are addresses: blurred like every address, revealed by hover or focus, and in the clear with privacy mode off. */
+html:not([data-privacy='off']) .ritual-lists:not(:hover, :focus) { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
 @media (max-width: 760px) { .ritual-pickers, .ritual-settings { grid-template-columns: minmax(0, 1fr); } }
 .ritual-status { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
 .ritual-problems { display: grid; gap: var(--space-4); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
@@ -255,6 +266,12 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-agent__hint, .ritual-agent__note { margin: 0; font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 .ritual-agent__prompts { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
 .ritual-agent__prompt { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-8) var(--space-4) var(--space-8) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+/* Phone: the status wraps (two lines are always reserved, so nothing moves when the approvals load); the concept line's example drops below it. */
+@media (max-width: 640px) {
+  .ritual-agent__status { min-height: calc(2 * var(--leading-xs)); white-space: normal; mask-image: none; }
+  .rcv-concept { flex-wrap: wrap; }
+  .rcv-concept > code.rcv-concept__example { white-space: normal; overflow-wrap: anywhere; }
+}
 @media (prefers-reduced-motion: reduce) {
   .ritual-incoming { animation: ui-appear 150ms ease-out; }
   .ritual-savebar__text--remote { animation: ui-appear 150ms ease-out; }
@@ -269,6 +286,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .inbound-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-size: var(--text-sm); font-weight: 500; }
 .inbound-advanced > summary .muted { font-weight: var(--font-weight-regular); }
 .inbound-advanced__body { padding-top: var(--space-16); }
+.inbox-folder { width: 280px; max-width: 100%; }
+@media (max-width: 640px) { .inbox-folder { width: 100%; } .ui-section-header > .cluster:has(> .inbox-folder) { flex: 1 1 100%; } }
 .inbox-facts-note { max-width: 72ch; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .connect-agent__title { font-size: var(--text-sm); }
 /* Phone and tablet (the document scrolls): the conversation list and the open conversation take their natural height
@@ -282,4 +301,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
   .app-shell--compact .mailbox-reader { overflow: visible; }
   .app-shell--compact .mailbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
   .app-shell--compact .mailbox-list .ui-tabs { margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); }
+}
+/* Phone: the idle reply box is just the field; the recipients, the reply target and Send show once it has focus or text. */
+@media (max-width: 640px) {
+  .app-shell--compact .mailbox-composer:not(:focus-within):not([data-filled]) :is(.inbound-composer__target, .inbound-recipients-review, .mailbox-composer__actions) { display: none; }
 }
