@@ -1,4 +1,4 @@
-// Stripe as Bane's payment rail: Checkout top-ups, saved cards, invoice-backed off-session charges and refunds.
+// Stripe as Nightmail's payment rail: Checkout top-ups, saved cards, invoice-backed off-session charges and refunds.
 // A thin fetch client (no SDK) keeps the Worker bundle small and lets tests point STRIPE_API_BASE at a fake.
 //
 // The rules every function here follows (billing-build-spec §1):
@@ -12,8 +12,9 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, id, log, notFound, type Database, type DbExecutor, type Runtime } from '../core.js';
 import { UC_PER_CENT } from './money.js';
 import type { AutoRechargeSettings, PaymentView } from './types.js';
+import { productName } from '../brand.js';
 
-/** The Stripe API version Bane is written against. Create the webhook endpoint with the same version. */
+/** The Stripe API version Nightmail is written against. Create the webhook endpoint with the same version. */
 export const STRIPE_API_VERSION = '2026-10-28.endive';
 export type StripeConfig = { secretKey: string; webhookSecret: string; automaticTax: boolean; apiBase: string };
 type Params = { [key: string]: unknown };
@@ -28,7 +29,7 @@ export class StripeError extends Error {
   /** No answer, or one Stripe asks us to retry: the request may or may not have taken effect. */
   get uncertain() { return this.status === 0 || this.status === 429 || this.status >= 500; }
   get missing() { return this.code === 'resource_missing'; }
-  /** The code Bane records and shows: the bank's decline reason when there is one. */
+  /** The code Nightmail records and shows: the bank's decline reason when there is one. */
   get reason() { return this.declineCode ?? this.code ?? this.type; }
 }
 /**
@@ -258,7 +259,7 @@ export async function saveCard(runtime: Runtime, attemptId: string, source: { pa
       WHERE workspace_id=${a.workspace_id} RETURNING stripe_customer, true AS changed`);
     return account?.stripe_customer ? { customer: account.stripe_customer, pm: card.id } : null;
   });
-  // Stripe's default card for the customer follows Bane's, so invoices fall back to the card Bane shows.
+  // Stripe's default card for the customer follows Nightmail's, so invoices fall back to the card Nightmail shows.
   if (outcome) await stripeRequest(cfg, 'POST', `/v1/customers/${encodeURIComponent(outcome.customer)}`, { invoice_settings: { default_payment_method: outcome.pm } }, `default:${outcome.customer}:${outcome.pm}`);
 }
 
@@ -364,10 +365,10 @@ async function startCheckout(runtime: Runtime, attemptId: string, input: { works
     const params: Params = input.setup
       ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, allowed_payment_method_types: CARD_ONLY, metadata: meta, setup_intent_data: { metadata: meta }, ...back }
       : { mode: 'payment', customer, client_reference_id: attemptId,
-        line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product_data: { name: 'Bane credit' } } }],
+        line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product_data: { name: `${productName} credit` } } }],
         allowed_payment_method_types: CARD_ONLY, payment_intent_data: { setup_future_usage: 'off_session', metadata: meta }, metadata: meta,
         invoice_creation: { enabled: true, invoice_data: { metadata: meta } },
-        custom_text: { submit: { message: 'Bane saves this card so auto-recharge can use it if you turn it on. Remove it any time in Settings → Billing.' } },
+        custom_text: { submit: { message: `${productName} saves this card so auto-recharge can use it if you turn it on. Remove it any time in Settings → Billing.` } },
         ...(cfg.automaticTax ? { automatic_tax: { enabled: true }, customer_update: { address: 'auto', name: 'auto' }, tax_id_collection: { enabled: true }, billing_address_collection: 'required' } : {}),
         ...back };
     const session = await stripeRequest(cfg, 'POST', '/v1/checkout/sessions', params, `attempt:${attemptId}:checkout`);
@@ -440,7 +441,7 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
         WHERE id=${attemptId} AND status IN ('created','pending') AND (stripe_invoice IS NULL OR stripe_invoice=${invoiceId})`);
     }
     const path = `/v1/invoices/${encodeURIComponent(invoiceId)}`;
-    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', { customer: a.stripe_customer, invoice: invoiceId, amount: cents(a.amount_uc), currency: 'usd', description: 'Bane credit', tax_behavior: 'exclusive', metadata: meta }, `${key}:item`);
+    await stripeRequest(cfg, 'POST', '/v1/invoiceitems', { customer: a.stripe_customer, invoice: invoiceId, amount: cents(a.amount_uc), currency: 'usd', description: `${productName} credit`, tax_behavior: 'exclusive', metadata: meta }, `${key}:item`);
     await stripeRequest(cfg, 'POST', `${path}/finalize`, { auto_advance: false }, `${key}:finalize`);
     // The invoice carries the card (default_payment_method), so a retry sends identical parameters under the same key.
     const paid = await stripeRequest(cfg, 'POST', `${path}/pay`, { off_session: true, expand: ['payments'] }, `${key}:pay`);
@@ -495,7 +496,7 @@ export async function listPayments(db: Database, workspaceId: string, cursor?: s
 
 // ---------- resolving attempts against Stripe (webhook and reconciliation) ----------
 const ref = (value: unknown): string | null => typeof value === 'string' ? value : value && typeof (value as StripeObject).id === 'string' ? (value as StripeObject).id : null;
-/** Retries of a create stop at 22 h, inside Stripe's 24 h idempotency window; after that Bane looks the object up. */
+/** Retries of a create stop at 22 h, inside Stripe's 24 h idempotency window; after that Nightmail looks the object up. */
 export const RETRY_STOP_S = 22 * 3600;
 const RECHARGE_EXPIRY_S = 24 * 3600;
 

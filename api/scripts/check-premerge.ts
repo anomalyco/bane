@@ -228,6 +228,20 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (!hits) console.log(`Identity: ${scanned.length} API, script and OIDC migration files admit and link people by subject only.`);
 }
 
+// 7. Copy: dashboard strings checked against the copy rules (app/scripts/copy-lint.mjs), as a ratchet against
+// app/scripts/copy-baseline.json, so only a finding the change adds fails. Fixing one is app/scripts/copy-fix.md.
+{
+  try {
+    const out = execFileSync('node', ['scripts/copy-lint.mjs', '--json'], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { fresh, rules, total } = JSON.parse(out) as { fresh: { file: string; line: number; rule: string; message: string; text: string }[]; rules: Record<string, string>; total: number };
+    for (const f of fresh) fail('Copy', `${f.rule}: ${f.message}. ${rules[f.rule]} “${f.text.slice(0, 100)}” Shorten it (app/scripts/copy-fix.md), or accept a deliberate exception with bun run copy-lint --update-baseline in app/.`, f.file, f.line);
+    if (!fresh.length) console.log(`Copy: no new findings (${total} in the baseline).`);
+  } catch (error) {
+    if (/Cannot find module '@babel\/parser'/.test(String((error as { stderr?: string }).stderr))) warn('Copy', 'Skipped: run bun install in app/ to lint dashboard copy.');
+    else fail('Copy', `app/scripts/copy-lint.mjs failed: ${String((error as { stderr?: string }).stderr ?? error).slice(0, 300)}`);
+  }
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

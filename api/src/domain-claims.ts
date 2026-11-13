@@ -3,7 +3,7 @@ import { z } from '@hono/zod-openapi';
 import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { placementRoot } from './domain-registry.js';
-import { assertTenantReady, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
+import { assertTenantReady, connectionReady, detachedClaim, PROOF_LABELS, verifyImportedClaims, type ClaimState, type IdentityFacts, type ProofLabel, type TenantState } from './states.js';
 import { productName } from './brand.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
@@ -65,7 +65,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   const reserve = regionalSending(runtime) ? sql`${sql.identifier(runtime.config.trustedPool?'reserve_placed_claim':'reserve_regional_claim')}(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`;
   // One reservation, one statement. The profiler never gates or runs inside the create route.
   const shadow = runtime.config.multiTenant && runtime.config.placementShadow, materialized = shadow || !!audit;
-  const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null; created_at?: string; ever_proven?: boolean }) | null; fresh: boolean; recovering: boolean; error_code: string | null; reserved_at: string}>(
+  const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null; proof_label: ProofLabel; created_at?: string; ever_proven?: boolean }) | null; fresh: boolean; recovering: boolean; error_code: string | null; reserved_at: string}>(
     sql`${materialized ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve})` : sql``}${shadow ? sql`, queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.placement:'||id,'domain.placement',${workspace},jsonb_build_object('domainId',id)
       FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}${audit ? sql`, audited AS (${audit(sql`reserved`)})` : sql``}
@@ -79,7 +79,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');
-  return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now().
+  return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, proof_label: PROOF_LABELS[0], created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now(), its proof_label the column default.
 }
 
 export async function importByoClaims(db: DbExecutor, connection: { id: string; workspace_id: string; region: string }, domains: { name: string; ses: IdentityFacts['ses'] }[]) {

@@ -230,6 +230,7 @@ jobs:
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
+  # The same run reads each page's text density (app/scripts/density.mjs), a ratchet against density-baseline.json.
   cls:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -276,13 +277,21 @@ jobs:
         working-directory: app
         env:
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
+          CLS_DENSITY: '1'
         run: ./node_modules/.bin/vite build && node scripts/cls.mjs
-      - name: Upload the shift sources
+      # Scores the density readings the CLS run took (no second server): fails on a new finding or a denser page.
+      - name: Check text density on every page
+        if: always() && steps.changes.outputs.run == 'true' && hashFiles('app/.cls/density.json') != ''
+        working-directory: app
+        run: node scripts/density.mjs --from .cls/density.json
+      - name: Upload the shift sources and density report
         if: failure() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cls-shift-sources
-          path: app/.cls/
+          path: |
+            app/.cls/
+            app/.density/
           include-hidden-files: true
           retention-days: 14
 

@@ -1,4 +1,5 @@
 import { addressParts, maskedParts } from './private-address.js'
+import { ownSecretPattern } from '../../../api/src/brand.js'
 
 // What a UI note may keep of the page's text (features/ui-notes): addresses masked by the dashboard's one rule
 // (lib/private-address.ts), and anything that looks like a credential removed. Secret-bearing screens are also marked
@@ -9,7 +10,7 @@ import { addressParts, maskedParts } from './private-address.js'
 // Bane's own credentials (API, inbox, notes, support and agent keys), webhook signing secrets, Stripe keys and object
 // IDs, app passwords, JWTs, AWS access keys and bearer headers.
 const SECRET = [
-  /\b(?:bane|os)_[A-Za-z0-9_.-]{20,}/g,
+  ownSecretPattern,
   /\bwhsec_[A-Za-z0-9+/=_-]{12,}/g,
   /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g,
   /\b(?:sk|rk)_[A-Za-z0-9]{20,}/g,

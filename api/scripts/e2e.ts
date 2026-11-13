@@ -10,6 +10,7 @@ import { crc32, deflateSync } from 'node:zlib';
 import * as sdk from '../../sdk/src/sdk.gen.js';
 import { createClient } from '../../sdk/src/client/index.js';
 import type { SendEmailInput } from '../../sdk/src/types.gen.js';
+import { secretPrefixes } from '../src/brand.js';
 
 type Op = keyof typeof sdk;
 const dashboard = 'Requires a signed-in dashboard session, not an API key.';
@@ -727,7 +728,7 @@ async function inboundKey(addressId: string, otherId: string) {
     check((await api('revokeApiKey', { path: { id: limited.id } })).revoked, 'limited key not revoked');
     await expectDenial(() => api('getInboundAddress', { client: limitedClient, path: { addressId } }), 401, 'AUTH_INVALID');
   });
-  check(limited.secret.startsWith('bane_mbx_') && limited.access.type === 'addresses' && limited.access.addressIds?.join() === addressId && limited.access.mail.join() === 'read' && !limited.permissions.length, 'limited key access differs');
+  check(limited.secret.startsWith(secretPrefixes.addressKey) && limited.access.type === 'addresses' && limited.access.addressIds?.join() === addressId && limited.access.mail.join() === 'read' && !limited.permissions.length, 'limited key access differs');
   check((await listed(limited.id, cursor => api('listApiKeys', { query: { cursor, limit: 100, includeRevoked: 'false' } }))).access.type === 'addresses', 'limited key not listed as an API key');
   check((await api('getInboundAddress', { client: limitedClient, path: { addressId } })).address === inbox, 'limited key cannot read its address');
   await expectDenial(() => api('getInboundAddress', { client: limitedClient, path: { addressId: otherId } }), 404, 'NOT_FOUND');

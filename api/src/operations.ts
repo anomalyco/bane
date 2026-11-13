@@ -11,7 +11,7 @@ import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
-import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
+import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { SuppressionEventData, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
@@ -272,11 +272,11 @@ const claimTag = 'bane:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
-type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean };
+type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
-  return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
+  return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.proof_label,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
     dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,dc.dns_first,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
@@ -308,18 +308,18 @@ async function txtProof(name: string, token: string) {
     return answer.Status === 0 && !!answer.Answer?.some(rr => rr.type === 16 && rr.name.toLowerCase().replace(/\.$/, '') === name && (rr.data === `"${token}"` || rr.data === token));
   } catch { throw dnsUnavailable(); }
 }
-// Either published label proves the same stored token. A resolver error is not proof of loss.
+// Any published label proves the same stored token. A resolver error is not proof of loss.
 async function ownershipTxt(domain: string, token: string) {
   let failed = false;
-  for (const label of ['_bane', '_opensend']) {
-    try { if (await txtProof(`${label}.${domain}`, token)) return true; }
+  for (const label of PROOF_LABELS) {
+    try { if (await txtProof(proofRecordName(label, domain), token)) return true; }
     catch { failed = true; }
   }
   if (failed) throw dnsUnavailable();
   return false;
 }
 const state = (verified:boolean) => verified ? 'verified' as const : 'pending' as const;
-function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; regional?:boolean; proven:boolean; imported?:boolean; txtOwned?:boolean }, mx?:MxReport|null, note?:string|null, observation?:DmarcObservation|null): Readiness {
+function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; label:ProofLabel; shared:boolean; regional?:boolean; proven:boolean; imported?:boolean; txtOwned?:boolean }, mx?:MxReport|null, note?:string|null, observation?:DmarcObservation|null): Readiness {
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
   const signed = dkim?.Status === 'SUCCESS' && dkim.SigningEnabled === true;
   const dns: z.infer<typeof domainSchema>['dns'] = [];
@@ -337,8 +337,8 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
   }
   let verified = value.VerifiedForSendingStatus === true, verificationStatus = value.VerificationStatus ?? 'NOT_STARTED';
   if (hosted) {
-    if (hosted.shared) dns.push({ name:`_bane.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.proven) });
-    if (hosted.imported) dns.push({name:`_bane.${row.name}`,type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.txtOwned===true),note:'Optional for sending. Publish this record and verify the domain to claim exclusive ownership.'});
+    if (hosted.shared) dns.push({ name:proofRecordName(hosted.label,row.name),type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.proven) });
+    if (hosted.imported) dns.push({name:proofRecordName(hosted.label,row.name),type:'TXT',value:hosted.token,purpose:'sending',status:state(hosted.txtOwned===true),note:'Optional for sending. Publish this record and verify the domain to claim exclusive ownership.'});
     verified = verified && hosted.proven && signed && (hosted.imported || (new Set(dkim?.Tokens).size===3 && (!dkim?.SigningAttributesOrigin || dkim.SigningAttributesOrigin==='AWS_SES')));
     if (!verified && verificationStatus === 'SUCCESS') verificationStatus = 'PENDING';
   }
@@ -359,8 +359,8 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
 // workspace stays configured. Every other adoption is send-only.
 const platformClaim = (config:Config,wid:string,row:{name:string;identity:IdentityFacts|null;connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}}) =>
   !!row.identity?.adopted && row.connection.kind==='shared' && row.connection.legacy!==false && platformDomainOwner(config,wid) && row.name===platformHost(config.publicUrl);
-const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean };
+const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;proof_label:ProofLabel;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,label:row.proof_label,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
+type ClaimRow = DomainRef & ClaimState & ProofTimes & { token:string; proof_label:ProofLabel; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean}; created_at?:string|Date; ever_proven?:boolean; dns_first?:boolean };
 const hour=3600_000;
 const proofTime=(at:Date|string|null|undefined)=>at?new Date(at).getTime():0;
 const proofUntil=(row:ProofTimes)=>Math.min(proofTime(row.receiving_proved_at)+72*hour,row.receiving_proof_missed_at?proofTime(row.receiving_proof_missed_at)+48*hour:Infinity);
@@ -371,7 +371,7 @@ function derivedReadiness(row: ClaimRow): Readiness {
   const facts=row.identity, held=sends(row);
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
   if(row.dns_first && !row.ever_proven){
-    if(!report.dns.some(record=>record.name===`_bane.${row.name}`)) report.dns.unshift({name:`_bane.${row.name}`,type:'TXT',value:row.token,purpose:'sending',status:'pending'});
+    if(!report.dns.some(record=>record.name===proofRecordName(row.proof_label,row.name))) report.dns.unshift({name:proofRecordName(row.proof_label,row.name),type:'TXT',value:row.token,purpose:'sending',status:'pending'});
     report.dnsUnavailableReason='Publish the ownership TXT record first. DKIM records follow after DNS proof.';
   }
   report.verified=held; report.ready=held; report.sending=state(held);
@@ -646,7 +646,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
         return;
       }
       // The platform domain also receives. The operator's attestation, which SES keeps current by checking the
-      // platform's own DKIM records, stands in for the claim tag and the _bane TXT; the MX checks are the ordinary
+      // platform's own DKIM records, stands in for the claim tag and the ownership TXT; the MX checks are the ordinary
       // ones. A drifted identity stops sending and receiving at once (no grace) until the operator attests it again,
       // and a claim whose adoption never completed (sending still pending) never receives.
       const ses=sesFacts(identity);
@@ -741,7 +741,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
   // A definitive missing/invalid/ambiguous answer must still replace it.
-  // An adopted claim never publishes a _bane TXT: its proof is the operator's attestation, renewed by domain.verify.
+  // An adopted claim never publishes an ownership TXT: its proof is the operator's attestation, renewed by domain.verify.
   const [observation,dmarc,proof]=await Promise.all([checkReceiving ? receivingMx(runtime.db,row,job.workspaceId) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(e=>{if(e instanceof ModuleLoadError)throw e;return undefined;}), row.connection.kind==='shared' && !row.identity.adopted && (checkReceiving || row.receiving_host) ? ownershipTxt(row.name,row.token) : undefined]);
   if(!observation && dmarc===undefined) throw dnsUnavailable();
   // A sending promotion to Virginia doesn't move the existing Ohio ingress. Re-attest the
@@ -792,7 +792,7 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
   const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
   if (c.env.config.multiTenant) {
-    const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
+    const rows=await c.env.db.select({row:domains,token:domainClaims.token,proof_label:domainClaims.proofLabel,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,receiving_proved_at:sql<string>`domain_claims.receiving_proved_at`,receiving_identity_at:sql<string>`domain_claims.receiving_identity_at`,receiving_proof_missed_at:sql<string>`domain_claims.receiving_proof_missed_at`,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,created_at:domainClaims.createdAt,ever_proven:domainClaims.everProven,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
       .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
       .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
       .where(where).orderBy(desc(domains.id)).limit(q.limit+1);

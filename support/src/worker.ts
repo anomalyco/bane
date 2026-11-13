@@ -6,12 +6,12 @@ import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
 import { log, logError } from './log.js';
-import { addresses } from '../../api/src/brand.js';
+import { addresses, productName } from '../../api/src/brand.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 import { INTAKE, type Mailbox } from './intake.js';
 
-// The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Bane's inbound webhook
+// The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Nightmail's inbound webhook
 // for support@bane.mx, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
 // reached only by ID from this router, never through a client-named route.
 
@@ -46,7 +46,7 @@ async function readHandoff(request: Request): Promise<{ handoff?: string; conver
 
 async function startChat(request: Request, env: Env): Promise<Response> {
   const headers = cors(env, request);
-  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', 'Open support from the Bane dashboard.');
+  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', `Open support from the ${productName} dashboard.`);
   const body = await readHandoff(request);
   if (!body?.handoff) return fail(400, 'INVALID_REQUEST', 'Send { "handoff": "<token from /v1/contact-support>" }.', headers);
   const checked = await env.BANE.verifyHandoff(body.handoff);
@@ -78,7 +78,7 @@ async function startChat(request: Request, env: Env): Promise<Response> {
 
 async function resumeChat(request: Request, env: Env): Promise<Response> {
   const headers = cors(env, request);
-  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', 'Open support from the Bane dashboard.');
+  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', `Open support from the ${productName} dashboard.`);
   const body = await readHandoff(request);
   if (!body?.handoff || !body.conversationId || !CONVERSATION_ID.test(body.conversationId)) return fail(400, 'INVALID_REQUEST', 'Send { "conversationId", "handoff" }.', headers);
   const checked = await env.BANE.verifyHandoff(body.handoff);
@@ -111,7 +111,7 @@ async function socket(request: Request, env: Env, conversationId: string): Promi
 /** A screenshot from the panel: the chat token in Authorization, the raw image as the body (support/PROTOCOL.md §5.1). */
 async function upload(request: Request, env: Env, conversationId: string): Promise<Response> {
   const headers = cors(env, request);
-  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', 'Upload from the Bane dashboard.');
+  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', `Upload from the ${productName} dashboard.`);
   const token = request.headers.get('authorization')?.match(/^Bearer (\S+)$/)?.[1] ?? null;
   const reader = await readChatToken(env.SUPPORT_ROOT_SECRET, token, conversationId);
   if (!reader) return fail(401, 'CHAT_TOKEN_INVALID', 'Renew the conversation through /chat/resume.', headers);
@@ -133,14 +133,14 @@ async function upload(request: Request, env: Env, conversationId: string): Promi
 
 type Hook = { type?: string; data?: { messageId?: string; recipients?: string[]; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown } } };
 
-/** A verified, parsed Bane webhook delivery, deduplicated by webhook-id (after parsing, so a malformed one is retried). */
+/** A verified, parsed Nightmail webhook delivery, deduplicated by webhook-id (after parsing, so a malformed one is retried). */
 async function delivery(request: Request, env: Env, secret: string | undefined, name: string): Promise<{ event: Hook; deliveryId: string } | Response> {
   if (!secret) throw new MissingSecret(name);
   const body = await request.text();
   if (body.length > 1_000_000 || !(await verifyWebhook(body, request.headers, secret))) return new Response(null, { status: 401 });
   let event: Hook;
   try { event = JSON.parse(body); } catch { return new Response(null, { status: 400 }); }
-  // A global brake before anything is recorded: Bane retries a 503 later (review M5).
+  // A global brake before anything is recorded: Nightmail retries a 503 later (review M5).
   if (env.EMAIL_IN_GLOBAL && !(await env.EMAIL_IN_GLOBAL.limit({ key: 'global' })).success) return new Response(null, { status: 503, headers: { 'retry-after': '60' } });
   const deliveryId = request.headers.get('webhook-id')!;
   const fresh = await env.DB.prepare('INSERT INTO webhook_deliveries (id, received_at) VALUES (?, ?) ON CONFLICT (id) DO NOTHING').bind(deliveryId, Date.now()).run();
@@ -148,7 +148,7 @@ async function delivery(request: Request, env: Env, secret: string | undefined, 
   return { event, deliveryId };
 }
 
-/** Bane's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
+/** Nightmail's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
 async function inbound(request: Request, env: Env): Promise<Response> {
   const got = await delivery(request, env, env.BANE_INBOUND_WEBHOOK_SECRET, 'BANE_INBOUND_WEBHOOK_SECRET');
   if (got instanceof Response) return got;
@@ -164,7 +164,7 @@ async function inbound(request: Request, env: Env): Promise<Response> {
     row = await env.DB.prepare('SELECT id, status FROM conversations WHERE thread_id = ?').bind(threadId).first<{ id: string; status: string }>();
   }
   if (!row) return new Response(null, { status: 503 });
-  // The Durable Object stores the message and arms its alarm before this returns, so Bane's retry is never needed
+  // The Durable Object stores the message and arms its alarm before this returns, so Nightmail's retry is never needed
   // once we answer 200: the DO is the durable inbox.
   await conversation(env, row.id).enqueueInbound({ conversationId: row.id, threadId, messageId, deliveryId });
   return new Response(null, { status: 200 });
@@ -176,7 +176,7 @@ async function intake(request: Request, env: Env): Promise<Response> {
   if (got instanceof Response) return got;
   const { event } = got, message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
   if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
-  // The envelope recipients Bane matched (so Bcc counts), else the To header.
+  // The envelope recipients Nightmail matched (so Bcc counts), else the To header.
   const recipients = (event.data?.recipients?.length ? event.data.recipients : [JSON.stringify(message?.to ?? '')]).join(' ').toLowerCase();
   const mailbox = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).filter(a => a && recipients.includes(a)).map(a => a.split('@')[0] as Mailbox).find(m => m in INTAKE);
   if (!mailbox) return new Response(null, { status: 200 });
@@ -193,18 +193,18 @@ const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`
 /** "Confirm it's me": GET shows a button (mail scanners prefetch links, so GET never confirms); POST confirms once. */
 async function confirm(request: Request, env: Env, token: string): Promise<Response> {
   const read = await readConfirmToken(env.SUPPORT_ROOT_SECRET, token);
-  if (!read) return page('Link expired', '<h1>This link has expired</h1><p>Reply to the support email again and we’ll send a new one, or sign in to Bane and press Help.</p>', 410);
+  if (!read) return page('Link expired', `<h1>This link has expired</h1><p>Reply to the support email again and we’ll send a new one, or sign in to ${productName} and press Help.</p>`, 410);
   if (request.method === 'GET') {
     // Nothing from the email (its subject or text) is shown here: the sender may not be who they say (review M4).
-    if (!(await conversation(env, read.conversationId).confirmationPending(read.addressHash))) return page('Link expired', '<h1>This link has expired</h1><p>Sign in to Bane and press Help instead.</p>', 410);
-    return page('Confirm it’s you', `<h1>Confirm it’s you</h1><p>Bane support will read your Bane account to answer the email you sent to Bane support. Only press this if you wrote to Bane support yourself.</p>
-<form method="post"><button type="submit">Confirm it’s me</button></form><p class="muted">Didn’t write to Bane support? Close this page; nothing happens.</p>`);
+    if (!(await conversation(env, read.conversationId).confirmationPending(read.addressHash))) return page('Link expired', `<h1>This link has expired</h1><p>Sign in to ${productName} and press Help instead.</p>`, 410);
+    return page('Confirm it’s you', `<h1>Confirm it’s you</h1><p>${productName} support will read your ${productName} account to answer the email you sent to ${productName} support. Only press this if you wrote to ${productName} support yourself.</p>
+<form method="post"><button type="submit">Confirm it’s me</button></form><p class="muted">Didn’t write to ${productName} support? Close this page; nothing happens.</p>`);
   }
   const used = await env.DB.prepare('INSERT INTO confirmations (nonce, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (nonce) DO NOTHING').bind(read.nonce, read.conversationId, Date.now()).run();
   if (!used.meta.changes) return page('Already confirmed', '<h1>Already confirmed</h1><p>You can close this page. We’ll reply by email.</p>');
   const result = await conversation(env, read.conversationId).confirmEmail({ addressHash: read.addressHash });
   return result.ok ? page('Confirmed', '<h1>Thanks, that’s confirmed</h1><p>We’ll reply to your email shortly. You can close this page.</p>')
-    : page('Couldn’t confirm', '<h1>We couldn’t confirm this</h1><p>Sign in to Bane and press Help, or reply to the email from your account address.</p>', 409);
+    : page('Couldn’t confirm', `<h1>We couldn’t confirm this</h1><p>Sign in to ${productName} and press Help, or reply to the email from your account address.</p>`, 409);
 }
 
 // Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
@@ -252,7 +252,7 @@ export default {
       failed = { error, code: missing ? 'SECRET_MISSING' : 'UNHANDLED' };
       response = fail(503, 'SUPPORT_UNAVAILABLE', missing ? `Support is not fully configured (${missing} is missing).` : 'Support is unavailable right now. Try again in a minute.', cors(env, request));
     }
-    // One line per request, like Bane's (api/src/app.ts): what answered, how, and how long it took; a crash adds its
+    // One line per request, like Nightmail's (api/src/app.ts): what answered, how, and how long it took; a crash adds its
     // error class, the missing secret's name and the stack to that same line.
     const status = response.status, line = { event: 'request', requestId: request.headers.get('cf-ray') ?? undefined, route: at.route, method: request.method, status, durationMs: Date.now() - started };
     if (failed) logError(failed.error, { ...line, code: failed.code });

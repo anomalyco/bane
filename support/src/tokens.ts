@@ -1,5 +1,5 @@
 // Short-lived capabilities the support Worker hands out, all HMAC-SHA256 under keys derived from one root
-// (SUPPORT_ROOT_SECRET) with HKDF and a purpose label, as Bane derives its own keys (api/README.md "Secret rotation").
+// (SUPPORT_ROOT_SECRET) with HKDF and a purpose label, as Nightmail derives its own keys (api/README.md "Secret rotation").
 //
 // - chat token: lets one person's panel open one conversation's WebSocket for 12 hours;
 // - confirm token: the "Confirm it's me" link in an email reply (24 hours, single use, bound to conversation and address).

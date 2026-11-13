@@ -19,7 +19,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Every PR, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below | ~1–2 min |
 | Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
 | Every PR, `dev` push | `preview` | The real Worker under `wrangler dev` (workerd) with dev's wrangler config, on a database upgraded from `dev`'s schema; see **Preview stack** | ~2 min |
-| Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
+| Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift and text density on every dashboard page | ~3 min, in parallel |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health, live dev E2E | ~2–3 min, plus ~1 min when Pulumi has work |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
 | Push to `production` | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
@@ -95,6 +95,14 @@ Below 640 px every `DataTable` renders its rows as cards from each column's `car
 Identity is `(issuer, subject)`. An issuer can assert a verified address that the sign-in method never vouched for (a GitHub-made account that links a personal Google account signs in with `acr=google` and its GitHub-verified work address), so no code may admit, link or authorize a person by email. **Fails when** `api/src`, `api/scripts` or a migration from 270 on names one of the removed email paths (`claim_bane_legacy_user`, `bane_legacy_claims`, `AUTH_ALLOWED_EMAILS`, `AUTH_ALLOWED_DOMAINS`, `allowedEmails`, `allowedDomains`, `signupApproved`, `google_hosted_domain`).
 
 **Fix:** decide by subject: the sign-in's provider identity for hosted staff (`api/src/account-policy.ts`), an invitation link, `AUTH_ALLOWED_SUBJECTS` when self-hosted, or an operator binding a subject (`scripts/list-signin-attempts.ts`). A line that must name a removed setting, such as the startup refusal, carries `premerge-identity: allowed`.
+
+## Copy and density lint (`build`, `cls`)
+
+Both are ratchets: a baseline holds today's findings, only a new one fails, and a clean local run drops fixed ones from it (`--update-baseline` accepts a deliberate exception). A finding keeps its identity when its line moves or its text is edited in place, and the product's name counts as one neutral word, so a rename is never new.
+
+- **Copy** (`app/scripts/copy-lint.mjs`, pre-merge invariant 7; locally `bun run copy-lint` in `app/`): every dashboard string against length per element type, sentence length, reading grade, filler, hedging, passive voice, the glossary, sentence case, numerals, restated labels and duplicates. Baseline `app/scripts/copy-baseline.json`.
+- **Density** (`app/scripts/density.mjs`, read during the `cls` run; locally `bun run density`): per page and main dialog at 1440 × 900 and 390 × 844, words in total and above the fold, long blocks, paragraphs, controls, tooltips, the same value or explanation shown twice, and explanations with nothing to act on. Fails on a new finding or a score 5% (at least 3) over `app/scripts/density-baseline.json`; the artifact has annotated screenshots.
+- **Fixing:** `app/scripts/copy-fix.md`.
 
 ## Deadlock guard (`acceptance`)
 

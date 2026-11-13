@@ -49,6 +49,15 @@ export const sdkPackage = '@banemx/sdk';
 export const apiKeyEnv = 'BANE_API_KEY';
 export const mcpServerName = 'bane';
 
+/** Prefixes of the secrets this service issues, by kind. New secrets get these. */
+export const secretPrefixes = { apiKey: 'nm_', addressKey: 'nm_mbx_', agentToken: 'nm_agent_', supportGrant: 'nm_support_', notesKey: 'nm_notes_' } as const;
+/** Earlier prefixes stay valid: bane_… and, before it, OpenSend's os_…. Remove after rename cleanup. */
+export const legacySecretPrefixes = ['bane', 'os'] as const;
+/** What a key list shows of a new secret: its kind's prefix and the first 8 characters after it. */
+export const shownPrefix = (secret: string) => secret.slice(0, secret.lastIndexOf('_') + 9);
+/** Any secret of ours (current or earlier prefix) inside text, for redaction. Use with replace or matchAll. */
+export const ownSecretPattern = /\b(?:nm|bane|os)_[A-Za-z0-9_.-]{20,}/g;
+
 /** User-Agent of the webhook deliveries this service makes. */
 export const webhookUserAgent = 'Bane-Webhooks/1.0';
 

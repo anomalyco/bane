@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
 import { checkMx, delegatedZone } from './mailbox-dns.js';
-import type { IdentityFacts } from './states.js';
+import { isProofRecord, type IdentityFacts } from './states.js';
 import { productName } from './brand.js';
 
 /**
@@ -22,7 +22,7 @@ type Ses = IdentityFacts['ses'] | undefined;
 export function baneRecordUse(host: string, domain: string, ses: Ses): string | null {
   const name = host.toLowerCase().replace(/\.$/, '');
   if (name === ses?.MailFromAttributes?.MailFromDomain?.toLowerCase()) return 'custom MAIL FROM subdomain';
-  if (name === `_bane.${domain}` || name === `_opensend.${domain}`) return 'ownership TXT record';
+  if (isProofRecord(name, domain)) return 'ownership TXT record';
   if (name === `_dmarc.${domain}`) return 'DMARC record';
   if (name.endsWith(`._domainkey.${domain}`) || ses?.DkimAttributes?.Tokens?.some(token => name === `${token}._domainkey.${domain}`)) return 'DKIM CNAME';
   return null;

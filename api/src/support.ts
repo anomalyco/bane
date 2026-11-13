@@ -9,7 +9,7 @@ import { cached, registerSupportDeliverability } from './support-deliverability.
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
 import { keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
-import { productName } from './brand.js';
+import { productName, secretPrefixes } from './brand.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Nightmail's operators and its
 // support platform, never for customers.
@@ -28,7 +28,7 @@ import { productName } from './brand.js';
 // Access: /v1/operator/* answers only an operator (operatorGate), /v1/support/* only a live support grant (supportGate).
 // Every other credential, including a workspace owner's session, gets the same 403 for every path under them, real or not.
 
-const SUPPORT_TOKEN = /^bane_support_[0-9a-f]{64}$/;
+const SUPPORT_TOKEN = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
 /** Requests per minute per support grant. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
 /**
@@ -281,10 +281,10 @@ export function registerSupportOperator(app: App) {
       workspaceIds: z.array(z.string().max(100)).min(1).max(100).optional().describe('The user’s workspaces to cover. Default: the handoff’s workspace for a handoff, otherwise all of them.'),
       ttlMinutes: z.number().int().min(1).max(GRANT_MAX_MINUTES).default(60),
     }).strict()) },
-    responses: { 201: response(Grant.extend({ token: z.string().describe('bane_support_…, shown once. Give it to the support agent’s environment only.') })), ...errors } }), async c => {
+    responses: { 201: response(Grant.extend({ token: z.string().describe('nm_support_…, shown once. Give it to the support agent’s environment only.') })), ...errors } }), async c => {
     const operator = await requireOperator(c, 'operator:read'), body = c.req.valid('json');
     if ((body.verification === 'handoff') !== !!body.handoffId) throw new ApiError(422, 'VALIDATION_FAILED', 'A handoff verification needs handoffId, and only it.', 'handoffId');
-    const token = randomSecret('bane_support_'), grantId = id('sgr'), context = operatorContext(c, operator);
+    const token = randomSecret(secretPrefixes.supportGrant), grantId = id('sgr'), context = operatorContext(c, operator);
     const created = await c.env.db.transaction(async tx => {
       // An expired grant no longer holds its ticket.
       await tx.execute(sql`UPDATE support_grants SET revoked_at = expires_at WHERE ticket_ref = ${body.ticketRef} AND revoked_at IS NULL AND expires_at <= now()`);

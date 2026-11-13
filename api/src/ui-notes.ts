@@ -5,6 +5,7 @@ import { ApiError, digest, errors, id, json, logError, notFound, randomSecret, r
 import { auditContext, auditInsert, operatorRequired, type AuditContext } from './audit.js';
 import { operatorActor } from './operator.js';
 import { uiNotesAllowed } from './operator-identity.js';
+import { ownSecretPattern, secretPrefixes, shownPrefix } from './brand.js';
 
 // UI notes: Nightmail staff (the platform operator role, #115) ⌘-click anything in the dashboard and leave a design or bug
 // note on it, with where it was, a locator for the element, its computed styles and a screenshot crop; an agent lists
@@ -13,7 +14,7 @@ import { uiNotesAllowed } from './operator-identity.js';
 //
 // Who: only the people in UI_NOTES_SUBJECTS (by issuer subject; today Ryan alone), and only while they hold the
 // operator role. Every other operator gets 404 on every route, and so does everyone when the list is empty: the
-// feature is off. A script uses a UI notes key (bane_notes_…), made by such a person for themself: it works only on GET
+// feature is off. A script uses a UI notes key (nm_notes_…), made by such a person for themself: it works only on GET
 // /v1/operator/ui-notes[/{id}] and PATCH /v1/operator/ui-notes/{id} (status, PR link and resolution), only while its
 // operator still holds the operator role, and never for anything else (support.ts operatorGate admits it on exactly
 // those routes; every other operator route still refuses any bearer token).
@@ -63,7 +64,7 @@ const NoteKey = z.object({ id: z.string(), name: z.string(), prefix: z.string(),
 const ADDRESS = /[^\s<>()[\]"',;:/?#&=]+(?:@|%40)[^\s<>()[\]"',;:/?#&=]+\.[^\s<>()[\]"',;:/?#&=]+/gi;
 export const maskAddresses = (value: string) => value.replace(ADDRESS, match => [...match].slice(0, 2).join('') + '•••');
 const SECRET = [
-  /\b(?:bane|os)_[A-Za-z0-9_.-]{20,}/g, /\bwhsec_[A-Za-z0-9+/=_-]{12,}/g, /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, /\b(?:sk|rk)_[A-Za-z0-9]{20,}/g,
+  ownSecretPattern, /\bwhsec_[A-Za-z0-9+/=_-]{12,}/g, /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, /\b(?:sk|rk)_[A-Za-z0-9]{20,}/g,
   /\b(?:cus|pi|pm|seti|sub|in|ch|cs|acct|price|prod|si|txn|re|po|evt)_(?=[A-Za-z0-9]*[A-Z])[A-Za-z0-9]{14,}/g, /\b(?:[0-9a-f]{4}-){7}[0-9a-f]{4}\b/gi,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, /\bAKIA[0-9A-Z]{16}\b/g, /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
 ];
@@ -133,7 +134,7 @@ async function sessionOperator(c: Ctx): Promise<Caller> {
 /** The only requests a UI notes key may make: list and read notes, and change one (support.ts operatorGate). */
 export const notesKeyRoute = (method: string, path: string) =>
   (method === 'GET' && /^\/v1\/operator\/ui-notes(?:\/uin_[0-9a-f]{32})?$/.test(path)) || (method === 'PATCH' && /^\/v1\/operator\/ui-notes\/uin_[0-9a-f]{32}$/.test(path));
-const NOTES_KEY = /^Bearer (bane_notes_[0-9a-f]{64})$/;
+const NOTES_KEY = /^Bearer ((?:nm|bane)_notes_[0-9a-f]{64})$/; // bane_: remove after rename cleanup
 /**
  * Authenticates a UI notes key for operatorGate, or refuses with the gate's own 403: a live, unexpired, unrevoked key
  * whose operator still holds the operator role, within its minute budget. One statement reads and touches it.
@@ -321,9 +322,9 @@ export function registerUiNotes(app: App) {
     description: 'A key for a script or agent to read UI notes and set their status as you, while you hold the operator role. The secret is shown once.',
     request: { body: json(z.object({ name: z.string().trim().min(1).max(100), expiresInDays: z.number().int().min(1).max(90).default(30) }).strict()) },
     responses: { 201: response(NoteKey.extend({ secret: z.string() })), ...errors } }), async c => {
-    const who = await sessionOperator(c), input = c.req.valid('json'), secret = randomSecret('bane_notes_'), keyId = id('unk');
+    const who = await sessionOperator(c), input = c.req.valid('json'), secret = randomSecret(secretPrefixes.notesKey), keyId = id('unk');
     const { rows: [key] } = await c.env.db.execute<z.infer<typeof NoteKey>>(sql`WITH k AS (INSERT INTO ui_note_keys(id, user_id, name, hash, prefix, expires_at)
-        VALUES (${keyId}, ${who.userId}, ${input.name}, ${await digest(secret)}, ${secret.slice(0, 15)}, now() + make_interval(days => ${input.expiresInDays})) RETURNING *),
+        VALUES (${keyId}, ${who.userId}, ${input.name}, ${await digest(secret)}, ${shownPrefix(secret)}, now() + make_interval(days => ${input.expiresInDays})) RETURNING *),
       a AS (${auditInsert(who.context, { action: 'ui_note_key.create', workspaceId: null, target: { type: 'ui_note_key', id: keyId },
         after: sql`jsonb_build_object('name', k.name, 'prefix', k.prefix, 'expiresAt', k.expires_at)` }, { from: sql`k` })})
       SELECT ${keyColumns} FROM k`);

@@ -10,6 +10,11 @@ for ((page=1; ; page++)); do
   ids=$(jq -r '.[] | select(.creator.login == "github-merge-queue[bot]" or .creator.login == "github-actions[bot]" or .creator.login == "R44VC0RP" or .creator.login == "thdxr") | .id' <<< "$rows")
   for id in $ids; do
     url=$(gh api "$repo/deployments/$id/statuses?per_page=100" --jq '([.[] | select(.state == "success")] | first | .log_url) // empty')
+    # Deployment statuses retain their original URL across a repository rename.
+    # Job and run metadata are still fetched from the current repository below.
+    if [[ $GITHUB_REPOSITORY == anomalyco/nightmail && $url == https://github.com/anomalyco/bane/actions/runs/* ]]; then
+      url="https://github.com/$GITHUB_REPOSITORY/actions/runs/${url#https://github.com/anomalyco/bane/actions/runs/}"
+    fi
     [[ $url == "https://github.com/$GITHUB_REPOSITORY/actions/runs/"* ]] || continue
     [[ $url =~ /job/([0-9]+)$ ]] || continue
     job=$(gh api "$repo/actions/jobs/${BASH_REMATCH[1]}")

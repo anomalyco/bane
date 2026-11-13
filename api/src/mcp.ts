@@ -345,7 +345,7 @@ export function registerMcp(app: App): void {
       catalog ??= buildMcpCatalog(app);
       return serve(app, c.req.raw, c.env, actor, catalog);
     };
-    const token=c.req.header('authorization')?.match(/^Bearer (bane_mbx_[0-9a-f]{64})$/i)?.[1];
+    const token=c.req.header('authorization')?.match(/^Bearer ((?:nm|bane)_mbx_[0-9a-f]{64})$/i)?.[1]; // bane_: remove after rename cleanup
     const response=preflight?new Response(null,{status:204}):token?await handler(await (await import('./mailbox.js')).authorizeInboxKey(c,token)):await withMcpAuthorization(c.env,c.req.raw,handler);
     // Authorization and the protocol SDK answer with their own responses, which never reach onError: name the failure
     // from the status and the stage it came from. Never from the body.

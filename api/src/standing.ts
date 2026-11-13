@@ -3,6 +3,7 @@ import { ApiError, id, isSimulatedSes, log, type DbExecutor, type JobHandler, ty
 import { enqueue, retryDatabaseFailures } from './jobs.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
 import { dailyLimit, moveScore, nextStanding, quality, stepRank, type DayEvidence, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type Window } from './standing-model.js';
+import { productName } from './brand.js';
 
 // The standing job: every ten minutes it counts each Hosted workspace's mail, moves its score, sets the daily limit
 // admission reads, and walks the ladder (notice → warn → restrict → pause). Every change of standing, by the job, an
@@ -264,7 +265,7 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     INSERT INTO sender_score_daily(workspace_id,day,score,quality,target,daily_limit,step) SELECT workspace_id,(now() AT TIME ZONE 'UTC')::date,score,quality,target,daily_limit,step FROM updated
     ON CONFLICT(workspace_id,day) DO UPDATE SET score=excluded.score,quality=excluded.quality,target=excluded.target,daily_limit=excluded.daily_limit,step=excluded.step`);
   await settlePaused(runtime);
-  // Any workspace whose SES tenants differ from what Bane wants (a missed job, a tenant ready after the pause) is queued.
+  // Any workspace whose SES tenants differ from what Nightmail wants (a missed job, a tenant ready after the pause) is queued.
   if (!options.only) await runtime.db.execute(queueTenantStatus(tenantStatusDrift()));
   return { evaluated: rows.length, changed };
 }
@@ -320,12 +321,12 @@ export function tenantStatusEvent(message: Record<string, unknown>) {
 /**
  * Mirrors AWS's own tenant pauses. A DISABLED from AWS (or from the strict reputation policy, which sets the
  * customer-managed status with its own cause) pauses the workspace (SES_TENANT_PAUSED): only an operator resumes it,
- * after AWS reinstates the tenant. Bane's own switch ("Status manually updated.") and every enable are timeline only.
+ * after AWS reinstates the tenant. Nightmail's own switch ("Status manually updated.") and every enable are timeline only.
  *
  * A valid SNS signature proves which topic published the bytes, not that SES wrote them: a BYO account controls what
- * its own topic publishes. So an event counts only when it arrived on a Bane-owned shared topic (topicKind, set by the
+ * its own topic publishes. So an event counts only when it arrived on a Nightmail-owned shared topic (topicKind, set by the
  * ingress from the topic's registration), its account, the tenant ARN's account and the topic's account agree, the
- * ARN's region is the topic's region, and the ARN is a tenant Bane recorded as owned (hosted_tenant_ownership) by a
+ * ARN's region is the topic's region, and the ARN is a tenant Nightmail recorded as owned (hosted_tenant_ownership) by a
  * shared connection whose pool or regional topic is that topic. A name never authorizes a target. Returns the refusal
  * code, or null when accepted.
  */
@@ -348,7 +349,7 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
   const ours = event.origin === 'CUSTOMER_MANAGED' && event.cause === 'Status manually updated.';
   const pause = verified.status === 'DISABLED' && !ours;
   await runtime.db.transaction(tx => applyChange(tx, { workspaceId: owner.workspace_id, actor: { kind: 'system', via: 'ses' }, kind: 'tenant',
-    ...(pause ? { step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused: AWS paused this workspace’s SES tenant. Bane reviews it with AWS before sending resumes.' },
+    ...(pause ? { step: 'pause', pauseKind: 'full', pause: { message: `Hosted sending paused: AWS paused this workspace’s SES tenant. ${productName} reviews it with AWS before sending resumes.` },
       reasons: [{ code: 'SES_TENANT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: event.cause ?? 'AWS paused the SES tenant.' }] } : {}),
     details: { tenant: event.arn, origin: event.origin, status: event.status, cause: event.cause } }));
   log(pause ? 'error' : 'info', { code: 'SES_TENANT_STATUS', workspaceId: owner.workspace_id, origin: event.origin, status: event.status, paused: pause });
@@ -361,15 +362,15 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
 // ---------- owner emails ----------
 const stepWords: Record<Step, string> = { ok: 'in good standing', notice: 'noted', warn: 'warned', restrict: 'restricted: marketing is held', pause: 'paused' };
 export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]; quarantine?: { campaign: string; message: string } | null; dashboard: string; marketingHeld: boolean }) {
-  const did = o.quarantine ? `Bane paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
-    : o.step === 'pause' ? 'Bane paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.'
-    : o.step === 'restrict' ? 'Bane holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.'
+  const did = o.quarantine ? `${productName} paused the campaign "${o.quarantine.campaign}". Your other mail is unaffected.`
+    : o.step === 'pause' ? `${productName} paused all sending from this workspace. Receiving, inboxes, reads and the dashboard keep working. Queued mail is held for 72 hours, then canceled.`
+    : o.step === 'restrict' ? `${productName} holds marketing (campaigns and marketing sends). Receipts, password resets and other transactional mail still send.`
     : 'Nothing is held yet. Your daily limit stays where it is (it will not rise) until this clears.';
   const fix = o.quarantine ? ['Remove the contacts that bounced and any you have not mailed before.', 'Check where the list came from and that every contact opted in.', 'Resume the campaign from its page, or ask for a review.']
     : ['Find the campaign or domain named above and stop sending to the addresses that bounced or complained.', 'Remove contacts you cannot show opted in, and old or bought lists.', o.step === 'warn' ? 'Keep sending as usual: the warning clears by itself after 24 hours under the line.' : 'Open the dashboard to follow the checklist, release it when allowed, or ask for a review.'];
   const what = o.quarantine ? o.quarantine.message : o.reasons.filter(r => r.step !== 'notice').map(r => `- ${r.message}`).join('\n') || '- Sending standing changed.';
-  return { subject: o.quarantine ? `Bane paused a campaign in ${o.workspace}` : `Bane: ${o.workspace} is ${stepWords[o.step]}`,
-    text: `What happened\n${what}\n\nWhat Bane did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${o.dashboard}\nThe thresholds are published at ${o.dashboard.replace(/\/$/, '')}/docs#sending-limits\n` };
+  return { subject: o.quarantine ? `${productName} paused a campaign in ${o.workspace}` : `${productName}: ${o.workspace} is ${stepWords[o.step]}`,
+    text: `What happened\n${what}\n\nWhat ${productName} did\n${did}\n\nHow to fix it\n${fix.map((s, i) => `${i + 1}. ${s}`).join('\n')}\n\nOpen the dashboard: ${o.dashboard}\nThe thresholds are published at ${o.dashboard.replace(/\/$/, '')}/docs#sending-limits\n` };
 }
 /**
  * Emails the workspace's owners and admins about a standing change, through the platform workspace's own sending

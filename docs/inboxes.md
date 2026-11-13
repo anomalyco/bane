@@ -111,7 +111,7 @@ Every snippet here was run against a local Nightmail on 2026-11-11 (isolated har
 
 ```sh
 export BANE_URL=https://bane.mx        # or your installation's URL
-export BANE_API_KEY=bane_…             # a workspace manage key, or an API key that creates inboxes
+export BANE_API_KEY=nm_…             # a workspace manage key, or an API key that creates inboxes
 AUTH="Authorization: Bearer $BANE_API_KEY"
 
 # 1. Create an inbox. Defaults: a random address on your oldest active receiving host, 24 hours.
