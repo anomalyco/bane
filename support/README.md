@@ -102,7 +102,7 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 - image checks: type by magic bytes, EXIF/XMP/text removed for PNG, JPEG and WebP, damage and oversize refused;
 - uploads: chat token, origin, 413, 415 and the 5-image cap. The model receives the stripped bytes;
 - a bug ticket: refused without its reproduction, then filed with request IDs from `api_errors`. The `[Bane bug]` email carries signed screenshot links, and tampered or expired links are refused;
-- the staff page: sign-in, single-use token, a demoted operator, filters, and CSRF, origin and session checks on "mark done";
+- the staff page: sign-in, single-use token, a demoted operator, filters, CSRF, origin and session checks on "mark done", and the hourly operator re-check;
 - email image attachments.
 
 They make no network or model calls. `test/*.local.ts` scripts, which are git-ignored, are for a few real turns against the gateway with a key read from a file.
@@ -113,19 +113,20 @@ Each email conversation is bound to the first address that writes in it, and onc
 
 - **Every later message is checked again.** It must come from that address, pass DMARC, and still map to the same account. Anything else goes to a conversation of its own and never touches the session, its context or its grant: another sender, a DMARC failure, or a changed account.
 - **No model turn until a sender is verified.**
-  - Without a DMARC pass, the sender gets a fixed reply with a confirm link, at most once a day per address.
+  - Without a DMARC pass, the sender gets a fixed reply with a confirm link. Follow-ups from the address wait in the open confirmation, and each later message after a confirmation needs a new one.
   - With a DMARC pass but no account, the sender gets a fixed "no account" reply.
 - **Tickets from unverified senders** lead with "UNVERIFIED SENDER" and name no customer.
 - **Links in email replies** must point to Bane's own sites, or the reply is held.
 
 ## Limits and retention
 
-- **Daily caps** (`src/limits.ts`, override each with a `LIMIT_*` var):
-  - model turns: 1,500 a day in total, and 100 per person;
-  - tickets: 60 a day in total, and 3 per person or sender;
-  - support mail: 2,000 a day in total, and 20 per sender;
-  - confirm links: 1 per address a day.
-  The first time a global cap is hit each day, the team gets one email. Past a cap, chats say support is busy, and emails get a fixed reply with no model call.
+- **Daily caps** (`src/limits.ts`; override each with a `LIMIT_*` var). The budgets are separate, so one can't starve another:
+  - model turns: 1,500 a day, and 100 per person;
+  - tickets: a 60-a-day reserve for verified customers, 40 a day per intake address for everyone else, and 3 per customer or DMARC-passing sender;
+  - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), and 2,000 in total;
+  - confirm links: 3 per address a day, at most one an hour per open confirmation. Later mail from the address joins the open confirmation and is answered once it's confirmed.
+
+  Mail over a cap is never dropped. It's kept, bounded, in D1 `overflow`, and the daily cron (00:10 UTC) emails the team one "N messages over cap" digest. The first time a global cap is hit each day, the team gets an alert at once. The same cron runs the retention sweep.
 - **Per conversation:** 60 turns, and 500K tokens weighted by cost (cache reads count a tenth). Past either, the conversation files a ticket.
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.

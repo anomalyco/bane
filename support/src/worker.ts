@@ -4,6 +4,7 @@ import { addressHash, chatToken, MissingSecret, newId, readChatToken, readConfir
 import { readAttachmentLink, readCapped, serveAttachment } from './attachments.js';
 import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
+import { daily } from './limits.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 import { INTAKE, type Mailbox } from './intake.js';
@@ -122,7 +123,7 @@ async function upload(request: Request, env: Env, conversationId: string): Promi
   return added.ok ? json({ attachment: added.attachment }, 201, headers) : fail(added.status, added.code, added.message, headers);
 }
 
-type Hook = { type?: string; data?: { messageId?: string; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown } } };
+type Hook = { type?: string; data?: { messageId?: string; recipients?: string[]; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown } } };
 
 /** A verified, parsed Bane webhook delivery, deduplicated by webhook-id (after parsing, so a malformed one is retried). */
 async function delivery(request: Request, env: Env, secret: string | undefined, name: string): Promise<{ event: Hook; deliveryId: string } | Response> {
@@ -132,7 +133,7 @@ async function delivery(request: Request, env: Env, secret: string | undefined, 
   let event: Hook;
   try { event = JSON.parse(body); } catch { return new Response(null, { status: 400 }); }
   // A global brake before anything is recorded: Bane retries a 503 later (review M5).
-  if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: 'global' })).success) return new Response(null, { status: 503, headers: { 'retry-after': '60' } });
+  if (env.EMAIL_IN_GLOBAL && !(await env.EMAIL_IN_GLOBAL.limit({ key: 'global' })).success) return new Response(null, { status: 503, headers: { 'retry-after': '60' } });
   const deliveryId = request.headers.get('webhook-id')!;
   const fresh = await env.DB.prepare('INSERT INTO webhook_deliveries (id, received_at) VALUES (?, ?) ON CONFLICT (id) DO NOTHING').bind(deliveryId, Date.now()).run();
   if (!fresh.meta.changes) return new Response(null, { status: 200 });
@@ -167,7 +168,8 @@ async function intake(request: Request, env: Env): Promise<Response> {
   if (got instanceof Response) return got;
   const { event } = got, message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
   if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
-  const recipients = JSON.stringify(message?.to ?? '').toLowerCase();
+  // The envelope recipients Bane matched (so Bcc counts), else the To header.
+  const recipients = (event.data?.recipients?.length ? event.data.recipients : [JSON.stringify(message?.to ?? '')]).join(' ').toLowerCase();
   const mailbox = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).filter(a => a && recipients.includes(a)).map(a => a.split('@')[0] as Mailbox).find(m => m in INTAKE);
   if (!mailbox) return new Response(null, { status: 200 });
   const threadId = message?.threadId ?? messageId;
@@ -223,5 +225,9 @@ export default {
       console.error(JSON.stringify({ level: 'error', code: missing ? 'SECRET_MISSING' : 'UNHANDLED', secret: missing, route: path, message: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) }));
       return fail(503, 'SUPPORT_UNAVAILABLE', missing ? `Support is not fully configured (${missing} is missing).` : 'Support is unavailable right now. Try again in a minute.', cors(env, request));
     }
+  },
+  /** Daily at 00:10 UTC: the team's over-cap digest for yesterday, and the retention sweep. */
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(daily(env, controller.scheduledTime).then(result => console.log(JSON.stringify({ level: 'info', code: 'SUPPORT_DAILY', ...result }))));
   },
 } satisfies ExportedHandler<Env>;

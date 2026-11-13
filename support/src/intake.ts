@@ -3,7 +3,7 @@ import { baneApi, BaneError, senderOf, type InboundMessage } from './bane.js';
 import type { Env } from './env.js';
 import { attachmentLink, safeName, storeImage } from './attachments.js';
 import { cleanImage, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
-import { alertOnce, countToday, limits } from './limits.js';
+import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js';
 import { fileTicket, notifyTeam, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, newId } from './tokens.js';
@@ -63,14 +63,16 @@ export class SupportIntake extends DurableObject<Env> {
   private async process(next: { message_id: string; thread_id: string; mailbox: Mailbox }) {
     const api = baneApi(this.env, 'intake'), set = (state: string) => this.sql.exec('UPDATE intake_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
     const message: InboundMessage = await api.message(next.message_id);
-    const sender = senderOf(message) ?? 'unknown', hash = await addressHash(sender), cap = limits(this.env);
-    // The same caps as the support address: per sender and in total.
-    if (!(await countToday(this.env, `sender:${hash}:mail`, cap.mailPerSender)).ok) { console.warn(JSON.stringify({ level: 'warn', code: 'INTAKE_SENDER_CAP', mailbox: next.mailbox })); set('dropped'); return; }
-    if (!(await countToday(this.env, 'global:mail', cap.mailPerDay)).ok) { await alertOnce(this.env, 'mail', cap.mailPerDay); set('dropped'); return; }
+    const sender = senderOf(message) ?? 'unknown', hash = await addressHash(sender);
+    const dmarc = String(message.verdicts?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
+    const hold = async (reason: string) => { await holdOverCap(this.env, { channel: next.mailbox, reason, sender, dmarc, subject: message.subject ?? null, text: message.text ?? null, messageId: next.message_id, threadId: next.thread_id }); set('held'); };
+    // Caps per DMARC identity (or this address's unauthenticated bucket) and in total (review R1): over a cap the
+    // message is kept for the team's digest, never dropped.
+    const mail = await mailAllowed(this.env, next.mailbox, sender, dmarcPass);
+    if (!mail.ok) { await hold(mail.reason); return; }
     const headers = new Map((message.headers ?? []).map(h => [h.name.toLowerCase(), h.value]));
     const automatic = /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || (headers.get('auto-submitted') ?? 'no').toLowerCase() !== 'no'
       || /^(?:bulk|list|junk|auto_reply)$/i.test(headers.get('precedence') ?? '') || headers.has('x-autoreply') || headers.has('x-autorespond');
-    const dmarc = String(message.verdicts?.dmarc ?? 'NONE').toUpperCase();
     // Who wrote: a DMARC pass that maps to a Bane user names them; anything else is shown as an unverified sender.
     let verified: TicketContext['verified'] = null, customer: TicketContext['customer'] = { userId: null, email: null, name: null, role: null, workspaces: [] };
     if (dmarc === 'PASS') {
@@ -103,19 +105,21 @@ export class SupportIntake extends DurableObject<Env> {
       evidence: { ids: [next.message_id] }, details: { topic: next.mailbox },
     };
     const ctx: TicketContext = { conversationId, channel: 'email', threadId: next.thread_id, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender: verified ? null : sender, customer };
+    // Tickets come from separate budgets (R1): a verified customer's from the verified reserve, anyone else's from this
+    // address's own budget, so spoofed abuse@ mail can't use up legal@, privacy@ or a customer's escalation.
     const exists = await this.env.DB.prepare('SELECT id FROM tickets WHERE conversation_id = ?').bind(conversationId).first();
+    let filed: { id: string; created: boolean } | null = null;
     if (!exists) {
-      const person = verified ? `user:${customer.userId}` : `sender:${hash}`;
-      if (!(await countToday(this.env, `${person}:tickets`, cap.ticketsPerPerson)).ok) { console.warn(JSON.stringify({ level: 'warn', code: 'INTAKE_TICKET_CAP', mailbox: next.mailbox })); set('dropped'); return; }
-      if (!(await countToday(this.env, 'global:tickets', cap.ticketsPerDay)).ok) { await alertOnce(this.env, 'tickets', cap.ticketsPerDay); set('dropped'); return; }
-    }
-    const filed = await fileTicket(this.env, ctx, input);
-    if (filed.created) await notifyTeam(this.env, ctx, filed, input);
+      const allowed = await ticketAllowed(this.env, { verifiedUserId: verified ? customer.userId : null, mailbox: next.mailbox, sender, dmarcPass });
+      if (!allowed.ok) await holdOverCap(this.env, { channel: next.mailbox, reason: allowed.reason, sender, dmarc, subject: message.subject ?? null, text: message.text ?? null, messageId: next.message_id, threadId: next.thread_id });
+      else filed = await fileTicket(this.env, ctx, input);
+    } else filed = await fileTicket(this.env, ctx, input);
+    if (filed?.created) await notifyTeam(this.env, ctx, filed as Awaited<ReturnType<typeof fileTicket>>, input);
     // One fixed acknowledgement per sender per mailbox per day; never to automatic mail.
     if (!automatic && (await countToday(this.env, `sender:${hash}:ack:${next.mailbox}`, 1)).ok) {
-      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@bane.mx. We've received your message and logged it as ${filed.id}. A person at Bane will reply by email.\n\nBane`;
+      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@bane.mx. We've received your message${filed ? ` and logged it as ${filed.id}` : ''}. A person at Bane will reply by email.\n\nBane`;
       await api.reply(message.threadId ?? next.thread_id, { replyToMessageId: next.message_id, text, to: sender, subject: `Re: your message to ${next.mailbox}@bane.mx`, addressId: null }, `ack-${next.message_id}`);
     }
-    set('done');
+    set(filed ? 'done' : 'held');
   }
 }

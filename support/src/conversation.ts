@@ -4,7 +4,7 @@ import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
 import { expectation, fileTicket, notifyTeam, openFollowUp, type TicketContext } from './tickets.js';
 import { addressHash, confirmToken, MissingSecret, newId } from './tokens.js';
-import { alertOnce, countToday, limits } from './limits.js';
+import { alertOnce, countToday, holdOverCap, limits, mailAllowed, ticketAllowed } from './limits.js';
 import { attachmentLink, deleteConversationUploads, MAX_ATTACHMENTS, modelImage, safeName, storeImage, type Attachment } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { customerBlock, firstName, greetingBundle, type Customer } from './agent/context.js';
@@ -161,8 +161,10 @@ export class SupportConversation extends DurableObject<Env> {
     if (!meta?.pendingSender || meta.verified || await addressHash(meta.pendingSender) !== hash) return { ok: false };
     const ok = await this.verifySender(meta, meta.pendingSender, { kind: 'magic_link', confirmedAt: new Date().toISOString() });
     if (!ok) return { ok: false };
-    // The confirmation covers the messages that asked for it; anything later is checked again on arrival.
+    // The confirmation covers the messages waiting for it (incl. ones that joined from other threads); anything later
+    // is checked again on arrival.
     this.sql.exec("UPDATE support_inbox SET state = 'confirmed' WHERE state = 'awaiting_confirmation'");
+    await this.env.DB.prepare('DELETE FROM pending_confirms WHERE address_hash = ? AND conversation_id = ?').bind(hash, meta.conversationId).run();
     await this.ctx.storage.setAlarm(Date.now());
     return { ok: true };
   }
@@ -415,7 +417,8 @@ export class SupportConversation extends DurableObject<Env> {
       },
       fileTicket: async (input: TicketInput) => {
         const meta = this.meta()!, filed = await this.harnessTicket(meta, input, this.currentDmarc);
-        if (filed.refused) throw new ToolFailure('Today’s ticket limit for this customer is reached, so this couldn’t be filed. Tell them the Bane team can still be reached by replying to an earlier ticket email, or by writing to support@bane.mx tomorrow; answer what you can yourself.');
+        if (filed.refused === 'person') throw new ToolFailure('This customer already filed today’s maximum of tickets, so this couldn’t be filed. Tell them the Bane team already has their earlier tickets today and can be reached by replying to one of those emails; answer what you can yourself.');
+        if (filed.refused) throw new ToolFailure('Bane support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email support@bane.mx; answer what you can yourself.');
         return filed.created
           ? `Filed ${filed.id}. Tell the customer: you've passed it to the Bane team as ${filed.id}; someone will reply by email to ${filed.replyTo ?? 'their account address'}, usually within one business day; you can't promise an outcome, but you've included what you found.`
           : `Added to the existing ticket ${filed.id}. Tell the customer you've added this to ${filed.id}.`;
@@ -433,14 +436,14 @@ export class SupportConversation extends DurableObject<Env> {
     return { ok: true, global: false };
   }
 
-  private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: boolean } : never> {
+  private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: 'person' | 'global' } : never> {
     const ctx = await this.ticketCtx(meta, dmarc);
-    // A new ticket counts against the person's and everyone's daily caps (review M5); adding to one doesn't.
+    // A new ticket counts against the person's cap and its budget (verified customers have their own reserve: R1);
+    // adding to an existing one doesn't.
     const exists = await this.env.DB.prepare('SELECT id FROM tickets WHERE conversation_id = ?').bind(meta.conversationId).first();
     if (!exists) {
-      const cap = limits(this.env);
-      if (!(await countToday(this.env, `${await this.person(meta)}:tickets`, cap.ticketsPerPerson)).ok) return { id: '', created: false, dueAt: 0, replyTo: null, refused: true };
-      if (!(await countToday(this.env, 'global:tickets', cap.ticketsPerDay)).ok) { await alertOnce(this.env, 'tickets', cap.ticketsPerDay); return { id: '', created: false, dueAt: 0, replyTo: null, refused: true }; }
+      const allowed = await ticketAllowed(this.env, { verifiedUserId: meta.verified ? meta.userId : null, mailbox: 'support', sender: meta.email, dmarcPass: dmarc === 'PASS' });
+      if (!allowed.ok) { console.warn(JSON.stringify({ level: 'warn', code: 'TICKET_CAP', scope: allowed.scope, reason: allowed.reason })); return { id: '', created: false, dueAt: 0, replyTo: null, refused: allowed.scope }; }
     }
     const filed = await fileTicket(this.env, ctx, input);
     if (filed.created) {
@@ -493,11 +496,15 @@ export class SupportConversation extends DurableObject<Env> {
     if (automatic) { set('dropped'); return true; }
     const dmarc = String(message.verdicts?.dmarc ?? message.verdicts?.dmarcVerdict ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
     const confirmed = next.state === 'confirmed';
-    // Daily caps on inbound mail, per sender and in total (review M5). Rerouted copies were counted where they arrived.
+    // Daily caps on inbound mail, per DMARC identity (or the unauthenticated bucket) and in total (review M5, R1). Over a
+    // cap the message is kept for the team's digest, never dropped. Rerouted copies were counted where they arrived.
     if (!confirmed && !this.rerouted.has(next.message_id)) {
-      const cap = limits(this.env), key = `sender:${await addressHash(sender)}:mail`;
-      if (!(await countToday(this.env, key, cap.mailPerSender)).ok) { console.warn(JSON.stringify({ level: 'warn', code: 'EMAIL_SENDER_CAP', conversation: meta.conversationId })); set('dropped'); return true; }
-      if (!(await countToday(this.env, 'global:mail', cap.mailPerDay)).ok) { await alertOnce(this.env, 'mail', cap.mailPerDay); set('dropped'); return true; }
+      const mail = await mailAllowed(this.env, 'support', sender, dmarcPass);
+      if (!mail.ok) {
+        await holdOverCap(this.env, { channel: 'support', reason: mail.reason, sender, dmarc, subject: message.subject ?? null, text: message.text ?? null, messageId: next.message_id, threadId: next.thread_id });
+        set('held');
+        return true;
+      }
     }
     const recent = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM support_inbox WHERE state IN ('answered', 'awaiting_confirmation') AND received_at > ?", Date.now() - EMAIL_BURST_MS).one().n;
     if (recent > EMAIL_BURST) { set('dropped'); return true; }
@@ -534,12 +541,28 @@ export class SupportConversation extends DurableObject<Env> {
       set('answered');
       return true;
     }
-    // No DMARC pass: a fixed reply with the confirm link, at most once a day per address; the message waits for it.
+    // No DMARC pass (review R2): the message waits for a confirmation, and nothing vanishes.
+    // - This conversation already sent a link: wait for it, and send a fresh one if the last is over an hour old.
+    // - Another conversation has an open link for this address: the message joins it, answered once that is confirmed.
+    // - Otherwise a new link (up to 3 a day per address); past that, the message waits and is kept for the team's digest.
+    const hash = await addressHash(sender), cap = limits(this.env), now = Date.now();
     set('awaiting_confirmation');
-    this.update(m => { m.pendingSender = sender; m.confirmSentAt = Date.now(); });
-    if ((await countToday(this.env, `sender:${await addressHash(sender)}:confirm`, limits(this.env).confirmsPerAddress)).ok) {
+    const pending = await this.env.DB.prepare('SELECT conversation_id, sent_at FROM pending_confirms WHERE address_hash = ? AND sent_at > ?').bind(hash, now - 86_400_000).first<{ conversation_id: string; sent_at: number }>();
+    if (pending && pending.conversation_id !== meta.conversationId && !meta.confirmSentAt) {
+      this.sql.exec("UPDATE support_inbox SET state = 'rerouted' WHERE message_id = ?", next.message_id);
+      console.warn(JSON.stringify({ level: 'info', code: 'EMAIL_JOINS_PENDING_CONFIRM', from: meta.conversationId, to: pending.conversation_id }));
+      await this.env.CONVERSATION.get(this.env.CONVERSATION.idFromName(pending.conversation_id)).enqueueInbound({ conversationId: pending.conversation_id, threadId: next.thread_id, messageId: next.message_id, deliveryId: 'reroute:pending_confirm' });
+      return true;
+    }
+    if (meta.confirmSentAt && now - meta.confirmSentAt < cap.confirmResendMinutes * 60_000) return true;
+    if ((await countToday(this.env, `sender:${hash}:confirm`, cap.confirmsPerAddress)).ok) {
+      this.update(m => { m.pendingSender = sender; m.confirmSentAt = now; });
+      await this.env.DB.prepare('INSERT INTO pending_confirms (address_hash, conversation_id, sent_at) VALUES (?, ?, ?) ON CONFLICT (address_hash) DO UPDATE SET conversation_id = excluded.conversation_id, sent_at = excluded.sent_at').bind(hash, meta.conversationId, now).run();
       await this.template(message, next.message_id, sender, 'confirm', `${this.env.PUBLIC_URL}/confirm/${await confirmToken(this.env.SUPPORT_ROOT_SECRET, meta.conversationId, sender)}`);
-    } else console.warn(JSON.stringify({ level: 'warn', code: 'CONFIRM_LINK_RATE_LIMITED', conversation: meta.conversationId }));
+    } else {
+      this.update(m => { m.pendingSender = sender; });
+      await holdOverCap(this.env, { channel: 'support', reason: 'confirm links per address', sender, dmarc, subject: message.subject ?? null, text: message.text ?? null, messageId: next.message_id, threadId: next.thread_id });
+    }
     return true;
   }
 

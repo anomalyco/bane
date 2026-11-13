@@ -12,7 +12,9 @@ import { TYPE_LABEL } from './tickets.js';
 
 const COOKIE = '__Host-bane-support-staff';
 const SESSION_SECONDS = 8 * 3600;
-type Staff = { userId: string; email: string; role: string; exp: number };
+/** How long one operator check is trusted (review Low): after this, a page load goes back through Bane's sign-in. */
+const recheckSeconds = (env: Env) => { const v = Number((env as unknown as Record<string, unknown>).STAFF_RECHECK_SECONDS); return Number.isInteger(v) && v > 0 ? v : 3600; };
+type Staff = { userId: string; email: string; role: string; exp: number; checked: number };
 
 const b64url = (s: string) => btoa(unescape(encodeURIComponent(s))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 const unb64url = (s: string) => decodeURIComponent(escape(atob(s.replaceAll('-', '+').replaceAll('_', '/'))));
@@ -34,13 +36,20 @@ nav a{margin-right:.6rem}button,select,input{font:inherit}</style></head><body>$
   { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff', ...headers } });
 
 const signIn = (env: Env, note = '') => page('Bane support staff', `<h1>Bane support tickets</h1>${note ? `<p>${esc(note)}</p>` : ''}<p>Staff only. Sign in with your Bane operator account.</p>
-<p><a href="${esc(`${env.BANE_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${env.PUBLIC_URL}/staff/callback`)}`)}">Sign in with Bane</a></p>`, note ? 403 : 200);
+<p><a href="${esc(signInUrl(env))}">Sign in with Bane</a></p>`, note ? 403 : 200);
+const signInUrl = (env: Env) => `${env.BANE_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${env.PUBLIC_URL}/staff/callback`)}`;
 
 export async function staff(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url), path = url.pathname;
   if (path === '/staff/callback' && request.method === 'GET') return callback(env, url.searchParams.get('staff'));
   const who = await session(env, request);
   if (!who) return path === '/staff' || request.method === 'GET' ? signIn(env) : new Response(null, { status: 403 });
+  // Re-check the operator role hourly: a GET goes back through Bane's sign-in (silent while their Bane session lasts,
+  // refused if they're no longer an operator); a write with a stale check is refused.
+  if (Date.now() / 1000 - who.checked > recheckSeconds(env)) {
+    if (request.method !== 'GET') return page('Check again', '<h1>Your staff session needs a fresh check</h1><p>Reload the ticket page, then try again.</p>', 403);
+    return new Response(null, { status: 303, headers: { location: signInUrl(env) } });
+  }
   if (request.method === 'POST') {
     // Writes: same-origin form posts only, with the session's CSRF token.
     if (request.headers.get('origin') !== new URL(env.PUBLIC_URL).origin) return new Response(null, { status: 403 });
@@ -67,7 +76,7 @@ async function callback(env: Env, token: string | null): Promise<Response> {
   const fresh = await env.DB.prepare('INSERT INTO staff_tokens_used (jti, used_at) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING').bind(checked.jti, Date.now()).run();
   if (!fresh.meta.changes) return signIn(env, 'That sign-in link was already used. Sign in again.');
   const exp = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
-  const payload = b64url(JSON.stringify({ userId: checked.staff.userId, email: checked.staff.email, role: checked.staff.role, exp } satisfies Staff));
+  const payload = b64url(JSON.stringify({ userId: checked.staff.userId, email: checked.staff.email, role: checked.staff.role, exp, checked: Math.floor(Date.now() / 1000) } satisfies Staff));
   const cookie = `s1.${payload}.${await sign(await key(env), `s1.${payload}`)}`;
   console.log(JSON.stringify({ level: 'info', code: 'STAFF_SIGNED_IN', staff: checked.staff.userId }));
   return new Response(null, { status: 303, headers: { location: '/staff/tickets', 'set-cookie': `${COOKIE}=${cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` } });

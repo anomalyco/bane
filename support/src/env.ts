@@ -15,6 +15,8 @@ export interface Env {
   /** Per-person conversation starts and per-sender inbound mail (Workers rate limiting). */
   CHAT_START?: RateLimit;
   EMAIL_IN?: RateLimit;
+  /** One key across all inbound mail, at a higher rate (the Worker answers 503 so Bane retries later). */
+  EMAIL_IN_GLOBAL?: RateLimit;
   /** Screenshots: the stage's private uploads bucket (bane-support[-dev]-uploads, 90-day lifecycle). */
   UPLOADS: R2Bucket;
   /** Optional: downscales large screenshots before the model sees them (Cloudflare Images binding). */

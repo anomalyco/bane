@@ -39,7 +39,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   INTAKE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportIntake' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), STAFF_RECHECK_SECONDS: text('6'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -97,8 +97,8 @@ async function connect(socketUrl: string) {
 }
 
 /** Bane's inbound webhook for one message, signed with the test secret (support@, or the intake addresses). */
-function signedHook(messageId: string, threadId: string, from = 'ada@acme.test', options: { to?: string; intake?: boolean; instance?: Miniflare } = {}) {
-  const body = JSON.stringify({ type: 'message.received', data: { messageId, message: { id: messageId, threadId, direction: 'inbound', from: { address: from }, to: [{ address: options.to ?? 'support@dev.bane.mx' }] } } });
+function signedHook(messageId: string, threadId: string, from = 'ada@acme.test', options: { to?: string; intake?: boolean; instance?: Miniflare; recipients?: string[] } = {}) {
+  const body = JSON.stringify({ type: 'message.received', data: { messageId, ...(options.recipients ? { recipients: options.recipients } : {}), message: { id: messageId, threadId, direction: 'inbound', from: { address: from }, to: [{ address: options.to ?? 'support@dev.bane.mx' }] } } });
   const id = `wh_${randomBytes(8).toString('hex')}`, ts = String(Math.floor(Date.now() / 1000)), secret = options.intake ? INTAKE_SECRET : WEBHOOK_SECRET;
   const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${id}.${ts}.${body}`).digest('base64')}`;
   return (options.instance ?? mf).dispatchFetch(`${SUPPORT}/hooks/${options.intake ? 'bane-intake' : 'bane-inbound'}`, { method: 'POST', body, headers: { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': signature } });
@@ -351,10 +351,25 @@ describe('support Worker', () => {
   }, 120_000);
 
   test('M5: daily caps on turns, tickets, mail and confirm links; unverified email gets no model turn; the team is alerted once', async () => {
-    const caps = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('4'), LIMIT_TICKETS_PER_PERSON: text('1'), LIMIT_MAIL_PER_SENDER: text('2'), LIMIT_CONFIRMS_PER_ADDRESS: text('1') })),
+    const caps = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('4'), LIMIT_TICKETS_PER_PERSON: text('1'), LIMIT_MAIL_PER_SENDER: text('2'), LIMIT_CONFIRMS_PER_ADDRESS: text('1'), LIMIT_TICKETS_INTAKE_PER_MAILBOX: text('2') })),
       { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
     try {
       await migrate(caps);
+      const db = await caps.getD1Database('DB', 'support');
+      // Review R1 (the reviewer's PoC I): spoofed abuse@ mail uses up only abuse@'s budget. The third is kept for the
+      // digest (still acknowledged, without a ticket ID); a DMARC-passing legal@ request and, below, a verified
+      // customer's escalation are still filed.
+      for (const n of [1, 2, 3]) assert.equal((await signedHook(`msg_abuse_s${n}`, `thr_s${n}`, `s${n}@spoof.test`, { intake: true, to: 'abuse@dev.bane.mx', instance: caps })).status, 200);
+      assert.equal((await signedHook('msg_legal_pass_1', 'thr_legal_pass', 'counsel@firm.test', { intake: true, to: 'legal@dev.bane.mx', instance: caps })).status, 200);
+      await eventually(async () => (await replies('thr_s3', caps))[0]);
+      await eventually(async () => db.prepare("SELECT id FROM tickets WHERE type = 'legal'").first());
+      assert.equal((await db.prepare("SELECT count(*) AS n FROM tickets WHERE type = 'abuse_report'").first<{ n: number }>())!.n, 2);
+      assert.ok(await db.prepare("SELECT id FROM tickets WHERE type = 'legal' AND title = 'Subpoena 2'").first(), 'legal@ is not starved by abuse@.');
+      const held = await db.prepare("SELECT channel, reason, sender, dmarc FROM overflow WHERE message_id = 'msg_abuse_s3'").first<any>();
+      assert.deepEqual(held, { channel: 'abuse', reason: 'tickets for abuse@', sender: 's3@spoof.test', dmarc: 'FAIL' }, 'Kept, not dropped.');
+      assert.equal((await replies('thr_s3', caps))[0][3].text, "Hi,\n\nThanks for writing to abuse@bane.mx. We've received your message. A person at Bane will reply by email.\n\nBane");
+      const buckets = (await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE '%:mail' ORDER BY key").all<{ key: string; n: number }>()).results;
+      assert.ok(buckets.some(b => b.key === 'unauthenticated:abuse:mail' && b.n === 3) && !buckets.some(b => b.key.startsWith('sender:') && b.n === 3), `Spoofed senders share one bucket: ${JSON.stringify(buckets)}`);
       const open = async () => {
         const start = await caps.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
         const socket = await caps.dispatchFetch(((await start.json()) as any).socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
@@ -383,18 +398,28 @@ describe('support Worker', () => {
       const alerts = (await fakeCalls(caps)).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /Daily model-turn budget reached \(4\)/.test(c[3].subject ?? ''));
       assert.equal(alerts.length, 1, 'The team is alerted once a day.');
       assert.deepEqual(alerts[0][3].to, ['ryan@anoma.ly']);
-      // Mail per sender: the third message from one address today is dropped (the fixed replies go to the first two).
+      // Mail per DMARC-passing sender: the third message today is over the cap, kept for the digest (not answered).
       for (const n of [1, 2, 3]) assert.equal((await signedHook(`msg_stranger_cap_${n}`, `thr_cap_${n}`, 'stranger@else.test', { instance: caps })).status, 200);
       await eventually(async () => (await replies('thr_cap_2', caps))[0]);
-      await new Promise(r => setTimeout(r, 1500));
+      await eventually(async () => db.prepare("SELECT id FROM overflow WHERE message_id = 'msg_stranger_cap_3'").first());
       assert.deepEqual([(await replies('thr_cap_1', caps)).length, (await replies('thr_cap_2', caps)).length, (await replies('thr_cap_3', caps)).length], [1, 1, 0]);
-      // Confirm links: one per address a day; unverified mail never costs a model turn.
+      // Review R2: a second unverified message from the same address joins the open confirmation instead of vanishing
+      // (no second link); confirming once answers both. Unverified mail never costs a model turn.
       const models = recorded.length;
       for (const n of [1, 2]) assert.equal((await signedHook(`msg_nodmarc_c${n}`, `thr_c${n}`, 'ada@acme.test', { instance: caps })).status, 200);
-      await eventually(async () => (await replies('thr_c1', caps))[0]);
+      const linkReply = await eventually(async () => (await replies('thr_c1', caps))[0]);
       await new Promise(r => setTimeout(r, 1500));
       assert.deepEqual([(await replies('thr_c1', caps)).length, (await replies('thr_c2', caps)).length], [1, 0]);
       assert.equal(recorded.length, models, 'No model turn for unverified email.');
+      const link = String(linkReply[3].text).match(/\/confirm\/(\S+)/)![1]!;
+      await caps.dispatchFetch(`${SUPPORT}/confirm/${link}`, { method: 'POST' });
+      const second = await eventually(async () => (await replies('thr_c2', caps))[0]);
+      assert.ok(second, 'The joined message is answered after the one confirmation (here with the busy reply: the turn cap is spent).');
+      // The digest: tomorrow at 00:10 UTC the team gets one email listing what went over a cap.
+      await (await caps.getWorker('support')).scheduled({ cron: '10 0 * * *', scheduledTime: new Date(Date.now() + 86_400_000) });
+      const digest = await eventually(async () => (await fakeCalls(caps)).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /messages? over cap on /.test(c[3].subject ?? '')));
+      assert.match(digest[3].subject, /^\[Bane support\] 2 messages over cap on \d{4}-\d{2}-\d{2}$/);
+      assert.ok(digest[3].text.includes('abuse@ · tickets for abuse@ · s3@spoof.test (DMARC FAIL)') && digest[3].text.includes('support@ · mail per sender · stranger@else.test'), digest[3].text);
       one.ws.close(); two.ws.close();
     } finally { await caps.dispose(); }
   }, 180_000);
@@ -439,6 +464,37 @@ describe('support Worker', () => {
     assert.equal(wrong.status, 401);
   }, 120_000);
 
+  test('R2 (the reviewer’s PoC V1): a domain without DMARC gets every email answered, each after its own confirmation; follow-ups join an open one', async () => {
+    const answered = async (thread: string, id: string) => eventually(async () => (await replies(thread)).find(c => c[3].replyToMessageId === id && /61 of 1,000/.test(c[3].text)), 60_000);
+    const confirmFrom = async (thread: string, id: string) => {
+      const reply = await eventually(async () => (await replies(thread)).find(c => c[3].replyToMessageId === id && CONFIRM_TEMPLATE.test(c[3].text)));
+      assert.ok(reply, `A confirm link for ${id}.`);
+      assert.equal((await mf.dispatchFetch(`${SUPPORT}/confirm/${String(reply[3].text).match(/\/confirm\/(\S+)/)![1]}`, { method: 'POST' })).status, 200);
+    };
+    assert.equal((await signedHook('msg_v1a', 'thr_v1', 'victim@acme.test')).status, 200);
+    await confirmFrom('thr_v1', 'msg_v1a');
+    assert.ok(await answered('thr_v1', 'msg_v1a'), 'Answered with account data after confirming.');
+    // The second message (still no DMARC): rerouted under M1, and it gets its own link instead of silence.
+    assert.equal((await signedHook('msg_v1b', 'thr_v1', 'victim@acme.test')).status, 200);
+    await confirmFrom('thr_v1', 'msg_v1b');
+    assert.ok(await answered('thr_v1', 'msg_v1b'), 'The second email is answered too.');
+    // Two messages in two threads before confirming: one link, both answered after it.
+    assert.equal((await signedHook('msg_v2a', 'thr_v2', 'vera@acme.test')).status, 200);
+    await eventually(async () => (await replies('thr_v2'))[0]);
+    assert.equal((await signedHook('msg_v2b', 'thr_v3', 'vera@acme.test')).status, 200);
+    await new Promise(r => setTimeout(r, 1500));
+    assert.equal((await replies('thr_v3')).length, 0, 'No second link while the first is open.');
+    await confirmFrom('thr_v2', 'msg_v2a');
+    assert.ok(await answered('thr_v2', 'msg_v2a') && await answered('thr_v3', 'msg_v2b'), 'Both answered, each in its own thread.');
+  }, 180_000);
+
+  test('intake keys the mailbox on the envelope recipient Bane matched, so Bcc reaches privacy@', async () => {
+    assert.equal((await signedHook('msg_privacy_bcc_1', 'thr_privacy', 'dpo@corp.test', { intake: true, to: 'someone@corp.test', recipients: ['privacy@dev.bane.mx'] })).status, 200);
+    const db = await mf.getD1Database('DB', 'support');
+    const ticket = await eventually(async () => db.prepare("SELECT type, severity, title FROM tickets WHERE title = 'Data request'").first<any>());
+    assert.deepEqual(ticket, { type: 'privacy', severity: 'P2', title: 'Data request' });
+  }, 60_000);
+
   test('image checks: the bytes decide the type, metadata is removed, damage and oversize are refused', () => {
     for (const [bytes, type, size] of [[pngWithMetadata(64, 32), 'image/png', [64, 32]], [jpegWithMetadata(40, 20), 'image/jpeg', [40, 20]], [webpWithMetadata(30, 10), 'image/webp', [30, 10]]] as const) {
       const clean = cleanImage(bytes, type);
@@ -449,6 +505,12 @@ describe('support Worker', () => {
     }
     assert.deepEqual(cleanImage(pngWithMetadata()).removed, ['tEXt', 'eXIf', 'tIME']);
     assert.deepEqual(cleanImage(jpegWithMetadata()).removed, ['APP1', 'COM']);
+    // Review Low: nothing rides along after the image ends.
+    const tailed = cleanImage(jpegWithMetadata(40, 20, `PK\x03\x04 ${SECRET_TEXT}`));
+    assert.ok(tailed.removed.includes('trailing data') && !Buffer.from(tailed.bytes).includes(SECRET_TEXT) && tailed.bytes.at(-2) === 0xff && tailed.bytes.at(-1) === 0xd9);
+    assert.ok(!Buffer.from(cleanImage(pngWithMetadata(64, 32, 64, SECRET_TEXT)).bytes).includes(SECRET_TEXT), 'PNG: nothing after IEND.');
+    const unknown = cleanImage(webpWithMetadata(30, 10, SECRET_TEXT));
+    assert.ok(unknown.removed.includes('ZZZZ') && !Buffer.from(unknown.bytes).includes(SECRET_TEXT), 'WebP: unknown chunks dropped.');
     const webp = cleanImage(webpWithMetadata());
     assert.deepEqual(webp.removed, ['EXIF', 'XMP']); assert.equal(webp.bytes[20]! & 0x0c, 0, 'VP8X no longer claims EXIF or XMP');
     assert.equal(Buffer.from(webp.bytes).readUInt32LE(4), webp.bytes.length - 8, 'RIFF size rewritten');
@@ -548,6 +610,15 @@ describe('support Worker', () => {
     const done = await db.prepare('SELECT status, resolved_by, resolution FROM tickets WHERE id = ?').bind(bug!.id).first<any>();
     assert.deepEqual(done, { status: 'resolved', resolved_by: 'usr_ops', resolution: 'Fixed in #160' });
     assert.ok(!(await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: session })).text()).includes('Webhook test returns 500'), 'Open tickets no longer list it.');
+    // Review Low: the operator role is re-checked (hourly in production; 6 s here). A stale session goes back through
+    // Bane's sign-in on a page load, and can't write.
+    await new Promise(r => setTimeout(r, 6500));
+    const stale = await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: session, redirect: 'manual' });
+    assert.deepEqual([stale.status, stale.headers.get('location')], [303, `${ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${SUPPORT}/staff/callback`)}`]);
+    assert.equal((await resolve({ ...session, origin: SUPPORT }, csrf)).status, 403, 'A stale check can’t write.');
+    const fresh = await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j9:usr_ops:ok`, { redirect: 'manual' });
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: { cookie: fresh.headers.get('set-cookie')!.split(';')[0]! } })).status, 200);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j10:usr_ops:demoted`, { redirect: 'manual' })).status, 403, 'A demoted operator gets no new session.');
   }, 60_000);
 
   test('email: image attachments are checked, stripped and shown to the model; other files are not opened', async () => {

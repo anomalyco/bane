@@ -75,9 +75,14 @@ function jpeg(b: Uint8Array) {
     if (length < 2 || end > b.length) throw malformed('JPEG');
     if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) { height = u16be(b, at + 5); width = u16be(b, at + 7); }
     if (marker === 0xda) {
-      // Start of scan: the entropy-coded data and everything after it (more scans, EOI) is image data.
-      parts.push(b.subarray(at));
-      if (width === null) throw malformed('JPEG');
+      // Start of scan: the scans run to the first EOI (inside entropy-coded data 0xFF is always followed by 0x00 or a
+      // restart marker, and the markers between progressive scans are never EOI). Anything after EOI is not the image
+      // and is dropped, so nothing can ride along in the stored file.
+      let eoi = -1;
+      for (let i = end; i + 1 < b.length; i++) if (b[i] === 0xff && b[i + 1] === 0xd9) { eoi = i; break; }
+      if (width === null || eoi < 0) throw malformed('JPEG');
+      parts.push(b.subarray(at, eoi + 2));
+      if (eoi + 2 < b.length) removed.push('trailing data');
       return { bytes: concat(parts), width, height, removed };
     }
     const keep = !(marker >= 0xe0 && marker <= 0xef) && marker !== 0xfe
@@ -88,7 +93,8 @@ function jpeg(b: Uint8Array) {
   throw malformed('JPEG');
 }
 
-/** WebP: drop the EXIF and XMP chunks and clear their flags in VP8X; keep image, alpha, animation and ICC. */
+/** WebP: keep only image, alpha, animation and ICC chunks; drop EXIF, XMP and anything unknown, and clear the VP8X flags. */
+const WEBP_KEEP = new Set(['VP8 ', 'VP8L', 'VP8X', 'ALPH', 'ANIM', 'ANMF', 'ICCP']);
 function webp(b: Uint8Array) {
   if (u32le(b, 4) + 8 > b.length) throw malformed('WebP');
   const chunks: Uint8Array[] = [], removed: string[] = [];
@@ -97,7 +103,7 @@ function webp(b: Uint8Array) {
   while (at + 8 <= end) {
     const type = ascii(b, at, 4), size = u32le(b, at + 4), next = at + 8 + size + (size & 1);
     if (at + 8 + size > end) throw malformed('WebP');
-    if (type === 'EXIF' || type === 'XMP ') { removed.push(type.trim()); at = next; continue; }
+    if (!WEBP_KEEP.has(type)) { removed.push(type.trim()); at = next; continue; }
     const chunk = b.slice(at, Math.min(next, end));
     if (type === 'VP8X') { vp8x = chunk; width = u24le(b, at + 12) + 1; height = u24le(b, at + 15) + 1; }
     else if (type === 'VP8 ' && width === null && size >= 10) { width = u16le14(b, at + 14); height = u16le14(b, at + 16); }

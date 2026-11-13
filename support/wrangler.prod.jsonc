@@ -31,10 +31,12 @@
   // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
   "ratelimits": [
     { "name": "CHAT_START", "namespace_id": "8794101", "simple": { "limit": 5, "period": 60 } },
-    // Per sender address, and the "global" key across all of them (the Worker answers 503 so Bane retries later).
-    { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } }
+    // Per sender address; and one key across all inbound mail at a higher rate (the Worker answers 503, Bane retries).
+    { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } },
+    { "name": "EMAIL_IN_GLOBAL", "namespace_id": "8794103", "simple": { "limit": 120, "period": 60 } }
   ],
-  "triggers": { "crons": [] },
+  // 00:10 UTC: yesterday's over-cap digest to the team, and the retention sweep (src/limits.ts daily()).
+  "triggers": { "crons": ["10 0 * * *"] },
   "vars": {
     "STAGE": "production",
     "PUBLIC_URL": "https://support.bane.mx",
