@@ -2,6 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
 import { hkdfSync } from 'node:crypto';
 import type { Config, Permission } from './core.js';
+import { secretPrefixes } from './brand.js';
 
 const Payload = z.object({
   v: z.literal([3, 4]), id: z.string().regex(/^agt_[0-9a-f]{32}$/), grant: z.string().regex(/^mcp_[A-Za-z0-9_-]{1,200}$/),
@@ -23,11 +24,11 @@ const signed = (payload: string) => `opensend-agent-token-v1:${payload}`;
 export async function createAgentToken(config: Config, input: { id: string; grant: string; permissions: Permission[]; domains: string[]; expiresAt: string }) {
   const payload = encode(JSON.stringify(Payload.parse({ v: 4, id: input.id, grant: input.grant, permissions: input.permissions, domains: input.domains, exp: Date.parse(input.expiresAt), nonce: Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('') })));
   const signature = encode(new Uint8Array(await crypto.subtle.sign('HMAC', await key(config.authSecret, 4), encoder.encode(signed(payload)))));
-  return `bane_agent_${payload}.${signature}`;
+  return `${secretPrefixes.agentToken}${payload}.${signature}`;
 }
 
 export async function verifyAgentToken(config: Config, token: string): Promise<AgentTokenPayload | null> {
-  const match = token.match(/^(?:bane|os)_agent_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/);
+  const match = token.match(/^(?:nm|bane|os)_agent_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/); // bane_/os_: remove after rename cleanup
   if (!match || token.length > 16 * 1024) return null;
   try {
     const payload = Payload.parse(JSON.parse(new TextDecoder().decode(decode(match[1]!))));

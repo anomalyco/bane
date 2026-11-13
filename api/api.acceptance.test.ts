@@ -386,7 +386,7 @@ test('UI notes capture text: an address split across inline elements is masked i
   assert.deepEqual(maskRuns(['Key: ', key.slice(0, 20), key.slice(20)]), ['Key: ', '•'.repeat(20), '•'.repeat(key.length - 20)]);
   const kept = [`cmp_${hex(32)}`, 'ui-table__clickable private-address__value', 'Section title sits 4px closer', 'abc123def456'];
   for (const text of kept) { assert.equal(redactSecrets(text), text); assert.deepEqual(maskRuns([text]), [text]); }
-  const secrets = [key, `bane_notes_${hex(64)}`, `bane_agent_${random}.${random}`, `whsec_${random}`, `sk_live_${random}`, `rk_${random}`, `cus_${random.slice(0, 16)}`,
+  const secrets = [key, `nm_${hex(64)}`, `nm_mbx_${hex(64)}`, `nm_notes_${hex(64)}`, `nm_agent_${random}.${random}`, `bane_notes_${hex(64)}`, `bane_agent_${random}.${random}`, `whsec_${random}`, `sk_live_${random}`, `rk_${random}`, `cus_${random.slice(0, 16)}`,
     Array.from({ length: 8 }, () => 'a1b2').join('-'), `eyJhbGciOiJIUzI1NiJ9.${random}.${random}`, 'AKIAIOSFODNN7EXAMPLE', `Bearer ${random}`, random, hex(40)];
   for (const secret of secrets) {
     assert.equal(redactSecrets(`before ${secret} after`).includes(secret), false, secret);
@@ -1574,7 +1574,7 @@ async function keyFixture(t: TestContext, options: { permissions?: string[]; dom
   }), 201);
   assert.equal(typeof body.id, 'string');
   assert.equal(typeof body.secret, 'string', 'API-key creation must return the secret exactly once.');
-  assert.match(body.secret, /^bane_[0-9a-f]{64}$/);
+  assert.match(body.secret, /^nm_[0-9a-f]{64}$/);
   secrets.add(body.secret);
   cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, MANAGER), [200, 204]); });
   return body;
@@ -1807,9 +1807,10 @@ describe('Public contract and authentication', () => {
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
-    // Even with a matching stored hash, the retired test key format cannot authenticate.
-    for (const prefix of ['os_', 'os_live_', 'os_test_', 'bane_test_']) {
-      const old = prefix + key.secret.slice('bane_'.length), id = unique('legacy-key');
+    // Keys from before the Nightmail rename (bane_) and OpenSend (os_) still authenticate; even with a matching stored
+    // hash, the retired test key format cannot.
+    for (const prefix of ['bane_', 'os_', 'os_live_', 'os_test_', 'bane_test_', 'nm_test_']) {
+      const old = prefix + key.secret.slice('nm_'.length), id = unique('legacy-key');
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,$3,'["read"]','[]')`, [id, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
       cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
       const me = await http('GET','/v1/me',old);
@@ -1820,6 +1821,7 @@ describe('Public contract and authentication', () => {
     const rows = await allPages('/v1/api-keys', MANAGER);
     const saved = rows.find(row => row.id === key.id);
     assert.ok(saved, 'Newly created API key must be visible in the key list.');
+    assert.equal(saved.prefix, key.secret.slice(0, 'nm_'.length + 8), 'A key list shows the prefix and 8 characters.');
     for (const row of rows) {
       assert.equal(row.secret, undefined, 'API-key listing must never return a secret.');
       assert.equal(row.hash, undefined, 'API-key listing must never return credential hashes.');
@@ -3267,7 +3269,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, undefined);
-    const [encoded, signature] = temporary.token.slice('bane_agent_'.length).split('.');
+    assert.match(temporary.token, /^nm_agent_/);
+    const [encoded, signature] = temporary.token.slice('nm_agent_'.length).split('.');
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
     const derived = Buffer.from(hkdfSync('sha256', AUTH_SECRET!, 'opensend:keys:v1', 'agent-token:v1', 32));
     const mac = (body: string, key: string | Buffer) => createHmac('sha256', key).update(`opensend-agent-token-v1:${body}`).digest('base64url');
@@ -4228,7 +4231,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const { token: mcpToken } = await oauthGrant(t, db, 'bane:read bane:manage offline_access', request);
       const rpc = async (method: string, params: Json) => ok(await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken) }, { jsonrpc: '2.0', id: 1, method, params })).result;
       const agentToken = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'audit trail fixture' }, confirm: true } })).structuredContent.token as string;
-      assert.match(agentToken, /^(?:bane|os)_agent_/); secrets.add(agentToken);
+      assert.match(agentToken, /^nm_agent_/); secrets.add(agentToken);
       const tools = (await rpc('tools/list', {})).tools.map((tool: Json) => tool.name as string);
       assert.ok(tools.length > 10 && !tools.some((name: string) => /support|operator|activity/i.test(name)), 'Internal routes are never MCP tools.');
       const appPassword = hex().slice(0, 32).match(/.{4}/g)!.join('-'); secrets.add(appPassword);
@@ -4326,7 +4329,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
       const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
-      assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
+      assert.match(grant.token, /^nm_support_[0-9a-f]{64}$/); secrets.add(grant.token);
       assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
       error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
       assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
@@ -4478,12 +4481,12 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.ok(!/ada(?:@|%40)example/.test(JSON.stringify(created)), 'No address in full anywhere in the note.');
       assert.equal(created.page.path, `/campaigns/${campaign}/edit?q=ad•••`, 'Resource IDs are not secrets.');
       // PR #175 review M1: credentials in what was captured (text, label, locator, URL) never reach the table, whatever the dashboard sent.
-      const leaked = { apiKey: `bane_${hex()}`, notesKey: `bane_notes_${hex()}`, signing: `whsec_${hex().slice(0, 24)}Zq`, stripe: `sk_live_${hex().slice(0, 20)}Zq`, appPassword: hex().slice(0, 32).match(/.{4}/g)!.join('-'), token: `Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae${hex().slice(0, 8)}` };
+      const leaked = { apiKey: `bane_${hex()}`, newKey: `nm_${hex()}`, notesKey: `bane_notes_${hex()}`, newNotesKey: `nm_notes_${hex()}`, signing: `whsec_${hex().slice(0, 24)}Zq`, stripe: `sk_live_${hex().slice(0, 20)}Zq`, appPassword: hex().slice(0, 32).match(/.{4}/g)!.join('-'), token: `Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae${hex().slice(0, 8)}` };
       const exposed = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, url: `${PUBLIC_ORIGIN}/api-keys?token=${leaked.token}`,
-        element: { ...element, text: `Key ${leaked.apiKey} · ${leaked.signing} · ${leaked.stripe} · ${leaked.appPassword}`, label: `Copy ${leaked.notesKey}`, selector: `code[title="${leaked.apiKey}"]`, alternatives: [`#k-${leaked.token}`] } }), 201);
+        element: { ...element, text: `Key ${leaked.apiKey} · ${leaked.signing} · ${leaked.stripe} · ${leaked.appPassword} · ${leaked.newKey}`, label: `Copy ${leaked.notesKey} ${leaked.newNotesKey}`, selector: `code[title="${leaked.apiKey}"]`, alternatives: [`#k-${leaked.token}`] } }), 201);
       const stored = JSON.stringify((await db.query('SELECT url, path, element FROM ui_notes WHERE id = $1', [exposed.id])).rows[0]);
       for (const [name, secret] of Object.entries(leaked)) assert.equal(stored.includes(secret) || JSON.stringify(exposed).includes(secret), false, name);
-      assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
+      assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
       // Recheck M2: an invisible character doesn't hide an address from the API's own pass either.
       const hidden = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, text: 'carol\uFEFF@example.net', label: 'To carol\u200B@exam\u00ADple.net' } }), 201);
       assert.deepEqual([hidden.element.text, hidden.element.label], ['ca•••', 'To ca•••']);
@@ -4542,7 +4545,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await send('POST', '/v1/operator/ui-note-keys', session(other), { name: 'Other agent' }), 404, 'NOT_FOUND');
       error(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 91 }), 422);
       const key = ok(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 7 }), 201); secrets.add(key.secret);
-      assert.match(key.secret, /^bane_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
+      assert.match(key.secret, /^nm_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
       const listed = ok(await send('GET', '/v1/operator/ui-note-keys', session(operator))).data;
       assert.deepEqual(listed.map((k: Json) => [k.id, k.name, 'secret' in k || 'hash' in k]), [[key.id, 'Fix agent', false]]);
       error(await send('GET', '/v1/operator/ui-note-keys', session(other)), 404, 'NOT_FOUND');
@@ -9776,16 +9779,18 @@ test('Brand: the hosted support hosts, docs examples and stdio MCP identity come
   for(const host of brand.hostedHosts) assert.ok(csp.includes(` https://support.${host} wss://support.${host}`),`connect-src names support.${host}`);
   const llms=await (await fetch(BASE+'/llms.txt')).text();
   assert.ok(llms.includes(`${brand.publicOrigin}/v1/emails/send`) && llms.includes(`$${brand.apiKeyEnv}`) && llms.includes(brand.sdkPackage));
-  const connect=(service:string,title:string)=>{
+  const connect=(service:string,title:string,key='bane_'+'1'.repeat(64))=>{
     const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
     const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
-    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:'bane_'+'1'.repeat(64)} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
+    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   };
   for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
     const result=connect(service,title);
     assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
   }
   assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
+  for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
+  assert.notEqual(connect(brand.productSlug,`${brand.productName} API`,'nm_live_'+'1'.repeat(64)).status,0);
 });
 
 // PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
@@ -14357,8 +14362,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
       error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
       const scoped = ok(await local('POST', '/v1/inbound/keys', { name: 'support fixture', addressIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
-      assert.match(scoped.secret,/^bane_mbx_[0-9a-f]{64}$/);
-      const old=scoped.secret.replace('bane_mbx_','os_mbx_');
+      assert.match(scoped.secret,/^nm_mbx_[0-9a-f]{64}$/);
+      const old=scoped.secret.replace('nm_mbx_','os_mbx_');
       await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) SELECT 'legacy-fixture',workspace_id,name,$1,$2,mailbox_ids,permissions FROM mailbox_keys WHERE id=$3`,[createHash('sha256').update(old).digest('hex'),old.slice(0,14),scoped.id]);
       assert.equal(ok(await local('GET',`${root}/${support.id}`,undefined,'live',{authorization:`Bearer ${old}`})).id,support.id);
       const agent = { authorization: `Bearer ${scoped.secret}` };
@@ -15620,7 +15625,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // The same keys through createApiKey: an address key, and an inbox key that ends with its inbox and its lease.
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Support agent', access: { type: 'addresses', addressIds: [a.id], mail: ['read', 'send'] } }), 201);
-      assert.match(reader.secret, /^bane_mbx_[0-9a-f]{64}$/);
+      assert.match(reader.secret, /^nm_mbx_[0-9a-f]{64}$/);
       assert.deepEqual([reader.access, reader.permissions, reader.domains, reader.expiresAt], [access('addresses', [a.id], null, ['read', 'send']), [], [], null]);
       ok(await read(reader.secret, a.id)); error(await read(reader.secret, b.id), 404, 'NOT_FOUND');
       error(await thread(reader.secret, { addressId: a.id, from: `beta@${host}` }), 403, 'FROM_NOT_ALLOWED');
@@ -15897,11 +15902,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
         // One config builder (mcp-clients.ts) for the API, the dashboard and Docs: plain /mcp, the key as a bearer header, and keys
         // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
-        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer bane_mbx_/);
+        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer nm_mbx_/);
         assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
         const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
         assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
-        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer bane_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
@@ -16827,8 +16832,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.match(error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1'),409,'IDEMPOTENT_SECRET_WITHHELD').message,/shown once/);
         assert.equal((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='ep-1'")).rows[0].r.includes('whsec_'),false);
         // A nested credential (createInbox's credential.secret) is withheld too.
-        const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
-        error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
+        const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/nm_mbx_/);
+        error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/(?:nm|bane)_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
       });
       // tear witness (api/tear): mint key, lost list key k1 b1, create list key k1 b1 created a second list.

@@ -186,10 +186,10 @@ export function createSeed(now = Date.now()): DemoState {
     workspaceKey('key_production', 'Production application', 'demo_prod_', ['send'], ['acme.com'], 30, 1),
     workspaceKey('key_analytics', 'Analytics dashboard', 'demo_read_', ['read'], [], 14, 3),
     workspaceKey('key_deploy', 'Deploy pipeline', 'demo_full_', ['read', 'send', 'manage'], [], 6, 50),
-    limitedKey('mbk_support_agent', 'Support agent', 'bane_mbx_4f2a91', { type: 'addresses', addressIds: ['mbx_support', 'mbx_billing'], mail: ['read', 'send', 'modify'] }, 20, 0.1),
-    limitedKey('mbk_triage', 'Triage reader', 'bane_mbx_8c1d07', { type: 'addresses', addressIds: null, mail: ['read'] }, 9, 30),
-    limitedKey('mbk_ops_inbox', 'Ops inbox reader', 'bane_mbx_2b7e55', { type: 'inbox', addressIds: ['inbox_ops'], inboxId: 'inbox_ops', mail: ['read', 'modify'] }, 4, 2),
-    limitedKey('mbk_e2e', 'End-to-end tests', 'bane_mbx_d93a10', { type: 'addresses', addressIds: [], mail: ['create', 'read', 'modify'] }, 2, 0.5),
+    limitedKey('mbk_support_agent', 'Support agent', 'nm_mbx_4f2a91', { type: 'addresses', addressIds: ['mbx_support', 'mbx_billing'], mail: ['read', 'send', 'modify'] }, 20, 0.1),
+    limitedKey('mbk_triage', 'Triage reader', 'nm_mbx_8c1d07', { type: 'addresses', addressIds: null, mail: ['read'] }, 9, 30),
+    limitedKey('mbk_ops_inbox', 'Ops inbox reader', 'nm_mbx_2b7e55', { type: 'inbox', addressIds: ['inbox_ops'], inboxId: 'inbox_ops', mail: ['read', 'modify'] }, 4, 2),
+    limitedKey('mbk_e2e', 'End-to-end tests', 'nm_mbx_d93a10', { type: 'addresses', addressIds: [], mail: ['create', 'read', 'modify'] }, 2, 0.5),
   ]
   const token = (id: string, grantId: string, purpose: string, permissions: ApiKey['permissions'], domains: string[], madeHours: number, expiresInHours: number, used: number | null) =>
     ({ id, grantId, purpose, permissions, domains, createdAt: ago(madeHours), expiresAt: new Date(now + expiresInHours * 3_600_000).toISOString(), lastUsedAt: used === null ? null : ago(used), revokedAt: null })

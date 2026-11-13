@@ -36,7 +36,7 @@ function canonical(value: unknown): string {
 }
 function carriesSecret(value: unknown, depth = 0): boolean {
   if (depth > 16) return true;
-  if (typeof value === 'string') return /^(?:Bearer |bane_|whsec_)/.test(value);
+  if (typeof value === 'string') return /^(?:Bearer |nm_|bane_|whsec_)/.test(value); // bane_: remove after rename cleanup
   if (Array.isArray(value)) return value.some(item => carriesSecret(item, depth + 1));
   if (!value || typeof value !== 'object') return false;
   return Object.entries(value).some(([k, v]) => (SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0) || carriesSecret(v, depth + 1));
