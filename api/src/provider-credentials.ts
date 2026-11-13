@@ -42,7 +42,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
     const c = result.Credentials;
     if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) throw new ApiError(503, 'AWS_SESSION_INVALID', 'STS returned incomplete session credentials.');
     if (verify) {
-      const expected = /^arn:aws:iam::(\d{12}):role\/(Bane-[a-f0-9]{20})$/.exec(roleArn);
+      const expected = /^arn:aws:iam::(\d{12}):role\/((?:Nightmail|Bane)-[a-f0-9]{20})$/.exec(roleArn);
       if (!expected || result.AssumedRoleUser?.Arn !== `arn:aws:sts::${expected[1]}:assumed-role/${expected[2]}/${input.RoleSessionName}`) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer role and account.');
     }
     const value = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };

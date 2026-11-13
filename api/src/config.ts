@@ -21,6 +21,9 @@ const values = z.object({
   // Origins this installation served before PUBLIC_URL and still answers on (https://bane.mx after the switch to
   // nightmail.com), comma-separated. Their /mcp resource stays valid for tokens minted there. Remove after rename cleanup.
   PREVIOUS_PUBLIC_URLS: z.string().default(''),
+  // The name a new BYO connection gives its CloudFormation stack and IAM role (<prefix>-<id>). Bane until the runtime's
+  // sts:AssumeRole policy also allows role/Nightmail-*, then Nightmail. Existing connections keep their stack's name.
+  BYO_STACK_PREFIX: z.enum(['Bane', 'Nightmail']).default('Bane'),
   // Kept distinct from a missing value: self-hosted installations opt out with an explicit empty value.
   ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(256).regex(/^\S+$/)]).optional(),
   // Self-hosted access: exact issuer subjects (never addresses). Find them with scripts/list-signin-attempts.ts.
@@ -190,7 +193,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
-    accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins,
+    accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
     encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_BANE_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_BANE_ROOT_SECRET) : v.ENCRYPTION_KEY,

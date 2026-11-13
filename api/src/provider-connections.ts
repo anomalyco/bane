@@ -3,7 +3,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
-import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
+import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
 import { importByoClaims } from './domain-claims.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
@@ -35,7 +35,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
 }).openapi('ConnectionSummary');
-type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
+type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
 
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -69,7 +69,7 @@ async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
 const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-south-1', 'ap-south-2', 'ap-southeast-3', 'ap-southeast-5', 'ap-south-1', 'ap-northeast-3', 'ap-northeast-2',
   'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ca-central-1', 'ca-west-1', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-north-1', 'eu-central-2',
   'il-central-1', 'me-south-1', 'me-central-1', 'sa-east-1'];
-const stackName = (row: Row) => `Bane-${row.id.slice(-20)}`;
+const stackName = (row: Row) => row.stack_name ?? byoStackName('Bane', row.id);
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
   if (row.template_version==='v5' && row.state!=='disconnecting' && runtime.config.byoV2 && runtime.config.byoV5TemplateUrl && !row.aws_account_id) quickCreateUrl=v5Link(runtime,row);
@@ -413,8 +413,8 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   const principalArn = (await platformIdentity(runtime)).arn;
   // BYO sends from the customer's own account: there is no tenant to wait for.
   const connectionId = id('conn'), prefix = setupResources(connectionId).topicName.replace(/-feedback$/, '');
-  const result = await runtime.db.execute<Row>(sql`WITH created AS (INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state,resource_prefix)
-    VALUES (${connectionId},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v4','awaiting_role','ready',${prefix})
+  const result = await runtime.db.execute<Row>(sql`WITH created AS (INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state,resource_prefix,stack_name)
+    VALUES (${connectionId},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v4','awaiting_role','ready',${prefix},${kind === 'byo' ? byoStackName(runtime.config.byoStackPrefix, connectionId) : null})
     ON CONFLICT(workspace_id) DO NOTHING RETURNING *), audit AS (${audit(sql`created`)}) SELECT * FROM created`);
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');

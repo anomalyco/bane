@@ -11405,7 +11405,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
-      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/Bane-${v5.id.slice(-20)}/Bane`};
+      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/Nightmail-${v5.id.slice(-20)}/Bane`};
       assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'Bane');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
       return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/Bane`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
@@ -11469,7 +11469,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     error(await post('/scan'),404);error(await post('',{kind:'byo',awsAccountId:account}),422,'VALIDATION_ERROR');
     const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
     error(await post('',{kind:'byo',awsAccountId:platform}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
+    // A connection made after BYO_STACK_PREFIX switches names its stack and role Nightmail-<id>, for good.
+    runtime.config.byoStackPrefix='Nightmail';
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
+    runtime.config.byoStackPrefix=undefined;
+    assert.equal(params.get('stackName'),'Nightmail-'+v5.id.slice(-20));
+    const {v5Link}=await import('./src/byo-regional.js'),stored=(await db.query('SELECT * FROM provider_connections WHERE id=$1',[v5.id])).rows[0];
+    assert.equal(stored.stack_name,'Nightmail-'+v5.id.slice(-20));
+    assert.equal(new URLSearchParams(new URL(v5Link(runtime,stored)).hash.split('?')[1]).get('stackName'),stored.stack_name,'Switching back never renames a launched stack.');
     assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'bane-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
     await assert.rejects(setByoV2(db,[wid,'disable']),/Disconnect/);
