@@ -13,45 +13,60 @@
 .billing-dollars > span { position: absolute; left: var(--space-8); color: var(--color-muted); pointer-events: none; }
 .billing-dollars .ui-input { padding-left: 20px; text-align: right; font-variant-numeric: tabular-nums; }
 .billing-save { transition: opacity 120ms ease-out; }
+.billing-section .ui-check-field { gap: 0; }
+.billing-needs { font-size: var(--text-sm); }
+/* Two tabs never scroll, so the focus ring isn't clipped by the tab list's overflow. */
+.billing-section .ui-tabs { overflow: visible; }
 .billing-save[data-hidden] { visibility: hidden; opacity: 0; }
 .billing-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }
 .billing-section > .usage-note { margin: 0; }
 
 .billing-amount { font-variant-numeric: tabular-nums; }
 .billing-amount[data-sign='in'] { color: var(--color-success); }
-.billing-link { display: inline-flex; align-items: center; gap: 2px; color: var(--color-muted); text-decoration: none; font-size: var(--text-xs); }
+.billing-link { position: relative; display: inline-flex; align-items: center; gap: 2px; color: var(--color-muted); text-decoration: none; font-size: var(--text-xs); white-space: nowrap; }
 @media (hover: hover) and (pointer: fine) { .billing-link:hover { color: var(--color-text); } }
-.billing-links { justify-content: flex-end; gap: var(--space-12); }
+@media (pointer: coarse), (max-width: 899px) { .billing-link::after { content: ''; position: absolute; inset: -14px -8px; } }
+.billing-links { justify-content: flex-start; gap: var(--space-12); flex-wrap: nowrap; }
 .billing-table td[data-col='amount'], .billing-table td[data-col='after'] { font-variant-numeric: tabular-nums; }
-/* One line per entry: a long usage description ends in an ellipsis (its title has the rest). */
-.billing-table td[data-col='description'] { max-width: 0; }
-.billing-desc { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A description takes the room the table has and wraps to a second line (a row fits two) before it is cut; the full text is in its title. */
+.billing-table td[data-col='description'], .billing-table td[data-col='kind'] { max-width: 0; }
+.billing-cell { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
+.billing-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; overflow: hidden; overflow-wrap: anywhere; }
+.billing-stack { display: flex; flex-direction: column; min-width: 0; }
+.billing-stack__note { font-size: var(--text-xs); line-height: var(--leading-xs); }
 
 /* Add credit: amounts as one row of choices, then how to pay. */
-.billing-add .ui-dialog__body, .billing-add form { gap: var(--space-16); }
+.billing-add .ui-dialog__body { display: flex; flex-direction: column; gap: var(--space-12); }
 .billing-choice { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-6); }
 .billing-choice__item, .billing-method { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: 36px; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; transition: box-shadow var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .billing-choice__item[aria-checked='true'], .billing-method[aria-checked='true'] { box-shadow: inset 0 0 0 1.5px var(--color-contrast); font-weight: var(--font-weight-bold); }
 .billing-choice__item:active:not(:disabled), .billing-method:active:not(:disabled) { transform: scale(.98); }
 .billing-choice__item:disabled, .billing-method:disabled { cursor: not-allowed; opacity: .6; }
 @media (hover: hover) and (pointer: fine) { .billing-choice__item:hover:not(:disabled, [aria-checked='true']), .billing-method:hover:not(:disabled, [aria-checked='true']) { background: var(--color-layer-2); } }
-.billing-methods { display: flex; flex-direction: column; gap: var(--space-6); margin-top: var(--space-16); }
+.billing-methods { display: flex; flex-direction: column; gap: var(--space-6); }
 .billing-method { justify-content: flex-start; height: 44px; padding-inline: var(--space-12); }
 .billing-method svg { color: var(--color-muted); }
-.billing-add__custom { width: 100%; margin-top: var(--space-12); }
+.billing-add .billing-add__custom { width: 100%; }
 .billing-add__confirm { margin: 0; text-wrap: pretty; }
 .billing-add__terms { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .billing-add__terms a, .billing-section > .usage-note a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
 @media (hover: hover) { .billing-add__terms a:hover, .billing-section > .usage-note a:hover { color: var(--color-text); } }
-.billing-add .ui-alert { margin-top: var(--space-12); }
 
 @media (max-width: 640px) {
-  /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box. */
-  .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 200px; }
+  /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
+     the rest and wraps, so no title or hint is cut off. Rows with a field keep a narrow column; the others two lines of hint. */
+  .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 200px; min-height: 68px; }
+  .billing-rows .settings-row:has(.billing-dollars) { grid-template-columns: minmax(0, 1fr) 112px; min-height: 60px; }
+  .billing-rows .settings-row__label > span { overflow: visible; white-space: normal; text-wrap: pretty; }
   .billing-rows .settings-row__control { justify-self: stretch; height: var(--control-height); }
   .billing-balance { height: 112px; }
   .billing-balance__amount { font-size: 32px; }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* Cards: a description wraps (up to three lines) instead of ending in an ellipsis; the card grows to fit. */
+  .billing-table .ui-card { height: auto; min-height: var(--table-row-height); }
+  .billing-table .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; white-space: normal; }
+  .billing-table .ui-card__title { overflow: visible; text-wrap: pretty; }
+  .billing-table .billing-desc { display: block; -webkit-line-clamp: unset; overflow: visible; }
 }
 @media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, .billing-save { transition: none; } }
