@@ -248,8 +248,8 @@ const RECEIPT_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta nam
 <tr><td style="padding:0 32px 28px;font-size:12px;line-height:18px;color:#71717a">Northwind, 120 Harbor Street, Portland, OR 97209</td></tr>
 </table></td></tr></table></body></html>`;
 const JUNK_SUBJECT = 'FINAL NOTICE: YOU ARE A WINNER!!!';
-const JUNK_HTML = `<html><head><style>.wrap{display:flex;gap:12px}.hero{background-image:url(https://cdn.example.net/prize.jpg)}</style></head><body>
-<div class="wrap"><div class="hero"><img src="https://cdn.example.net/prize-banner.jpg" width="600" height="420"></div></div>
+const JUNK_HTML = `<html><head><style>.wrap{display:flex;gap:12px}.hero{background:#fde047}</style></head><body>
+<div class="wrap"><div class="hero"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGN4KOsBAAMpAUf+vsNwAAAAAElFTkSuQmCC" width="600" height="420"></div></div>
 <p style="font-size:1px;color:#ffffff">you are a winner you are a winner you are a winner you are a winner</p>
 <p><a href="https://bit.ly/3claim">CLAIM YOUR PRIZE NOW</a> or <a href="http://203.0.113.7/claim">https://northwind.example/claim</a></p>
 <form action="https://203.0.113.7/claim"><input type="text" name="card"><button>Claim</button></form>
@@ -376,6 +376,7 @@ export async function seed(fx) {
     ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The newest receipt as a well-made transactional email, and a junk-like one sent a minute ago (EmailInsight's two cases).
+  // Neither links a remote image: the sent-mail preview loads those, and the gate allows no external request.
   await db.query('UPDATE sending_emails SET snapshot = snapshot || $2::jsonb WHERE id = $1', [email, JSON.stringify({ fromName: 'Northwind', html: RECEIPT_HTML, text: RECEIPT_TEXT })]);
   const junkEmail = rid('email');
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
