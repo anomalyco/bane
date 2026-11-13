@@ -40,7 +40,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
       </span>, 160)}</Row>
       <Row title="Free this month" hint="Sent and received, this UTC month">{value(b, () => <Meter used={b!.free.emails.used} cap={b!.free.emails.limit} label="Free emails used this month" />, 160)}</Row>
       <Row title="Stored past 90 days" hint="1 GB free, then $0.25 per GB-month">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)}`, 140)}</Row>
-      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)} sent`, usage!.month.received === null ? null : `${number(usage!.month.received)} received`, canAdminister && !omens.isError ? `${number(omenCount)} Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
+      <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
       <Row title="Estimated cost" hint={free ? 'Not charged: free plan' : b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>
       <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? 'Custom, set by the Bane team' : 'Recipients, last 24 hours'}>{value(usage, () => !usage!.daily ? <span className="muted">Connect sending first</span> : usage!.daily.cap === null ? 'No daily limit' : <DailyMeter used={usage!.daily.used} cap={usage!.daily.cap} resetAt={usage!.daily.resetAt} />, 160)}</Row>
     </div>
@@ -63,7 +63,7 @@ function Meter({ used, cap, label }: { used: number; cap: number; label: string 
   const share = Math.min(1, used / Math.max(1, cap))
   return <span className="usage-meter">
     <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={cap} aria-valuenow={used}><i style={{ transform: `scaleX(${share})` }} /></span>
-    <span>{number(used)} / {number(cap)}</span>
+    <span className="usage-meter__count">{number(used)} / {number(cap)}</span>
   </span>
 }
 
@@ -71,6 +71,6 @@ function DailyMeter({ used, cap, resetAt }: { used: number; cap: number; resetAt
   const share = Math.min(1, used / Math.max(1, cap))
   return <span className="usage-meter" title={resetAt ? `Capacity frees up from ${date(resetAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })} UTC` : undefined}>
     <span className="usage-meter__track" data-full={share >= 0.9 || undefined} role="meter" aria-label="Recipients used in the last 24 hours" aria-valuemin={0} aria-valuemax={cap} aria-valuenow={used}><i style={{ transform: `scaleX(${share})` }} /></span>
-    <span>{number(used)} / {number(cap)}</span>
+    <span className="usage-meter__count">{number(used)} / {number(cap)}</span>
   </span>
 }

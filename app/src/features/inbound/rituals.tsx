@@ -7,7 +7,7 @@ import { autocompletion } from '@codemirror/autocomplete'
 import { forceLinting, linter, lintGutter, type Diagnostic as LintDiagnostic } from '@codemirror/lint'
 import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
 import { request } from '../../data/live'
@@ -95,6 +95,7 @@ function Editor({ value, change, completions, check, flash, relint }: { value: s
         basicSetup, javascript(), highlight, EditorView.lineWrapping, lintGutter(), changedField,
         EditorView.contentAttributes.of({ 'aria-label': 'Ritual source' }),
         autocompletion({ override: [ctx => {
+          if (!ctx.explicit && /Comment/.test(syntaxTree(ctx.state).resolveInner(ctx.pos, -1).name)) return null
           const word = ctx.matchBefore(/[\w.[\]"-]+/)
           if (!word || (word.from === word.to && !ctx.explicit)) return null
           return { from: word.from, options: latest.current.completions.map(c => ({ label: c.label, type: c.type, detail: c.detail, info: c.info, ...(c.apply ? { apply: c.apply } : {}) })) }
@@ -517,7 +518,7 @@ export function RitualsPage() {
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
         <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
-          <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
+          <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
         <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />

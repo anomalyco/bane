@@ -34,7 +34,7 @@ function sendingNote(domain: Domain) {
 
 // A card's corner has room for the status alone; the note is on the domain's page.
 function SendingCell({ domain, short = false }: { domain: Domain; short?: boolean }) {
-  const status = domain.status === 'verified' ? 'Verified' : label(domain.status), note = sendingNote(domain)
+  const { status } = domainState(domain), note = sendingNote(domain)
   return <StatusDot tone={domain.status === 'issue' ? 'danger' : domain.status === 'verified' ? 'success' : 'warning'} note={short ? undefined : note} title={note ? `${status} · ${note}` : undefined}>{status}</StatusDot>
 }
 
@@ -51,25 +51,25 @@ function ReceivingCell({ domain, receiving, card = false }: { domain: Domain; re
   return <StatusDot tone={status.tone} note={receiving.status !== 'active' ? status.label : card ? `${receiving.addressCount.toLocaleString('en-US')} ${receiving.addressCount === 1 ? 'address' : 'addresses'}` : undefined} title={[`${status.label} at ${receiving.name}`, detail].filter(Boolean).join('. ')}>{receiving.name}</StatusDot>
 }
 
-/** Hosted: the domain's receiving status and its catch-all, beside the sending setup and DNS records below. */
+/** Hosted: where the domain receives, its addresses and catch-all. Only once receiving is on: while it is off the Receiving records below say how to turn it on, and the status is in the page's facts. */
 /** The page reads the receiving domain before it shows (so this section arrives at its final height) and passes it in. */
 function ReceivingSettings({ domainId, receiving }: { domainId: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown } }) {
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, true, domainId)
   const update = useApiMutation((_api, catchAll: MailboxDomain['catchAll']) => request<MailboxDomain>(`/v1/inbound/domains/${encodeURIComponent(domainId)}`, { method: 'PATCH', body: { catchAll } }), 'Catch-all saved', false, true, domainId)
   const state = update.data ?? receiving.data
-  const on = !!state && !['off', 'disabled'].includes(state.status)
+  if (!state) return receiving.error ? <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={receiving.error as Error} onRetry={() => void receiving.refetch()} /></section> : null
+  if (['off', 'disabled'].includes(state.status)) return null
   return <section className="section stack" aria-labelledby="domain-receiving">
-    <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2><p className="muted">{!state ? <span className="ui-skeleton" /> : on ? <>Mail to addresses at {state.name} follows its <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>routes</Link>.</> : 'Publish the receiving MX record below to get mail at this domain.'}</p></div>
-      {on && state!.status !== 'active' && <div className="cluster"><Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button></div>}</div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2 id="domain-receiving">Receiving</h2><p className="muted">Mail to addresses at {state.name} follows its <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>routes</Link>.</p></div>
+      {state.status !== 'active' && <div className="cluster"><Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button></div>}</div>
     <MutationError error={update.error ?? check.error} />
-    {!state && receiving.error ? <ErrorState error={receiving.error as Error} onRetry={() => void receiving.refetch()} /> : !state ? <dl className="settings-facts domain-facts domain-receiving-facts" aria-hidden="true">{['Status', 'Receives at', 'Addresses', catchAllSetting.title].map(term => <div key={term}><dt>{term}</dt><dd><span className="ui-skeleton" /></dd></div>)}</dl> : <dl className="settings-facts domain-facts domain-receiving-facts">
-      <div><dt>Status</dt><dd><StatusBadge status={receivingStatus[state.status].label} tone={receivingStatus[state.status].tone} /></dd></div>
-      <div><dt>Receives at</dt><dd>{on ? state.name : '—'}</dd></div>
-      <div><dt>Addresses</dt><dd>{on ? <Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>{state.addressCount.toLocaleString('en-US')}</Link> : '—'}</dd></div>
-      <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd>{on ? <Select aria-label={`${catchAllSetting.title}: ${catchAllSetting.line}`} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
-        options={[{ value: 'store', label: catchAllSetting.options.store }, { value: 'create_address', label: catchAllSetting.options.create_address }]} /> : catchAllLabel[state.catchAll]}</dd></div>
-    </dl>}
-    {on && <p className="muted domain-receiving-note">{catchAllSetting.line}</p>}
+    <dl className="settings-facts domain-facts domain-receiving-facts">
+      <div><dt>Receives at</dt><dd>{state.name}</dd></div>
+      <div><dt>Addresses</dt><dd><Link to={`/receiving?domain=${encodeURIComponent(state.name)}`}>{state.addressCount.toLocaleString('en-US')}</Link></dd></div>
+      <div title={catchAllSetting.line}><dt>{catchAllSetting.title}</dt><dd><Select aria-label={`${catchAllSetting.title}: ${catchAllSetting.line}`} value={state.catchAll} onValueChange={value => void update.mutateAsync(value as MailboxDomain['catchAll']).catch(() => undefined)} disabled={update.isPending}
+        options={[{ value: 'store', label: catchAllSetting.options.store }, { value: 'create_address', label: catchAllSetting.options.create_address }]} /></dd></div>
+    </dl>
+    <p className="muted domain-receiving-note">{catchAllSetting.line}</p>
   </section>
 }
 
@@ -116,7 +116,7 @@ function DomainsList() {
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
-    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Continue to DNS records</Button></>}>
+    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Add domain</Button></>}>
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
         <Field label="Domain name" htmlFor="domain-name" error={invalid || fieldError(create.error, 'name')}><Input id="domain-name" autoFocus required value={name} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="updates.acme.com" /></Field>
@@ -172,17 +172,18 @@ function DomainDetail() {
   }
   async function checkNow() { try { await verify.mutateAsync(id); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ } }
   if (domain.isPending || (!domain.error && (dns.pending || (hosted && receiving.isPending && !receiving.error)))) return <DomainDetailSkeleton />
-  if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
+  if (domain.error) return <div className="stack"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
   const mailFromRecords = recordsFor(current, 'mail_from')
   const mailFromName = current.mailFromDomain ?? mailFromRecords[0]?.name ?? null
   const state = domainState(current)
+  const sendingDetail = sendingNote(current)
   const receivingRecord = recordsFor(current, 'receiving')[0]
   const receivingPending = !!receivingRecord && receivingRecord.status !== 'verified'
   const onRoot = receivingRecord?.name === current.name
   // Check MX now also stays for a live host whose DNS changed (receivingIssue); choosing another host only before it receives.
   const receivingActions = hosted && (receivingPending || current.receivingIssue) ? <>
-    {receivingPending && chooseSupported && <Button variant="ghost" loading={choose.isPending} onClick={() => void chooseHost(onRoot ? null : current.name)}>{onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`}</Button>}
+    {receivingPending && chooseSupported && <Button loading={choose.isPending} onClick={() => void chooseHost(onRoot ? null : current.name)}>{onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`}</Button>}
     <Button loading={verify.isPending} onClick={() => void checkNow()} title="Added the MX record? Check it now instead of waiting for the hourly check.">Check MX now</Button>
   </> : undefined
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
@@ -195,7 +196,8 @@ function DomainDetail() {
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <dl className="settings-facts domain-facts">
-      <div><dt>Sending</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
+      <div><dt>Sending</dt><dd><StatusBadge status={state.status} tone={state.tone} />{sendingDetail && <span className="muted domain-fact-note" title={sendingDetail}>{sendingDetail}</span>}</dd></div>
+      {hosted && receiving.data && <div><dt>Receiving</dt><dd><StatusBadge status={receiving.data.status === 'active' ? 'On' : receivingStatus[receiving.data.status].label} tone={receivingStatus[receiving.data.status].tone} /></dd></div>}
       {!multiTenant && <div><dt>Region</dt><dd>{current.regionId}</dd></div>}
     </dl>
     {hosted && <ReceivingSettings domainId={id} receiving={receiving} />}
@@ -217,7 +219,7 @@ function DomainDetail() {
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'domain' && query.queryKey[3] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'domains' }) }} />
-    <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
+    <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
         <Field label="MAIL FROM domain" htmlFor="mail-from-domain" error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>

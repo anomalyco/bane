@@ -52,5 +52,5 @@ export function Chain({ keys, empty }: { keys: string[]; empty?: ReactNode }) {
 
 /** One plain line about a concept, with an example in code type and a link to its guide. */
 export function ConceptLine({ line, example, guide }: { line: ReactNode; example?: string; guide?: string }) {
-  return <p className="rcv-concept"><span>{line}</span>{example && <code>{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
+  return <p className="rcv-concept"><span>{line}</span>{example && <code className="rcv-concept__example">{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
 }
