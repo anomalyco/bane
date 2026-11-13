@@ -49,8 +49,14 @@ const legalMarkdown: Plugin = {
   },
 }
 
+// Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name bane.mx.
+const publicOrigin: Plugin = {
+  name: 'bane:public-origin',
+  transformIndexHtml: html => html.replaceAll('%BANE_ORIGIN%', (process.env.VITE_PUBLIC_URL || 'https://bane.mx').replace(/\/$/, '')),
+}
+
 export default defineConfig({
-  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders()],
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),

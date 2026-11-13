@@ -1,4 +1,9 @@
-# bane
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="app/public/brand/bane-lockup-dark.svg">
+    <img src="app/public/brand/bane-lockup-light.svg" alt="bane" height="40">
+  </picture>
+</h1>
 
 Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, OIDC sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 

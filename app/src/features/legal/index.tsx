@@ -8,6 +8,7 @@ import acceptableUse from './content/acceptable-use.md'
 import privacy from './content/privacy.md'
 import subprocessors from './content/subprocessors.md'
 import './legal.css'
+import { BaneWordmark } from '../../components/BaneLogo'
 
 // Public pages, no sign-in: /legal and one page per document. The documents are Markdown in ./content, rendered to HTML
 // when the dashboard builds (app/legal-markdown.ts).
@@ -41,7 +42,7 @@ export function LegalPage() {
   }
   return <div className="legal-page">
     <header className="legal-header">
-      <Link className="wordmark" to="/" aria-label="bane home"><span className="wordmark-square" aria-hidden="true" />bane</Link>
+      <Link className="wordmark" to="/" aria-label="bane home"><BaneWordmark /></Link>
       <nav className="legal-switcher" aria-label="Legal documents">
         <NavLink to="/legal" end>Overview</NavLink>
         {legalLinks.map(([slug, label]) => <NavLink key={slug} to={`/legal/${slug}`}>{label}</NavLink>)}
