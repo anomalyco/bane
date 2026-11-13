@@ -79,7 +79,7 @@ export function AccountSwitcher() {
   })
   const full = accounts.length >= limit
   sections.push([
-    // Bane staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
+    // Nightmail staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
     ...identity.uiNotes === true ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
       label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },

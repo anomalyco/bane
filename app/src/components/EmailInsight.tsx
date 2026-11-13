@@ -7,6 +7,7 @@ import { usePhone } from '../lib/media'
 import { AddressText } from './AddressText'
 import { Alert, Button, ErrorText, SectionHeader, Skeleton, SkeletonText, Tabs } from './ui'
 import './email-insight.css'
+import { productName } from '../../../api/src/brand'
 
 // One surface for "will this email land and look right": the sendability check (POST /v1/emails/check) beside the
 // per-client emulation (POST /v1/emails/preview). Used by a sent email's detail and by the campaign editor's draft.
@@ -103,7 +104,7 @@ export function EmailInsight({ source, pending = false, placeholder, warnBelow }
           {current.clients ? <>
             <p className="muted ei-caption">{current.captions![device]} · Emulated offline, not a screenshot. Remote images are blocked.</p>
             {preview?.html ? <ClientFrame html={preview.html} device={device} title={`${current.captions![device]}, ${theme} mode`} pending={previews.isPlaceholderData || previews.isFetching} /> : <div className="ei-frame ei-frame--empty muted">No preview for this client.</div>}
-          </> : <p className="muted ei-caption">Classic Outlook for Windows renders with Word, so Bane checks its support instead of previewing it.</p>}
+          </> : <p className="muted ei-caption">Classic Outlook for Windows renders with Word, so {productName} checks its support instead of previewing it.</p>}
           <IssueList issues={tabIssues(current)} />
         </>}
     </section>

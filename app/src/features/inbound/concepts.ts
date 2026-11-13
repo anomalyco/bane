@@ -1,3 +1,4 @@
+import { productName } from '../../../../api/src/brand'
 // The words Receiving uses, in one place. docs/receiving.md says the same thing in the same words; change both together.
 // Names follow the API: routes, rituals, endpoints, catch-all (catchAll), store.
 
@@ -24,7 +25,7 @@ export const concepts = {
   // Jev is the AI model behind omens. The API and its docs keep the name; the dashboard says what it does.
   omens: {
     title: 'Omens',
-    line: 'Questions a ritual asks Bane’s AI about an email. Each answer is a score from 0 to 1.',
+    line: `Questions a ritual asks ${productName}’s AI about an email. Each answer is a score from 0 to 1.`,
     example: 'omens(email, { refund: "Is the sender asking for a refund?" })',
   },
 } as const

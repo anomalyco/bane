@@ -11,7 +11,7 @@ import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotes
 import { describe, locate, ownElement, routeOf, screenshot, sensitiveElement } from './capture'
 import './notes.css'
 
-// UI notes mode, for Bane staff (lazy; the shell mounts it only while the mode is on, lib/ui-notes-mode.ts). ⌘-click
+// UI notes mode, for Nightmail staff (lazy; the shell mounts it only while the mode is on, lib/ui-notes-mode.ts). ⌘-click
 // (Ctrl-click off a Mac) any element, or long-press it on a touch screen, to leave a note on it: the click is taken
 // before the page sees it, so a link doesn't open and a menu doesn't toggle. The page's open notes show as numbered pins
 // on their elements, found again by selector; one whose element isn't here is listed in the tray as moved. Everything

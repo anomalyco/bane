@@ -21,20 +21,21 @@ import { togglePrivacy } from '../lib/privacy'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 import { BaneWordmark } from './BaneLogo'
+import { productName } from '../../../api/src/brand'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
 // The sender score explainer: one dialog for every place the score appears, loaded when first opened.
 const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
-// UI notes mode (Bane staff with the operator role): its code loads only while the mode is on, as a fixed overlay.
+// UI notes mode (Nightmail staff with the operator role): its code loads only while the mode is on, as a fixed overlay.
 const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => module.UiNotesLayer)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
 type NavItem = readonly [path: string, title: string]
 const navigation: readonly NavItem[] = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
-// Bane staff (a platform operator role in GET /v1/me) also get the operator console, last.
+// Nightmail staff (a platform operator role in GET /v1/me) also get the operator console, last.
 const operatorLink: NavItem = ['/operator', 'Operator']
 // Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
@@ -152,7 +153,7 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   // Docs pages name themselves (features/docs).
-  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname])
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -224,7 +225,7 @@ export function AppShell() {
   if (compact) return <div className="app-shell app-shell--compact">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="mobile-bar">
-      <NavLink className="wordmark" to="/" aria-label="bane overview"><BaneWordmark /></NavLink>
+      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><BaneWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
       {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
@@ -237,7 +238,7 @@ export function AppShell() {
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to="/" aria-label="bane overview"><BaneWordmark /></NavLink>
+      <NavLink className="wordmark" to="/" aria-label={`${productName.toLowerCase()} overview`}><BaneWordmark /></NavLink>
       <ThemeToggle />
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}

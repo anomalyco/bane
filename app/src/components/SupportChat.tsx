@@ -10,8 +10,8 @@ import { IconButton } from './ui'
 //
 // Where it runs: the demo dashboard and ?support=demo (kept for the browser session; ?support=off clears it) get the
 // scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
-// everyone (dev deploys), "staff" for Bane staff (the operator role) and workspaces Anomaly made free, unset for no one
-// (production until it is rolled out). ?support=<conversationId> (a support email's "continue in Bane" link) opens the
+// everyone (dev deploys), "staff" for Nightmail staff (the operator role) and workspaces Anomaly made free, unset for no one
+// (production until it is rolled out). ?support=<conversationId> (a support email's "continue in Nightmail" link) opens the
 // panel on that conversation.
 const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)

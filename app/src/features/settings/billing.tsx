@@ -10,6 +10,7 @@ import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, mo
 import { useCursorPagination } from '../../lib/pagination'
 import { date, number } from '../../lib/format'
 import './billing.css'
+import { productName } from '../../../../api/src/brand'
 
 type RowProps = { title: ReactNode; hint?: ReactNode; children: ReactNode }
 const errorText = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
@@ -88,9 +89,9 @@ function BillingAlerts({ state, summary: b }: { state: NonNullable<ReturnType<ty
   // The date ends its line, so the text replacing the skeleton moves nothing.
   const slot = (ready: string | null | undefined, width: number) => ready ? <span>{ready}</span> : <span className="billing-slot"><Skeleton width={width} height={14} /></span>
   return <>
-    {state.receiving === 'held' ? <Alert tone="danger" title="Received mail is being held">Bane stores new received mail but doesn’t deliver it to inboxes, webhooks or IMAP until you add credit. Nothing is deleted.</Alert>
+    {state.receiving === 'held' ? <Alert tone="danger" title="Received mail is being held">{productName} stores new received mail but doesn’t deliver it to inboxes, webhooks or IMAP until you add credit. Nothing is deleted.</Alert>
       : state.receiving === 'grace' ? <Alert tone="warning" title={<>Received mail is accepted until {slot(b?.grace.receiveHoldAt ? monthDay(b.grace.receiveHoldAt) : null, 44)}</>}>Then it’s held until you add credit. The balance is below $0; a top-up settles it first. Nothing is deleted.</Alert> : null}
-    {state.autoRecharge === 'failed' && <Alert tone="warning" title="Auto-recharge is off">Bane couldn’t charge your card. Update the card, then turn auto-recharge back on.</Alert>}
+    {state.autoRecharge === 'failed' && <Alert tone="warning" title="Auto-recharge is off">{productName} couldn’t charge your card. Update the card, then turn auto-recharge back on.</Alert>}
   </>
 }
 const useBillingState = () => useSession()?.identity?.billing
@@ -118,7 +119,7 @@ function CardControl({ summary: b }: { summary: BillingSummary | undefined }) {
 // is off and says why. Save keeps its place whether or not it shows, so editing never moves anything.
 // Every way credit is added names the terms it is sold under: refunds and the 12-month expiry (Terms §5.7).
 const TERMS = <>By adding credit you agree to the <Link to="/legal/terms#refunds-and-credit-expiry">Terms (refund and expiry policy)</Link>.</>
-const RECHARGE_NOTE = <>Bane charges your saved card when the balance falls below the threshold, up to the monthly limit. A failed charge turns it off. {TERMS}</>
+const RECHARGE_NOTE = <>{productName} charges your saved card when the balance falls below the threshold, up to the monthly limit. A failed charge turns it off. {TERMS}</>
 const RECHARGE_ROWS = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'], ['cap', 'Monthly limit', '']] as const
 function AutoRecharge({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   const settings = b?.autoRecharge

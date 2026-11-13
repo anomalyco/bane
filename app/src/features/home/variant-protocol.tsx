@@ -4,13 +4,13 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import type { HomeProps } from '.'
 import './variant-protocol.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { hostedDomain, sdkPackage } from '../../../../api/src/brand'
+import { hostedDomain, productName, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 3: one conversation as a sequence diagram. The four verbs are its legend; the brand square is the message.
 type Lane = 0 | 1 | 2
 type Verb = 'send' | 'receive' | 'reply' | 'thread'
 type Step = { from: Lane; to: Lane; label: string; short?: string; note?: string; verb: Verb }
-const lanes = [['your app', 'server'], ['bane', 'Amazon SES'], ['inbox', 'ada@example.net']] as const
+const lanes = [['your app', 'server'], [productName.toLowerCase(), 'Amazon SES'], ['inbox', 'ada@example.net']] as const
 const steps: Step[] = [
   { from: 0, to: 1, label: 'POST /v1/emails/send', short: 'sendEmail()', verb: 'send' },
   { from: 1, to: 0, label: '202 queued', note: 'email_0c6f…', verb: 'send' },
@@ -45,7 +45,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
   const verbState = (verb: Verb) => still || verb === activeVerb ? 'on' : 'off'
   return <div className="vp-page">
     <header className="vp-header">
-      <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
+      <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
       <nav className="vp-nav" aria-label="Site">
         <a href="/docs">Docs</a>
         <ThemeToggle />
@@ -54,7 +54,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
     </header>
 
     <main className="vp-main">
-      <h1 className="sr-only">Send, receive, reply to and thread email with bane</h1>
+      <h1 className="sr-only">Send, receive, reply to and thread email with {productName.toLowerCase()}</h1>
       <p className="vp-strip" aria-hidden="true">{verbs.map(({ verb, word }) => <span key={verb} data-state={verbState(verb)}>{word}</span>)}</p>
 
       <figure className="vp-figure" data-step={step}>

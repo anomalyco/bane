@@ -10,7 +10,7 @@ import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { sdkPackage } from '../../../../api/src/brand'
+import { productName, sdkPackage } from '../../../../api/src/brand'
 
 // GET /v1/public/stats: installation-wide aggregates over whole hours, rounded, computed every minute by the API.
 // `available` is false until enough workspaces send that the figures can't describe one customer; every figure is then null.
@@ -65,7 +65,7 @@ function selectedVariant() {
 
 export function HomePage(props: HomeProps) {
   const [Variant] = useState(selectedVariant)
-  useEffect(() => { document.title = 'bane · Email infrastructure' }, [])
+  useEffect(() => { document.title = `${productName.toLowerCase()} · Email infrastructure` }, [])
   // The first screen after signing in: fetch its code while the visitor reads, so it is already cached on return.
   useEffect(() => {
     const load = () => void import('../onboarding').catch(() => {})
@@ -78,7 +78,7 @@ export function HomePage(props: HomeProps) {
 // Shared page chrome: navigation, sign-in and footer.
 export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
   return <header className="home-header">
-    <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
+    <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
     <nav className="home-nav" aria-label="Site">
       <a href="/docs">Docs</a>
       <ThemeToggle />
@@ -89,7 +89,7 @@ export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, '
 
 export function HomeActions({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
   return <div className="home-actions">
-    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in to Bane</Button>
+    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in to {productName}</Button>
     <a className="ui-button ui-button--secondary ui-button--md" href="/docs">Docs <ArrowUpRight size={16} aria-hidden="true" /></a>
   </div>
 }

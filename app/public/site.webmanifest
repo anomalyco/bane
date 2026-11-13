@@ -1,6 +1,6 @@
 {
-  "name": "bane",
-  "short_name": "bane",
+  "name": "nightmail",
+  "short_name": "nightmail",
   "description": "Email infrastructure done right. One API on Amazon SES.",
   "start_url": "/",
   "scope": "/",

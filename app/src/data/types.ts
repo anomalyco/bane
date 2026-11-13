@@ -1,3 +1,4 @@
+import { productName } from '../../../api/src/brand.js'
 export type RegionId = string
 export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
@@ -234,7 +235,7 @@ const friendlyErrors: Record<string, (detail: string) => string> = {
   OWNER_REQUIRED: () => 'Only a workspace owner can do this.',
   SES_NOT_CONFIGURED: () => 'Sending isn’t available on this server right now. Try again in a few minutes.',
   TENANT_NOT_READY: () => 'Your workspace is still being set up for sending. Try again in a minute or two.',
-  HOSTED_SENDING_PAUSED: detail => `Sending is paused while Bane reviews this workspace${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
+  HOSTED_SENDING_PAUSED: detail => `Sending is paused while ${productName} reviews this workspace${detail ? ` (${detail.replace(/\.$/, '')})` : ''}. Receiving still works.`,
   SENDER_DOMAIN_NOT_VERIFIED: () => 'This sender’s domain isn’t verified. Check its DNS records in Domains, then send once it shows Verified.',
   SEND_LIMIT_REACHED: detail => detail,
   BALANCE_EXHAUSTED: () => 'Sending is paused: your balance is empty. Add credit in Settings → Billing.',
@@ -348,7 +349,7 @@ export interface BaneApi {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Bane staff only: the platform operator role, which opens /operator. */ operator?: 'operator' | 'operator:read' | null; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; standing?: { step: StandingStep; marketingHeld: boolean } | null }) | null; /** Nightmail staff only: the platform operator role, which opens /operator. */ operator?: 'operator' | 'operator:read' | null; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 // GET /v1/overview/setup: Overview's setup and next steps in one read. A part is null where its own list would refuse the caller.

@@ -1,4 +1,5 @@
 import { request } from './live'
+import { productName } from '../../../api/src/brand'
 
 // Settings → Activity (hosted, owners and admins): GET /v1/activity, the workspace's audit trail, newest first.
 export type AuditActorType = 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe'
@@ -9,7 +10,7 @@ export type AuditEntry = {
   actor: { type: AuditActorType; id: string | null; label: string | null; email: string | null }
   via: string
   target: { type: string; id: string | null } | null
-  /** The member the event concerns when it is not the actor: whose role changed, or whose support request let Bane support in. */
+  /** The member the event concerns when it is not the actor: whose role changed, or whose support request let Nightmail support in. */
   subject: { userId: string; email: string | null } | null
   summary: Record<string, unknown>
   reason: string | null
@@ -50,7 +51,7 @@ const labels: Record<string, string> = {
   'campaign.pause': 'Paused a campaign', 'campaign.resume': 'Resumed a campaign', 'campaign.cancel': 'Cancelled a campaign', 'audience.bulk_apply': 'Changed contacts in bulk',
   'sending.pause': 'Paused sending', 'sending.resume': 'Resumed sending',
   'support.contact': 'You contacted support', 'support.view': 'Viewed this workspace',
-  'billing.topup': 'Added credit', 'billing.grant': 'Promotional credit from Bane', 'billing.adjustment': 'Adjustment by Bane', 'billing.refund_release': 'Refund canceled: credit restored',
+  'billing.topup': 'Added credit', 'billing.grant': `Promotional credit from ${productName}`, 'billing.adjustment': `Adjustment by ${productName}`, 'billing.refund_release': 'Refund canceled: credit restored',
   'billing.dispute': 'Card payment disputed', 'billing.dispute_reversal': 'Dispute closed: credit restored', 'billing.write_off': 'Unpaid balance written off', 'billing.expire': 'Credit expired',
 }
 export const actionLabel = (action: string) => labels[action] ?? action

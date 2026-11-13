@@ -131,7 +131,10 @@ const attr = (el, name) => el.openingElement.attributes.find(a => a.type === 'JS
 const classOf = el => { const v = attr(el, 'className')?.value; return v?.type === 'StringLiteral' ? v.value : v?.expression?.type === 'StringLiteral' ? v.expression.value : v?.expression?.type === 'TemplateLiteral' ? v.expression.quasis.map(q => q.value.cooked).join(' ') : ''; };
 const clean = s => s.replace(/\s+/g, ' ').trim();
 const letters = s => /[A-Za-z]{2,}/.test(s.replaceAll(PH, ''));
-const templateText = t => t.quasis.map((q, i) => (q.value.cooked ?? '') + (i < t.expressions.length ? PH : '')).join('');
+// The brand module's productName (and its lowercase form) is the product's name, not a placeholder.
+const brandName = e => e.type === 'Identifier' && e.name === 'productName' ? 'Nightmail'
+  : e.type === 'CallExpression' && e.callee.type === 'MemberExpression' && e.callee.object.type === 'Identifier' && e.callee.object.name === 'productName' ? 'nightmail' : null;
+const templateText = t => t.quasis.map((q, i) => (q.value.cooked ?? '') + (i < t.expressions.length ? brandName(t.expressions[i]) ?? PH : '')).join('');
 // Strings that aren't prose: identifiers, paths, URLs, selectors, CSS, markup, code.
 const codeLike = s => /^(https?:|mailto:|\/|#|\.|[a-z][\w-]*:)/.test(s) || /[{};=<>]|=>|\(\)|\$\{/.test(s) || /^[\w.@+-]+$/.test(s) && !/^[A-Z][a-z]+$/.test(s);
 const sentenceLike = s => /^[A-Z“"‘(]/.test(s) && / /.test(s) && words(s) >= 4 && !codeLike(s) && /[a-z]/.test(s);
@@ -146,7 +149,7 @@ function flatten(children, consume) {
       const e = c.expression;
       if (e.type === 'StringLiteral') text += e.value;
       else if (e.type === 'TemplateLiteral') text += templateText(e);
-      else if (e.type !== 'JSXEmptyExpression') text += PH;
+      else if (e.type !== 'JSXEmptyExpression') text += brandName(e) ?? PH;
     } else if (c.type === 'JSXFragment') text += flatten(c.children, consume);
     else if (c.type === 'JSXElement') {
       if (CODE.has(tagName(c))) text += ` ${PH} `;
@@ -373,7 +376,7 @@ export function lint() {
 // A finding is known by its rule, file and the start of its text, with the product's name as “brand”; when the text
 // changed, by its rule, file and line (compare below). So a line moved by an unrelated edit, or a string edited in
 // place (a rename), is still the same finding.
-const findingKey = (rule, text, term) => (clean(text.toLowerCase()).slice(0, 60) + (term && !rule.startsWith('length') && rule !== 'grade' && rule !== 'sentence-length' ? ` ⟨${term}⟩` : '')).replace(BRAND, 'brand');
+const findingKey = (rule, text, term) => clean(text.toLowerCase()).replace(BRAND, 'brand').slice(0, 60) + (term && !rule.startsWith('length') && rule !== 'grade' && rule !== 'sentence-length' ? ` ⟨${term.replace(BRAND, 'brand')}⟩` : '');
 
 // ---------------------------------------------------------------- ratchet
 function readBaseline() { try { return JSON.parse(readFileSync(BASELINE, 'utf8')).findings ?? {}; } catch { return {}; } }

@@ -15,13 +15,14 @@ import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { productName } from '../../../../api/src/brand'
 
 const route = '/receiving/inboxes'
 const lifetimes = [{ value: '3600', label: '1 hour' }, { value: '86400', label: '24 hours' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
 const statusTone: Record<InboxStatus, Tone> = { active: 'success', expired: 'warning', deleting: 'neutral' }
 const statusLabel: Record<InboxStatus, string> = { active: 'Active', expired: 'Expired', deleting: 'Deleting' }
 const size = (bytes: number) => bytes < 1024 ? `${number(bytes)} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : `${(bytes / 1048576).toFixed(1)} MiB`
-// The MX record's host is the receiving host: reply.example.com on hosted Bane, the domain itself otherwise.
+// The MX record's host is the receiving host: reply.example.com on hosted Nightmail, the domain itself otherwise.
 const receivingHosts = (domains: MailboxDomain[] = []) => domains.filter(domain => domain.status === 'active').map(domain => domain.dns[0]?.name ?? domain.name)
 
 function messageState(message: InboxMessage): { label: string; tone: Tone } {
@@ -238,7 +239,7 @@ function InboxDetail({ id }: { id: string }) {
             // A message's card: its subject and status, then the sender and any code it carries.
             { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender value={row.from} /></span> },
             { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
-            { key: 'code', label: <span title="A one-time code Bane found in the message, such as a sign-up code">Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
+            { key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
             { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />

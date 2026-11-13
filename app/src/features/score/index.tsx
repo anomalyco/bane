@@ -11,6 +11,7 @@ import { useTween } from '../../components/motion'
 import { Dialog } from '../../components/ui'
 import { Dial, Strip } from './gauge'
 import { factorFormats, factorPlain, ScoreAbout } from './about'
+import { productName } from '../../../../api/src/brand'
 export { factorFormats } from './about'
 import { SendingLimitsGuide } from './limits'
 import './score.css'
@@ -122,7 +123,7 @@ function ScoreLimit({ report, limit }: { report: SenderScore; limit: SenderLimit
   const helps = !graded ? 'Factors count from the first grade' : !weakest ? 'No factor measured yet' : weakest.score! >= 100 ? 'Every measured factor is at full marks' : `Helps most: ${weakest.label} (${factorFormats[weakest.key](weakest.value!)})`
   const standing = report.standing, step = standing?.step ?? 'ok'
   const raised = stepAtLeast(step, 'warn') ? step as RaisedStep : null
-  const note = raised ? `${standingTitle[raised]} · see above` : step === 'notice' ? `Note: ${standing!.reasons[0]?.message ?? 'Bane noticed a first problem.'}` : standing?.marketingRelease ? `Marketing at ${standing.marketingRelease.percent}% until ${shortDateTime(standing.marketingRelease.until)} UTC` : 'No sending issues'
+  const note = raised ? `${standingTitle[raised]} · see above` : step === 'notice' ? `Note: ${standing!.reasons[0]?.message ?? `${productName} noticed a first problem.`}` : standing?.marketingRelease ? `Marketing at ${standing.marketingRelease.percent}% until ${shortDateTime(standing.marketingRelease.until)} UTC` : 'No sending issues'
   return <div className="score-limit" aria-label="Daily limit">
     <p className="score-limit__headline">{headline}</p>
     <p>{adjustments || bursts}</p>

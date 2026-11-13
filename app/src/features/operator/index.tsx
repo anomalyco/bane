@@ -10,7 +10,7 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { factorFormats } from '../score'
 import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, useOperatorTabs, OperatorQueueSkeleton, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, WorkspaceBodySkeleton } from './skeletons'
 
-// The operator console (lazy, /operator): Bane staff with a platform role review flagged Hosted workspaces and act on
+// The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
 // UI notes (/operator/notes) live in ./notes and load with this chunk.

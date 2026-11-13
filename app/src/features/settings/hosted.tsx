@@ -23,7 +23,7 @@ import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { agentAccess, connectionTitle } from './key-labels'
-import { hostedHosts } from '../../../../api/src/brand'
+import { hostedHosts, productName } from '../../../../api/src/brand'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -109,7 +109,7 @@ function SendingRows() {
   const current = connection.data, kind = current?.kind ?? summary?.kind, region = current?.region ?? summary?.region
   return <>
     <div className="settings-rows">
-      <Row title="Connection" hint={kind === 'byo' ? 'Amazon SES in your AWS account' : 'Sent through Bane’s Amazon SES'}>{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
+      <Row title="Connection" hint={kind === 'byo' ? 'Amazon SES in your AWS account' : `Sent through ${productName}’s Amazon SES`}>{kind ? <span className="cluster settings-inline"><span>{connectionKindLabel[kind]}</span><StatusBadge status={label(current?.state ?? summary?.state ?? 'pending')} /></span> : <Skeleton width={160} height={20} />}</Row>
       {region && <Row title="Region" hint="The AWS region your mail is sent from"><code>{region}</code></Row>}
       {kind === 'byo' && <Row title="AWS account"><code>{current?.awsAccountId ?? '—'}</code></Row>}
       <ScoreRow />
@@ -131,7 +131,7 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
   if (!kind) return null
   const keeps = 'Domains, DNS records, API keys and received mail stay. It isn’t possible while emails or campaigns are still sending.'
   return <div className="settings-rows settings-danger"><Row title="Disconnect sending" hint="Sending stops until you connect again"><Button variant="danger" onClick={() => setConfirming(true)}>Disconnect</Button></Row>
-    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the Bane stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
+    <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the ${productName} stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
   </div>
 }
 // The account service's connected apps page, on the installations that sign in with Anomaly account.
@@ -151,7 +151,7 @@ function AccountRows() {
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
-    {/* An agent signs in to the account service, which lists and disconnects it everywhere. Bane lists each connected
+    {/* An agent signs in to the account service, which lists and disconnects it everywhere. Nightmail lists each connected
         agent below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
     {accountApps && <Row title="Connected apps" hint="Disconnect a client from your Anomaly account"><a href={accountApps}>Manage at Anomaly account</a></Row>}
     {apps?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect the client':'Revoked · reconnect the client'}</Row>

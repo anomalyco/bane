@@ -7,7 +7,7 @@ import { ownSecretPattern } from '../../../api/src/brand.js'
 // No React here, so the API acceptance suite can test it. The API runs the same patterns again before storing
 // (api/src/ui-notes.ts).
 
-// Bane's own credentials (API, inbox, notes, support and agent keys), webhook signing secrets, Stripe keys and object
+// Nightmail's own credentials (API, inbox, notes, support and agent keys), webhook signing secrets, Stripe keys and object
 // IDs, app passwords, JWTs, AWS access keys and bearer headers.
 const SECRET = [
   ownSecretPattern,
@@ -20,7 +20,7 @@ const SECRET = [
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
 ]
-// A Bane resource ID (cmp_ + 32 hex) names a thing; it is not a secret.
+// A Nightmail resource ID (cmp_ + 32 hex) names a thing; it is not a secret.
 const RESOURCE_ID = /^[a-z]{2,8}_[0-9a-f]{32}$/
 const entropy = (text: string) => {
   const counts = new Map<string, number>()

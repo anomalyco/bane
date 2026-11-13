@@ -5,6 +5,7 @@ import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number } from '../../lib/format'
 import { gradeKey } from './gauge'
+import { productName } from '../../../../api/src/brand'
 
 const percent = (digits: number) => (value: number) => `${(value * 100).toFixed(digits)}%`
 // Engagement is the marketing unsubscribe rate.
@@ -13,7 +14,7 @@ export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => 
 export const factorPlain: Record<SenderScoreFactor['key'], string> = {
   complaints: 'How often recipients mark your mail as spam.',
   bounces: 'How often mail can’t be delivered, like to addresses that don’t exist.',
-  content: 'How often Bane’s content check stops a message as spam.',
+  content: `How often ${productName}’s content check stops a message as spam.`,
   auth: 'Whether your domains sign mail (DKIM), align the sender (SPF) and publish DMARC.',
   hygiene: 'How often new contacts bounce, and how often you mail suppressed addresses.',
   engagement: 'How often marketing recipients unsubscribe; tracked clicks help.',

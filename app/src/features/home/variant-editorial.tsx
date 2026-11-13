@@ -3,7 +3,7 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import type { HomeProps } from '.'
 import './variant-editorial.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { hostedDomain, sdkPackage } from '../../../../api/src/brand'
+import { hostedDomain, productName, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 2: one narrow column, four sentences, one verb each. Every fragment is a real SDK export.
 const verbs = [
@@ -16,7 +16,7 @@ const verbs = [
 export function EditorialHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
   return <div className="ve-page">
     <header className="ve-header">
-      <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
+      <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
       <nav className="ve-nav" aria-label="Site">
         <a href="/docs">Docs</a>
         <button type="button" className="ve-link" disabled={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in</button>
@@ -25,7 +25,7 @@ export function EditorialHome({ onSignIn, onSignInIntent, busy, notice }: HomePr
     </header>
 
     <main className="ve-main">
-      <h1 className="sr-only">Send, receive, reply to and thread email with bane</h1>
+      <h1 className="sr-only">Send, receive, reply to and thread email with {productName.toLowerCase()}</h1>
       <ol className="ve-verbs">
         {verbs.map(([verb, rest, code]) => <li key={verb}>
           <p className="ve-sentence"><span className="ve-verb">{verb}</span> {rest}</p>

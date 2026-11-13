@@ -14,6 +14,7 @@ import { isReceivedId, logsPageColumns, logCsvRows, logHref, useLogRowIntent } f
 import { useAdaptivePageSize } from '../../lib/pagination'
 import { AddressList, NameText, PrivateAddress } from '../../components/PrivateAddress'
 import { nameParts } from '../../lib/private-address'
+import { productName } from '../../../../api/src/brand'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 // Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
@@ -202,11 +203,11 @@ function EmailDetail({ email }: { email: Email }) {
 
 // One plain name and one line of meaning per delivery event; the raw event type stays on hover for support and logs.
 const eventCopy: Record<string, [title: string, meaning: string]> = {
-  dispatch_attempt: ['Handed to SES', 'Bane passed the email to Amazon SES.'],
+  dispatch_attempt: ['Handed to SES', `${productName} passed the email to Amazon SES.`],
   accepted: ['Accepted by SES', 'SES took the email and gave it a message ID.'],
-  dispatch_deferred: ['Waiting to send', 'Bane is holding the email until there is sending capacity.'],
-  provider_throttled: ['Slowed down by SES', 'SES asked Bane to slow down; the email is retried automatically.'],
-  acceptance_unknown: ['Acceptance unknown', 'SES didn’t confirm whether it took the email, so Bane won’t resend it.'],
+  dispatch_deferred: ['Waiting to send', `${productName} is holding the email until there is sending capacity.`],
+  provider_throttled: ['Slowed down by SES', `SES asked ${productName} to slow down; the email is retried automatically.`],
+  acceptance_unknown: ['Acceptance unknown', `SES didn’t confirm whether it took the email, so ${productName} won’t resend it.`],
   send: ['Sent by SES', 'SES is delivering it to the recipient’s mail server.'], sent: ['Sent by SES', 'SES is delivering it to the recipient’s mail server.'],
   delivery: ['Delivered', 'The recipient’s mail server accepted it.'], delivered: ['Delivered', 'The recipient’s mail server accepted it.'],
   bounce: ['Bounced', 'The recipient’s server refused it. The reason is below.'], bounced: ['Bounced', 'The recipient’s server refused it. The reason is below.'],

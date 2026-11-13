@@ -17,7 +17,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { apiKeyEnv, secretPrefixes } from '../../../../api/src/brand'
+import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Bring-your-own verification is resumable; keep retrying while AWS confirms the feedback subscription.
@@ -63,11 +63,11 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
 // Full-page shell for /onboarding: no dashboard navigation or dashboard data.
 export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const session = useSession()
-  useEffect(() => { document.title = 'Get started · bane' }, [])
+  useEffect(() => { document.title = `Get started · ${productName.toLowerCase()}` }, [])
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
-      <span className="wordmark"><BaneWordmark title="bane" /></span>
+      <span className="wordmark"><BaneWordmark title={productName.toLowerCase()} /></span>
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />
@@ -155,7 +155,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     setAwsPhase('idle')
     shared.reset(); byo.reset()
     setPicked(next)
-    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast('If you created the Bane stack in AWS, you can delete it there.', 'info')
+    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast(`If you created the ${productName} stack in AWS, you can delete it there.`, 'info')
     void client.cancelQueries({ queryKey: ['bane', api.mode, 'connection'] })
     void (async () => {
       try { if (pending) await connectionApi.remove() }
@@ -258,7 +258,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through Bane’s Amazon SES account. No AWS account needed, just a few DNS records. The daily limit rises as your mail proves healthy.</span>
+        <span className="onboarding-option-body">Send through {productName}’s Amazon SES account. No AWS account needed, just a few DNS records. The daily limit rises as your mail proves healthy.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit to start</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
@@ -289,7 +289,7 @@ function AwsLogo() {
 
 function verifyError(error: unknown, region: string) {
   switch (code(error)) {
-    case 'AWS_ACCESS_DENIED': return `Bane can’t use the role yet. Wait for the stack to show CREATE_COMPLETE in ${region}, then try again.`
+    case 'AWS_ACCESS_DENIED': return `${productName} can’t use the role yet. Wait for the stack to show CREATE_COMPLETE in ${region}, then try again.`
     case 'EXTERNAL_ID_REQUIRED': return 'The role is missing this setup’s external ID. Delete the stack in AWS, then open the link again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
@@ -315,7 +315,7 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
       <h1 className="onboarding-title">Connect your AWS account</h1>
-      <p className="onboarding-lead">A CloudFormation stack gives Bane a role in your account. It takes about two minutes; this page continues on its own.</p>
+      <p className="onboarding-lead">A CloudFormation stack gives {productName} a role in your account. It takes about two minutes; this page continues on its own.</p>
     </div>
     <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
       {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></a>

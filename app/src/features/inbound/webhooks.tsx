@@ -12,6 +12,7 @@ import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
 import { AddressList } from '../../components/PrivateAddress'
+import { productName } from '../../../../api/src/brand'
 
 const eventInfo: Partial<Record<MailboxEventType, string>> = {
   'message.junk': 'Received mail whose spam verdict isn’t PASS, when junk delivery is on',
@@ -54,8 +55,8 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
           onValueChange={value => onChange({ ...input, routeOnly: value === 'routed', addressIds: value === 'selected' ? [] : null, eventTypes: value === 'selected' ? input.eventTypes.filter(type => type !== 'message.stored') : input.eventTypes.length ? input.eventTypes : ['message.received'] })}
           options={[{ value: 'all', label: 'Every address' }, { value: 'selected', label: 'Selected addresses' }, { value: 'routed', label: 'Only mail a route sends here' }]} />
       </Field>
-      <Field label="Payload" htmlFor="mailbox-webhook-format" hint={input.format === 'inbound' ? 'inbound.new’s email.received, for receivers moved from inbound.new. Signed like Bane events too.' : 'Bane’s signed event. Read the message with its messageId.'}>
-        <Select id="mailbox-webhook-format" value={input.format ?? 'bane'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'bane', label: 'Bane event' }, { value: 'inbound', label: 'inbound.new email.received' }]} />
+      <Field label="Payload" htmlFor="mailbox-webhook-format" hint={input.format === 'inbound' ? `inbound.new’s email.received, for receivers moved from inbound.new. Signed like ${productName} events too.` : `${productName}’s signed event. Read the message with its messageId.`}>
+        <Select id="mailbox-webhook-format" value={input.format ?? 'bane'} disabled={disabled} onValueChange={value => onChange({ ...input, format: value as Draft['format'], junk: undefined, eventTypes: value === 'inbound' ? receivedOnly(input.eventTypes).length ? receivedOnly(input.eventTypes) : ['message.received'] : input.eventTypes })} options={[{ value: 'bane', label: `${productName} event` }, { value: 'inbound', label: 'inbound.new email.received' }]} />
       </Field>
     </div>
     <Checkbox disabled={disabled} checked={(input.junk ?? (input.format === 'inbound' ? 'include' : 'skip')) === 'include'} onCheckedChange={checked => onChange({ ...input, junk: checked ? 'include' : 'skip' })} label={<span className="settings-cell-stack"><span>Deliver junk mail too</span><span className="ui-field__hint">Mail whose spam verdict isn’t PASS, as message.junk or with spam.isJunk.</span></span>} />

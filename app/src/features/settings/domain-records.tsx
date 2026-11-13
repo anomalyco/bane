@@ -13,6 +13,7 @@ import { receivingIssueTitle } from './receiving-issue-title'
 import './settings.css'
 import './domain-records.css'
 import { expectAccount } from '../../data/accounts'
+import { productName } from '../../../../api/src/brand'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
 export function useDomain(id: string, recheckUntil = 0) {
@@ -31,7 +32,7 @@ export function useDomain(id: string, recheckUntil = 0) {
 }
 
 export type DnsSetup = { provider: { id: string; name: string } | null; applyUrl: string | null; groups: string[] }
-// Off until DNS providers host Bane's Domain Connect template (none do yet), so the records never wait on
+// Off until DNS providers host Nightmail's Domain Connect template (none do yet), so the records never wait on
 // discovery that can only fail. DnsWaitNote says why there is no one-click button. Flip once a provider ships it.
 const oneClickDns = false
 // Domain Connect: the provider's one-click consent URL, when the domain's DNS host supports it.
@@ -183,11 +184,11 @@ const guides = [
 ] as const
 const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.now()) / 3_600_000))
 
-// While records are pending: how long DNS usually takes, that Bane keeps checking, when an unproven domain is released, and where to add records.
+// While records are pending: how long DNS usually takes, that Nightmail keeps checking, when an unproven domain is released, and where to add records.
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    <p>New records usually appear within minutes, sometimes up to an hour. Bane checks every 20 seconds while this page is open, and keeps checking after you leave.</p>
+    <p>New records usually appear within minutes, sometimes up to an hour. {productName} checks every 20 seconds while this page is open, and keeps checking after you leave.</p>
     {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
     <p>One-click setup isn’t available yet, so add the records yourself.</p>
     <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
@@ -196,16 +197,16 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
 
 /**
  * Where the domain receives and why, from the receiving MX record the API chose (onboarding and the domain page say
- * the same thing). Bane receives on a free subdomain such as reply.<domain> unless the domain's own MX already points
- * to Bane, so publishing the record never moves mail that goes elsewhere today, unless someone chose the root.
+ * the same thing). Nightmail receives on a free subdomain such as reply.<domain> unless the domain's own MX already points
+ * to Nightmail, so publishing the record never moves mail that goes elsewhere today, unless someone chose the root.
  */
 export function receivingHostCopy(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
   if (!host) return `Receive mail at ${domain}.`
-  if (host !== domain) return `Mail to addresses on ${host} comes to Bane. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
+  if (host !== domain) return `Mail to addresses on ${host} comes to ${productName}. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
   return receiving.every(record => record.status === 'verified')
-    ? `Every address at ${domain} receives here: its MX record already points to Bane.`
-    : `This MX record sends all mail for ${domain} to Bane, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
+    ? `Every address at ${domain} receives here: its MX record already points to ${productName}.`
+    : `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
 }
 
 // The domain page adds its receiving actions (choose the root or a subdomain, Check MX now) to the receiving group.
@@ -242,7 +243,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     {receiving.length > 0 && <RecordRows title="Receiving" optional description={receivingCopy} notes={notes} alert={alert} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. Bane keeps checking.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. {productName} keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}

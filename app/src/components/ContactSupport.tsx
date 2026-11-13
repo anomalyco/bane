@@ -4,6 +4,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { supportApi, type SupportHandoff } from '../data/support'
 import { MutationError } from '../features/settings/shared'
 import { Button, Checkbox, CopyButton, Dialog, Field, Textarea } from './ui'
+import { productName } from '../../../api/src/brand'
 
 const MAX = 2000
 // Hosted only: from the workspace menu and Settings → Account. Sends the page and the last failed request IDs with the
@@ -24,14 +25,14 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
   }
   const close = () => { if (!contact.isPending) onClose() }
   if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support is open in a new tab' : 'Support reference'}
-    description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : 'Include this reference when you email Bane support.'}
+    description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : `Include this reference when you email ${productName} support.`}
     footer={<Button key="done" variant="primary" autoFocus onClick={close}>Done</Button>}>
     <div className="stack">
       <div className="contact-support__reference"><code>{done.id}</code><CopyButton value={done.id} label="Copy support reference" /></div>
       {done.url && <a className="contact-support__link" href={done.url} target="_blank" rel="noopener noreferrer">Open support<ArrowUpRight size={14} aria-hidden="true" /></a>}
     </div>
   </Dialog>
-  return <Dialog open onOpenChange={next => { if (!next) close() }} title="Contact support" description="Bane support gets your message, the page you’re on and any recent errors."
+  return <Dialog open onOpenChange={next => { if (!next) close() }} title="Contact support" description={`${productName} support gets your message, the page you’re on and any recent errors.`}
     footer={<><Button disabled={contact.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="contact-support" loading={contact.isPending}>Contact support</Button></>}>
     <form id="contact-support" className="stack" onSubmit={submit}>
       <Field label="Message" htmlFor="contact-support-message" hint={`Optional. ${message.length.toLocaleString('en-US')} / ${MAX.toLocaleString('en-US')}`}>

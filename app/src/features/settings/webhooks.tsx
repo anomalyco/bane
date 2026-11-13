@@ -11,11 +11,12 @@ import { fieldError, MutationError, SecretDialog } from './shared'
 import { AdminOnlyPage } from './admin-only'
 import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
+import { productName } from '../../../../api/src/brand'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
 // The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks, subscription and standing changes are opt-in.
 const defaultEvents: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']
-const eventHints: Partial<Record<WebhookEvent, string>> = { 'account.standing.changed': 'Bane warned, held or released this workspace’s sending', 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Bane or SES refused to send it', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
+const eventHints: Partial<Record<WebhookEvent, string>> = { 'account.standing.changed': `${productName} warned, held or released this workspace’s sending`, 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': `${productName} or SES refused to send it`, 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
 const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
@@ -62,7 +63,7 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note">Bane calls your URL when email you send is delivered, bounces, is marked as spam and more. Each call is signed so you can <Link to="/docs/webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
+    <p className="muted settings-section-note">{productName} calls your URL when email you send is delivered, bounces, is marked as spam and more. Each call is signed so you can <Link to="/docs/webhook-signatures">verify it came from {productName}</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
@@ -170,7 +171,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     if (action === 'delete') { await remove.mutateAsync(webhook.id); navigate('/settings#webhooks') }
   }
   const actionTitle = action === 'rotate' ? `Rotate ${webhook.name} signing secret?` : action === 'delete' ? `Delete ${webhook.name}?` : `${action === 'pause' ? 'Pause' : 'Resume'} ${webhook.name}?`
-  const actionDescription = action === 'rotate' ? 'The current secret stops working at once, so update your server with the new one. To copy the current secret instead, use Reveal.' : action === 'delete' ? 'Bane stops calling this URL. Its delivery history is deleted too.' : action === 'pause' ? 'Bane stops calling this URL. Events from the pause are kept and delivered when you resume.' : 'Bane starts calling this URL again, including events held while it was paused.'
+  const actionDescription = action === 'rotate' ? 'The current secret stops working at once, so update your server with the new one. To copy the current secret instead, use Reveal.' : action === 'delete' ? `${productName} stops calling this URL. Its delivery history is deleted too.` : action === 'pause' ? `${productName} stops calling this URL. Events from the pause are kept and delivered when you resume.` : `${productName} starts calling this URL again, including events held while it was paused.`
   return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} urlHint={save.data?.url ?? webhook.url} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
@@ -192,7 +193,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     </section>
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete webhook</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete webhook' : action === 'pause' ? 'Pause webhook' : 'Resume webhook'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />
-    <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? 'Shown once. Copy it now.' : 'Keep it on your server. Anyone with it can sign requests as Bane.'} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningNote /></SecretDialog>
+    <SecretDialog secret={secret?.value ?? null} title={`${webhook.name} · ${secret?.rotated ? 'New signing secret' : 'Signing secret'}`} description={secret?.rotated ? 'Shown once. Copy it now.' : `Keep it on your server. Anyone with it can sign requests as ${productName}.`} onClose={() => { setSecret(null); rotate.reset(); reveal.reset() }}><SigningNote /></SecretDialog>
     <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title={inspected?.test ? 'Test delivery payload' : 'Delivery payload'} description={inspected ? [inspected.event, ...multiTenant ? [] : [inspected.regionId], label(inspected.status)].join(' · ') : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
   </div>
 }
@@ -205,5 +206,5 @@ export function WebhookDetailPage() {
 
 // How to use the signing secret, wherever it is shown.
 function SigningNote() {
-  return <p className="muted settings-section-note">Bane signs every delivery with this secret in the <code>Webhook-Signature</code> header. Check it on your server so you only act on calls from Bane: <Link to="/docs/webhook-signatures">how to verify signatures</Link>.</p>
+  return <p className="muted settings-section-note">{productName} signs every delivery with this secret in the <code>Webhook-Signature</code> header. Check it on your server so you only act on calls from {productName}: <Link to="/docs/webhook-signatures">how to verify signatures</Link>.</p>
 }
