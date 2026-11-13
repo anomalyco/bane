@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ExternalLink } from 'lucide-react'
-import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Select, StatusBadge, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Select, StatusBadge, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { useSession } from '../../data/context'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { relativeTime, shortDateTime } from '../../lib/format'
@@ -160,13 +160,13 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
   const revoke = async (keyId: string) => { try { await uiNotesApi.keys.revoke(keyId); await client.invalidateQueries({ queryKey: [...uiNotesKey, 'keys'] }) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Couldn’t revoke the key.') } }
   const live = (keys.data ?? []).filter(key => !key.revokedAt && Date.parse(key.expiresAt) > Date.now())
   const origin = window.location.origin
-  return <Dialog open onOpenChange={next => { if (!next) onClose() }} title="Agent keys" className="op-keys-dialog"
+  return <Dialog sensitive={Boolean(secret)} open onOpenChange={next => { if (!next) onClose() }} title="Agent keys" className="op-keys-dialog"
     description="A key lets a script or agent list UI notes, download their screenshots and set their status as you. It does nothing else, and stops working if you lose the operator role."
     footer={<Button onClick={onClose}>Done</Button>}>
     <div className="op-dialog-fields">
       {error && <Alert tone="danger">{error}</Alert>}
       {secret ? <Alert tone="success" title="Copy the key now. It isn’t shown again.">
-        <span className="op-key-secret"><code>{secret}</code><CopyButton value={secret} label="Copy key" /></span>
+        <span className="op-key-secret"><SecretCode>{secret}</SecretCode><CopyButton value={secret} label="Copy key" /></span>
         <code className="op-key-usage">{`BANE_URL=${origin} BANE_UI_NOTES_KEY=${secret.slice(0, 15)}… node --import tsx api/scripts/ui-notes.ts list --status open --json --screenshots ./notes`}</code>
       </Alert> : <form className="op-key-form" onSubmit={create}>
         <Field label="Name" htmlFor="ui-note-key-name"><Input id="ui-note-key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} required /></Field>

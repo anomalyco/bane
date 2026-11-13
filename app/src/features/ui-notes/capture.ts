@@ -1,4 +1,4 @@
-import { addressParts, maskedParts } from '../../lib/private-address'
+import { maskRuns, maskText } from '../../lib/capture-text'
 import type { NoteContext, NoteElement } from '../../data/ui-notes'
 
 // What a UI note records about the element it was left on, so an agent can find it in the code and see it: where
@@ -13,13 +13,37 @@ export const build = typeof __BANE_BUILD__ === 'string' ? __BANE_BUILD__ : 'unkn
 const OWN = '[data-ui-notes], .uin-sheet'
 export const ownElement = (node: EventTarget | null) => node instanceof Element && Boolean(node.closest(OWN))
 
-/** Text with every address masked: its first two characters, then dots. */
-export function maskText(text: string) {
-  if (!text.includes('@')) return text
-  return addressParts(text).map(part => part.address ? `${maskedParts(part.text)?.shown ?? part.text.slice(0, 2)}•••` : part.text).join('')
-}
+// Secret-bearing screens (one-time keys and signing secrets, invitation links, credential examples) carry
+// data-sensitive: a note can't be left inside one, and a capture drops its text and blacks it out. Frames and media are
+// blacked out too: their content is the page's to show, not a note's to keep.
+const SENSITIVE = '[data-sensitive]'
+const OPAQUE = `${SENSITIVE}, iframe, frame, embed, object, video`
+// Inline elements join their text with their neighbours'; anything else starts a new run.
+const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'CITE', 'CODE', 'DATA', 'DFN', 'EM', 'FONT', 'I', 'KBD', 'LABEL', 'MARK', 'Q', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TIME', 'U', 'VAR', 'WBR'])
+const blockOf = (node: Node) => { let element = node.parentElement; while (element && INLINE.has(element.tagName)) element = element.parentElement; return element }
+export const sensitiveElement = (node: Element) => Boolean(node.closest(SENSITIVE))
+export { maskText }
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text
 const clean = (value: string | null | undefined, max: number) => { const text = value?.replace(/\s+/g, ' ').trim(); return text ? clip(maskText(text), max) : null }
+/**
+ * The element's text as the page renders it, without the text of any sensitive part inside it. An inline element is
+ * masked in the context of its whole block, so <strong>alice</strong> in <strong>alice</strong>@example.net reads al•••.
+ */
+function visibleText(target: Element) {
+  const scope = INLINE.has(target.tagName) ? blockOf(target) ?? target : target
+  if (scope === target && !target.querySelector(SENSITIVE)) return (target as HTMLElement).innerText ?? target.textContent
+  const nodes: Text[] = [], texts: string[] = [], slots: number[] = []
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, { acceptNode: node => node.nodeType === Node.ELEMENT_NODE && (node as Element).matches(SENSITIVE) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT })
+  let block: Element | null = null
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType !== Node.TEXT_NODE) continue
+    const here = blockOf(node)
+    if (nodes.length && here !== block) texts.push('\n')
+    block = here; slots.push(texts.length); texts.push(node.nodeValue ?? ''); nodes.push(node as Text)
+  }
+  const masked = maskRuns(texts)
+  return nodes.map((node, i) => target.contains(node) ? masked[slots[i]!] : '').join('')
+}
 function maskedUrl(href: string) {
   let decoded = href
   try { decoded = decodeURI(href).replace(/%40/gi, '@') } catch { /* keep it as it is */ }
@@ -107,12 +131,11 @@ export function describe(target: Element): { element: NoteElement; context: Note
   const box = target.getBoundingClientRect(), computed = getComputedStyle(target)
   const styles = Object.fromEntries(STYLES.map(name => [name, computed.getPropertyValue(name).trim()] as const).filter(([, value]) => value && value !== 'normal' && value !== 'none' && value !== 'auto'))
   const names = componentNames(target)
-  const html = target instanceof HTMLElement ? target : null
   const element: NoteElement = {
     ...selectors(target), component: names[0] ?? null, components: names.slice(0, 8).reverse(),
     tag: target.tagName.toLowerCase(), role: target.getAttribute('role') ?? implicitRole[target.tagName.toLowerCase()] ?? null,
     label: clean(target.getAttribute('aria-label') ?? target.getAttribute('title') ?? target.getAttribute('placeholder') ?? target.getAttribute('alt'), 300),
-    text: clean(html?.innerText ?? target.textContent, 300),
+    text: clean(visibleText(target), 300),
     box: { x: round(box.x), y: round(box.y), width: round(box.width), height: round(box.height), scrollX: round(scrollX), scrollY: round(scrollY) },
     styles: Object.fromEntries(Object.entries(styles).map(([name, value]) => [name, clip(value, 200)])),
   }
@@ -146,15 +169,36 @@ export function locate(element: Pick<NoteElement, 'selector' | 'alternatives' | 
 const MARGIN = 64, MIN_WIDTH = 400, MIN_HEIGHT = 200, MAX_BYTES = 2 * 1024 * 1024
 type Rect = { left: number; top: number; right: number; bottom: number }
 const intersect = (a: Rect, b: Rect): Rect => ({ left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) })
-// The clone the image is drawn from: every address in its text, form values and labels masked, a revealed one
-// included (the pointer is on it when the note is made). The library calls this for each cloned element once its
-// children are in, and never for text nodes, so each element masks its own text.
-function maskClone(node: Node) {
-  if (node.nodeType !== Node.ELEMENT_NODE) return
-  const element = node as HTMLElement
-  for (const child of element.childNodes) if (child.nodeType === Node.TEXT_NODE && child.nodeValue?.includes('@')) child.nodeValue = maskText(child.nodeValue)
-  if ('value' in element && typeof element.value === 'string' && element.value.includes('@')) { const value = maskText(element.value); (element as HTMLInputElement).value = value; element.setAttribute('value', value) }
-  for (const name of ['title', 'aria-label', 'placeholder', 'alt', 'value']) { const value = element.getAttribute(name); if (value?.includes('@')) element.setAttribute(name, maskText(value)) }
+// The clone the image is drawn from. Its rendered text is masked as a whole (lib/capture-text.ts maskRuns): an
+// address split across inline elements, or revealed by the hover the ⌘-click sits on, is masked in every node it
+// spans, and so is anything that looks like a credential. Text in different blocks is never joined. Sensitive parts
+// lose their text and form values and are painted over; labels and values are masked too.
+function maskClone(root: Node) {
+  if (root.nodeType !== Node.ELEMENT_NODE) return
+  const element = root as Element
+  for (const part of [element, ...element.querySelectorAll(SENSITIVE)]) {
+    if (!part.matches(SENSITIVE)) continue
+    for (const node of [part, ...part.querySelectorAll('*')]) {
+      (node as HTMLElement).style?.setProperty('color', '#000', 'important'); (node as HTMLElement).style?.setProperty('background', '#000', 'important')
+      if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') { (node as HTMLInputElement).value = ''; node.setAttribute('value', ''); node.textContent = '' }
+    }
+    const walker = document.createTreeWalker(part, NodeFilter.SHOW_TEXT)
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) node.nodeValue = (node.nodeValue ?? '').replace(/\S/g, '•')
+  }
+  const nodes: Text[] = [], texts: string[] = [], slots: number[] = []
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, { acceptNode: node => node.parentElement?.closest('style, script') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT })
+  let block: Element | null = null
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    const here = blockOf(node)
+    if (nodes.length && here !== block) texts.push('\n')
+    block = here; slots.push(texts.length); texts.push(node.nodeValue ?? ''); nodes.push(node)
+  }
+  const masked = maskRuns(texts)
+  nodes.forEach((node, i) => { const value = masked[slots[i]!]!; if (value !== node.nodeValue) node.nodeValue = value })
+  for (const node of [element, ...element.querySelectorAll('input, textarea, [title], [aria-label], [placeholder], [alt]')]) {
+    if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') { const value = maskText((node as HTMLInputElement).value); (node as HTMLInputElement).value = value; if (node.hasAttribute('value')) node.setAttribute('value', value) }
+    for (const name of ['title', 'aria-label', 'placeholder', 'alt', 'value']) { const value = node.getAttribute(name); if (value) node.setAttribute(name, maskText(value)) }
+  }
 }
 /**
  * A crop of the page around the element (see MARGIN; inside the viewport), drawn from a masked clone with the
@@ -180,13 +224,19 @@ export async function screenshot(target: Element): Promise<{ blob: Blob; width: 
     const scale = Math.min(devicePixelRatio || 1, 2)
     const background = getComputedStyle(document.body).backgroundColor
     const canvas = await domToCanvas(host, { scale, backgroundColor: background, timeout: 4000, features: { restoreScrollPosition: true },
-      filter: node => !(node instanceof Element && node.matches(OWN)), onCloneEachNode: maskClone })
+      filter: node => !(node instanceof Element && node.matches(OWN)), onCloneNode: maskClone })
     const ratio = canvas.width / Math.max(1, hostRect.width)
     const out = document.createElement('canvas')
     out.width = Math.round(width * ratio); out.height = Math.round(height * ratio)
     const context = out.getContext('2d')
     if (!context) return null
     context.drawImage(canvas, (crop.left - hostRect.left) * ratio, (crop.top - hostRect.top) * ratio, width * ratio, height * ratio, 0, 0, out.width, out.height)
+    // Sensitive parts, frames and media, painted over where they are on the page: whatever the clone drew there.
+    context.fillStyle = '#000'
+    for (const part of host.querySelectorAll(OPAQUE)) {
+      const r = intersect(part.getBoundingClientRect(), crop)
+      if (r.right > r.left && r.bottom > r.top) context.fillRect((r.left - crop.left) * ratio, (r.top - crop.top) * ratio, (r.right - r.left) * ratio, (r.bottom - r.top) * ratio)
+    }
     // The element, outlined just outside its box.
     context.strokeStyle = '#E5484D'; context.lineWidth = 2 * ratio
     context.strokeRect((rect.left - crop.left - 2) * ratio, (rect.top - crop.top - 2) * ratio, (rect.width + 4) * ratio, (rect.height + 4) * ratio)

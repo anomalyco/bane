@@ -55,11 +55,30 @@ type NoteView = z.infer<typeof Note>;
 const NoteKey = z.object({ id: z.string(), name: z.string(), prefix: z.string(), createdAt: z.string(), expiresAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('UiNoteKey');
 
 // Addresses never leave the page in full (lib/private-address.ts in the dashboard masks them before sending): this is
-// the API's own pass over everything captured, encoded addresses in URLs included. The note's own text is the author's.
+// the API's own pass over everything captured, encoded addresses in URLs included. So is removing anything that looks
+// like a credential: a note can't be left inside a secret-bearing screen (data-sensitive), and this catches a secret
+// shown anywhere else. The same patterns as the dashboard's lib/capture-text.ts. The note's own text is the author's.
 const ADDRESS = /[^\s<>()[\]"',;:/?#&=]+(?:@|%40)[^\s<>()[\]"',;:/?#&=]+\.[^\s<>()[\]"',;:/?#&=]+/gi;
 export const maskAddresses = (value: string) => value.replace(ADDRESS, match => [...match].slice(0, 2).join('') + '•••');
+const SECRET = [
+  /\b(?:bane|os)_[A-Za-z0-9_.-]{20,}/g, /\bwhsec_[A-Za-z0-9+/=_-]{12,}/g, /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}/g, /\b(?:sk|rk)_[A-Za-z0-9]{20,}/g,
+  /\b(?:cus|pi|pm|seti|sub|in|ch|cs|acct|price|prod|si|txn|re|po|evt)_(?=[A-Za-z0-9]*[A-Z])[A-Za-z0-9]{14,}/g, /\b(?:[0-9a-f]{4}-){7}[0-9a-f]{4}\b/gi,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, /\bAKIA[0-9A-Z]{16}\b/g, /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+];
+const RESOURCE_ID = /^[a-z]{2,8}_[0-9a-f]{32}$/;
+const entropy = (text: string) => { const counts = new Map<string, number>(); for (const ch of text) counts.set(ch, (counts.get(ch) ?? 0) + 1); let bits = 0; for (const n of counts.values()) { const p = n / text.length; bits -= p * Math.log2(p); } return bits; };
+const highEntropy = (run: string) => run.length >= 32 && /\d/.test(run) && /[A-Za-z]/.test(run) && !RESOURCE_ID.test(run) && (/^[0-9a-f]+$/i.test(run) || entropy(run) >= 3.5);
+/** Text with every credential-looking run (Bane keys, webhook secrets, Stripe keys, app passwords, JWTs, long random tokens) replaced. */
+export function redactSecrets(text: string) {
+  const spans: [number, number][] = [];
+  for (const pattern of SECRET) for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
+  for (const match of text.matchAll(/[A-Za-z0-9_+=-]{32,}/g)) if (highEntropy(match[0])) spans.push([match.index, match.index + match[0].length]);
+  let out = '', from = 0;
+  for (const [start, end] of spans.sort((a, b) => a[0] - b[0])) { if (end <= from) continue; out += text.slice(from, Math.max(from, start)) + '[secret]'; from = end; }
+  return out + text.slice(from);
+}
 function masked<T>(value: T): T {
-  if (typeof value === 'string') return maskAddresses(value) as T;
+  if (typeof value === 'string') return maskAddresses(redactSecrets(value)) as T;
   if (Array.isArray(value)) return value.map(masked) as T;
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, masked(entry)])) as T;
   return value;
@@ -247,7 +266,7 @@ export function registerUiNotes(app: App) {
     responses: { 200: response(Note), ...errors } }), async c => {
     const who = await sessionOperator(c), noteId = c.req.valid('param').id, size = c.req.valid('query');
     const type = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase() as ImageType;
-    if (!(type in IMAGE_TYPES)) throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send a WebP, PNG or JPEG image with its Content-Type.');
+    if (!Object.hasOwn(IMAGE_TYPES, type)) throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send a WebP, PNG or JPEG image with its Content-Type.');
     if (Number(c.req.header('content-length')) > MAX_SHOT_BYTES) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'A screenshot is at most 2 MiB.');
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     if (bytes.length > MAX_SHOT_BYTES) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'A screenshot is at most 2 MiB.');
@@ -274,7 +293,7 @@ export function registerUiNotes(app: App) {
     try { claims = JSON.parse(Buffer.from(data, 'base64url').toString()); } catch { throw missing(); }
     if (!Number.isSafeInteger(claims.e) || (claims.e as number) <= Date.now() / 1000 || typeof claims.n !== 'string' || typeof claims.k !== 'string') throw missing();
     const { rows: [row] } = await c.env.db.execute<{ screenshot_key: string | null; type: string | null }>(sql`SELECT screenshot_key, screenshot->>'contentType' AS type FROM ui_notes WHERE id = ${claims.n}`);
-    if (!row || row.screenshot_key !== claims.k || !row.type || !(row.type in IMAGE_TYPES)) throw missing();
+    if (!row || row.screenshot_key !== claims.k || !row.type || !Object.hasOwn(IMAGE_TYPES, row.type)) throw missing();
     const object = await c.env.storage.get(claims.k);
     if (!object) throw missing();
     return new Response(new Blob([object.body as Uint8Array<ArrayBuffer>]), { headers: { 'Content-Type': row.type, 'Content-Disposition': 'inline', 'Cache-Control': 'private, no-store', 'Content-Security-Policy': "sandbox; default-src 'none'", 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-site' } });

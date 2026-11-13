@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
-import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs, useToast } from '../../components/ui'
+import { Alert, Button, ErrorState, ErrorText, Field, Input, SecretCode, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
@@ -480,7 +480,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
-          <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><code>{secret ?? keyPlaceholder}</code><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
+          <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><SecretCode>{secret ?? keyPlaceholder}</SecretCode><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
         </div>
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>

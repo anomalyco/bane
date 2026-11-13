@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
@@ -87,11 +87,11 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
 /** Shown once after creating an endpoint: how rituals call it, and a webhook's signing secret, which is never shown again. */
 export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRitual?: boolean }) {
   const call = created ? `${created.call}${created.type === 'slack' ? '({ text: `New mail from ${email.from.address}` })' : created.type === 'discord' ? '({ content: `New mail from ${email.from.address}` })' : created.type === 'webhook' ? '({ subject: email.subject })' : '()'}` : ''
-  return <Dialog open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
+  return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
     footer={<><Button onClick={onClose}>Done</Button>{writeRitual && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rituals?new=1" onClick={onClose}>Write a ritual that uses it</Link>}</>}>
     {created && <div className="stack">
       <Field label="Call it from a ritual" hint={created.type === 'webhook' ? 'The payload is optional; without one it gets the whole message event.' : undefined}><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
-      {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again. Use it to check each request really comes from Bane."><div className="settings-copy-cell"><code>{created.secret}</code><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
+      {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again. Use it to check each request really comes from Bane."><div className="settings-copy-cell"><SecretCode>{created.secret}</SecretCode><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
       {created.status === 'pending' && <p className="muted">{created.nextStep}</p>}
     </div>}
   </Dialog>

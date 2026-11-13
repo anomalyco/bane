@@ -91,7 +91,7 @@ export function WebhookHeadersField({ current, draft, onChange, errors, apiError
           <Input ref={node => { if (node) inputs.current.set(`${item.key}:name`, node); else inputs.current.delete(`${item.key}:name`) }} className="webhook-header-row__name" aria-label={`Header ${n} name`} value={item.name} placeholder="Authorization" disabled={disabled}
             autoComplete="off" autoCapitalize="off" spellCheck={false} aria-invalid={nameError ? true : undefined} aria-describedby={nameError ? rowErrorId : undefined}
             onChange={event => update(item.key, { name: event.target.value })} />
-          <div className="webhook-header-row__value">
+          <div className="webhook-header-row__value" data-sensitive>
             <Input ref={node => { if (node) inputs.current.set(`${item.key}:value`, node); else inputs.current.delete(`${item.key}:value`) }} type={item.shown ? 'text' : 'password'} aria-label={`Header ${n} value`} value={item.value} placeholder={replacing && current.some(header => header.name === item.name) ? 'New value' : 'Value'} disabled={disabled}
               autoComplete="off" autoCapitalize="off" spellCheck={false} data-1p-ignore="" data-lpignore="true" data-bwignore="" aria-invalid={valueError ? true : undefined} aria-describedby={valueError ? rowErrorId : undefined}
               onChange={event => update(item.key, { value: event.target.value })} />

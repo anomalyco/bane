@@ -8,7 +8,7 @@ import { usePhone } from '../../lib/media'
 import { relativeTime } from '../../lib/format'
 import { notesModifier, notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
-import { describe, locate, ownElement, routeOf, screenshot } from './capture'
+import { describe, locate, ownElement, routeOf, screenshot, sensitiveElement } from './capture'
 import './notes.css'
 
 // UI notes mode, for Bane staff (lazy; the shell mounts it only while the mode is on, lib/ui-notes-mode.ts). ⌘-click
@@ -50,10 +50,12 @@ export function UiNotesLayer() {
 
   const open = useCallback((node: Element) => {
     const target = noteTarget(node)
+    // A secret-bearing screen (data-sensitive) never becomes a note: nothing of it is recorded.
+    if (sensitiveElement(target)) { toast('That shows a secret, so it can’t have a note. Note what’s around it instead.', 'error'); return }
     setViewing(null); setTray(false)
     // The screenshot starts now, before the composer exists, so it shows the page as it was clicked.
     setDraft({ target, info: describe(target), shot: screenshot(target) })
-  }, [])
+  }, [toast])
 
   // The gesture. Capture-phase listeners on window run before React and every other handler.
   useEffect(() => {
@@ -80,6 +82,7 @@ export function UiNotesLayer() {
       if (!target) { box.hidden = true; return }
       const r = target.getBoundingClientRect()
       Object.assign(box.style, { translate: `${r.left}px ${r.top}px`, width: `${r.width}px`, height: `${r.height}px` })
+      box.toggleAttribute('data-blocked', sensitiveElement(target))
       box.hidden = false
     }
     const onUp = (event: Event) => { cancel(); if (armed) swallow(event) }

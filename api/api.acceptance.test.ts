@@ -326,6 +326,37 @@ test('S3 fixture: object round trips and reserved part headers keep the service 
   for(const Key of [key,'copy.txt'])await client.send(new DeleteObjectCommand({Bucket:'fixture',Key}));
   assert.equal((await client.send(new ListObjectsV2Command({Bucket:'fixture'}))).KeyCount,0);
 });
+// PR #175 review M1 and M2: what a UI note keeps of the page's rendered text (app/src/lib/capture-text.ts). The
+// screenshot's clone passes its text nodes, in order and split by block, through maskRuns.
+test('UI notes capture text: an address split across inline elements is masked in every node it spans; credentials are removed', async () => {
+  const { maskRuns, maskText, redactSecrets } = await import('../app/src/lib/capture-text.js');
+  const hex = (n: number) => Array.from({ length: n }, (_, i) => '0123456789abcdef'[(i * 7 + 3) % 16]).join('');
+  const random = 'Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae';
+  // The reviewer's campaign-editor DOM: <p><a href="mailto:…"><strong>alice</strong>@example.net</a></p><p>Plain address: bob@example.net</p>.
+  const rendered = maskRuns(['alice', '@example.net', '\n', 'Plain address: ', 'bob@example.net']);
+  assert.deepEqual(rendered, ['al•••', '••••••••••••', '\n', 'Plain address: ', 'bo•••••••••••••']);
+  assert.ok(!/alice|example\.net|bob@/.test(rendered.join('')));
+  // Split three ways, inside a sentence; lengths are kept so the layout doesn't move.
+  const three = ['Reply to ', 'ma', 'ry', '@north', 'wind.example', ' today'];
+  const out = maskRuns(three);
+  assert.deepEqual(out.map(t => t.length), three.map(t => t.length));
+  assert.equal(out.join(''), 'Reply to ma•••••••••••••••••••• today');
+  // Text in different blocks is never joined: a name in one cell stays readable beside an address in the next.
+  assert.deepEqual(maskRuns(['Dana Rivera', '\n', 'dana@northwind.example']), ['Dana Rivera', '\n', 'da••••••••••••••••••••']);
+  // A secret split across nodes is dotted out whole; resource IDs, class names and prose stay.
+  const key = `bane_${hex(64)}`;
+  assert.deepEqual(maskRuns(['Key: ', key.slice(0, 20), key.slice(20)]), ['Key: ', '•'.repeat(20), '•'.repeat(key.length - 20)]);
+  const kept = [`cmp_${hex(32)}`, 'ui-table__clickable private-address__value', 'Section title sits 4px closer', 'abc123def456'];
+  for (const text of kept) { assert.equal(redactSecrets(text), text); assert.deepEqual(maskRuns([text]), [text]); }
+  const secrets = [key, `bane_notes_${hex(64)}`, `bane_agent_${random}.${random}`, `whsec_${random}`, `sk_live_${random}`, `rk_${random}`, `cus_${random.slice(0, 16)}`,
+    Array.from({ length: 8 }, () => 'a1b2').join('-'), `eyJhbGciOiJIUzI1NiJ9.${random}.${random}`, 'AKIAIOSFODNN7EXAMPLE', `Bearer ${random}`, random, hex(40)];
+  for (const secret of secrets) {
+    assert.equal(redactSecrets(`before ${secret} after`).includes(secret), false, secret);
+    assert.match(redactSecrets(`before ${secret} after`), /^before .*\[secret\].* after$/, secret);
+    assert.ok(!maskRuns([`x ${secret} y`])[0]!.includes(secret.slice(-12)), secret);
+  }
+  assert.equal(maskText(`Sent to ada@example.net with ${key}`), 'Sent to ad••• with [secret]');
+});
 // PR #144 review: a contact property is free text. Every run of non-space characters with an @ in it is masked whole,
 // with any quoted string or comment it touches (app/src/lib/private-address.ts addressParts, components/AddressText.tsx).
 test('dashboard addresses in free text: every run holding an @ is masked whole, with the quoted string or comment it touches', async () => {
@@ -4154,7 +4185,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const context = { viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'dark', device: 'desktop', pointer: 'fine', build: 'abc123def456', title: 'Campaigns · bane' };
       const element = { selector: '#main-content > header.ui-page-header > div.cluster > h1', alternatives: ['[data-component="PageHeader"] > div.cluster > h1'], testId: null, component: 'PageHeader', components: ['PageHeader'],
         tag: 'h1', role: 'heading', label: 'Reply to ada@example.net', text: 'Sent to ada@example.net', box: { x: 24, y: 16, width: 180, height: 24, scrollX: 0, scrollY: 120 }, styles: { 'font-size': '18px', 'line-height': '24px' } };
-      const input = { body: 'Title sits 2px low next to the actions', kind: 'alignment', severity: 'high', url: `${PUBLIC_ORIGIN}/campaigns/cmp_${hex()}/edit?q=ada%40example.net`, route: '/campaigns/:id/edit', context, element };
+      const campaign = `cmp_${hex().slice(0, 32)}`;
+      const input = { body: 'Title sits 2px low next to the actions', kind: 'alignment', severity: 'high', url: `${PUBLIC_ORIGIN}/campaigns/${campaign}/edit?q=ada%40example.net`, route: '/campaigns/:id/edit', context, element };
 
       // Customers, a forged notes key and no credential: the operator gate's 403 on every UI notes route. (The support
       // test above also sends every customer credential type to every /v1/operator route, these included.)
@@ -4171,6 +4203,15 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([created.status, created.kind, created.severity, created.page.route, created.page.path.startsWith('/campaigns/cmp_'), created.screenshot, created.author.id, created.resolvedAt], ['open', 'alignment', 'high', '/campaigns/:id/edit', true, null, operator.userId, null]);
       assert.deepEqual([created.element.text, created.element.label, created.context.build], ['Sent to ad•••', 'Reply to ad•••', 'abc123def456']);
       assert.ok(!/ada(?:@|%40)example/.test(JSON.stringify(created)), 'No address in full anywhere in the note.');
+      assert.equal(created.page.path, `/campaigns/${campaign}/edit?q=ad•••`, 'Resource IDs are not secrets.');
+      // PR #175 review M1: credentials in what was captured (text, label, locator, URL) never reach the table, whatever the dashboard sent.
+      const leaked = { apiKey: `bane_${hex()}`, notesKey: `bane_notes_${hex()}`, signing: `whsec_${hex().slice(0, 24)}Zq`, stripe: `sk_live_${hex().slice(0, 20)}Zq`, appPassword: hex().slice(0, 32).match(/.{4}/g)!.join('-'), token: `Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae${hex().slice(0, 8)}` };
+      const exposed = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, url: `${PUBLIC_ORIGIN}/api-keys?token=${leaked.token}`,
+        element: { ...element, text: `Key ${leaked.apiKey} · ${leaked.signing} · ${leaked.stripe} · ${leaked.appPassword}`, label: `Copy ${leaked.notesKey}`, selector: `code[title="${leaked.apiKey}"]`, alternatives: [`#k-${leaked.token}`] } }), 201);
+      const stored = JSON.stringify((await db.query('SELECT url, path, element FROM ui_notes WHERE id = $1', [exposed.id])).rows[0]);
+      for (const [name, secret] of Object.entries(leaked)) assert.equal(stored.includes(secret) || JSON.stringify(exposed).includes(secret), false, name);
+      assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
+      ok(await send('DELETE', `/v1/operator/ui-notes/${exposed.id}`, session(operator)));
       error(await send('POST', '/v1/operator/ui-notes', session(reader), input), 403, 'OPERATOR_REQUIRED');
       assert.equal(ok(await send('GET', `/v1/operator/ui-notes/${created.id}`, session(reader))).id, created.id);
       error(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, selector: '' } }), 422);
@@ -4191,6 +4232,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
       const shot = (body: Uint8Array, type = 'image/png', who = session(operator)) => send('PUT', `/v1/operator/ui-notes/${created.id}/screenshot?width=1&height=1`, who, body, type);
       error(await shot(png, 'image/gif'), 415);
+      // Only the three types themselves, not names an object inherits (PR #175 review, low).
+      for (const type of ['constructor', 'toString', '__proto__']) error(await shot(png, type), 415);
       error(await shot(new TextEncoder().encode('<svg onload=alert(1)>'), 'image/png'), 422, 'INVALID_IMAGE');
       const large = new Uint8Array(2 * 1024 * 1024 + 1); large.set(png);
       error(await shot(large), 413);
@@ -4270,7 +4313,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(operator)), 404);
 
       // Every change is an internal audit row of the operator (no workspace), the key's as a script.
-      const trail = (await db.query(`SELECT action, actor_type, actor_id, actor_label, user_id, workspace_id, via, internal, target_id FROM audit_events WHERE target_type IN ('ui_note', 'ui_note_key') ORDER BY id`)).rows;
+      const trail = (await db.query(`SELECT action, actor_type, actor_id, actor_label, user_id, workspace_id, via, internal, target_id FROM audit_events WHERE target_type IN ('ui_note', 'ui_note_key') AND target_id = ANY($1) ORDER BY id`, [[created.id, key.id]])).rows;
       assert.deepEqual(trail.map(r => `${r.action}:${r.via}`), ['ui_note.create:console', 'ui_note.update:console', 'ui_note.update:console', 'ui_note.screenshot:console', 'ui_note_key.create:console',
         'ui_note.update:script', 'ui_note.update:script', 'ui_note_key.revoke:console', 'ui_note.delete:console']);
       assert.ok(trail.every(r => r.actor_type === 'operator' && r.actor_id === operator.userId && r.user_id === operator.userId && r.workspace_id === null && r.internal), JSON.stringify(trail));

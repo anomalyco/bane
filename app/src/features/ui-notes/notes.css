@@ -4,6 +4,9 @@
 .uin-outline, .uin-highlight { position: fixed; top: 0; left: 0; z-index: 62; pointer-events: none; border-radius: 3px; }
 .uin-outline { outline: 1.5px solid var(--color-accent); outline-offset: 1px; background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
 .uin-highlight { outline: 1.5px dashed var(--color-accent); outline-offset: 2px; }
+/* Over a secret (data-sensitive), which can't have a note. */
+.uin-outline[data-blocked] { outline-color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 7%, transparent); }
+html[data-ui-notes-armed] [data-sensitive], html[data-ui-notes-armed] [data-sensitive] * { cursor: not-allowed !important; }
 .uin-outline[hidden], .uin-highlight[hidden], .uin-pin[hidden] { display: none; }
 html[data-ui-notes-armed], html[data-ui-notes-armed] * { cursor: crosshair !important; }
 /* A long press notes the element instead of selecting text or opening the browser's callout. */
