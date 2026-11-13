@@ -14491,6 +14491,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const sender=ok(await create({send:{enabled:true,perDay:20}}),201),mail=await deliver('sender-test',[sender.address],false,true,'sender-test',false,{dmarcVerdict:{status:'PASS'}});error(await reply(sender.id,mail.thread_id,'outsider@example.net'),403,'RECIPIENT_NOT_ALLOWED');
         const unverified=await deliver('unverified-author',[sender.address],false,true,'unverified-author',false,{dmarcVerdict:{status:'FAIL'},dkimVerdict:{status:'FAIL'},spfVerdict:{status:'PASS'}},'envelope@unrelated.invalid');
         error(await reply(sender.id,unverified.thread_id,'fixture@example.net',unverified.id),403,'RECIPIENT_NOT_ALLOWED');
+        // An inbox key reads the sender's authentication results and the automated flag, never the delivery projection.
+        const authOf=async(id:string)=>{const m=ok(await request('GET',`/v1/inbound/messages/${id}?includeAuthentication=true`,provision));return {...m.authentication,automated:m.automated};};
+        assert.deepEqual(await authOf(mail.id),{spf:null,dkim:null,dmarc:'PASS',automated:false});assert.deepEqual(await authOf(unverified.id),{spf:'PASS',dkim:'FAIL',dmarc:'FAIL',automated:false});
+        await db.query('UPDATE mail_messages SET automated=true WHERE id=$1',[unverified.id]);assert.equal((await authOf(unverified.id)).automated,true);
+        const plain=ok(await request('GET',`/v1/inbound/messages/${mail.id}`,provision));assert.equal(plain.authentication,undefined);assert.equal(plain.automated,undefined);
+        error(await request('GET',`/v1/inbound/messages/${mail.id}?includeDelivery=true`,provision),403,'ADMIN_REQUIRED');
         ok(await reply(sender.id,mail.thread_id,'fixture@example.net'),202);
         await db.query("INSERT INTO mail_messages(id,workspace_id,thread_id,sender_mailbox_id,direction) SELECT 'out_'||i,$1,$2,$3,'outbound' FROM generate_series(1,19)i",[wid,mail.thread_id,sender.id]);error(await reply(sender.id,mail.thread_id,'fixture@example.net',mail.id),429,'MAILBOX_SEND_LIMIT');
       });

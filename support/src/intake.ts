@@ -64,15 +64,13 @@ export class SupportIntake extends DurableObject<Env> {
     const api = baneApi(this.env, 'intake'), set = (state: string) => this.sql.exec('UPDATE intake_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
     const message: InboundMessage = await api.message(next.message_id);
     const sender = senderOf(message) ?? 'unknown', hash = await addressHash(sender);
-    const dmarc = String(message.verdicts?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
+    const dmarc = String(message.authentication?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
     const hold = async (reason: string) => { await holdOverCap(this.env, { channel: next.mailbox, reason, sender, dmarc, subject: message.subject ?? null, text: message.text ?? null, messageId: next.message_id, threadId: next.thread_id }); set('held'); };
     // Caps per DMARC identity (or this address's unauthenticated bucket) and in total (review R1): over a cap the
     // message is kept for the team's digest, never dropped.
     const mail = await mailAllowed(this.env, next.mailbox, sender, dmarcPass);
     if (!mail.ok) { await hold(mail.reason); return; }
-    const headers = new Map((message.headers ?? []).map(h => [h.name.toLowerCase(), h.value]));
-    const automatic = /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || (headers.get('auto-submitted') ?? 'no').toLowerCase() !== 'no'
-      || /^(?:bulk|list|junk|auto_reply)$/i.test(headers.get('precedence') ?? '') || headers.has('x-autoreply') || headers.has('x-autorespond');
+    const automatic = message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender);
     // Who wrote: a DMARC pass that maps to a Bane user names them; anything else is shown as an unverified sender.
     let verified: TicketContext['verified'] = null, customer: TicketContext['customer'] = { userId: null, email: null, name: null, role: null, workspaces: [] };
     if (dmarc === 'PASS') {
