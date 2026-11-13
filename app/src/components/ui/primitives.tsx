@@ -1,4 +1,4 @@
-import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type InputHTMLAttributes, type ReactElement, type ReactNode, type TextareaHTMLAttributes } from 'react';
+import { Children, Fragment, cloneElement, createContext, forwardRef, isValidElement, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type InputHTMLAttributes, type ReactElement, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu';
@@ -86,7 +86,30 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
       setFocusTarget(accepted === false ? value : items[index].value);
     } finally { activating.current = false; }
   }
-  return <div data-component="Tabs" className="ui-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
+  // One marker under the selected tab slides to the next one (200 ms); it lands without moving on first paint and when
+  // a tab's width changes (a count, the web font).
+  const marker = useRef<HTMLSpanElement>(null);
+  const placed = useRef('');
+  const index = items.findIndex(item => item.value === value), order = items.map(item => item.value).join('\n');
+  useLayoutEffect(() => {
+    const place = (animate: boolean) => {
+      const bar = marker.current, tab = refs.current[index];
+      if (!bar) return;
+      // Sub-pixel layout positions, undoing any scale on an ancestor (a dialog opening).
+      const list = bar.parentElement!, box = list.getBoundingClientRect(), rect = tab?.getBoundingClientRect(), scale = box.width / list.offsetWidth || 1;
+      const at = rect ? `translate(${(rect.left - box.left) / scale - list.clientLeft + list.scrollLeft}px, ${(rect.bottom - box.top) / scale - list.clientTop + list.scrollTop - 1}px) scaleX(${rect.width / scale})` : '';
+      if (at === placed.current) return;
+      bar.toggleAttribute('data-animate', animate && placed.current !== '' && at !== '');
+      bar.style.transform = at;
+      bar.style.opacity = at ? '1' : '0';
+      placed.current = at;
+    };
+    place(true);
+    const observer = new ResizeObserver(() => place(false));
+    for (const tab of refs.current) if (tab) observer.observe(tab);
+    return () => observer.disconnect();
+  }, [index, order]);
+  return <div data-component="Tabs" className="ui-tabs ui-tabs--marker" role="tablist" aria-label={label}><span ref={marker} className="ui-tabs__marker" aria-hidden="true" />{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
 }
 // `sensitive`: the dialog shows a secret (a one-time key, a signing secret, an invitation link). Staff UI notes can't be
 // left inside it and capture none of it (features/ui-notes).

@@ -7,7 +7,7 @@ import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
-import { useTween } from '../../components/motion'
+import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, ReportCard, StandingCard, useNextSteps, useSenderScore } from '../score'
 // `logColumns` here are Overview's compact set of Logs' columns (skeletons.tsx).
@@ -19,7 +19,8 @@ import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
 
 // Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
 // on the right with setup (until the first email), the sender score and up to three next steps.
-// Every async block reserves its final size, and refetches keep the previous data on screen.
+// Every async block reserves its final size, and refetches keep the previous data on screen. A new range or stream keeps
+// the old figures up (dimmed if the new ones take over 100 ms), then numbers tween and charts morph or crossfade.
 export function OverviewPage() {
   const { regionId } = useRegion()
   const live = useApi().mode === 'live'
@@ -39,6 +40,9 @@ export function OverviewPage() {
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
   </div>
   const data = query.data
+  // The range the figures on screen are for: while a new range loads, the chart keeps labelling the old one.
+  const [shownRange, setShownRange] = useState(range)
+  if (data && !query.isPlaceholderData && shownRange !== range) setShownRange(range)
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
   const latest = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
@@ -51,8 +55,8 @@ export function OverviewPage() {
     <div className="ov-split">
       <div className="ov-split__main">
         {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-          {data ? <Facts data={data} /> : <FactsSkeleton />}
-          {data ? <Chart data={data} range={range} live={live} /> : <ChartSkeleton />}
+          {data ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
+          {data ? <Chart data={data} range={shownRange} live={live} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
         </>}
         <LatestEmails />
         {data && data.recentCampaigns.length > 0 && <Campaigns data={data} />}
@@ -84,43 +88,50 @@ function Aside() {
   </>}</aside>
 }
 
-const delta = (data: Overview) => data.previousSent ? `${data.sent >= data.previousSent ? '+' : ''}${percent((data.sent - data.previousSent) / data.previousSent, 0)}` : ''
+// The buckets a series covers: series over the same buckets morph into each other, any others crossfade.
+const buckets = (points: ChartPoint[]) => `${points.length}:${points[0]?.at ?? ''}:${points.at(-1)?.at ?? ''}`
+const swap = 200
 
 // Four facts (Console-style): a hairline, a label row with a count or delta, and the value beside its own series.
-function Facts({ data }: { data: Overview }) {
-  const sent = useTween(data.sent), delivered = useTween(data.sent ? data.delivered / data.sent : 0), bounced = useTween(data.sent ? data.bounced / data.sent : 0), complaints = useTween(data.sent ? data.complaints / data.sent : 0)
+// Every number tweens (tabular figures, so nothing beside it moves) and every series morphs or crossfades.
+function Facts({ data, stale }: { data: Overview; stale: boolean }) {
+  const sent = useTween(data.sent, swap), delivered = useTween(data.sent ? data.delivered / data.sent : 0, swap), bounced = useTween(data.sent ? data.bounced / data.sent : 0, swap), complaints = useTween(data.sent ? data.complaints / data.sent : 0, swap)
+  const deliveredCount = useTween(data.delivered, swap), bouncedCount = useTween(data.bounced, swap), complaintCount = useTween(data.complaints, swap)
+  const change = useTween(data.previousSent ? (data.sent - data.previousSent) / data.previousSent : undefined, swap)
   const facts = [
-    { title: factTitles[0], value: number(Math.round(sent)), aside: delta(data), series: data.points.map(p => p.sent), tone: 'sent' },
-    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(data.delivered), series: data.points.map(p => p.delivered), tone: 'delivered' },
-    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(data.bounced), series: data.points.map(p => p.bounced), tone: 'bounces', warn: data.sent > 0 && data.bounced / data.sent >= 0.05 },
-    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(data.complaints), series: data.points.map(p => p.complaints), tone: 'complaints', warn: data.sent > 0 && data.complaints / data.sent >= 0.001 },
+    { title: factTitles[0], value: number(Math.round(sent)), aside: data.previousSent ? `${change >= 0 ? '+' : ''}${percent(change, 0)}` : '', series: data.points.map(p => p.sent), tone: 'sent' },
+    { title: factTitles[1], value: data.sent ? percent(delivered) : '—', aside: number(Math.round(deliveredCount)), series: data.points.map(p => p.delivered), tone: 'delivered' },
+    { title: factTitles[2], value: data.sent ? percent(bounced) : '—', aside: number(Math.round(bouncedCount)), series: data.points.map(p => p.bounced), tone: 'bounces', warn: data.sent > 0 && data.bounced / data.sent >= 0.05 },
+    { title: factTitles[3], value: data.sent ? percent(complaints) : '—', aside: number(Math.round(complaintCount)), series: data.points.map(p => p.complaints), tone: 'complaints', warn: data.sent > 0 && data.complaints / data.sent >= 0.001 },
   ]
-  return <dl className="ov-facts">{facts.map(fact => <div key={fact.title}>
+  return <dl className="ov-facts" data-stale={stale || undefined}>{facts.map(fact => <div key={fact.title}>
     <dt><span>{fact.title}</span><span className="muted">{fact.aside}</span></dt>
-    <dd><span className={`ov-facts__value${fact.warn ? ' text-warning' : ''}`}>{fact.value}</span><Spark values={fact.series} tone={fact.tone} /></dd>
+    <dd><span className={`ov-facts__value${fact.warn ? ' text-warning' : ''}`}>{fact.value}</span><Crossfade id={buckets(data.points)} className="ov-spark-stack"><Spark values={fact.series} tone={fact.tone} /></Crossfade></dd>
   </div>)}</dl>
 }
-function Spark({ values, tone }: { values: number[]; tone: string }) {
+function Spark({ values: target, tone }: { values: number[]; tone: string }) {
+  const values = useMorph(target, swap)
   const max = Math.max(1, ...values), slot = 100 / Math.max(1, values.length)
   return <svg className={`ov-spark ov-spark--${tone}`} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
     {values.map((value, i) => { const h = Math.max(value ? 2 : 1, value / max * 24); return <rect key={i} className={value ? undefined : 'ov-spark__zero'} x={i * slot + slot * .18} width={slot * .64} y={24 - h} height={h} /> })}
   </svg>
 }
 
-function Chart({ data, range, live }: { data: Overview; range: TimeRange; live: boolean }) {
-  return <section className="ov-chart" aria-label="Sending activity">
+function Chart({ data, range, live, stale }: { data: Overview; range: TimeRange; live: boolean; stale: boolean }) {
+  return <section className="ov-chart" aria-label="Sending activity" data-stale={stale || undefined}>
     <div className="ov-chart__head"><h2>Activity</h2><div className="chart-legend"><span><i className="legend-sent" />Emails</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span></div></div>
-    <div className="ov-chart__plot">{data.sent ? <ActivityChart key={range} points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</div>
+    <Crossfade id={data.sent ? buckets(data.points) : 'empty'} className="ov-chart__plot">{data.sent ? <ActivityChart points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</Crossfade>
   </section>
 }
 
 // The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact, seven rows
-// always reserved so loading, short and full lists are the same height.
+// always reserved so loading, short and full lists are the same height. A new email or outcome crossfades the rows.
 function LatestEmails() {
   const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
+  const rows = logs.data?.items ?? []
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {
@@ -144,7 +155,8 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
 
 // Three whole-number steps so every gridline label is a distinct integer.
 function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
-export function ActivityChart({ points, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
+// New counts over the same buckets morph the bars, the lines and their scales (200 ms); the scale labels crossfade.
+export function ActivityChart({ points: target, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
   const [active, setActive] = useState<number | null>(null)
   const container = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 1080, height: 196 })
@@ -156,14 +168,18 @@ export function ActivityChart({ points, range, createdOnly = false }: { points: 
     const observer = new ResizeObserver(([entry]) => measure(entry.contentRect))
     observer.observe(element)
     return () => observer.disconnect()
-  }, [points.length])
-  if (!points.length) return <EmptyState title="No activity" />
+  }, [target.length])
+  const count = target.length
+  const hasOutcomes = target.every(point => Number.isFinite(point.bounced) && Number.isFinite(point.complaints))
+  const maxSent = niceMax(Math.max(...target.map(p => p.sent)))
+  const maxException = niceMax(Math.max(...target.map(p => Math.max(p.bounced ?? 0, p.complaints ?? 0))))
+  const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced ?? NaN), ...target.map(p => p.complaints ?? NaN), maxSent, maxException], 200)
+  if (!count) return <EmptyState title="No activity" />
+  const points = target.map((p, i) => ({ ...p, sent: shown[i], bounced: shown[count + i], complaints: shown[2 * count + i] }))
+  const sentScale = shown[3 * count], exceptionScale = shown[3 * count + 1]
   const { width, height } = size
   const left = 52, right = width - 64, top = 30, bottom = height - 42
-  const selectedPoint = active === null ? undefined : points[active]
-  const hasOutcomes = points.every(point => Number.isFinite(point.bounced) && Number.isFinite(point.complaints))
-  const maxSent = niceMax(Math.max(...points.map(p => p.sent)))
-  const maxException = niceMax(Math.max(...points.map(p => Math.max(p.bounced ?? 0, p.complaints ?? 0))))
+  const selectedPoint = active === null ? undefined : target[active]
   const slot = (right - left) / points.length
   const x = (i: number) => left + (i + 0.5) * slot
   const barWidth = Math.max(1, Math.min(24, slot * 0.6))
@@ -188,13 +204,14 @@ export function ActivityChart({ points, range, createdOnly = false }: { points: 
   const tickIndices = [...new Set([0, ...Array.from({ length: tickSteps }, (_, i) => Math.round((i + 1) * (points.length - 1) / tickSteps))])]
   return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={createdOnly ? `Emails created per ${hourly ? 'hour' : 'day'} on the left scale; outcomes for those emails on the right scale.` : `Email activity per ${hourly ? 'hour' : 'day'}. Sends use the left scale; bounces and complaints use the right scale.`}>
     <text x={0} y={12} className="chart-label">Emails</text>{hasOutcomes && <text x={width - 2} y={12} textAnchor="end" className="chart-label">Bounces and complaints</text>}
-    {[0, 1, 2, 3].map(i => <g key={i}><line x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" /><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}
-    {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, maxSent)} width={barWidth} height={bottom - y(p.sent, maxSent)} rx={Math.min(2, barWidth / 2)} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{hasOutcomes && <><path d={line('bounced', maxException)} className="chart-line chart-line--bounces" /><path d={line('complaints', maxException)} className="chart-line chart-line--complaints" /></>}
+    {[0, 1, 2, 3].map(i => <line key={i} x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" />)}
+    <Crossfade as="g" id={`${maxSent}:${hasOutcomes ? maxException : ''}`}>{[0, 1, 2, 3].map(i => <g key={i}><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text>{hasOutcomes && <text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text>}</g>)}</Crossfade>
+    {points.map((p, i) => p.sent > 0 && <rect key={p.at} x={x(i) - barWidth / 2} y={y(p.sent, sentScale)} width={barWidth} height={bottom - y(p.sent, sentScale)} rx={Math.min(2, barWidth / 2)} className={`chart-bar${active === i ? ' chart-bar--active' : ''}`} />)}{hasOutcomes && <><path d={line('bounced', exceptionScale)} className="chart-line chart-line--bounces" /><path d={line('complaints', exceptionScale)} className="chart-line chart-line--complaints" /></>}
     {/* 24 h: the hour, and the date under the first tick and wherever the day changes, so 12:00 yesterday and 12:00
         today never read as the same tick. 7 d: the date, then the hour. */}
     {tickIndices.map((i, n) => { const day = date(points[i].at, { month: 'short', day: 'numeric', timeZone: 'UTC' }), dated = range === '24h' && (n === 0 || day !== date(points[tickIndices[n - 1]].at, { month: 'short', day: 'numeric', timeZone: 'UTC' }))
       return <text key={i} x={x(i)} y={height - (range === '30d' ? 13 : 22)} textAnchor="middle" className="chart-label">{range === '24h' ? date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) : day}{range === '7d' ? <tspan x={x(i)} dy={15}>{date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })}</tspan> : dated ? <tspan x={x(i)} dy={15} className="chart-label--date">{day}</tspan> : null}</text> })}
-    {points.map((p, i) => {
+    {target.map((p, i) => {
       const start = left + i * slot, end = start + slot
       return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" tabIndex={0} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} ${createdOnly ? 'created' : 'sent'}${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => setActive(i)} onBlur={() => setActive(null)} />
     })}
