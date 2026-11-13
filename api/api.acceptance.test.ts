@@ -2615,6 +2615,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('GET', '/v1/me', undefined, returning)).workspaceId, a.org.id, 'An unsolicited invitation must not switch an existing member into another workspace.');
       const accept = `/v1/workspaces/invitations/${invited.id}/accept`;
       error(await local('POST', accept, undefined, a.cookie), 404);
+      // A bearer credential never rides the session cookie: 403, as on every dashboard-only route (the live E2E's API key).
+      error(await local('POST', accept, undefined, guest, { authorization: 'Bearer bane_not_a_session' }), 403, 'DASHBOARD_AUTH_REQUIRED');
       assert.equal(ok(await local('POST', accept, undefined, guest)).workspaceId, b.org.id);
       assert.equal(ok(await local('GET', '/v1/me', undefined, guest)).role, 'admin');
       error(await local('POST', `${base}/members`, { email: address(), role:'owner' }, guest), 403, 'OWNER_REQUIRED');
