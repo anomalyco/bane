@@ -105,13 +105,13 @@ export function ReportCard({ report }: { report: SenderScore | undefined }) {
   </section>
 }
 
-// Hosted: the limit the score sets, any adjustment, the factor that would help most and the standing, four fixed
-// lines in every state (calibrating, graded, override, notice, warn and above).
+// Hosted: the limit the score sets, any adjustment, the factor that would help most and the standing: four lines in
+// every state (calibrating, graded, override, notice, warn and above), each in full; the standing note may take two.
 function ScoreLimit({ report, limit }: { report: SenderScore; limit: SenderLimit }) {
   const graded = report.state === 'graded' && report.score !== null
   const daily = limit.daily === null ? 'No daily limit' : `Limit ${number(limit.daily)}/day${limit.source === 'override' ? ' (override)' : ''}`
   const headline = !graded ? `Calibrating ${report.emails.firstEmails}/${report.needed} · ${daily.toLowerCase()}`
-    : [daily, `score ${whole(report.score!)} (${report.grade})`, limit.next ? `next ${number(limit.next.limit)} at ${limit.next.atScore}` : limit.source === 'score' ? 'top band' : null].filter(Boolean).join(' · ')
+    : [daily, limit.next ? `next ${number(limit.next.limit)} at ${limit.next.atScore}` : limit.source === 'score' ? 'top band' : null].filter(Boolean).join(' · ')
   const adjustments = [
     limit.override && (limit.override.expiresAt ? `Override until ${shortDateTime(limit.override.expiresAt)} UTC` : 'Override with no expiry'),
     limit.restore && `${limit.restore.daily.toLocaleString('en-US')} a day after a resume, until ${shortDateTime(limit.restore.until)} UTC`,
@@ -124,10 +124,10 @@ function ScoreLimit({ report, limit }: { report: SenderScore; limit: SenderLimit
   const raised = stepAtLeast(step, 'warn') ? step as RaisedStep : null
   const note = raised ? `${standingTitle[raised]} · see above` : step === 'notice' ? `Note: ${standing!.reasons[0]?.message ?? 'Bane noticed a first problem.'}` : standing?.marketingRelease ? `Marketing at ${standing.marketingRelease.percent}% until ${shortDateTime(standing.marketingRelease.until)} UTC` : 'No sending issues'
   return <div className="score-limit" aria-label="Daily limit">
-    <p className="score-limit__headline" title={headline}>{headline}</p>
-    <p title={adjustments || bursts}>{adjustments || bursts}</p>
-    <p title={helps}>{helps}</p>
-    <p className="score-limit__note" data-tone={raised ? standingTone(raised) : step === 'notice' ? 'warning' : 'ok'} title={note}><span aria-hidden="true" /><span>{note}</span></p>
+    <p className="score-limit__headline">{headline}</p>
+    <p>{adjustments || bursts}</p>
+    <p>{helps}</p>
+    <p className="score-limit__note" data-tone={raised ? standingTone(raised) : step === 'notice' ? 'warning' : 'ok'}><span aria-hidden="true" /><span>{note}</span></p>
   </div>
 }
 

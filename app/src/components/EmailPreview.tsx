@@ -78,13 +78,13 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: AttachmentApi | undefined; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
-  const [fontFaces, setFontFaces] = useState('');
+  const [fontFaces, setFontFaces] = useState<string | null>(null);
   const italic = ITALIC.test(withoutFontStyles(html)), otherScripts = OTHER_SCRIPTS.test(html);
   useEffect(() => {
     let live = true;
     const faces = (italic ? [['normal', 'inter'], ['italic', 'inter-italic']] : [['normal', 'inter']]).flatMap(([style, file]) => [[style, `/fonts/${file}-latin.woff2`, LATIN_RANGE], ...(otherScripts ? [[style, `/fonts/${file}-ext.woff2`, EXT_RANGE]] : [])]);
     Promise.all(faces.map(async ([style, path, range]) => `@font-face { font-family: 'Inter'; src: url('${await fontSource(path)}') format('woff2'); font-style: ${style}; font-weight: 100 900; font-display: swap; unicode-range: ${range}; }`))
-      .then(css => { if (live) setFontFaces(css.join(' ')); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ });
+      .then(css => { if (live) setFontFaces(css.join(' ')); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ if (live) setFontFaces(current => current ?? ''); });
     return () => { live = false; };
   }, [italic, otherScripts]);
   // Content-ID → signed link, applied only to exact img[src] matches after sanitizing (L15).
@@ -137,10 +137,12 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
     // Reuse the browser's cached font files without opening network access inside the sandbox.
-    style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); scrollbar-width: none; } ::-webkit-scrollbar { display: none; } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
+    style.textContent = `${fontFaces ?? ''} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); scrollbar-width: none; } ::-webkit-scrollbar { display: none; } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
   }, [html, sources, fontFaces, respectStyles, remoteImages, inline]);
+  // The first frame waits for the fonts (one read per session), so the preview loads once instead of twice.
+  if (fontFaces === null) return <div className={['ui-email-preview', className].filter(Boolean).join(' ')} aria-hidden />;
   // Changing srcdoc on a mounted iframe navigates it, and Chrome adds that navigation to the tab's
   // history: Back then steps the preview instead of leaving the page. A new iframe per document
   // (keyed on its content) loads without a history entry.
