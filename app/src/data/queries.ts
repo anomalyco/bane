@@ -1,5 +1,5 @@
 import { connectionApi } from './connections'
-import type { InboundThreadView, BaneApi, LogDirection, PageRequest, Stream, TimeRange } from './types'
+import { ApiError, type InboundThreadView, type BaneApi, type LogDirection, type PageRequest, type Stream, type TimeRange } from './types'
 import { usageApi } from './usage'
 import { billingApi } from './billing'
 import { workspaceApi } from './workspaces'
@@ -35,10 +35,16 @@ export const queries = {
   overviewSetup: () => def(['overview-setup'], (api, signal) => api.overview.setup(signal)),
   domains: (regionId: string, page: number) => def(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal)),
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
-  agentTokens: (showRevoked: boolean) => def(['agent-tokens', showRevoked], (api, signal) => api.credentials.agentTokens(showRevoked, signal)),
-  mcpConnections: () => def(['mcp-connections'], (api, signal) => api.credentials.mcpConnections(signal)),
-  mcpConnection: (id: string) => def(['mcp-connections', id], (api, signal) => api.credentials.mcpConnection(id, signal)),
-  mailboxKeys: (showRevoked: boolean) => def(['mailbox-keys', showRevoked], (api, signal) => api.mailboxes.keys(showRevoked, signal)),
+  // Connected agents with the tokens they made here. With inactive ones: Settings → Account and the rituals page read
+  // the same list (your own sign-ins, `own`), so they share the cache.
+  agents: (includeInactive: boolean) => def(['agents', includeInactive], (api, signal) => api.credentials.agents(includeInactive, signal)),
+  /** One of your own sign-ins (another account's is not in your list). */
+  ownAgent: (id: string) => def(['agents', 'own', id], async (api, signal) => {
+    const found = (await api.credentials.agents(true, signal)).find(agent => agent.own && agent.id === id)
+    if (!found) throw new ApiError('Agent was not found.', 'NOT_FOUND', {}, undefined, 404)
+    return found
+  }),
+  appPasswords: () => def(['app-passwords'], (api, signal) => api.credentials.appPasswords(signal)),
   webhooks: (cursor?: string) => def(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor)),
   connection: () => def(['connection'], (_api, signal) => connectionApi.get(signal)),
   usage: () => def(['usage'], (_api, signal) => usageApi.get(signal)),

@@ -8,10 +8,11 @@ import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { McpConnection } from '../../data/types'
+import type { Agent } from '../../data/types'
 import { mcpClientConfig, mcpClientFiles, mcpClientNames } from '../../../../api/src/mcp-clients'
 import { useMcpUrl } from '../docs/connect-agent'
 import { guides } from './concepts'
+import { connectionTitle } from '../settings/key-labels'
 import '../docs/developer.css'
 
 const others = ['claude', 'cursor'] as const
@@ -30,11 +31,9 @@ function prompts(ritual: string, address: string | null, workspace: string | nul
   ]
 }
 
-/** How Settings names an approval: its client, and the label of its entry (`?profile=`). */
-const connectionTitle = (app: McpConnection) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
-/** An approval that can edit rituals here: active with full access (bane:manage), for an owner or admin of this
- * workspace. Its calls name the workspace they act in, so any of the account's approvals can work in this one. */
-const canEdit = (app: McpConnection, admin: boolean) => app.status === 'active' && admin && app.scopes.includes('bane:manage')
+/** A connected agent that can edit rituals here: active with full access (manage), for an owner or admin of this
+ * workspace. Its calls name the workspace they act in, so any of the account's agents can work in this one. */
+const canEdit = (app: Agent, admin: boolean) => app.status === 'active' && admin && app.permissions.includes('manage')
 
 export function RitualAgentCard({ ritual, address }: { ritual: string; address: string | null }) {
   const [open, setOpen] = useState(false)
@@ -43,9 +42,9 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
   const admin = useWorkspaceAccess().canAdminister
   const several = (identity?.workspaces?.length ?? 0) > 1
   const workspace = several ? identity?.workspaces?.find(w => w.id === identity.workspaceId)?.name ?? null : null
-  const apps = useApiDef(queries.mcpConnections())
+  const apps = useApiDef(queries.agents(true))
   const url = useMcpUrl()
-  const active = (apps.data ?? []).filter(app => app.status === 'active')
+  const active = (apps.data ?? []).filter(app => app.own && app.status === 'active')
   const connected = active.find(app => canEdit(app, admin))
   // Connected but not able to edit rituals here: read or send access only, or a member of this workspace.
   const limited = !connected ? active[0] ?? null : null

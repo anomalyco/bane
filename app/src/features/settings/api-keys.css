@@ -2,19 +2,35 @@
 .keys-sections { display: flex; flex-direction: column; min-width: 0; }
 .keys-sections > .section { margin-block: 0; }
 .keys-sections > .section:not(:first-child) { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
-.keys-head { display: flex; flex-direction: column; gap: var(--space-8); }
-.keys-head > .ui-section-header { margin-bottom: 0; }
-.keys-head > p { max-width: 60ch; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 /* Two-line rows (name + caption, access + scope) render 53px; the skeleton must match. */
 .ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
 /* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
 .keys-table .ui-table { min-width: 880px; }
-/* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways. */
-@media (max-width: 1100px) { .keys-table .ui-table { min-width: 0; } .keys-table [data-col='prefix'] { width: 15% !important; } }
+/* One-line cells clip rather than wrap, so every row stays 53px. */
+.keys-table td:is([data-col='type'], [data-col='prefix'], [data-col='last']) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways; the key
+   prefix gives way (a phone's card still shows it). */
+@media (max-width: 1100px) {
+  .keys-table .ui-table { min-width: 0; }
+  .keys-table [data-col='prefix'] { display: none; }
+  .keys-table [data-col='name'] { width: 25% !important; }
+  .keys-table [data-col='type'] { width: 15% !important; }
+}
 .keys-cell { min-width: 0; }
 .keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* An agent's short-lived tokens sit under it, indented. */
+.keys-cell--nested, .keys-nested { padding-left: var(--space-16); }
 
-/* Create key dialog: plain choices up front, exact scope under Advanced. */
+/* Create key, first step: the three types as rows that go straight to their form. */
+.keys-types { display: flex; flex-direction: column; gap: var(--space-4); margin: 0 calc(-1 * var(--space-12)); padding: 0; list-style: none; }
+.keys-type { display: flex; align-items: center; gap: var(--space-12); width: 100%; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 100ms ease-out; }
+.keys-type > svg { flex: none; margin-left: auto; color: var(--color-faint); }
+.keys-type__label { font-weight: var(--font-weight-bold); }
+.keys-type:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { .keys-type:hover { background: var(--color-hover); transition-duration: 0ms; } }
+.keys-form-note { margin: 0; font-size: var(--text-sm); }
+
+/* Create key, second step: every choice visible, one radio list. */
 .keys-purpose { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; margin: 0; padding: 0; border: 0; }
 .keys-purpose > legend { padding: 0; margin-bottom: var(--space-8); }
 .keys-choice { display: flex; align-items: flex-start; gap: var(--space-8); cursor: pointer; }
@@ -28,12 +44,11 @@
   .keys-purpose:disabled .keys-choice input { box-shadow: inset 0 0 0 1px GrayText; }
   .keys-purpose:disabled .keys-choice input:checked { background: GrayText; box-shadow: inset 0 0 0 1px GrayText, inset 0 0 0 4px Canvas; }
 }
-.keys-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-weight: var(--font-weight-bold); overflow-wrap: anywhere; }
-.keys-advanced > summary .muted { font-weight: var(--font-weight-regular); }
-.keys-advanced-body { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-16); min-width: 0; }
-.keys-advanced-body .settings-key-domains > legend { margin-bottom: var(--space-8); }
-.keys-advanced-body .settings-key-domains > .ui-field__hint { margin: 0; }
-/* Which key do I need: one quiet line that opens the six credentials in place. */
+/* A checkbox among the radios (Organize, IMAP, SMTP) lines up with their two-line labels. */
+.keys-purpose .ui-check-field { align-items: flex-start; min-height: 0; }
+.keys-purpose .ui-checkbox { margin-top: 2px; }
+.keys-purpose > .ui-field__hint, .keys-purpose > .ui-field__error { margin: 0; }
+/* Which key do I need: one quiet line that opens the three credentials in place. */
 .keys-guide { display: flex; flex-direction: column; min-width: 0; margin-bottom: var(--space-8); }
 .keys-guide__line { display: flex; align-items: baseline; gap: var(--space-12); }
 .keys-guide__toggle { position: relative; display: inline-flex; align-items: center; gap: var(--space-4); padding: 0; border: 0; border-radius: 2px; background: none; color: var(--color-muted); font: inherit; font-size: var(--text-sm); line-height: var(--leading-sm); cursor: pointer; transition: color 100ms ease-out; }

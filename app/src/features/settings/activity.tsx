@@ -9,7 +9,7 @@ import { settingsColumns } from './skeletons'
 
 // Settings → Activity (hosted, owners and admins): what happened in this workspace, newest first, 50 at a time.
 // Rows are one line each (53px); a row opens its details (before → after, reason, request ID).
-const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'MCP client', agent_token: 'Agent token', inbox_key: 'Inbox key', app_password: 'App password' }
+const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'Agent', agent_token: 'Agent token', inbox_key: 'API key', app_password: 'App password' }
 function Who({ actor }: { actor: AuditEntry['actor'] }) {
   if (actor.type === 'member') return actor.email ? <PrivateAddress value={actor.email} /> : <>{actor.label ?? 'A member'}</>
   // Support reading the workspace under a grant stands out from everything the workspace did itself.
