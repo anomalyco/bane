@@ -19,9 +19,9 @@
 .rcv-chain__then { margin-right: var(--space-4); color: var(--color-faint); }
 .rcv-add { color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration); }
 .rcv-add:hover { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
-.rcv-concept { display: flex; align-items: baseline; gap: var(--space-12); min-width: 0; margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.rcv-concept { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-4) var(--space-12); min-width: 0; margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .rcv-concept > span { flex: none; max-width: 100%; }
-.rcv-concept > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-faint); font-size: var(--text-xs); }
+.rcv-concept > code { white-space: nowrap; color: var(--color-faint); font-size: var(--text-xs); }
 
 /* One fixed-height loading block, replaced by the tabs once the one read arrives. */
 .rcv-skeleton { display: grid; gap: var(--space-16); }
@@ -70,14 +70,17 @@
 .addr-step li .ui-icon-button { margin-left: var(--space-4); }
 .addr-step__empty { color: var(--color-muted); font-size: var(--text-sm); }
 .addr-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.addr-step__foot { display: grid; gap: var(--space-8); }
+/* A ghost button that starts a row sits on the column's edge, its label under the text above it. */
+.addr-step__actions > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
 .addr-step__actions .ui-select-trigger { min-width: 0; width: 180px; }
 .addr-recent { display: grid; margin: 0; padding: 0; list-style: none; }
 .addr-recent a { display: grid; grid-template-columns: minmax(140px, 30%) minmax(0, 1fr) 72px; gap: var(--space-16); align-items: center; min-height: 44px; margin: 0 calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: var(--radius-sm); color: var(--color-text); text-decoration: none; transition: background var(--motion-duration); }
-.addr-recent li + li a { border-top: 1px solid var(--color-border-muted); }
+.addr-recent li + li { border-top: 1px solid var(--color-border-muted); }
 .addr-recent a:hover { background: var(--color-hover); }
-.addr-recent span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
+.addr-recent span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
 .addr-recent time { color: var(--color-muted); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
-.addr-patterns { display: grid; gap: var(--space-8); }
+.addr-patterns { display: grid; gap: var(--space-8); max-width: 520px; margin-top: var(--space-8); }
 .addr-patterns ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .addr-patterns li { display: flex; align-items: center; gap: var(--space-8); min-height: 40px; border-top: 1px solid var(--color-border-muted); }
 .addr-patterns li:last-child { border-bottom: 1px solid var(--color-border-muted); }
@@ -173,7 +176,7 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
    shows its rituals then where its mail goes. */
 @media (max-width: 640px) {
   /* The line wraps beside the Guide link instead of pushing it past the screen's edge. */
-  .rcv-concept > span { flex: 0 1 auto; min-width: 0; }
+  .rcv-concept > span { flex: 1 1 0; min-width: 0; }
   .rcv-toolbar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); }
   .rcv-filters { flex-wrap: nowrap; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--bleed, 0px)); padding: var(--focus-reach) var(--bleed, 0px) var(--focus-reach) calc(var(--bleed, 0px) - 8px); overflow-x: auto; }
   .rcv-filter { flex: none; height: 36px; }
@@ -198,4 +201,34 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
   .trace-recent__time { grid-area: time; }
   .trace-recent__from { grid-area: from; color: var(--color-muted); }
   .trace-recent__to { grid-area: to; max-width: 160px; justify-self: end; }
+}
+
+/* A long address or name clips inside its cell, column or heading instead of running into its neighbour; the whole value
+   is one click away on its page, and a masked address is revealed by hover or focus as everywhere else. */
+.rcv-cell > .settings-cell-stack { min-width: 0; max-width: 100%; }
+:is(.rcv-match, .routing-choices .private-address, .addr-page dd .private-address, .inbound-stack .ui-page-header h1 .private-address) > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.rcv-match[data-revealed] > .private-address__value { text-overflow: ellipsis; white-space: nowrap; }
+:is(.addr-page dd, .inbound-stack .ui-page-header h1) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.routing-choices .settings-cell-stack { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
+.routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
+.routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
+.rcv-to { display: block; min-width: 0; }
+.rcv-table:not(.ui-cards) .rcv-targets { flex-wrap: nowrap; max-width: 100%; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.addr-step li > .rcv-match { flex: 0 1 auto; }
+.rcv-step__body .cluster > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
+@media (max-width: 640px) {
+  .rcv-concept > code { order: 3; flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; }
+  /* A recent message: subject and time, then its first words on a line of their own. */
+  .addr-recent a { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'subject time' 'snippet snippet'; gap: 2px var(--space-12); padding-block: var(--space-8); }
+  .addr-recent__subject { grid-area: subject; }
+  .addr-recent time { grid-area: time; }
+  .addr-recent__snippet { grid-area: snippet; font-size: var(--text-xs); }
+}
+.inbound-note.rcv-note { max-width: 90ch; }
+/* An address in a clipped line keeps its focus ring inside the clip. */
+.receiving-clip .private-address:focus-visible { outline-offset: -2px; }
+@media (min-width: 641px) {
+  .rcv-kindline > .rcv-concept { flex: 1 1 0; }
+  .rcv-kindline > .cluster { flex: none; flex-wrap: nowrap; }
 }
