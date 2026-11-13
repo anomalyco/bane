@@ -170,6 +170,9 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-editor .cm-selectionBackground, .ritual-editor .cm-focused .cm-selectionBackground { background: var(--color-active-bg) !important; }
 .ritual-editor .cm-cursor { border-left-color: var(--color-text); }
 .ritual-editor .cm-matchingBracket { background: var(--color-active-bg); outline: none; }
+/* CodeMirror parks a new tooltip at top: -10000px for one frame to measure it, then moves top/left into view; keeping
+   that offscreen frame hidden preserves its measured box while stopping Blink from counting the move as a layout shift. */
+.cm-tooltip[style*="-10000px"] { visibility: hidden; }
 .cm-tooltip { border: 1px solid var(--color-border) !important; border-radius: var(--radius-sm); background: var(--color-surface) !important; color: var(--color-text); box-shadow: var(--shadow-popover); font-size: var(--text-sm); }
 .cm-tooltip-lint .cm-diagnostic { padding: var(--space-6) var(--space-8); }
 .cm-tooltip-lint .cm-diagnostic-error { border-left: 0; }
