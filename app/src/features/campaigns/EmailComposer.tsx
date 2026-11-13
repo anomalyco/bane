@@ -284,8 +284,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     } else if (locked) { event.preventDefault(); event.stopPropagation() }
   }}>
     <div className="composer-toolbar">
-      <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
-        <DropdownMenu trigger={<Button size="sm" variant="ghost" disabled={inactive}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
+      <div className="composer-tools ui-scroll-fade" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
+        <DropdownMenu label="Insert" trigger={<Button size="sm" variant="ghost" disabled={inactive}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
           { label: 'Text', icon: <Type size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setParagraph().run()) },
           { label: 'Heading', icon: <Heading2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHeading({ level: 2 }).run()) },
           { label: 'Button', icon: <MousePointer2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setButton().run()) },
@@ -299,8 +299,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         ]} />
         <div className="cluster"><IconButton size="sm" label="Bold" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Bold size={16} /></IconButton><IconButton size="sm" label="Italic" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Italic size={16} /></IconButton></div>
         <div className="cluster"><IconButton size="sm" label="Align left" disabled={inactive} onClick={() => align('left')}><AlignLeft size={16} /></IconButton><IconButton size="sm" label="Align center" disabled={inactive} onClick={() => align('center')}><AlignCenter size={16} /></IconButton><IconButton size="sm" label="Align right" disabled={inactive} onClick={() => align('right')}><AlignRight size={16} /></IconButton></div>
-        {busy && <span className="muted" role="status">Preparing…</span>}
         <Button size="sm" variant="ghost" disabled={inactive} aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(value => !value)}><SlidersHorizontal size={16} />Design</Button>
+        {busy && <span className="muted" role="status">Preparing…</span>}
         <div className="cluster composer-history"><IconButton size="sm" label="Undo" disabled={inactive} onClick={() => command(e => e.chain().focus().undo().run())}><Undo2 size={16} /></IconButton><IconButton size="sm" label="Redo" disabled={inactive} onClick={() => command(e => e.chain().focus().redo().run())}><Redo2 size={16} /></IconButton></div>
         <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
       </div>
