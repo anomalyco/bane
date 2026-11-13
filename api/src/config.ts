@@ -30,12 +30,9 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   BANE_NOTIFY_FROM: optional(z.email().max(254)),
-  // Hosted only, support integration (api/README.md "Support integration"): the support platform's server-to-server
-  // operator credential (read-only; mints support grants), where "Contact support" sends a member, and the Ed25519
-  // private JWK (with "x") that signs the handoff it carries. Treat the token and the key as secrets.
-  BANE_SUPPORT_PLATFORM_TOKEN: optional(z.string().regex(/^bane_ops_[0-9a-f]{64}$/)),
-  // During a rotation: the token being retired, still accepted until it is removed (its calls are logged as "previous").
-  BANE_SUPPORT_PLATFORM_TOKEN_PREVIOUS: optional(z.string().regex(/^bane_ops_[0-9a-f]{64}$/)),
+  // Hosted only, support integration (api/README.md "Support integration"): where "Contact support" sends a member, and
+  // the Ed25519 private JWK (with "x") that signs the handoff it carries. Treat the key as a secret. The support
+  // platform itself has no credential here: it calls the SupportPlatform service-binding entrypoint (src/worker.ts).
   BANE_SUPPORT_URL: optional(z.url({ protocol: /^https$/ }).max(500)),
   BANE_SUPPORT_SIGNING_KEY: optional(z.string().max(2000)),
   BANE_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
@@ -155,7 +152,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BANE_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_BANE_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.BANE_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.BANE_NOTIFY_FROM : undefined,
-    support: v.MULTI_TENANT==='true' ? { platformToken: v.BANE_SUPPORT_PLATFORM_TOKEN, previousPlatformToken: v.BANE_SUPPORT_PLATFORM_TOKEN_PREVIOUS, url: v.BANE_SUPPORT_URL, signingKey: supportSigningKey } : undefined, receivingRedrive:v.BANE_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
+    support: v.MULTI_TENANT==='true' ? { url: v.BANE_SUPPORT_URL, signingKey: supportSigningKey } : undefined, receivingRedrive:v.BANE_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
     allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.BANE_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',

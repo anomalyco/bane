@@ -1,7 +1,9 @@
 import {gatewayLane} from './protocol-admission.js';
 import { getPath } from 'hono/utils/url';
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
+import type { SupportPlatformApi } from './support-platform.js';
 export { DispatcherShard };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -140,6 +142,31 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
+/**
+ * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
+ * the same account binds `{ service: "bane-production" | "bane-dev", entrypoint: "SupportPlatform" }` and calls these
+ * methods over RPC. There is no token: only a Worker whose deployed config declares this binding can reach it. Every call
+ * runs through the normal routes (validation, audit, budgets) as `service:bane-support`, on its own admission lane.
+ */
+export class SupportPlatform extends WorkerEntrypoint<Env> {
+  private async platform(): Promise<SupportPlatformApi> {
+    const [{ app, core }, { supportPlatform, SUPPORT_PLATFORM_CALLER }, { CONFIG_KEYS, loadConfig }] = await Promise.all([loadHttpDeps(), import('./support-platform.js'), import('./config.js')]);
+    stampLogs(this.env, core);
+    const config = () => configFor(this.env, CONFIG_KEYS, loadConfig);
+    return supportPlatform(async request => {
+      if (!(await this.env.ADMISSION.limit({ key: 'bane:support-platform' })).success) return core.admissionDenied();
+      return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, platformCaller: SUPPORT_PLATFORM_CALLER }), 1, this.ctx);
+    }, config);
+  }
+  async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
+  async verifyEmail(body: Parameters<SupportPlatformApi['verifyEmail']>[0]) { return (await this.platform()).verifyEmail(body); }
+  async mintGrant(body: Parameters<SupportPlatformApi['mintGrant']>[0]) { return (await this.platform()).mintGrant(body); }
+  async revokeGrant(grantId: string) { return (await this.platform()).revokeGrant(grantId); }
+  async read(path: string, grant: string) { return (await this.platform()).read(path, grant); }
+  // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
+  override async fetch() { return new Response(null, { status: 404 }); }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);

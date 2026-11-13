@@ -59,7 +59,7 @@ export interface Config {
   /** Hosted only: From for Bane's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
-  support?: { platformToken?: string; previousPlatformToken?: string; url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
+  support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;
@@ -115,6 +115,8 @@ export interface Runtime {
   snsCertificateState?: import('./operations.js').SnsCertificateState; // Omitted by production: share one state per isolate, not per request.
   allowMalformedSns?: (peer: string) => Promise<boolean>;
   jwksCacheScope?: object; // Workers create a new DB adapter per request; scope public keys to the binding instead.
+  // Set only by the SupportPlatform service-binding entrypoint (src/support-platform.ts), never from a request.
+  platformCaller?: 'bane-support';
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
   // Outbound webhook transport. Node supplies a connect-time guard against private addresses
   // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.

@@ -22,26 +22,25 @@ import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, ope
 // Every other credential, including a workspace owner's session, gets the same 403 for every path under them, real or not.
 
 const SUPPORT_TOKEN = /^bane_support_[0-9a-f]{64}$/;
-const OPERATOR_TOKEN = /^bane_ops_[0-9a-f]{64}$/;
 /** Requests per minute per support grant. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
 const GRANT_MAX_MINUTES = 120;
 const bearer = (c: Ctx) => c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
 const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', 'This area is for Bane support with an active support grant.');
 
-/** /v1/operator and /v1/operator/*: an operator's dashboard session or the support platform's credential, else 403. */
+/**
+ * /v1/operator and /v1/operator/*: an operator's dashboard session, or the support platform through the SupportPlatform
+ * service binding (src/support-platform.ts) on the support routes only, else 403. No bearer token is an operator: the
+ * static platform token (BANE_SUPPORT_PLATFORM_TOKEN) is retired.
+ */
 export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!c.env.config.multiTenant) throw operatorRequired();
-  const token = bearer(c), support = c.env.config.support;
-  if (token !== undefined || c.req.header('authorization') !== undefined) {
-    // The current token, or during a rotation the previous one; each is its own actor in the trail.
-    const presented = token && OPERATOR_TOKEN.test(token) ? await digest(token) : null;
-    const which = !presented ? null : support?.platformToken && presented === await digest(support.platformToken) ? 'current'
-      : support?.previousPlatformToken && presented === await digest(support.previousPlatformToken) ? 'previous' : null;
-    if (!which) throw operatorRequired();
+  if (c.req.header('authorization') !== undefined) throw operatorRequired();
+  if (c.env.platformCaller === 'bane-support') {
+    if (!c.req.path.startsWith('/v1/operator/support/')) throw operatorRequired();
     const { chargeGrantBudget, checkBudget } = await import('./auth.js');
     checkBudget(c, await timed(c, 'budget-db', () => chargeGrantBudget(c.env, 'platform', 'ops_support')), c.env.config.apiRateLimitPerMinute);
-    c.set('actor', { workspaceId: '', permissions: [], domains: [], keyId: `service:support-platform:${which}`, credential: 'operatorService' });
+    c.set('actor', { workspaceId: '', permissions: [], domains: [], keyId: 'service:bane-support', credential: 'operatorService' });
     return next();
   }
   if (!hasSessionCookie(c.req.raw.headers)) throw operatorRequired();

@@ -3478,16 +3478,20 @@ describe('Hosted MCP OAuth and tools', () => {
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
-      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, platformToken = `bane_ops_${hex()}`;
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
-        support: { platformToken, url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
-      secrets.add(platformToken);
+        support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
         const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
         return { status: res.status, body: parsed, headers: res.headers };
       };
+      // The support platform: the SupportPlatform service-binding entrypoint (src/worker.ts) wraps exactly this, with
+      // the runtime marked as the binding's caller. No token: the binding is the credential.
+      const { supportPlatform, supportPlatformAllows } = await import('./src/support-platform.js');
+      const platform = supportPlatform(req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
@@ -3590,22 +3594,28 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([claims.jti, claims.aud, claims.workspace.id, claims.user.id, claims.shareContent, claims.requestIds], [handoff.id, 'bane-support', wid, manager!.userId, true, [createdRequest]]);
       ok(await send('POST', '/v1/contact-support', session(member), { shareContent: false }), 201);
 
-      // The support platform's server verifies an emailed request and mints a grant for that one user.
-      const service = bearer(platformToken);
+      // The support platform verifies the handoff it was given: Bane checks its own signature and the stored row.
+      const checked = await platform.verifyHandoff(handoff.token);
+      assert.ok(checked.ok); assert.deepEqual([checked.handoff.id, checked.handoff.userId, checked.handoff.workspace.id, checked.handoff.shareContent, checked.handoff.usedAt, checked.handoff.message], [handoff.id, manager!.userId, wid, true, null, 'Why did my key stop working?']);
+      assert.deepEqual(await platform.verifyHandoff(`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`), { ok: false, code: 'HANDOFF_INVALID' });
+      const otherKey = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, { verifyHandoffToken } = await import('./src/support-platform.js');
+      assert.deepEqual(await verifyHandoffToken({ ...runtime.config, support: { signingKey: { kty: 'OKP', crv: 'Ed25519', d: otherKey.d, x: otherKey.x } } }, handoff.token), { ok: false, code: 'HANDOFF_INVALID' }, 'Another installation’s key does not verify it.');
+      assert.deepEqual(await verifyHandoffToken(runtime.config, handoff.token, Date.now() + 11 * 60_000), { ok: false, code: 'HANDOFF_EXPIRED' });
+      // The support platform verifies an emailed request and mints a grant for that one user.
       const dmarc = { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<support-1@example.com>' };
-      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
+      const verified = ok(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
       assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
-      assert.deepEqual(ok(await send('POST', '/v1/operator/support/verify-email', service, { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
+      assert.deepEqual(ok(await service('POST', '/v1/operator/support/verify-email', { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
       // Evidence the platform could not have: a DMARC pass without the verified message, a magic link opened in the future.
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
-      const mint = (body: Json) => send('POST', '/v1/operator/support/grants', service, { reason: 'Customer asked about a revoked key', ...body });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
+      const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
       assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
       assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
       error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
-      assert.equal(ok(await send('GET', `/v1/operator/support/handoffs/${handoff.id}`, service)).grantId, grant.id);
+      assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
       error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
       const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
@@ -3649,7 +3659,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Rate limit, revocation and expiry.
       await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
       error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
-      ok(await send('POST', `/v1/operator/support/grants/${grant.id}/revoke`, service));
+      ok(await service('POST', `/v1/operator/support/grants/${grant.id}/revoke`));
       error(await send('GET', '/v1/support/context', support), 403, 'SUPPORT_GRANT_REQUIRED');
       const again = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 201); secrets.add(again.token);
       await db.query(`UPDATE support_grants SET created_at = now() - interval '3 hours', expires_at = now() - interval '2 hours' WHERE id = $1`, [again.id]);
@@ -3685,17 +3695,24 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-7', verification: 'handoff', handoffId: late.id }), 404);
 
-      // Rotation: the previous platform token works until it is removed, and the trail names which one acted.
-      const nextToken = `bane_ops_${hex()}`; secrets.add(nextToken);
-      Object.assign(runtime.config.support!, { platformToken: nextToken, previousPlatformToken: platformToken });
-      ok(await send('GET', '/v1/operator/support/grants?ticketRef=T-5', service));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, bearer(nextToken)));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, service));
-      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE action = 'audit.read' AND actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id),
-        ['service:support-platform:current', 'service:support-platform:previous']);
-      Object.assign(runtime.config.support!, { previousPlatformToken: undefined });
-      error(await send('GET', '/v1/operator/support/grants', service), 403, 'OPERATOR_REQUIRED');
-
+      // The binding is narrow: only the support operator routes and grant reads, as service:bane-support, and no bearer
+      // token is an operator any more (the static platform token is retired).
+      error(await service('GET', '/v1/operator/support/grants?ticketRef=T-5'), 404, 'NOT_FOUND');
+      error(await service('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`), 404, 'NOT_FOUND');
+      assert.equal(supportPlatformAllows('GET', '/v1/support/../operator/users/x/audit'), false);
+      // Past its allow-list, the gate itself still refuses the binding everywhere else under /v1/operator.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/users/${manager!.userId}/audit`), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(bypass.status, 403);
+      // Any Authorization header on an operator route is refused, even through the binding's runtime.
+      const withBearer = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/handoffs/${handoff.id}`, { headers: bearer(`bane_ops_${hex()}`) }), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(withBearer.status, 403);
+      // Grant reads through the binding need the grant itself; the trail names the binding as the operator.
+      assert.equal((await platform.read('/v1/support/workspaces', theirs.token)).status, 200);
+      assert.equal((await platform.read('/v1/support/workspaces', `bane_support_${hex()}`)).status, 403);
+      assert.equal((await platform.call('GET', '/v1/support/workspaces')).status, 403, 'A /v1/support read without a grant.');
+      const used = await platform.verifyHandoff(handoff.token);
+      assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === grant.id, JSON.stringify(used));
+      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id), ['service:bane-support']);
       // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
       await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
       assert.equal((await db.query(`SELECT FROM audit_events WHERE action = 'operator.set_operator' AND user_id IS NULL AND workspace_id IS NULL`)).rowCount, 0);
