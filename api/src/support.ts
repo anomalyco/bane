@@ -5,7 +5,10 @@ import { ApiError, digest, errors, hasSessionCookie, id, json, log, notFound, ra
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
 import { budgetedRead } from './deliverability.js';
 import { limitRequestEligibility, LIMIT_REQUEST, type Step } from './standing-model.js';
-import { registerSupportDeliverability } from './support-deliverability.js';
+import { cached, registerSupportDeliverability } from './support-deliverability.js';
+import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
+import { keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
+import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Bane's operators and its
 // support platform, never for customers.
@@ -27,9 +30,12 @@ import { registerSupportDeliverability } from './support-deliverability.js';
 const SUPPORT_TOKEN = /^bane_support_[0-9a-f]{64}$/;
 /** Requests per minute per support grant. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
-/** The deliverability reads (src/support-deliverability.ts) aggregate up to 30 days of mail: each costs 5 of the 120. */
+/**
+ * The deliverability reads (src/support-deliverability.ts) aggregate up to 30 days of mail, and the request reads ask
+ * Workers Logs (src/support-logs.ts): each costs 5 of the 120.
+ */
 export const SUPPORT_EXPENSIVE_WEIGHT = 5;
-const EXPENSIVE = /^\/v1\/support\/(?:deliverability\/[^/]+|screen|campaigns(?:\/[^/]+(?:\/lint)?)?|audience\/health|domains\/[^/]+\/health|emails\/[^/]+\/lint)$/;
+const EXPENSIVE = /^\/v1\/support\/(?:deliverability\/[^/]+|screen|campaigns(?:\/[^/]+(?:\/lint)?)?|audience\/health|domains\/[^/]+\/health|emails\/[^/]+\/lint|requests(?:\/[^/]+)?)$/;
 export const supportWeight = (path: string) => EXPENSIVE.test(path) ? SUPPORT_EXPENSIVE_WEIGHT : 1;
 const GRANT_MAX_MINUTES = 120;
 const bearer = (c: Ctx) => c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
@@ -103,14 +109,6 @@ export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 // ---------- the customer's in-app handoff ----------
 
-const b64url = (bytes: Uint8Array | string) => Buffer.from(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes).toString('base64url');
-async function keyId(x: string) { return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(x)))).slice(0, 16); }
-/** A compact JWS (EdDSA) the support platform verifies with GET /v1/public/support-keys. */
-async function signHandoff(key: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string }, claims: Record<string, unknown>) {
-  const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: await keyId(key.x) })), payload = b64url(JSON.stringify(claims));
-  const signer = await crypto.subtle.importKey('jwk', { ...key, ext: false }, { name: 'Ed25519' }, false, ['sign']);
-  return `${header}.${payload}.${b64url(new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signer, new TextEncoder().encode(`${header}.${payload}`))))}`;
-}
 /** A handoff opens at most one grant, within this many minutes; its signed token lives 10 minutes. */
 const HANDOFF_MINUTES = 30, HANDOFF_TOKEN_SECONDS = 600, HANDOFFS_PER_HOUR = 10;
 const Handoff = z.object({
@@ -342,6 +340,42 @@ export function registerSupportOperator(app: App) {
     if (!row) notFound('Handoff');
     return c.json({ ...row!, createdAt: new Date(row!.createdAt).toISOString(), expiresAt: new Date(row!.expiresAt).toISOString(), usedAt: row!.usedAt ? new Date(row!.usedAt).toISOString() : null }, 200);
   });
+
+  // Staff sign-in for the support Worker's internal pages: an operator's own dashboard session leaves Bane for the
+  // support site's /staff/callback with a 2-minute EdDSA JWS (aud bane-support-staff) naming them. The support Worker
+  // verifies it through the binding (staff/verify, which also checks they are still an operator) and accepts each jti
+  // once. The binding cannot mint one: staff-sign-in is not in its allow-list and refuses it here too.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[], method: 'get', path: '/v1/operator/support/staff-sign-in', operationId: 'operatorSupportStaffSignIn',
+    request: { query: z.object({ return: z.string().max(500).describe('Exactly <the support site’s origin>/staff/callback.') }) },
+    responses: { 302: { description: 'To return?staff=<token>: a signed staff token that lives 2 minutes.' }, ...errors } }), async c => {
+    const operator = await requireOperator(c, 'operator:read'), support = c.env.config.support;
+    if (operator.via !== 'console' || !operator.userId) throw operatorRequired();
+    if (!support?.url || !support.signingKey) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set BANE_SUPPORT_URL and BANE_SUPPORT_SIGNING_KEY to sign staff in to the support site.');
+    const callback = `${new URL(support.url).origin}/staff/callback`;
+    let target: URL | null = null;
+    try { target = new URL(c.req.valid('query').return); } catch { /* refused below */ }
+    if (!target || target.origin + target.pathname !== callback || target.search || target.hash || target.username || target.password) throw new ApiError(422, 'RETURN_URL_INVALID', `return must be ${callback}.`, 'return');
+    const jti = id('sst'), now = Math.floor(Date.now() / 1000), userId = operator.userId;
+    const { rows: [user] } = await c.env.db.execute<{ email: string | null }>(sql`WITH logged AS (${auditInsert(operatorContext(c, operator), { action: 'support.staff_sign_in', workspaceId: null, userId,
+      target: { type: 'user', id: userId }, details: { jti }, internal: true })}) SELECT ${userEmail(sql`${userId}`)} AS email`);
+    const token = await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: STAFF_AUDIENCE, sub: userId, email: user?.email ?? '', role: operator.role, jti, iat: now, exp: now + STAFF_TOKEN_SECONDS });
+    c.header('cache-control', 'no-store');
+    return c.redirect(`${callback}?staff=${token}`, 302);
+  });
+  const StaffCheck = z.union([
+    z.object({ ok: z.literal(true), staff: z.object({ userId: z.string(), email: z.string(), role: z.string().describe('Their operator role now.') }), jti: z.string().describe('Accept each once.'), expiresAt: z.string() }),
+    z.object({ ok: z.literal(false), code: z.enum(['STAFF_INVALID', 'STAFF_EXPIRED', 'NOT_OPERATOR']) }),
+  ]);
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/staff/verify', operationId: 'operatorVerifySupportStaff',
+    request: { body: json(z.object({ token: z.string().min(1).max(4096) }).strict()) }, responses: { 200: response(StaffCheck), ...errors } }), async c => {
+    if ((await requireOperator(c, 'operator:read')).via !== 'support') throw new ApiError(403, 'SUPPORT_PLATFORM_REQUIRED', 'Only the support platform verifies staff sign-ins.');
+    const checked = await verifyStaffToken(c.env.config, c.req.valid('json').token);
+    if (!checked.ok) return c.json({ ok: false as const, code: checked.code }, 200);
+    const { userId, jti, expiresAt } = checked.claims;
+    const { rows: [now] } = await c.env.db.execute<{ role: OperatorRole | null; email: string | null }>(sql`SELECT ${operatorRoleOf(userId)} AS role, ${userEmail(sql`${userId}`)} AS email`);
+    if (!now?.role) return c.json({ ok: false as const, code: 'NOT_OPERATOR' as const }, 200);
+    return c.json({ ok: true as const, staff: { userId, email: now.email ?? checked.claims.email, role: now.role }, jti, expiresAt }, 200);
+  });
 }
 
 /** The customer's "Contact support", the public signing keys and the grant's read routes. */
@@ -370,7 +404,7 @@ export function registerSupport(app: App) {
       SELECT h.id, h.expires_at::text, w.name, ${userEmail(sql`${userId}`)} AS email FROM h, workspaces w WHERE w.id = ${a.workspaceId}`);
     if (!row) { c.header('Retry-After', '3600'); throw new ApiError(429, 'SUPPORT_RATE_LIMITED', `You can contact support ${HANDOFFS_PER_HOUR} times an hour. Email support with your earlier reference instead.`, undefined, true); }
     const support = c.env.config.support, now = Math.floor(Date.now() / 1000);
-    const token = support?.signingKey ? await signHandoff(support.signingKey, { iss: c.env.config.publicUrl, aud: 'bane-support', jti: handoffId, iat: now, exp: now + HANDOFF_TOKEN_SECONDS,
+    const token = support?.signingKey ? await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: 'bane-support', jti: handoffId, iat: now, exp: now + HANDOFF_TOKEN_SECONDS,
       kind: body.kind, workspace: { id: a.workspaceId, name: row.name }, user: { id: userId, email: row.email, role: a.role }, page: body.page ?? null, requestIds: body.requestIds,
       shareContent: body.shareContent, message: !!body.message }) : null;
     const url = support?.url ? `${support.url}#${token ? `handoff=${token}` : `handoffId=${handoffId}`}` : null;
@@ -543,24 +577,68 @@ export function registerSupport(app: App) {
     const { workspaceId: _w, ...filters } = c.req.valid('query');
     return c.json(await customerTrail(c.env.db, scoped(c, ['owner', 'admin']).ids, filters), 200);
   });
+  // The customer's own requests, from this Worker's request lines in Workers Logs (src/support-logs.ts).
+  const DAY = 86_400_000, Retention = z.literal(`${LOG_RETENTION_DAYS} days`).describe('How long Workers Logs keep request lines.');
+  const Principal = z.string().describe('How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.');
+  const RequestGroup = z.object({ route: z.string().describe('The route template (/v1/emails/:id), never a path.'), method: z.string(), status: z.number(), code: z.string().nullable().describe('The error code Bane answered with.'),
+    principal: Principal, count: z.number(), firstSeen: z.string(), lastSeen: z.string(),
+    sampleRequestIds: z.array(z.string()).describe('Up to 5 of the latest, to look up with /v1/support/requests/{requestId}.') }).openapi('SupportRequestGroup');
+  const RequestLog = z.object({
+    available: z.boolean().describe('False when this installation does not read Workers Logs (reason not_configured) or they did not answer (unavailable).'),
+    reason: z.enum(['not_configured', 'unavailable']).optional(),
+    window: z.object({ since: z.string(), until: z.string() }), retention: Retention,
+    groups: z.array(RequestGroup).describe('At most 50, most frequent first.'),
+    totals: z.object({ errors: z.number().describe('Matching request lines in the window.'),
+      truncated: z.boolean().describe(`More than ${LOG_ROWS.toLocaleString('en-US')} lines matched, so the counts are of a sample spread over the window: narrow it.`) }),
+    computedAt: z.string(),
+  }).openapi('SupportRequestLog');
+  app.openapi(createRoute({ ...meta('listSupportRequests', `The customer’s own failed API requests over at most the last ${LOG_RETENTION_DAYS} days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Bane could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds.`),
+    path: '/v1/support/requests', request: { query: WorkspaceFilter.extend({
+      status: z.enum(['error', '5xx', '4xx']).default('error').describe('error: every status of 400 or more (default); 5xx or 4xx only.'),
+      since: z.iso.datetime().optional().describe(`Window start (default: 24 hours before until). At most ${LOG_RETENTION_DAYS} days back.`), until: z.iso.datetime().optional().describe('Window end (default: now).'),
+      route: z.string().max(200).regex(ROUTE_TEMPLATE).optional().describe('Only this route template, as a group names it.'), code: z.string().regex(ERROR_CODE).optional().describe('Only this error code.') }) },
+    responses: { 200: response(RequestLog), ...errors } }), async c => {
+    const q = c.req.valid('query'), list = scoped(c).ids, now = Date.now();
+    const until = q.until ? Date.parse(q.until) : Math.ceil(now / 60_000) * 60_000, since = q.since ? Date.parse(q.since) : until - DAY;
+    if (since >= until) throw new ApiError(422, 'INVALID_DATE_RANGE', 'since must be before until.', 'since');
+    if (since < now - LOG_RETENTION_DAYS * DAY - 60_000) throw new ApiError(422, 'WINDOW_TOO_OLD', `Workers Logs keep request lines ${LOG_RETENTION_DAYS} days: since can be at most that far back.`, 'since');
+    const window = { since: new Date(since).toISOString(), until: new Date(until).toISOString() }, retention = `${LOG_RETENTION_DAYS} days` as const;
+    const none = (reason: 'not_configured' | 'unavailable') => c.json({ available: false, reason, window, retention, groups: [], totals: { errors: 0, truncated: false }, computedAt: new Date().toISOString() }, 200);
+    const observability = c.env.config.observability;
+    if (!observability) return none('not_configured');
+    try {
+      return c.json(await cached(c, 'requests', list, { ...window, status: q.status, route: q.route, code: q.code }, async () => {
+        const { lines, truncated } = await requestLines(observability, { workspaceIds: list, from: since, to: until, status: q.status, route: q.route, code: q.code, limit: LOG_ROWS });
+        return { available: true, window, retention, groups: groupLines(lines), totals: { errors: lines.length, truncated } };
+      }), 200);
+    } catch (error) { if (error instanceof LogsUnavailable) return none('unavailable'); throw error; }
+  });
   const RequestTrace = z.object({
-    requestId: z.string(), found: z.boolean().describe('Whether Bane stored anything about this request for this customer.'),
+    requestId: z.string(), found: z.boolean().describe('Whether Bane logged or stored anything about this request for this customer.'),
+    logs: z.array(z.object({ at: z.string(), route: z.string(), method: z.string(), status: z.number(), code: z.string().nullable(), durationMs: z.number().nullable(), principal: Principal, workspaceId: z.string() }))
+      .describe(`Its request lines from Workers Logs (the last ${LOG_RETENTION_DAYS} days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.`),
+    logsAvailable: z.boolean().describe('False when this installation does not read Workers Logs or they did not answer; logs is then empty.'),
     auditEvents: z.array(AuditEntry).describe('Changes the request made.'),
     campaigns: z.array(z.object({ workspaceId: z.string(), id: z.string(), name: z.string(), state: z.string(), error: z.unknown().nullable() })).describe('Campaign launches the request started.'),
     routingVersions: z.array(z.object({ workspaceId: z.string(), version: z.number(), resourceId: z.string(), at: z.string() })).describe('Routing versions the request wrote.'),
     note: z.string(),
   }).openapi('SupportRequestTrace');
-  app.openapi(createRoute({ ...meta('getSupportRequest', 'What Bane recorded for one API request (the x-request-id a customer quotes): the changes it made, campaign launches and routing versions. Requests that changed nothing leave no database record.'), path: '/v1/support/requests/{requestId}', request: { query: WorkspaceFilter, params: z.object({ requestId: z.string().regex(/^req_[0-9a-f]{32}$/) }) }, responses: { 200: response(RequestTrace), ...errors } }), async c => {
-    const { scope, ids: list } = scoped(c), requestId = c.req.valid('param').requestId, db = c.env.db;
-    // DB-side only. TODO(request logs): when request logging lands in the database, add route, status and error code here.
+  app.openapi(createRoute({ ...meta('getSupportRequest', `What Bane recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last ${LOG_RETENTION_DAYS} days), the changes it made, campaign launches and routing versions.`), path: '/v1/support/requests/{requestId}', request: { query: WorkspaceFilter, params: z.object({ requestId: z.string().regex(/^req_[0-9a-f]{32}$/) }) }, responses: { 200: response(RequestTrace), ...errors } }), async c => {
+    const { scope, ids: list } = scoped(c), requestId = c.req.valid('param').requestId, db = c.env.db, observability = c.env.config.observability;
+    let logs: z.infer<typeof RequestTrace>['logs'] = [], logsAvailable = false;
+    if (observability) try {
+      const now = Date.now(), { lines } = await cached(c, 'request', list, requestId, () => requestLines(observability, { workspaceIds: list, from: now - LOG_RETENTION_DAYS * DAY, to: now + 60_000, requestId, limit: 20 }));
+      logs = lines.map(({ requestId: _r, ...line }) => line); logsAvailable = true;
+    } catch (error) { if (!(error instanceof LogsUnavailable)) throw error; }
     const auditEvents = (await customerTrail(db, list, AuditFilters.parse({ requestId, limit: 20 }))).data;
     const { rows: campaigns } = list.length ? await db.execute<{ workspaceId: string; id: string; name: string; state: string; error: unknown }>(sql`SELECT workspace_id AS "workspaceId", id, coalesce(draft ->> 'name', id) AS name, state, error
       FROM sending_campaigns WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 20`) : { rows: [] };
     const { rows: routing } = list.length ? await db.execute<{ workspaceId: string; version: number; resourceId: string; at: string }>(sql`SELECT workspace_id AS "workspaceId", version, resource_id AS "resourceId", created_at::text AS at
       FROM mail_routing_audit WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 50`) : { rows: [] };
-    const found = !!(auditEvents.length || campaigns.length || routing.length);
-    return c.json({ requestId, found, auditEvents, campaigns, routingVersions: routing.map(r => ({ ...r, at: new Date(r.at).toISOString() })),
-      note: found ? 'Changes recorded for this request.' : 'Nothing recorded: the request changed nothing, belongs to another account, or is older than the retention window. Ask for the time, the route and the error code shown.' }, 200);
+    const changed = !!(auditEvents.length || campaigns.length || routing.length), found = changed || logs.length > 0;
+    return c.json({ requestId, found, logs, logsAvailable, auditEvents, campaigns, routingVersions: routing.map(r => ({ ...r, at: new Date(r.at).toISOString() })),
+      note: changed ? 'Changes recorded for this request.' : found ? 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.'
+        : `Nothing recorded: the request changed nothing${logsAvailable ? ` and is not in the last ${LOG_RETENTION_DAYS} days of request logs` : ''}, belongs to another account, or is older than the retention window. Ask for the time, the route and the error code shown.` }, 200);
   });
   registerSupportDeliverability(app, meta, WorkspaceFilter);
 }

@@ -54,7 +54,11 @@
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
     "LEGACY_FEEDBACK_QUEUE_NAME": "bane-prod-feedback",
     // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
-    "LEGACY_FEEDBACK_CUTOVER": ""
+    "LEGACY_FEEDBACK_CUTOVER": "",
+    // Support reads this Worker's own request lines from Workers Logs (GET /v1/support/requests). The token is the
+    // CF_OBSERVABILITY_TOKEN secret (api/README.md "Support integration").
+    "CF_OBSERVABILITY_ACCOUNT_ID": "15d29c8639fd3733b1b5486a2acfd968",
+    "CF_OBSERVABILITY_SCRIPT": "bane-production"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.

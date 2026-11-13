@@ -4362,12 +4362,87 @@ export type SupportBilling = {
     }>;
 };
 
+export type SupportRequestLog = {
+    /**
+     * False when this installation does not read Workers Logs (reason not_configured) or they did not answer (unavailable).
+     */
+    available: boolean;
+    reason?: 'not_configured' | 'unavailable';
+    window: {
+        since: string;
+        until: string;
+    };
+    /**
+     * How long Workers Logs keep request lines.
+     */
+    retention: '3 days';
+    /**
+     * At most 50, most frequent first.
+     */
+    groups: Array<SupportRequestGroup>;
+    totals: {
+        /**
+         * Matching request lines in the window.
+         */
+        errors: number;
+        /**
+         * More than 1,000 lines matched, so the counts are of a sample spread over the window: narrow it.
+         */
+        truncated: boolean;
+    };
+    computedAt: string;
+};
+
+export type SupportRequestGroup = {
+    /**
+     * The route template (/v1/emails/:id), never a path.
+     */
+    route: string;
+    method: string;
+    status: number;
+    /**
+     * The error code Bane answered with.
+     */
+    code: string | null;
+    /**
+     * How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.
+     */
+    principal: string;
+    count: number;
+    firstSeen: string;
+    lastSeen: string;
+    /**
+     * Up to 5 of the latest, to look up with /v1/support/requests/{requestId}.
+     */
+    sampleRequestIds: Array<string>;
+};
+
 export type SupportRequestTrace = {
     requestId: string;
     /**
-     * Whether Bane stored anything about this request for this customer.
+     * Whether Bane logged or stored anything about this request for this customer.
      */
     found: boolean;
+    /**
+     * Its request lines from Workers Logs (the last 3 days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.
+     */
+    logs: Array<{
+        at: string;
+        route: string;
+        method: string;
+        status: number;
+        code: string | null;
+        durationMs: number | null;
+        /**
+         * How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.
+         */
+        principal: string;
+        workspaceId: string;
+    }>;
+    /**
+     * False when this installation does not read Workers Logs or they did not answer; logs is then empty.
+     */
+    logsAvailable: boolean;
     /**
      * Changes the request made.
      */
@@ -22406,6 +22481,92 @@ export type ListSupportAuditResponses = {
 };
 
 export type ListSupportAuditResponse = ListSupportAuditResponses[keyof ListSupportAuditResponses];
+
+export type ListSupportRequestsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * error: every status of 400 or more (default); 5xx or 4xx only.
+         */
+        status?: 'error' | '5xx' | '4xx';
+        /**
+         * Window start (default: 24 hours before until). At most 3 days back.
+         */
+        since?: string;
+        /**
+         * Window end (default: now).
+         */
+        until?: string;
+        /**
+         * Only this route template, as a group names it.
+         */
+        route?: string;
+        /**
+         * Only this error code.
+         */
+        code?: string;
+    };
+    url: '/v1/support/requests';
+};
+
+export type ListSupportRequestsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportRequestsError = ListSupportRequestsErrors[keyof ListSupportRequestsErrors];
+
+export type ListSupportRequestsResponses = {
+    /**
+     * Success
+     */
+    200: SupportRequestLog;
+};
+
+export type ListSupportRequestsResponse = ListSupportRequestsResponses[keyof ListSupportRequestsResponses];
 
 export type GetSupportRequestData = {
     body?: never;

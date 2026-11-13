@@ -60,6 +60,8 @@ export interface Config {
   notifyFrom?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
   support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
+  /** Hosted only: where support reads this Worker's request lines (Workers Logs, src/support-logs.ts). */
+  observability?: { token: string; accountId: string; script: string };
   regionalSending?: boolean;
   trustedPool?: boolean;
   receivingRedrive?:boolean;

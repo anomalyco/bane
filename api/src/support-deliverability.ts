@@ -28,7 +28,7 @@ const ids = (list: string[]) => sql`${sql.param(list)}::text[]`;
  * 60 seconds per (workspace, route, parameters) in the dashboard cache; the result says when it was computed. A read by
  * ID is keyed by the workspaces the grant narrows to, and every read that may hold content by whether it may.
  */
-async function cached<T extends object>(c: Ctx, route: string, workspace: string | string[], params: unknown, compute: () => Promise<T>) {
+export async function cached<T extends object>(c: Ctx, route: string, workspace: string | string[], params: unknown, compute: () => Promise<T>) {
   const { value } = await cachedDashboardRead(new URL(c.req.url).origin, JSON.stringify(['support', route, workspace, params]),
     async () => ({ computedAt: new Date().toISOString(), ...await compute() }), 60);
   return value;
