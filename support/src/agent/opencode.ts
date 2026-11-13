@@ -148,6 +148,12 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
   return {
     async turn(input: TurnInput, tools: ToolHost, onEvent: (event: HarnessEvent) => void, signal: AbortSignal): Promise<TurnResult> {
       const sessionID = await session();
+      // A turn cut off by an eviction resumes when OpenCode boots; let it finish first, so its events aren't read as
+      // this turn's (its answer stays in OpenCode's history).
+      const api = opencode as unknown as { sessions: { active(): Promise<Record<string, unknown>> }; experimental?: { session?: { wait(input: { sessionID: string }): Promise<void> } } };
+      if ((await api.sessions.active().catch((): Record<string, unknown> => ({})))[sessionID] && api.experimental?.session?.wait) {
+        await Promise.race([api.experimental.session.wait({ sessionID }), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
+      }
       current.host = tools; current.context = input.context;
       const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
       const texts: string[] = [], names = new Map<string, string>();

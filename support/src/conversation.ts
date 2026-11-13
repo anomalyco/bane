@@ -31,7 +31,7 @@ type Meta = {
   workspace: { id: string; name: string } | null; workspaces: { id: string; name: string; role: string }[];
   verified: Customer['verified']; contentAccess: boolean; page: string | null; handoffMessage: string | null; requestIds: string[];
   threadId: string | null; greeted: boolean; turns: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; costUsd: number;
-  ticketId: string | null; lastActivity: number; closedAt: number | null; seq: number;
+  ticketId: string | null; lastActivity: number; closedAt: number | null;
   pendingSender: string | null; confirmSentAt: number | null;
 };
 type Transcript = { id: string; role: 'user' | 'assistant'; kind: 'first' | 'reply' | 'notice' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[] };
@@ -43,6 +43,8 @@ export class SupportConversation extends DurableObject<Env> {
   private harness: Harness | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private abort: AbortController | null = null;
+  /** Frame sequence: increases across restarts (it starts from the clock), without a storage write per streamed delta. */
+  private seq = Date.now() * 1000;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -75,7 +77,7 @@ export class SupportConversation extends DurableObject<Env> {
   private update(change: (meta: Meta) => void) { const meta = this.meta(); if (!meta) throw new Error('conversation not opened'); change(meta); this.save(meta); return meta; }
   private fresh(conversationId: string, channel: Meta['channel']): Meta {
     return { conversationId, channel, status: 'open', userId: null, email: null, name: null, role: null, workspace: null, workspaces: [], verified: null, contentAccess: false, page: null, handoffMessage: null,
-      requestIds: [], threadId: null, greeted: false, turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: Date.now(), closedAt: null, seq: 0, pendingSender: null, confirmSentAt: null };
+      requestIds: [], threadId: null, greeted: false, turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, ticketId: null, lastActivity: Date.now(), closedAt: null, pendingSender: null, confirmSentAt: null };
   }
   private customer(meta: Meta): Customer {
     return { channel: meta.channel, userId: meta.userId, name: meta.name, email: meta.email, role: meta.role, workspace: meta.workspace, workspaces: meta.workspaces, verified: meta.verified, contentAccess: meta.contentAccess, page: meta.page };
@@ -230,13 +232,11 @@ export class SupportConversation extends DurableObject<Env> {
   }
   private record(t: Transcript) { this.sql.exec('INSERT INTO support_transcript (id, role, kind, text, at, tools) VALUES (?, ?, ?, ?, ?, ?)', t.id, t.role, t.kind, t.text, t.at, JSON.stringify(t.tools)); }
   private broadcast(message: Outgoing) {
-    const seq = this.update(m => { m.seq += 1; }).seq;
-    const frame = JSON.stringify({ v: 1, ...message, seq });
+    const frame = JSON.stringify({ v: 1, ...message, seq: ++this.seq });
     for (const ws of this.ctx.getWebSockets()) { try { ws.send(frame); } catch { /* closed */ } }
   }
   private sendTo(ws: WebSocket, message: Outgoing) {
-    const meta = this.meta(), seq = meta ? this.update(m => { m.seq += 1; }).seq : 0;
-    try { ws.send(JSON.stringify({ v: 1, ...message, seq })); } catch { /* closed */ }
+    try { ws.send(JSON.stringify({ v: 1, ...message, seq: ++this.seq })); } catch { /* closed */ }
   }
   private notice(text: string) {
     const id = newId('msg');
@@ -519,7 +519,7 @@ export class SupportConversation extends DurableObject<Env> {
   override async alarm() {
     const meta = this.meta();
     if (!meta) return;
-    if (meta.closedAt && Date.now() - meta.closedAt > KEEP_AFTER_CLOSE_MS) { await this.ctx.storage.deleteAll(); return; }
+    if (meta.closedAt && Date.now() - meta.closedAt > KEEP_AFTER_CLOSE_MS) { await this.ctx.storage.deleteAlarm(); await this.ctx.storage.deleteAll(); return; }
     try { while (await this.processInbox()) { /* one message at a time, in order */ } }
     catch (error) { console.error(JSON.stringify({ level: 'error', code: 'INBOX_FAILED', message: String(error).slice(0, 300) })); await this.ctx.storage.setAlarm(Date.now() + 60_000); return; }
     const idle = meta.channel === 'chat' ? CHAT_IDLE_MS : EMAIL_IDLE_MS;
