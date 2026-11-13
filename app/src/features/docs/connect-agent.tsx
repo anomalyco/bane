@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { Alert, Button, Checkbox, Dialog, Field, Select, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApiQuery, usePublicOrigin, useWorkspaceAccess } from '../../data/context'
+import { useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
+import { requestedScopes } from '../../../../api/src/brand'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
@@ -14,11 +15,16 @@ import { productName } from '../../../../api/src/brand'
 
 /** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. */
 export const mcpAccess = [
-  { value: 'read', label: 'Read only', scope: 'bane:read offline_access', hint: 'Reads mail, logs and settings. Can’t send or change anything.' },
-  { value: 'send', label: 'Read and send', scope: 'bane:read bane:send offline_access', hint: 'Also sends email, which may reach real recipients.' },
-  { value: 'manage', label: 'Full access', scope: 'bane:read bane:send bane:manage offline_access', hint: 'Also changes configuration: domains, routes, rituals and keys.' },
+  { value: 'read', label: 'Read only', grants: 1, hint: 'Reads mail, logs and settings. Can’t send or change anything.' },
+  { value: 'send', label: 'Read and send', grants: 2, hint: 'Also sends email, which may reach real recipients.' },
+  { value: 'manage', label: 'Full access', grants: 3, hint: 'Also changes configuration: domains, routes, rituals and keys.' },
 ] as const
 export type McpAccess = typeof mcpAccess[number]['value']
+/** The scope OpenCode asks for: this installation's scope names (read, send, manage) up to the chosen access. */
+export function useMcpScope(access: McpAccess) {
+  const scopes = useSession()?.identity?.mcpScopes ?? requestedScopes({})
+  return [...scopes.slice(0, mcpAccess.find(option => option.value === access)!.grants), 'offline_access'].join(' ')
+}
 const clientTabs = mcpClients.map(value => ({ value, label: mcpClientNames[value] }))
 
 /** The hosted MCP URL on this installation's canonical address, or null until that is known. */
@@ -84,7 +90,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
     } catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }
   }, chosen)
-  const selected = mcpAccess.find(option => option.value === access)!
+  const selected = mcpAccess.find(option => option.value === access)!, scope = useMcpScope(access)
   // The API names the key after the inbox (its name, or else its address) and the client it was made for.
   const box = active.find(item => item.id === chosen)
   const keyName = box?.name ? `${box.name} · ${mcpClientNames[result?.client ?? client]}` : null
@@ -109,7 +115,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
       </>}
       {result && <Alert tone="success" title="API key created">Copy the setup now: the key is shown only once. You’ll find it in API keys and on the inbox’s page{keyName ? <>, named “{keyName}”</> : null}.</Alert>}
       {error && <Alert tone="danger">{error}</Alert>}
-      {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { bearer: result.key } : { scope: selected.scope }} />}
+      {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { bearer: result.key } : { scope }} />}
       {mode === 'key' && !result && <McpClientPreview client={client} onClient={setClient} />}
     </div>
   </Dialog>

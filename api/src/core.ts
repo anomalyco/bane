@@ -47,6 +47,10 @@ export interface Config {
   mailGatewayToken?:string;
   previousAuthSecret?: string;
   accountIssuer?: string;
+  /** The OAuth scope names the MCP server asks for (config OAUTH_SCOPE_PREFIX); tokens with any accepted prefix work. */
+  oauthScopePrefix?: 'bane' | 'nightmail';
+  /** Earlier origins still served (PREVIOUS_PUBLIC_URLS): their /mcp resource stays valid for tokens minted there. */
+  previousOrigins?: string[];
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
   /** Required `acr` on ID tokens and on every MCP access token. Hosted installations always require Google. */
   accountRequiredAcr?: string;

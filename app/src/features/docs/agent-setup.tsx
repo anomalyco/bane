@@ -7,7 +7,7 @@ import { isMailbox } from '../../lib/private-address'
 import type { Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
 import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
-import { McpClientSetup, mcpAccess, useMcpUrl, type McpAccess } from './connect-agent'
+import { McpClientSetup, mcpAccess, useMcpScope, useMcpUrl, type McpAccess } from './connect-agent'
 import './developer.css'
 import { apiKeyEnv, productName, sdkPackage } from '../../../../api/src/brand'
 
@@ -88,7 +88,7 @@ export function AgentPrompt({ prompt }: { prompt: string | null }) {
 export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   const [client, setClient] = useState<McpClient>('opencode')
   const [access, setAccess] = useState<McpAccess>(chooseAccess ? 'read' : 'manage')
-  const selected = mcpAccess.find(option => option.value === access)!
+  const selected = mcpAccess.find(option => option.value === access)!, scope = useMcpScope(access)
   const serverUrl = useMcpUrl()
   return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
@@ -99,6 +99,6 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
         <Select id="developer-mcp-access" value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
       </Field>
     </div>}
-    <McpClientSetup client={client} onClient={setClient} url={serverUrl} auth={{ scope: selected.scope }} />
+    <McpClientSetup client={client} onClient={setClient} url={serverUrl} auth={{ scope }} />
   </section>
 }
