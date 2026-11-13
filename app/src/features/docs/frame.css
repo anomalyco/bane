@@ -14,7 +14,7 @@
 .docs-toc { position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--space-16); height: calc(100dvh - 2 * var(--page-inset) - 2 * var(--space-24)); min-height: 0; }
 .docs-toc > .ui-input, .docs-toc > .ui-control-skeleton { flex-shrink: 0; }
 /* The list scrolls under a short fade at its bottom edge instead of stopping hard. */
-.docs-toc-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent); padding-bottom: var(--space-24); }
+.docs-toc-scroll { --fade-pad-x: var(--focus-reach); flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; margin-inline: calc(-1 * var(--focus-reach)); padding: 0 var(--focus-reach) var(--space-24); }
 .docs-toc nav { display: flex; flex-direction: column; gap: var(--space-24); }
 .docs-picker { display: none; }
 .docs-main { min-width: 0; }

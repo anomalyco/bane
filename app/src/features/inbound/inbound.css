@@ -5,7 +5,7 @@
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .mailbox-layout { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 .mailbox-list { display: flex; flex-direction: column; min-height: 0; padding-right: var(--space-16); border-right: 1px solid var(--color-border-muted); }
-.mailbox-list .ui-tabs { padding-top: var(--space-8); }
+.mailbox-list .ui-tabs { flex: none; padding-top: var(--space-8); }
 .inbound-filter { padding-top: var(--space-12); }
 .inbound-filter .ui-select-trigger { width: 100%; }
 .mailbox-search { width: 100%; min-width: 0; margin: var(--space-12) 0 var(--space-8); }

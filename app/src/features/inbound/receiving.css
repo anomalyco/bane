@@ -172,6 +172,8 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 /* Phone: the kind filters scroll sideways in one row, the domain picker and search take full rows, and a route's card
    shows its rituals then where its mail goes. */
 @media (max-width: 640px) {
+  /* The line wraps beside the Guide link instead of pushing it past the screen's edge. */
+  .rcv-concept > span { flex: 0 1 auto; min-width: 0; }
   .rcv-toolbar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); }
   .rcv-filters { flex-wrap: nowrap; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--bleed, 0px)); padding: var(--focus-reach) var(--bleed, 0px) var(--focus-reach) calc(var(--bleed, 0px) - 8px); overflow-x: auto; }
   .rcv-filter { flex: none; height: 36px; }
