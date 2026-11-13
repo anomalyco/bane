@@ -140,6 +140,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .template-picker { display: flex; flex-direction: column; max-height: min(424px, 60vh); overflow: auto; border-top: 1px solid var(--color-border-muted); }
 .template-picker__row { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 53px; padding: var(--space-8) var(--space-4); border: 0; border-bottom: 1px solid var(--color-border-muted); background: transparent; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 120ms ease; }
 .template-picker__row:disabled { cursor: default; }
+/* The rows fill the scrolling list edge to edge, so the ring is drawn inside them. */
+.template-picker__row:focus-visible { outline-offset: -2px; }
 .template-picker__row > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (hover: hover) and (pointer: fine) { .template-picker__row:hover:not(:disabled) { background: var(--color-active-bg); } }
 .template-picker .ui-empty-state { border: 0; }
