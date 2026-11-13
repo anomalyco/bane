@@ -68,7 +68,7 @@ export function ContactDetailBodySkeleton() {
 }
 // Consent history renders before Matching emails; Matching emails waits until the history's height is known.
 export function ConsentHistorySkeleton() {
-  return <section className="section"><SectionHeader title="Consent history" /><p className="muted">Every change to this person’s marketing consent, and how it was given or withdrawn.</p><TableSkeleton columns={consentColumns} rows={1} /></section>
+  return <section className="section"><SectionHeader title="Consent history" /><p className="muted">Every consent change, and how it was given or withdrawn.</p><TableSkeleton columns={consentColumns} rows={1} /></section>
 }
 export function SegmentEditorBodySkeleton() {
   return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div>

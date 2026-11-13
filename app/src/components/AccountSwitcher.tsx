@@ -106,14 +106,14 @@ export function AccountSwitcher() {
   return <>
     <DropdownPrimitive.Root open={open} onOpenChange={next => { setOpen(next); if (next) intent() }}>
       <DropdownPrimitive.Trigger asChild>{trigger}</DropdownPrimitive.Trigger>
-      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces">
+      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces"><div className="ui-popover-scroll">
         {sections.map((section, index) => <DropdownPrimitive.Group key={index} className="account-menu__group">{section.map(entry => entry.heading && entry.disabled
           ? <DropdownPrimitive.Label key={entry.key} className="ui-menu-item account-menu__account" aria-current="true">{entry.label}</DropdownPrimitive.Label>
           : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect} title={typeof entry.hint === 'string' ? entry.hint : undefined}
             className={['ui-menu-item', entry.heading ? 'account-menu__account' : entry.icon ? 'account-menu__action' : 'account-menu__workspace', entry.destructive && 'ui-menu-item--danger'].filter(Boolean).join(' ')}>
             {entry.icon && <span className="ui-menu-icon">{entry.icon}</span>}{entry.label}{entry.checked && <Check className="account-menu__check" size={14} aria-label="Current workspace" />}
           </DropdownPrimitive.Item>)}</DropdownPrimitive.Group>)}
-      </DropdownPrimitive.Content></DropdownPrimitive.Portal>
+      </div></DropdownPrimitive.Content></DropdownPrimitive.Portal>
     </DropdownPrimitive.Root>
     {create}
   </>

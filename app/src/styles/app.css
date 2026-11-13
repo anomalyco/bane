@@ -3,9 +3,12 @@ code, pre, .identifier { font-family: var(--font-mono); font-size: inherit; }
 button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); stroke-width: 1.5; }
 .app-shell { display: flow-root; height: 100dvh; overflow: hidden; background: var(--color-deep); }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--color-deep); z-index: 20; display: flex; flex-direction: column; gap: var(--space-16); padding: 56px var(--sidebar-gutter) var(--space-16); overflow-y: auto; }
-.wordmark { position: absolute; top: var(--space-16); left: calc(var(--sidebar-gutter) + var(--sidebar-inset)); height: var(--space-24); display: flex; align-items: center; color: var(--color-text); text-decoration: none; }
-.wordmark svg { display: block; flex: none; }
-.theme-toggle { position: absolute; top: 14px; right: var(--sidebar-gutter); }
+.wordmark { position: absolute; top: var(--space-16); left: var(--sidebar-gutter); height: var(--space-24); display: flex; align-items: center; color: var(--color-text); text-decoration: none; }
+/* The logo starts on the sidebar's content edge: the same x as the workspace picker's border and the navigation pills. */
+.bane-wordmark { display: flex; align-items: center; gap: var(--space-6); font-size: var(--text-md); font-weight: 600; line-height: var(--leading-sm); letter-spacing: -.01em; white-space: nowrap; }
+.bane-wordmark svg { display: block; flex: none; }
+/* The same top and height as the logo row, so the toggle is centred on it. */
+.theme-toggle { position: absolute; top: var(--space-16); right: var(--sidebar-gutter); }
 .sidebar-context { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-6); }
 .demo-indicator { align-self: flex-start; padding-inline: var(--sidebar-inset); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); cursor: help; }
 .main-navigation { flex-shrink: 0; margin-top: var(--space-16); display: flex; flex-direction: column; gap: var(--space-4); }
@@ -36,7 +39,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .quota-meter::-webkit-meter-bar { background: var(--color-layer-2); border: 0; border-radius: 2px; height: 3px; }
 .quota-meter::-webkit-meter-optimum-value { background: var(--color-accent); }
 .quota-meter::-moz-meter-bar { background: var(--color-accent); }
-.page-surface { display: flex; flex-direction: column; margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-24) var(--space-32); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.page-surface { display: flex; flex-direction: column; margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-24) var(--space-32); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 .page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
@@ -221,7 +224,7 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 /* Positioned (not static), so a touch screen's enlarged hit area (ui.css, .ui-button--sm::after) stays on the button
    instead of spreading over the whole bar: a tap on the workspace picker used to switch the theme. */
 .mobile-bar .theme-toggle { position: relative; inset: auto; flex: none; width: 44px; height: 44px; }
-.app-shell--compact .page-surface { --page-pad: max(var(--space-16), env(safe-area-inset-left), env(safe-area-inset-right)); height: auto; min-height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); margin: 0; padding: var(--space-20) var(--page-pad) var(--space-32); overflow-x: clip; overflow-y: visible; border-radius: 0; box-shadow: 0 -.5px 0 var(--color-border-muted); scrollbar-gutter: auto; overscroll-behavior: auto; }
+.app-shell--compact .page-surface { --page-pad: max(var(--space-16), env(safe-area-inset-left), env(safe-area-inset-right)); height: auto; min-height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); margin: 0; padding: var(--space-20) var(--page-pad) var(--space-32); overflow-x: clip; overflow-y: visible; border-radius: 0; box-shadow: 0 -.5px 0 var(--color-border-muted); overscroll-behavior: auto; }
 .tab-bar { position: fixed; inset: auto 0 0; z-index: 30; display: grid; grid-template-columns: repeat(5, minmax(0, 128px)); justify-content: center; height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: color-mix(in srgb, var(--color-deep) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border); backdrop-filter: blur(12px); }
 .tab-bar__item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: var(--color-muted); font-size: 11px; line-height: 14px; text-decoration: none; -webkit-tap-highlight-color: transparent; transition: color var(--motion-duration); }
 .tab-bar__icon { position: relative; display: grid; place-items: center; width: 52px; height: 28px; transition: transform 160ms var(--ease-out-strong); }
@@ -277,13 +280,12 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 /* The account and workspace switcher (components/AccountSwitcher.tsx). The trigger is a select trigger with a small
    avatar inside it, so it is the size the workspace picker was and loading or switching never moves the sidebar. */
 .account-switcher { width: 100%; }
-.sidebar .account-switcher { padding-inline: var(--sidebar-inset); }
 .account-switcher__current { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .account-switcher__workspace { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-avatar { display: inline-flex; flex: none; align-items: center; justify-content: center; border-radius: 50%; background: var(--color-layer-3); color: var(--color-text); font-weight: var(--font-weight-bold); line-height: 1; }
 .account-avatar--sm { width: 18px; height: 18px; font-size: 9px; }
 .account-avatar--md { width: 28px; height: 28px; font-size: var(--text-xs); }
-.account-menu { width: 288px; max-height: min(480px, var(--radix-dropdown-menu-content-available-height)); overflow-y: auto; }
+.account-menu { display: flex; flex-direction: column; width: 288px; max-height: min(480px, var(--radix-dropdown-menu-content-available-height)); }
 .account-menu__group + .account-menu__group { margin-top: var(--space-4); padding-top: var(--space-4); box-shadow: inset 0 1px var(--color-border-muted); }
 .account-menu__account { min-height: 44px; }
 .account-menu__account[aria-current] { cursor: default; }
@@ -305,10 +307,10 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 /* The open menu has focus as a whole; an address in it shows only while its own row is pointed at or highlighted. */
 .account-menu:focus-visible .private-address__rest, .account-sheet :focus-visible .private-address__rest { filter: blur(4px); }
 .account-menu [data-highlighted] .private-address__rest, .account-menu .private-address:hover .private-address__rest { filter: blur(0); }
-/* Help (components/SupportChat.tsx). On a desktop: a small raised button in the page's bottom-right corner, clear of a
-   classic scrollbar, with the chat docked above it. Every page keeps its last line (pagination, a reply box) above the
-   button, and notices rise above it, or to the left of the open chat. On a phone or tablet: in the top bar. A dot marks a
-   reply that arrived while the chat was closed. */
+/* Help (components/SupportChat.tsx). On a desktop: a small raised button in the page's bottom-right corner, with the
+   chat docked above it. Every page keeps its last line (pagination, a reply box) above the button, and notices rise
+   above it, or to the left of the open chat. On a phone or tablet: in the top bar. A dot marks a reply that arrived
+   while the chat was closed. */
 :root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
 .app-shell--support .page-surface { padding-bottom: calc(var(--space-16) + var(--launcher-size) + var(--space-8)); }
 .ui-button.support-launcher { position: fixed; right: var(--launcher-inset); bottom: var(--launcher-inset); z-index: 41; width: var(--launcher-size); height: var(--launcher-size); padding: 0; border-radius: var(--radius-sm); color: var(--color-muted); box-shadow: var(--shadow-popover); }

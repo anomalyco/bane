@@ -71,22 +71,22 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
     </Dialog>
     <ConnectAgentDialog open={open && connecting} onOpenChange={next => { if (!next) { setConnecting(false); close() } }} inboxId={created.id} />
   </>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" description="An expiring address for an agent or an end-to-end test to receive mail at, such as sign-up codes." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="New agent inbox" description="An expiring address where an agent or test receives mail, like sign-up codes." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="agent-inbox-create" loading={create.isPending} disabled={domains.isPending}>Create inbox</Button></>}>
     <form id="agent-inbox-create" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
-      {noHost && <Alert tone="info">No domain receives mail yet, so this will be a sandbox inbox: it only gets test mail you send with the API. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
-      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'Sandbox: a made-up address (on .invalid) that never gets real mail. You send it test mail yourself, from its page or the API.' : 'A random address on this domain that nobody can guess.'}>
+      {noHost && <Alert tone="info">No domain receives mail yet, so this is a sandbox inbox for test mail only. For a real address, add a domain in <Link to="/domains">Domains</Link> and publish its receiving MX record.</Alert>}
+      <Field label="Address" htmlFor="agent-inbox-type" error={fieldError(create.error, 'domain')} hint={type === 'sandbox' ? 'Sandbox: a made-up .invalid address that only gets test mail you send from its page or the API.' : 'A random address on this domain that nobody can guess.'}>
         <Select id="agent-inbox-type" value={type === 'sandbox' ? 'sandbox' : host || hosts[0] || ''} disabled={create.isPending} onValueChange={value => { if (value === 'sandbox') setType('sandbox'); else { setType('ephemeral'); setHost(value) } }}
           options={[...hosts.map(value => ({ value, label: `…@${value}` })), { value: 'sandbox', label: 'Sandbox: test mail only' }]} />
       </Field>
       <Field label="Name" htmlFor="agent-inbox-name" hint="Optional. Shown in lists and as the sender name on replies.">
         <Input id="agent-inbox-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="Sign-up test" autoComplete="off" />
       </Field>
-      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then it expires: for one more day it keeps new mail without delivering it, and after that the inbox and all its mail are deleted. You can extend it from its page.">
+      <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then it holds new mail for 1 more day without delivering it, and the inbox and its mail are deleted. You can extend it from its page.">
         <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes} />
       </Field>
       <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key for this inbox: lets an agent or test read it, and nothing else, over the API or MCP" />
-      {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies: it may answer people who wrote to it, up to 20 a day" />}
+      {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies: up to 20 a day, only to people who wrote to it" />}
     </form>
   </Dialog>
 }
@@ -173,7 +173,7 @@ function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: bo
     <form id="agent-inbox-edit" className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
       <Field label="Name" htmlFor="agent-inbox-edit-name" error={fieldError(save.error, 'name')} hint="Shown in lists and as the sender name on replies."><Input id="agent-inbox-edit-name" value={name} maxLength={200} onChange={event => setName(event.target.value)} disabled={save.isPending} autoComplete="off" /></Field>
-      <Field label="Keep it longer" htmlFor="agent-inbox-edit-extend" error={fieldError(save.error, 'expiresAt')} hint={!canExtend ? `It already lasts as long as it can: 30 days after it was created (${date(new Date(limit).toISOString())}).` : until ? `It will receive until ${date(until.toISOString())}, then be deleted a day later.` : `It receives until ${date(inbox.expiresAt)}.`}>
+      <Field label="Keep it longer" htmlFor="agent-inbox-edit-extend" error={fieldError(save.error, 'expiresAt')} hint={!canExtend ? `It already lasts the maximum: 30 days from creation (${date(new Date(limit).toISOString())}).` : until ? `It will receive until ${date(until.toISOString())}, then be deleted a day later.` : `It receives until ${date(inbox.expiresAt)}.`}>
         <Select id="agent-inbox-edit-extend" value={extend} onValueChange={setExtend} disabled={save.isPending || !canExtend} options={[{ value: '', label: 'Keep the current expiry' }, ...extensions]} />
       </Field>
     </form>
@@ -227,10 +227,10 @@ function InboxDetail({ id }: { id: string }) {
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
       {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
     </>}
-    <p className="muted inbox-facts-note">It receives mail until it expires; for one more day it keeps new mail without delivering it, then the inbox and its mail are deleted. Past its message or size limit, new mail is held the same way: stored and listed, not delivered. Replies can only go to people who wrote to it, and are turned on when the inbox is created.</p>
+    <p className="muted inbox-facts-note">It receives mail until it expires. For 1 more day, new mail is held (stored and listed, not delivered), then the inbox and its mail are deleted. Over its message or size limit, new mail is held the same way. Replies go only to people who wrote to it and are turned on at creation.</p>
     <section className="section stack" aria-labelledby="agent-inbox-messages">
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} />
-      {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder" hint="All deliveries lists every message. Folders are what a mail client or an agent filed them into."><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
+      {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder" hint="All deliveries lists every message; folders are where a mail client or agent filed them."><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
         <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}

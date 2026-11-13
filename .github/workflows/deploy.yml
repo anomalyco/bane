@@ -7,8 +7,8 @@ name: Deploy
 # write can never race the E2E as it could when pulumi.yml was separate.
 #
 # A dev deploy starts on the push itself, alongside that push's CI. Production
-# deploys only a commit with both a passing dev push CI and a passing live dev
-# E2E (dev-proof.sh, which waits for a CI still running), and needs no
+# deploys only a commit with passing CI (queue tree or dev push) and a passing
+# live dev E2E for that SHA (dev-proof.sh), and needs no
 # reviewer: the proof, the production branch's ruleset and its fast-forward
 # history gate it (docs/ci.md).
 run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
@@ -172,7 +172,7 @@ jobs:
 
       # The dev deploy no longer waits for dev CI, so production checks both
       # halves of dev's proof itself, waiting for a CI that is still running.
-      - name: Require a passing dev E2E and dev push CI for this commit
+      - name: Require a passing dev E2E and CI for this commit
         if: steps.stage.outputs.stage == 'production'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -529,6 +529,44 @@ jobs:
             api/e2e-worker-logs.json
           if-no-files-found: warn
 
+  promote:
+    name: Fast-forward production
+    needs: [authorize, deploy]
+    if: >-
+      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' &&
+      needs.authorize.result == 'success' && needs.deploy.result == 'success' &&
+      needs.deploy.outputs.e2e == 'success' && vars.AUTO_SHIP != 'off'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    # The workflow's deploy-dev group serializes promotions. The environment restricts the shipping credential to dev.
+    environment: dev
+    permissions: {}
+    steps:
+      - name: Promote the tested dev tip (never force)
+        env:
+          GH_TOKEN: ${{ secrets.PRODUCTION_PUSH_TOKEN }}
+          SHA: ${{ needs.authorize.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z $GH_TOKEN ]]; then
+            echo '::warning::Production was not promoted: dev has no PRODUCTION_PUSH_TOKEN. Manual shipping remains available.'
+            echo 'No production push: configure the dev environment shipping token (docs/ci.md).' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          repo="repos/$GITHUB_REPOSITORY"
+          current=$(gh api "$repo/git/ref/heads/production" --jq .object.sha)
+          status=$(gh api "$repo/compare/$current...$SHA?per_page=1" --jq .status)
+          case $status in
+            ahead) ;;
+            identical|behind) echo "Production already contains $SHA; skipping."; exit 0 ;;
+            *) echo "::error::Cannot fast-forward production from $current to $SHA ($status)."; exit 1 ;;
+          esac
+          tip=$(gh api "$repo/git/ref/heads/dev" --jq .object.sha)
+          if [[ $tip != "$SHA" ]]; then echo "Dev advanced to $tip; skipping $SHA."; exit 0; fi
+          # GitHub checks fast-forward atomically against the live ref, even if a human pushed since the comparison.
+          # Unlike GITHUB_TOKEN, the operator's scoped token triggers the ordinary production push workflow.
+          gh api -X PATCH "$repo/git/refs/heads/production" -f sha="$SHA" -F force=false --jq .object.sha
+
   # A failed live dev E2E opens (or comments on) one issue with the failed steps, their request IDs and the Worker's
   # log lines for those requests. Production stays blocked exactly as before: it requires a passing dev E2E for its SHA.
   e2e-issue:
@@ -636,7 +674,9 @@ jobs:
         working-directory: support
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
-        run: ./node_modules/.bin/wrangler deploy --config "$SUPPORT_CONFIG" > /dev/null
+        run: |
+          source ../.github/scripts/cloudflare-retry.sh
+          cloudflare_retry ./node_modules/.bin/wrangler deploy --config "$SUPPORT_CONFIG" > /dev/null
 
       - name: Health check
         run: |

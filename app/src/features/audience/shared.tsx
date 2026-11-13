@@ -57,10 +57,10 @@ export function ListPicker({ value, onChange, emptyLabel, id, label, disabled = 
         else if (event.key === 'Tab') { setOpen(false); setSearch('') }
       }} />
     <ChevronDown size={14} aria-hidden="true" />
-    {open && <div ref={menu} id={listbox} role="listbox" aria-label={label ?? 'Lists'} className="ui-popover audience-list-options">
+    {open && <div ref={menu} id={listbox} role="listbox" aria-label={label ?? 'Lists'} className="ui-popover audience-list-options"><div className="ui-popover-scroll">
       {items.map((item, index) => <button key={item.id || 'none'} id={`${listbox}-${index}`} type="button" role="option" tabIndex={-1} aria-selected={index === activeIndex} data-current={item.id === value || undefined} className="audience-list-option" onPointerMove={() => setActive(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(item.id)}><span>{item.name}</span>{item.id === value && <Check size={14} aria-hidden="true" />}</button>)}
       {options.isPending ? <div className="audience-list-note" role="status">Loading lists…</div> : options.isError ? <div className="audience-list-note" role="alert">Couldn’t load lists. Close and reopen to try again.</div> : search.trim() && !options.data.length ? <div className="audience-list-note">No list named “{search.trim()}”.</div> : options.data.nextCursor ? <div className="audience-list-note">More lists exist. Type to narrow them down.</div> : null}
-    </div>}
+    </div></div>}
   </div>
 }
 

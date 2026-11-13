@@ -44,11 +44,11 @@ export function TemplatePickerDialog({ onOpenChange }: { onOpenChange: (open: bo
   const query = useApiQuery(['templates', { publishedOnly: true, page: 1 }], (client, signal) => client.templates.list({ publishedOnly: true, page: 1, pageSize: 50 }, signal))
   const { start, pending, unavailable } = useStartFromTemplate()
   const rows: CampaignTemplateSummary[] = query.data?.items ?? []
-  return <Dialog open onOpenChange={value => { if (pending === null) onOpenChange(value) }} title="Start from a template" description="Copies a published template into a new draft. Changes to the draft never change the template." className="template-picker-dialog">
+  return <Dialog open onOpenChange={value => { if (pending === null) onOpenChange(value) }} title="Start from a template" description="Copies a published template into a new draft; editing the draft doesn’t change the template." className="template-picker-dialog">
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <div className="template-picker" aria-busy={query.isPending || undefined}>
       {query.isPending ? [0, 1, 2].map(index => <div key={index} className="template-picker__row" aria-hidden="true"><SkeletonText width="45%" lineHeight={18} /><SkeletonText width="70%" lineHeight={18} /></div>)
         : rows.length ? rows.map(row => <button key={row.id} type="button" className="template-picker__row" disabled={pending !== null || unavailable} onClick={() => void start(row)}><span className="template-picker__name">{row.name}</span><span className="muted">{row.description || row.subject || 'No subject yet'}</span>{pending === row.id && <span className="muted template-picker__status" role="status">Creating draft…</span>}</button>)
-        : <EmptyState title="No published templates" description="A template is a reusable email design. Create one under Templates and publish it, then start campaigns from it here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/campaigns/templates">Go to templates</Link>} />}
+        : <EmptyState title="No published templates" description="A template is a reusable email design. Publish one under Templates to start campaigns from it here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/campaigns/templates">Go to templates</Link>} />}
     </div>}
   </Dialog>
 }

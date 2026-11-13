@@ -33,7 +33,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-panel__actions { display: flex; align-items: center; gap: 2px; }
 
 /* The conversation grows down from the top; while the reader is at the bottom it follows the newest line. */
-.support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
+.support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; }
 .support-log:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 /* --tray: the screenshot tray's height while it covers the bottom of the conversation (AttachmentTray). */
 .support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) calc(var(--space-24) + var(--tray, 0px)); }

@@ -5,10 +5,13 @@ import { useApi } from '../../data/context'
 import { actionLabel, activityApi, activityAreas, type AuditEntry } from '../../data/activity'
 import { relativeTime, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { maskedParts } from '../../lib/private-address'
 import { settingsColumns } from './skeletons'
 
 // Settings → Activity (hosted, owners and admins): what happened in this workspace, newest first, 50 at a time.
-// Rows are one line each (53px); a row opens its details (before → after, reason, request ID).
+// Rows are one line each (53px); a row opens its details (before → after, reason, request ID). The section takes the
+// panel's full width, so values show whole on a desktop; a cell that still runs out of room ends in an ellipsis and
+// shows all of it on hover. An address is never put in that tooltip: it stays masked until it is revealed itself.
 const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'Agent', agent_token: 'Agent token', inbox_key: 'API key', app_password: 'App password' }
 function Who({ actor }: { actor: AuditEntry['actor'] }) {
   if (actor.type === 'member') return actor.email ? <PrivateAddress value={actor.email} /> : <>{actor.label ?? 'A member'}</>
@@ -18,6 +21,15 @@ function Who({ actor }: { actor: AuditEntry['actor'] }) {
   if (actor.type === 'stripe') return <>Stripe</>
   const detail = actor.label ?? actor.id
   return <>{credential[actor.type] ?? actor.type}{detail && <span className="muted"> · {detail}</span>}</>
+}
+const plain = (text: string | null | undefined) => text && !maskedParts(text) ? text : null
+function whoText(actor: AuditEntry['actor']) {
+  if (actor.type === 'member') return actor.email ? null : plain(actor.label ?? 'A member')
+  if (actor.type === 'support') return 'Bane support'
+  if (actor.type === 'system' || actor.type === 'operator') return 'Bane'
+  if (actor.type === 'stripe') return 'Stripe'
+  const detail = actor.label ?? actor.id
+  return plain(`${credential[actor.type] ?? actor.type}${detail ? ` · ${detail}` : ''}`)
 }
 const record = (value: unknown): Record<string, unknown> | null => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null
 // The object's name from the summary when it has one (a key's name, a domain, an address), else its ID.
@@ -43,6 +55,19 @@ function Target({ entry }: { entry: AuditEntry }) {
 const channel: Record<string, string> = { dashboard: 'Dashboard', api: 'API', mcp: 'MCP', imap: 'IMAP', smtp: 'SMTP', console: 'Bane', support: 'Bane support', script: 'Bane', job: 'Bane', webhook: 'Webhook' }
 const source = (entry: AuditEntry) => entry.client ?? channel[entry.via] ?? entry.via
 const fromText = (entry: AuditEntry) => [source(entry), entry.network].filter(Boolean).join(' · ')
+function targetText(entry: AuditEntry) {
+  if (entry.action === 'support.view') return entry.subject?.email ? null : ['Support request', ticketOf(entry)].filter(Boolean).join(' · ')
+  return plain(targetName(entry))
+}
+// `hint` is the tooltip while the value fits.
+function Cell({ full, hint, className, children }: { full: string | null; hint?: string; className?: string; children: ReactNode }) {
+  return <span className={className ? `activity-cell ${className}` : 'activity-cell'} title={hint} onPointerEnter={event => {
+    const cell = event.currentTarget, clipped = [cell, ...cell.children].some(part => part.scrollWidth > part.clientWidth)
+    const title = full && clipped ? full : hint
+    if (title) cell.title = title
+    else cell.removeAttribute('title')
+  }}>{children}</span>
+}
 function When({ at }: { at: string }) {
   return <time dateTime={at} title={`${shortDateTime(at)} UTC`}>{relativeTime(at)}</time>
 }
@@ -65,10 +90,10 @@ export function ActivitySection() {
     {activity.error && !activity.data ? <ErrorState error={activity.error} onRetry={() => void activity.refetch()} /> : <DataTable className="activity-table" loading={activity.isPending} skeletonRows={8} minRows={3} rows={rows} rowKey={entry => entry.id} onRowClick={setOpen}
       empty={<EmptyState title={area ? 'No matching activity' : 'No activity yet'} description={area ? undefined : 'Changes to members, keys, domains, webhooks and settings appear here.'} />} columns={[
         { ...when, render: entry => <When at={entry.at} /> },
-        { ...who, render: entry => <span className="activity-cell"><Who actor={entry.actor} /></span>, cardRender: entry => <Who actor={entry.actor} /> },
-        { ...action, render: entry => <span className="activity-cell" title={entry.action}>{actionLabel(entry.action)}</span>, cardRender: entry => actionLabel(entry.action) },
-        { ...target, render: entry => <span className="activity-cell"><Target entry={entry} /></span>, cardRender: entry => <Target entry={entry} /> },
-        { ...from, render: entry => <div className="settings-cell-stack activity-from"><span title={source(entry)}>{source(entry)}</span><span title={entry.network ?? undefined}>{entry.network ?? ''}</span></div>, cardRender: fromText },
+        { ...who, render: entry => <Cell full={whoText(entry.actor)}><Who actor={entry.actor} /></Cell>, cardRender: entry => <Who actor={entry.actor} /> },
+        { ...action, render: entry => <Cell full={actionLabel(entry.action)} hint={entry.action}>{actionLabel(entry.action)}</Cell>, cardRender: entry => actionLabel(entry.action) },
+        { ...target, render: entry => <Cell full={targetText(entry)}><Target entry={entry} /></Cell>, cardRender: entry => <Target entry={entry} /> },
+        { ...from, render: entry => <Cell full={fromText(entry)} className="activity-from"><span>{source(entry)}</span>{entry.network && <span> · {entry.network}</span>}</Cell>, cardRender: fromText },
       ]} />}
     {activity.hasNextPage && <div className="activity-more"><Button loading={activity.isFetchingNextPage} onClick={() => void activity.fetchNextPage()}>Load more</Button></div>}
     {activity.isFetchNextPageError ? <ErrorState error={activity.error} onRetry={() => void activity.fetchNextPage()} /> : null}

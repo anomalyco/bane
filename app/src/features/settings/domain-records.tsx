@@ -113,8 +113,8 @@ export function DnsRecordTable({ domain, records, status }: { domain: string; re
 // What the two alignments mean together: DMARC passes when either one aligns, so one "not aligned" is often fine.
 function dmarcVerdict(dkim: boolean, spf: boolean) {
   if (dkim && spf) return 'Both align, so mail from this domain passes DMARC. Nothing to do.'
-  if (dkim) return 'DMARC passes through DKIM, so this is fine. To align SPF as well, set a custom MAIL FROM domain under Advanced.'
-  if (spf) return 'DMARC passes through SPF. Publish the DKIM records above to align DKIM as well.'
+  if (dkim) return 'DMARC passes through DKIM. To align SPF too, set a custom MAIL FROM domain under Advanced.'
+  if (spf) return 'DMARC passes through SPF. Publish the DKIM records above to align DKIM too.'
   return 'Neither aligns, so DMARC fails: publish the DKIM records above, then check again.'
 }
 function DmarcRecords({ domain }: { domain: Domain }) {
@@ -187,9 +187,9 @@ const hoursLeft = (at: string) => Math.max(0, Math.ceil((Date.parse(at) - Date.n
 export function DnsWaitNote({ domain }: { domain: Domain }) {
   if (domain.status === 'verified' || (domain.sending ?? 'pending') === 'verified') return null
   return <div className="dns-wait">
-    <p>Most DNS providers publish new records within a few minutes; some take up to an hour. Bane checks about every 20 seconds while this page is open and keeps checking in the background, so you can leave.</p>
-    {domain.releasesAt && <p>If the sending records aren’t found within 72 hours of adding the domain, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
-    <p>One-click setup isn’t available for any DNS provider yet, so add the records yourself. Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && ' · '}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
+    <p>New records usually appear within minutes, sometimes up to an hour. Bane checks every 20 seconds while this page is open, and keeps checking after you leave.</p>
+    {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
+    <p>One-click setup isn’t available yet, so add the records yourself. Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && ' · '}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
   </div>
 }
 
@@ -201,10 +201,10 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
 export function receivingHostCopy(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
   if (!host) return `Receive mail at ${domain}.`
-  if (host !== domain) return `Mail to addresses on ${host}, such as support@${host}, comes to Bane. Mail to ${domain} itself keeps going wherever it goes today: Bane uses a subdomain so your current mailboxes keep working.`
+  if (host !== domain) return `Mail to addresses on ${host}, like support@${host}, comes to Bane. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
   return receiving.every(record => record.status === 'verified')
     ? `Every address at ${domain} receives here: its MX record already points to Bane.`
-    : `This MX record sends all mail for ${domain} to Bane, including mailboxes you have elsewhere today. To keep them, receive on a subdomain such as reply.${domain} instead.`
+    : `This MX record sends all mail for ${domain} to Bane, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
 }
 
 // The domain page adds its receiving actions (choose the root or a subdomain, Check MX now) to the receiving group.
