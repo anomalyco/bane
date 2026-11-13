@@ -8,7 +8,8 @@ import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderC
 import { Link, useLocation, useNavigate } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
 import { permissionCodes } from '../../data/types';
-import { usePhone, useTouch } from '../../lib/media';
+import { PrivateAddress } from '../PrivateAddress';
+import { TOUCH, matches, usePhone, useTouch } from '../../lib/media';
 import { SkeletonText, PaginationSkeleton, ControlSkeleton } from './skeleton';
 import { Sheet, SheetOpenEffects, useSheetDrag } from './sheet';
 import { isDuplicateSubmission } from '../../lib/single-flight';
@@ -45,16 +46,38 @@ export function Field({ label, htmlFor, error, hint, children }: { label: ReactN
   const descriptionId = `${id}-description`;
   return <div data-component="Field" className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
 }
-export type SelectProps = { value: string; onValueChange: (value: string) => void; options: { value: string; label: string; disabled?: boolean }[]; placeholder?: string; id?: string; name?: string; disabled?: boolean; required?: boolean; 'aria-label'?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean; className?: string };
-export function Select({ value, onValueChange, options, placeholder = 'Select…', id, name, disabled, required, className, ...aria }: SelectProps) {
+// A label may be any node (the menu and the trigger render it); `text` is its plain form for the phone's native picker, which can't
+// show a node. `mask`: string labels are email addresses, shown through PrivateAddress (blurred until hovered or focused, like every
+// address); the native picker on a touch screen can't blur them.
+export type SelectOption = { value: string; label: ReactNode; text?: string; disabled?: boolean };
+export type SelectProps = { value: string; onValueChange: (value: string) => void; options: SelectOption[]; mask?: boolean; placeholder?: string; id?: string; name?: string; disabled?: boolean; required?: boolean; 'aria-label'?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean; className?: string };
+function SheetSelect({ value, onValueChange, options, shown, placeholder, id, name, disabled, className, aria }: { value: string; onValueChange: (value: string) => void; options: SelectOption[]; shown: (option: SelectOption) => ReactNode; placeholder: string; id?: string; name?: string; disabled?: boolean; className?: string; aria: Pick<SelectProps, 'aria-label' | 'aria-describedby' | 'aria-invalid'> }) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const current = options.find(option => option.value === value);
+  return <>
+    <button ref={trigger} type="button" data-component="Select" {...aria} id={id} aria-haspopup="dialog" aria-expanded={open} disabled={disabled} className={cx('ui-input', 'ui-select-trigger', className)} data-placeholder={current ? undefined : ''} onClick={() => setOpen(true)}><span>{current ? shown(current) : placeholder}</span><span aria-hidden="true"><ChevronDown size={14} /></span></button>
+    {name && <input type="hidden" name={name} value={value} />}
+    <Sheet open={open} onOpenChange={setOpen} title={aria['aria-label'] ?? placeholder} className="ui-action-sheet" returnFocus={trigger}>
+      <div className="ui-action-sheet__items" role="listbox" aria-label={aria['aria-label'] ?? placeholder}>{options.map(option => <button key={option.value} type="button" role="option" aria-selected={option.value === value} disabled={option.disabled} className="ui-action-sheet__item" onClick={() => { setOpen(false); onValueChange(option.value); }}><span className="ui-action-sheet__label">{shown(option)}</span>{option.value === value && <Check size={14} aria-hidden="true" />}</button>)}</div>
+      <button type="button" className="ui-action-sheet__item ui-action-sheet__cancel" onClick={() => setOpen(false)}>Cancel</button>
+    </Sheet>
+  </>;
+}
+const optionText = (option: SelectOption) => option.text ?? (typeof option.label === 'string' ? option.label : option.value);
+export function Select({ value, onValueChange, options, mask = false, placeholder = 'Select…', id, name, disabled, required, className, ...aria }: SelectProps) {
+  const shown = (option: SelectOption) => mask && typeof option.label === 'string' ? <PrivateAddress value={option.label} /> : option.label;
   const emptyValue = useId();
   const hasEmptyOption = options.some(option => option.value === '');
-  // Touch screens get the platform's own picker (the iOS wheel, Android's list): bigger targets, no zoom, no popover.
-  if (useTouch()) {
+  const touch = useTouch();
+  // Touch screens get the platform's own picker (the iOS wheel, Android's list): bigger targets, no zoom, no popover. Options a
+  // native list can't draw (addresses to blur, rich labels) get a bottom sheet of the same rows instead.
+  if (touch && (mask || options.some(option => typeof option.label !== 'string'))) return <SheetSelect value={value} onValueChange={onValueChange} options={options} shown={shown} placeholder={placeholder} id={id} name={name} disabled={disabled} className={className} aria={aria} />;
+  if (touch) {
     const known = options.some(option => option.value === value);
-    return <select data-component="Select" {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}</select>;
+    return <select data-component="Select" {...aria} id={id} name={name} disabled={disabled} required={required} className={cx('ui-input', 'ui-select-trigger', 'ui-native-select', className)} value={known ? value : ''} data-placeholder={known ? undefined : ''} onChange={event => onValueChange(event.target.value)}>{!known && <option value="" disabled hidden>{placeholder}</option>}{options.map(option => <option key={option.value} value={option.value} disabled={option.disabled}>{optionText(option)}</option>)}</select>;
   }
-  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger data-component="Select" {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)} onPointerEnter={event => { const shown = event.currentTarget.firstElementChild; event.currentTarget.title = shown && shown.scrollWidth > shown.clientWidth ? shown.textContent ?? '' : ''; }}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{option.label}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
+  return <SelectPrimitive.Root value={value === '' && hasEmptyOption ? emptyValue : value} onValueChange={next => onValueChange(next === emptyValue ? '' : next)} name={name} disabled={disabled} required={required}><SelectPrimitive.Trigger data-component="Select" {...aria} id={id} className={cx('ui-input', 'ui-select-trigger', className)} onPointerEnter={event => { const label = event.currentTarget.firstElementChild, selected = options.find(option => option.value === value); event.currentTarget.title = !mask && label && selected && label.scrollWidth > label.clientWidth ? optionText(selected) : ''; }}><SelectPrimitive.Value placeholder={placeholder} /><SelectPrimitive.Icon><ChevronDown size={14} aria-hidden="true" /></SelectPrimitive.Icon></SelectPrimitive.Trigger><SelectPrimitive.Portal><SelectPrimitive.Content className="ui-popover ui-select-content" position="popper" sideOffset={4}><SelectPrimitive.ScrollUpButton className="ui-select-scroll"><ChevronDown size={14} className="ui-rotate" /></SelectPrimitive.ScrollUpButton><SelectPrimitive.Viewport>{options.map(option => <SelectPrimitive.Item key={option.value} value={option.value === '' ? emptyValue : option.value} disabled={option.disabled} className="ui-select-item"><SelectPrimitive.ItemText>{shown(option)}</SelectPrimitive.ItemText><SelectPrimitive.ItemIndicator><Check size={14} /></SelectPrimitive.ItemIndicator></SelectPrimitive.Item>)}</SelectPrimitive.Viewport><SelectPrimitive.ScrollDownButton className="ui-select-scroll"><ChevronDown size={14} /></SelectPrimitive.ScrollDownButton></SelectPrimitive.Content></SelectPrimitive.Portal></SelectPrimitive.Root>;
 }
 type CheckProps = { checked: boolean; onCheckedChange: (checked: boolean) => void; label: ReactNode; disabled?: boolean; id?: string; name?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean };
 export function Checkbox({ checked, onCheckedChange, label, disabled, id: suppliedId, ...props }: CheckProps) {
