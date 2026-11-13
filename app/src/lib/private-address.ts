@@ -3,8 +3,8 @@
 // components/PrivateAddress.tsx. Masked means absent: the rest of the address is not in the page's text, a title or
 // a label until it is revealed, so reading, copying or listening to the page gives only what is shown. Domain names
 // and domain-only labels (bane.mx, @bane.mx, *@bane.mx) are not mailbox addresses and stay readable. Forms where an
-// address is typed or chosen, one-time dialogs with a copy button and CSV exports show addresses in full. No React
-// here, so the API acceptance suite can test it.
+// address is typed or chosen, one-time dialogs with a copy button and CSV exports show addresses in full. Privacy mode
+// (lib/privacy.ts) can turn the masking off for one browser. No React here, so the API acceptance suite can test it.
 
 /** A mailbox address or address pattern: something before the @ other than wildcards. */
 export function isMailbox(value: string) {

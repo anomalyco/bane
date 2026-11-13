@@ -28,7 +28,8 @@
 //
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
-// cold desktop load, hovering the first few reveals them without anything moving.
+// cold desktop load, hovering the first few reveals them without anything moving, and so does turning privacy mode off
+// with ⇧P (then on again, which masks them as before).
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -256,6 +257,24 @@ async function masking(page, hover) {
     else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
     if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
   }
+  // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
+  const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
+  if (!count) return problems;
+  const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
+  // ⇧P is ignored while typing (the support chat's box, a ritual's editor), so leave whatever field has focus first.
+  await page.evaluate(() => document.activeElement?.blur());
+  const before = await states();
+  await page.keyboard.press('Shift+P'); await frame();
+  const off = await states(), root = await page.evaluate(() => ({ privacy: document.documentElement.dataset.privacy, pressed: document.querySelector('.privacy-toggle')?.getAttribute('aria-pressed') }));
+  if (root.privacy !== 'off' || root.pressed !== 'false') problems.push(`⇧P did not turn privacy mode off: ${JSON.stringify(root)}`);
+  off.forEach((state, i) => {
+    if (!state.revealed || [...state.text].length <= 2) problems.push(`privacy mode off left ${before[i].text}… masked`);
+    else if (state.own !== before[i].own || state.around !== before[i].around) problems.push(`privacy mode off moved ${before[i].text}…: ${before[i].own} → ${state.own}`);
+  });
+  await page.keyboard.press('Shift+P'); await frame();
+  const on = await states();
+  on.forEach((state, i) => { if (state.revealed !== before[i].revealed || state.text !== before[i].text || state.own !== before[i].own) problems.push(`privacy mode on again did not mask ${before[i].text}… as before`); });
+  problems.push(...await page.evaluate(maskedLeaks));
   return problems;
 }
 

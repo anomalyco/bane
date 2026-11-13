@@ -16,6 +16,8 @@ import { AccountSwitcher } from './AccountSwitcher'
 import { StandingBanner } from './StandingBanner'
 import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
+import { PrivacyToggle } from './PrivacyToggle'
+import { togglePrivacy } from '../lib/privacy'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 import { BaneWordmark } from './BaneLogo'
 
@@ -155,6 +157,16 @@ export function AppShell() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
+  // ⇧P turns privacy mode (lib/privacy.ts) on or off, unless you are typing.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'P' || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || event.repeat || event.defaultPrevented) return
+      if ((event.target as HTMLElement | null)?.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]')) return
+      event.preventDefault(); togglePrivacy()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -177,15 +189,17 @@ export function AppShell() {
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
     {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
   </>
+  // The links and privacy mode first, so the last item (the sender score card, or SES's quota) ends on the main panel's bottom edge.
   const footer = <>
-    {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
+    <LegalFooterLinks />
+    <PrivacyToggle />
     {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
     <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
       <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
       {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
       <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
-    <LegalFooterLinks />
+    {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
   </>
   const supportHost = support.mode && <SupportHost chat={support} />
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
