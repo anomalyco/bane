@@ -28,12 +28,12 @@ The mark is a muted periwinkle in both themes. It meets the 3:1 floor for graphi
 - **Mark:** as tall as the x-height, sitting on the baseline, so it reads with the lowercase “ane” rather than towering to the ascender. Inter's x-height is 75% of its cap height.
 - **Gap:** 0.35× the mark's width, measured to the stem of the “b”.
 - **Mark weight:** the outer frame is 17% of the mark's height, the heaviest it can be before its white gaps close. The inner ring, centre square and perforations follow the original Stamp design.
-- **In a layout:** `BaneWordmark`'s viewBox is Inter's own line box (ascender 1984, descender 494 of 2048 units), so the logo centres in a row and finds its baseline exactly like a line of Inter text. Align its left edge with the content edge (in the sidebar, `--sidebar-gutter` + `--sidebar-inset`, the same edge as the workspace picker's avatar and the navigation labels).
+- **In the dashboard:** `BaneWordmark` sets “bane” as live Inter 600 text at 14 px with the 16 px mark beside it, 6 px apart, the mark centred on the word. The mark's left edge sits on the sidebar's content edge (`--sidebar-gutter`), the same x as the workspace picker's border and the navigation pills. The outlined files in `app/public/brand/` are for use outside the app.
 
 ## Clear space and size
 
 - **Clear space:** keep at least half the mark's height clear on every side.
-- **Minimum size:** the mark at 15 px tall in the lockup, or 16 px alone. Below that the perforations fill in. The dashboard sidebar uses 15 px: the x-height of 27.5 px Inter, which puts the baseline on a whole pixel in the 24 px header row.
+- **Minimum size:** the mark at 16 px tall, whether alone or in the lockup. Below that the perforations fill in.
 - **Favicon:** the mark alone, with its inner squares snapped to whole pixels at 16, 32 and 48 px (`favicon.svg` is on the 16 px grid), so the frame and rings stay sharp in a browser tab.
 
 ## Don't
