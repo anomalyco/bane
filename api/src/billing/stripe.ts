@@ -144,6 +144,11 @@ export async function creditAttempt(runtime: Runtime, attemptId: string, paid: P
     const { attempt: a } = locked;
     if (!OPEN.includes(a.status)) {
       if (a.status !== 'succeeded') log('error', { code: 'BILLING_LATE_PAYMENT', workspaceId: a.workspace_id, attemptId, status: a.status, message: 'Stripe reports a payment for a closed attempt; credit or refund it by hand.' });
+      // Checkout creates its invoice after the payment: checkout.session.completed credits with no invoice, and
+      // invoice.paid arrives later. Record the invoice then (never replacing one), so the payment has its links and a
+      // refund goes through a credit note. Nothing about the credit changes.
+      else if (paid.invoice) await tx.execute(sql`UPDATE billing_payment_attempts SET stripe_invoice=${paid.invoice}, invoice_url=coalesce(invoice_url,${paid.invoiceUrl ?? null}),
+        invoice_pdf=coalesce(invoice_pdf,${paid.invoicePdf ?? null}), updated_at=now() WHERE id=${attemptId} AND status='succeeded' AND stripe_invoice IS NULL`);
       return a.status;
     }
     const facts = sql`charged_cents=coalesce(${paid.chargedCents ?? null}::int,charged_cents), tax_cents=coalesce(${paid.taxCents ?? null}::int,tax_cents),
