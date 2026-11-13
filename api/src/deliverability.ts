@@ -450,21 +450,25 @@ const audienceMeasures = sql`count(*)::int AS contacts,
 type AudienceRow = { contacts: number; subscribed: number; unknown: number; unsubscribed: number; suppressed: number; clicked30: number; clicked90: number; clicked180: number; stale: number; neverObserved: number; role: number; freeMail: number; typoDomains: number };
 /** Counts per list (the 20 largest, or one) and for the whole audience, imports of the last 90 days; never an address. */
 export async function audienceHealth(db: DbExecutor, wid: string, listId?: string) {
-  const contacts = sql`audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL`;
-  const view = async (from: SQL) => {
-    const { rows: [row] } = await db.execute<AudienceRow>(sql`SELECT ${audienceMeasures} FROM ${from}`);
-    const { rows: reasons } = await db.execute<{ reason: string; n: number }>(sql`SELECT coalesce(c.suppression_reason, 'unspecified') AS reason, count(*)::int AS n FROM ${from} AND c.suppressed GROUP BY 1 ORDER BY 2 DESC LIMIT 10`);
-    const { rows: providers } = await db.execute<{ provider: Provider; n: number }>(sql`SELECT ${providerSql(cdomain)} AS provider, count(*)::int AS n FROM ${from} GROUP BY 1 ORDER BY 2 DESC`);
-    const counts = row!;
-    return { ...counts, suppressedBy: Object.fromEntries(reasons.map(r => [r.reason, r.n])), providers: Object.fromEntries(providers.map(p => [p.provider, p.n])),
-      shares: { stale: rate(counts.stale, counts.contacts - counts.neverObserved), role: rate(counts.role, counts.contacts), freeMail: rate(counts.freeMail, counts.contacts) } };
+  // Three statements per scope (counts, suppression reasons, providers), each grouped by list: never one per list.
+  const views = async (group: SQL, from: SQL) => {
+    const { rows } = await db.execute<AudienceRow & { g: string }>(sql`SELECT ${group} AS g, ${audienceMeasures} FROM ${from} GROUP BY 1`);
+    const { rows: reasons } = await db.execute<{ g: string; reason: string; n: number }>(sql`SELECT ${group} AS g, coalesce(c.suppression_reason, 'unspecified') AS reason, count(*)::int AS n FROM ${from} AND c.suppressed GROUP BY 1, 2`);
+    const { rows: providers } = await db.execute<{ g: string; provider: Provider; n: number }>(sql`SELECT x.g, ${providerSql(sql`x.domain`)} AS provider, sum(x.n)::int AS n
+      FROM (SELECT ${group} AS g, ${cdomain} AS domain, count(*) AS n FROM ${from} GROUP BY 1, 2) x GROUP BY 1, 2`);
+    return new Map(rows.map(({ g, ...counts }) => [g, { ...counts,
+      suppressedBy: Object.fromEntries(reasons.filter(r => r.g === g).sort((a, b) => b.n - a.n).slice(0, 10).map(r => [r.reason, r.n])),
+      providers: Object.fromEntries(providers.filter(p => p.g === g).sort((a, b) => b.n - a.n).map(p => [p.provider, p.n])),
+      shares: { stale: rate(counts.stale, counts.contacts - counts.neverObserved), role: rate(counts.role, counts.contacts), freeMail: rate(counts.freeMail, counts.contacts) } }]));
   };
+  const empty = () => ({ contacts: 0, subscribed: 0, unknown: 0, unsubscribed: 0, suppressed: 0, clicked30: 0, clicked90: 0, clicked180: 0, stale: 0, neverObserved: 0, role: 0, freeMail: 0, typoDomains: 0,
+    suppressedBy: {}, providers: {}, shares: { stale: rate(0, 0), role: rate(0, 0), freeMail: rate(0, 0) } });
   const { rows: lists } = await db.execute<{ id: string; name: string; size: number }>(sql`SELECT l.id, l.name, (SELECT count(*)::int FROM audience_list_members m WHERE m.workspace_id = l.workspace_id AND m.list_id = l.id) AS size
     FROM audience_lists l WHERE l.workspace_id = ${wid} ${listId ? sql`AND l.id = ${listId}` : sql``} ORDER BY size DESC, l.id LIMIT ${LIMITS.groups}`);
-  const perList = [];
-  for (const list of lists) perList.push({ id: list.id, name: list.name, ...await view(sql`audience_list_members m JOIN audience_contacts c ON c.workspace_id = m.workspace_id AND c.id = m.contact_id
-    WHERE m.workspace_id = ${wid} AND m.list_id = ${list.id} AND c.deleted_at IS NULL`) });
-  const all = listId ? null : await view(contacts);
+  const byList = lists.length ? await views(sql`m.list_id`, sql`audience_list_members m JOIN audience_contacts c ON c.workspace_id = m.workspace_id AND c.id = m.contact_id
+    WHERE m.workspace_id = ${wid} AND m.list_id = ANY(${texts(lists.map(l => l.id))}) AND c.deleted_at IS NULL`) : new Map();
+  const perList = lists.map(list => ({ id: list.id, name: list.name, ...byList.get(list.id) ?? empty() }));
+  const all = listId ? null : (await views(sql`''`, sql`audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL`)).get('') ?? empty();
   // Imports: each committed import's contacts, now. Suppressions after the import stand for its bounces and complaints:
   // the outcome of first mailing that list (Bane does not record which send first reached each imported contact).
   const { rows: imports } = await db.execute<{ id: string; list_id: string | null; list_name: string | null; created_at: string; imported: number; errors: number; matched: number; hard_bounced: number; complained: number; unsubscribed: number }>(sql`WITH i AS (

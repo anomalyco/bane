@@ -20,7 +20,7 @@ function oneWorkspace(c: Ctx) {
   const scope = c.get('support')!, filter = c.req.query('workspaceId');
   const list = filter ? scope.workspaces.filter(w => w.id === filter) : scope.workspaces;
   if (list.length !== 1) throw new ApiError(422, 'WORKSPACE_REQUIRED', `This grant covers ${list.length} workspaces; aggregates read one. Pass workspaceId (see GET /v1/support/workspaces).`, 'workspaceId');
-  return { workspaceId: list[0]!.id, content: scope.contentWorkspaceId === list[0]!.id };
+  return { workspaceId: list[0]!.id };
 }
 const narrowed = (c: Ctx) => { const scope = c.get('support')!, filter = c.req.query('workspaceId'); return scope.workspaces.filter(w => !filter || w.id === filter).map(w => w.id); };
 const ids = (list: string[]) => sql`${sql.param(list)}::text[]`;
@@ -137,7 +137,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
         dmarc?: { status?: string; record?: string | null; source?: string | null; checkedAt?: number; aspf?: string } | null };
       const ses = identity.ses ?? {}, stored = identity.dmarc ?? null, mailFromDomain = ses.MailFromAttributes?.MailFromDomain?.toLowerCase() ?? null;
       const activity = await d.budgetedRead(c.env.db, tx => d.domainActivity(tx, r.workspace_id, name));
-      const region = r.region ?? r.connection?.region ?? 'us-east-1';
+      const region = r.region ?? r.connection?.region ?? c.env.config.regions[0]!;
       const dns = await d.liveDns(name, mailFromDomain ? { domain: mailFromDomain, region } : null, stored ? { record: stored.record ?? null, checkedAt: stored.checkedAt ?? null } : null);
       const align = await d.alignment(name, { dkim: ses.DkimAttributes?.Status ?? null, signing: ses.DkimAttributes?.SigningEnabled === true, mailFrom: mailFromDomain, mailFromStatus: ses.MailFromAttributes?.MailFromDomainStatus ?? null }, dns.dmarc.aspf);
       const daily = activity.days.map(x => x.accepted).sort((a, b) => a - b), median = daily.length ? daily[Math.floor(daily.length / 2)]! : 0, peak = daily.at(-1) ?? 0;
