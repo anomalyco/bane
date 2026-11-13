@@ -13,7 +13,9 @@ export const SuppressionEventData = z.object({suppressionReason:SuppressionReaso
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
-  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support'; email?: string; name?: string;
+  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support' | 'uiNotesKey'; email?: string; name?: string;
+  /** A UI notes key (src/ui-notes.ts): the operator who made it. It has no workspace and no permissions. */
+  userId?: string;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
@@ -51,6 +53,8 @@ export interface Config {
   allowedSubjects: string[];
   /** Hosted staff: Google Workspace domains of the sign-in's provider identity (see account-policy.ts). */
   staffGoogleDomains: string[];
+  /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
+  uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;

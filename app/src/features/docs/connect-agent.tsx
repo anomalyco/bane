@@ -30,7 +30,7 @@ export function McpClientSetup({ client, onClient, url, auth, label = 'MCP clien
   if (!url) return <p className="muted developer-copy" role="status">Loading this installation’s address…</p>
   return <div className="stack">
     <Tabs label={label} value={client} onValueChange={value => onClient(value as McpClient)} items={clientTabs} />
-    <div className="developer-client-panels">{mcpClients.map(value => {
+    <div className="developer-client-panels" data-sensitive={kind === 'key' || undefined}>{mcpClients.map(value => {
       const snippet = mcpSnippet(value, url, auth)
       return <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client}>
         <div className="developer-snippet">

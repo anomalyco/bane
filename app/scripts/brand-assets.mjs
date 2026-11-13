@@ -51,9 +51,10 @@ try {
     const i = Math.round(Number(a) * size / 100) * 100 / size, o = 100 - i;
     return `M${i} ${i}L${o} ${i}L${o} ${o}L${i} ${o}Z`;
   });
-  // favicon.svg: the mark on the 16 px grid (also whole pixels at 32), in the dark brand colour when the system is dark.
+  // favicon.svg: the mark on the 16 px grid (also whole pixels at 32), switching colour with the system theme if the
+  // brand's dark colour differs.
   const d = snap(svg('bane-mark.svg'), 16).match(/ d="([^"]+)"/)[1], dark = svg('bane-mark-dark.svg').match(/fill="([^"]+)"/)[1], light = svg('bane-mark.svg').match(/fill="([^"]+)"/)[1];
-  writeFileSync(join(publicDir, 'favicon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">\n  <style>path { fill: ${light}; } @media (prefers-color-scheme: dark) { path { fill: ${dark}; } }</style>\n  <path fill-rule="evenodd" d="${d}"/>\n</svg>\n`);
+  writeFileSync(join(publicDir, 'favicon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">\n  <style>path { fill: ${light}; }${dark === light ? '' : ` @media (prefers-color-scheme: dark) { path { fill: ${dark}; } }`}</style>\n  <path fill-rule="evenodd" d="${d}"/>\n</svg>\n`);
   const favicon = async size => ({ size, data: await shot(`<body style="margin:0;background:transparent">${snap(inline('bane-mark.svg'), size).replace('<svg', `<svg style="display:block;width:${size}px;height:${size}px"`)}</body>`, size, size, true) });
   writeFileSync(join(publicDir, 'favicon.ico'), ico(await Promise.all([16, 32, 48].map(favicon))));
   writeFileSync(join(publicDir, 'apple-touch-icon.png'), await shot(tile(180, 0.6, canvas), 180, 180));

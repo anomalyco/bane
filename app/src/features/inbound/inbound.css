@@ -197,6 +197,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-savebar[data-dirty] .ritual-savebar__state { color: var(--color-text); }
 .ritual-savebar[data-dirty] .ritual-savebar__dot { background: var(--color-warning-marker); }
 .ritual-savebar__discard[data-hidden], .ritual-delete[data-hidden] { visibility: hidden; }
+@media (max-width: 640px) { .ritual-delete { order: 1; } }
 .ritual-savebar__kbd { margin-left: var(--space-8); font: inherit; font-size: var(--text-xs); opacity: .6; }
 @media (hover: none) { .ritual-savebar__kbd { display: none; } }
 /* Phone and tablet: above the bottom tab bar, full width. */

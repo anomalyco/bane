@@ -50,6 +50,11 @@
 .settings-facts dd > .ui-status { vertical-align: top; }
 .settings-group { scroll-margin-top: var(--space-24); }
 .ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }
+/* Domains: one line per cell at the shared row height; a long name or host ends in an ellipsis, whole in its title. */
+.ui-table-scroll.domains-table { --table-row-height: 53px; }
+.domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
+@media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
