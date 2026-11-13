@@ -153,6 +153,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `sendEndpointVerification` | `endpoints` · `verify` · endpoints |
 | `testEndpoint` | `endpoints` · `test` · endpoints |
 | `createInboxConnection` | `connections` · `createInbox` · inboxes |
+| `getRitualVersion` | Dashboard step: the rituals page’s long poll, so a person sees an agent’s saves live. Agents read the version from rituals · config (getRituals). |
 | `checkRitual` | `rituals` · `check` · rituals |
 | `getRitualTypings` | `rituals` · `typings` · rituals |
 | `listRitualTemplates` | `rituals` · `templates` · rituals |
