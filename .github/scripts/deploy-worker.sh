@@ -92,7 +92,9 @@ fi
 args+=(--secrets-file "$secrets_file")
 # Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
 if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi
-WRANGLER_LOG=error "$wrangler" "${args[@]}"
+# shellcheck source=/dev/null
+source "$(dirname "$0")/cloudflare-retry.sh"
+WRANGLER_LOG=error cloudflare_retry "$wrangler" "${args[@]}"
 if bound; then state=true; else state=false; fi
 [[ $state == "$gateway" ]] || { echo "::error::Worker MAILGW_API_TOKEN bound=$state, but bane:mailGatewayEnabled=$gateway"; exit 1; }
 echo "Mail gateway: bane:mailGatewayEnabled=$gateway; Worker MAILGW_API_TOKEN bound=$state."
