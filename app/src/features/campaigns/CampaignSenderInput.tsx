@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { Input } from '../../components/ui'
+import { NamedAddress } from '../../components/PrivateAddress'
 import './sender-input.css'
 
 type Sender = { name: string; email: string }
@@ -52,6 +54,7 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(-1)
   const [touched, setTouched] = useState(false)
+  const [editing, setEditing] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLDivElement>(null)
   const listId = useId()
@@ -71,6 +74,13 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
     : parsed && !allowed(parsed) ? 'Choose an address on a verified domain.'
     : candidates.length ? 'Choose a sender address.' : 'Enter a valid sender email address.'
   const showError = touched && (!parsed || !allowed(parsed))
+  // A complete address is shown as PrivateAddress (masked until hovered, in full with privacy mode off, like every address in the dashboard) until the field is focused or clicked; the input stays mounted, hidden, so focus moves into it without a blur.
+  const masked = !editing && !!parsed
+  function edit() {
+    if (disabled) return
+    flushSync(() => setEditing(true))
+    input.current?.focus()
+  }
 
   useEffect(() => {
     if (expanded && activeIndex >= 0) list.current?.querySelectorAll('[role="option"]')[activeIndex]?.scrollIntoView({ block: 'nearest' })
@@ -102,9 +112,13 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
     setOpen(false)
     setActive(-1)
     setTouched(true)
+    setEditing(false)
     if (parsed && allowed(parsed)) choose(parsed, false)
   }}>
-    <Input ref={input} id="campaign-from-email" role="combobox" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false}
+    {masked && <div className="ui-input campaign-sender-mask" role="button" aria-label="From: edit sender" aria-disabled={disabled || undefined} tabIndex={disabled ? undefined : 0} onClick={edit} onFocus={edit}>
+      <span className="campaign-sender-mask__text"><NamedAddress name={parsed.name} address={parsed.email} /></span>
+    </div>}
+    <Input ref={input} hidden={masked || undefined} id="campaign-from-email" role="combobox" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false}
       placeholder={`Name <sender@${verified[0] ?? 'example.com'}>`} value={draft} maxLength={458} disabled={disabled} required
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
