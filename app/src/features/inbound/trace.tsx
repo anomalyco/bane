@@ -74,7 +74,7 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
           <pre className="trace-sample__mime">{sampleMime(value.to || 'support@acme.com').replace(/\r\n/g, '\n')}</pre>
         </div>
         : <Field label="Message" htmlFor="trace-paste" hint="The full message with its headers. Its To and Cc addresses are traced."><Textarea id="trace-paste" rows={8} spellCheck={false} value={value.mime} onChange={e => onChange({ mode: 'paste', mime: e.target.value })} placeholder={'From: ana@example.org\nTo: support@acme.com\nSubject: Invoice\n\nHello'} /></Field>}
-      {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail received yet, so a sample email stands in. Paste a message to trace your own.</p>}
+      {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail yet, so a sample email stands in. Paste a message to trace your own.</p>}
     </div>
   </div>
 }
@@ -243,12 +243,12 @@ export function TracePage() {
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
         <Input id="trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens (questions for Bane’s AI) give their default answer here; to set answers, try a ritual in its editor.</span></div>
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens (questions for Bane’s AI) give their default answer; to set answers, try a ritual in its editor.</span></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>
         : dry.result ? <TraceView result={dry.result} sources={sources} overview={overview.data} inboxes={new Map((options.data ?? []).map(a => [a.id, a.address]))} runId={dry.runId} />
-        : <EmptyState title="Pick an email and trace it" description="You’ll see which route it takes, each ritual’s conditions light up true or false, and where it ends up." action={<Link to="/receiving?tab=rituals">Rituals</Link>} />}
+        : <EmptyState title="Pick an email and trace it" description="See which route it takes, which ritual conditions are true or false, and where it ends up." action={<Link to="/receiving?tab=rituals">Rituals</Link>} />}
     </div>
     </>}
   </div>
