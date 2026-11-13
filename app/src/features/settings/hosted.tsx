@@ -14,6 +14,7 @@ import { openScoreAbout } from '../../lib/score-about'
 import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
 import { PlanUsage } from './usage'
+import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
 import { ActivitySection } from './activity'
 import { ContactSupportDialog } from '../../components/ContactSupport'
@@ -23,11 +24,11 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -56,6 +57,7 @@ export function HostedSettings() {
           {section === 'webhooks' && <WebhooksSection note={false} />}
           {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
+          {section === 'billing' && <BillingSection row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
         </>}
     </div>

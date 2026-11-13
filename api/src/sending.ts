@@ -2232,12 +2232,15 @@ export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':ca
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
  */
 /**
- * An internal notice from the platform workspace about one committed standing event. Its origin, standing:<event id>,
- * dispatches only from the configured platform workspace and only while that event exists (the dispatcher's claim);
+ * An internal notice from the platform workspace about one committed standing event or billing notice. Its origin,
+ * standing:<event id> or billing:<notice id>, dispatches only from the configured platform workspace and only while that
+ * row exists (the dispatcher's claim);
  * it is not a general system bypass. Idempotent per event.
  */
-export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string; standingEvent: string }) {
-  const a: Actor = { workspaceId, keyId: `standing:${mail.standingEvent}`, permissions: ['send'], domains: [], credential: 'apiKey' };
+export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string })) {
+  // The origin names the committed row the notice is about: a standing event, or a billing notice (billing_notices).
+  const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : `billing:${mail.billingNotice}`;
+  const a: Actor = { workspaceId, keyId: origin, permissions: ['send'], domains: [], credential: 'apiKey' };
   const values = new Map<string, unknown>([['actor', a]]);
   const c = { env: runtime, req: { path: '/v1/emails/batch', header: (name: string) => name.toLowerCase() === 'idempotency-key' ? mail.idempotencyKey : undefined },
     get: (key: string) => values.get(key), set: (key: string, value: unknown) => { values.set(key, value); } } as unknown as Ctx;

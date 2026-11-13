@@ -610,9 +610,16 @@ async function sendRefund(runtime: Runtime, refundId: string): Promise<string> {
  * Refunds paid credit from a succeeded top-up (operator only). The amount is held in the ledger before Stripe is
  * called (#4224), so the balance can't be spent twice; promotional credit is never refundable (#3991).
  */
-export async function refundTopUp(runtime: Runtime, input: { workspaceId: string; attemptId: string; amountCents?: number; reason: string; operator: string }): Promise<{ refundId: string; status: string }> {
+/** `onHeld` runs inside the transaction that holds the refund (the refund_hold ledger row), so a caller's own record
+ *  of it (the operator audit) commits or rolls back with the money. */
+/** Why a top-up is refunded. Unused credit is not refundable except for a billing error, an account Anomaly closes
+ *  without cause, or where the law requires it (Ryan, 2026-11-12). */
+export type RefundBasis = 'billing_error' | 'account_closure' | 'legal';
+export async function refundTopUp(runtime: Runtime, input: { workspaceId: string; attemptId: string; amountCents?: number; basis: RefundBasis; reason: string; operator: string;
+  onHeld?: (tx: DbExecutor, held: { refundId: string; amountUc: bigint }) => Promise<void> }): Promise<{ refundId: string; status: string }> {
   stripeConfig(runtime);
   if (input.amountCents !== undefined && (!Number.isInteger(input.amountCents) || input.amountCents < 1)) throw new ApiError(422, 'REFUND_AMOUNT_INVALID', 'Refund a whole number of cents.', 'amountCents');
+  if (!['billing_error', 'account_closure', 'legal'].includes(input.basis)) throw new ApiError(422, 'REFUND_BASIS_REQUIRED', 'Unused credit is refunded only for a billing error, an account Anomaly closes, or a legal requirement.', 'basis');
   const refundId = await runtime.db.transaction(async tx => {
     await lockAccount(tx, input.workspaceId);
     // Usage not settled yet is owed too (finding 3): settlement takes promotional credit first, so the paid credit
@@ -629,8 +636,9 @@ export async function refundTopUp(runtime: Runtime, input: { workspaceId: string
     const amount = input.amountCents === undefined ? refundable : BigInt(input.amountCents) * UC_PER_CENT;
     if (amount <= 0n || amount > refundable) throw new ApiError(409, 'REFUND_EXCEEDS_BALANCE', `At most ${cents(refundable)}¢ of this payment can be refunded: refunds come only from paid credit not yet spent, including usage that is not settled yet.`, 'amountCents');
     const refund = id('brf');
-    await tx.execute(sql`INSERT INTO billing_refunds(id,workspace_id,attempt_id,amount_uc,status,reason,operator) VALUES (${refund},${input.workspaceId},${a.id},${amount},'held',${input.reason.slice(0, 500)},${input.operator})`);
-    await tx.execute(sql`SELECT billing_post(${input.workspaceId}, 'refund_hold', ${'refund:' + refund}, ${-amount}::bigint, 0::bigint, ${JSON.stringify({ refundId: refund, attemptId: a.id, reason: input.reason.slice(0, 500) })}::jsonb, ${input.operator})`);
+    await tx.execute(sql`INSERT INTO billing_refunds(id,workspace_id,attempt_id,amount_uc,status,reason,operator) VALUES (${refund},${input.workspaceId},${a.id},${amount},'held',${`${input.basis}: ${input.reason}`.slice(0, 500)},${input.operator})`);
+    await tx.execute(sql`SELECT billing_post(${input.workspaceId}, 'refund_hold', ${'refund:' + refund}, ${-amount}::bigint, 0::bigint, ${JSON.stringify({ refundId: refund, attemptId: a.id, basis: input.basis, reason: input.reason.slice(0, 500) })}::jsonb, ${input.operator})`);
+    await input.onHeld?.(tx, { refundId: refund, amountUc: amount });
     return refund;
   });
   try { return { refundId, status: await sendRefund(runtime, refundId) }; }

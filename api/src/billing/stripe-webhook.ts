@@ -152,6 +152,9 @@ export async function receiveStripeEvent(runtime: Runtime, event: StripeObject):
 /** POST /v1/billing/stripe: unauthenticated (the Stripe signature is the credential), hidden from OpenAPI, 512 KB. */
 export function registerStripeWebhook(app: App): void {
   app.post('/v1/billing/stripe', async c => {
+    // The signature is the credential: a request without one stops here, before the configuration is consulted, so an
+    // anonymous caller gets 400 whether or not payments are set up. A signed event without the keys gets 503 (Stripe retries).
+    if (c.env.config.multiTenant && !c.req.header('stripe-signature')) throw new ApiError(400, 'STRIPE_SIGNATURE_INVALID', 'The Stripe-Signature header does not match this request.');
     const cfg = stripeConfig(c.env);
     const body = await c.req.text();
     if (body.length > MAX_BODY) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 512 KiB limit.');

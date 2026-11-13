@@ -564,12 +564,12 @@ export function registerSupport(app: App) {
     ledger: z.array(z.record(z.string(), z.unknown())).describe('The latest 50 ledger entries: top-ups, usage, refunds, disputes, credits.') })) }).openapi('SupportBilling');
   app.openapi(createRoute({ ...meta('getSupportBilling', 'Balance, payments and the billing ledger of the workspaces the customer owns or administers.'), path: '/v1/support/billing', request: { query: WorkspaceFilter }, responses: { 200: response(Billing), ...errors } }), async c => {
     const list = scoped(c, ['owner', 'admin']).ids, db = c.env.db;
-    // TODO(billing): the ledger tables come with the billing build (plans/billing-build-spec.md); read through to_jsonb so their exact columns don't matter here.
-    const { rows: [tables] } = await db.execute<{ accounts: boolean; ledger: boolean }>(sql`SELECT to_regclass('billing_accounts') IS NOT NULL AS accounts, to_regclass('billing_transactions') IS NOT NULL AS ledger`);
+    // The billing tables (migrations 291–302), read through to_jsonb; Stripe's customer and card IDs stay out.
+    const { rows: [tables] } = await db.execute<{ accounts: boolean; ledger: boolean }>(sql`SELECT to_regclass('billing_accounts') IS NOT NULL AS accounts, to_regclass('billing_ledger') IS NOT NULL AS ledger`);
     if (!tables?.ledger || !list.length) return c.json({ available: !!tables?.ledger, data: [] }, 200);
     const { rows } = await db.execute<{ workspaceId: string; account: Record<string, unknown> | null; ledger: Record<string, unknown>[] }>(sql`SELECT w.id AS "workspaceId",
-      ${tables.accounts ? sql`(SELECT to_jsonb(a) - 'stripe_customer' - 'reload_payment_method' FROM billing_accounts a WHERE a.workspace_id = w.id)` : sql`NULL::jsonb`} AS account,
-      coalesce((SELECT jsonb_agg(to_jsonb(b) - 'workspace_id') FROM (SELECT * FROM billing_transactions b WHERE b.workspace_id = w.id ORDER BY b.id DESC LIMIT 50) b), '[]') AS ledger
+      ${tables.accounts ? sql`(SELECT to_jsonb(a) - 'stripe_customer' - 'stripe_payment_method' - 'card_fingerprint' FROM billing_accounts a WHERE a.workspace_id = w.id)` : sql`NULL::jsonb`} AS account,
+      coalesce((SELECT jsonb_agg(to_jsonb(b) - 'workspace_id') FROM (SELECT * FROM billing_ledger b WHERE b.workspace_id = w.id ORDER BY b.id DESC LIMIT 50) b), '[]') AS ledger
       FROM workspaces w WHERE w.id = ANY(${ids(list)})`);
     return c.json({ available: true, data: rows }, 200);
   });

@@ -44,7 +44,7 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through the router's
 // history. It must land on `path`.
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
-// still onboarding, rae a restricted one (the standing banner on every page).
+// still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
   ['Overview', '/', { from: '/logs' }],
@@ -85,6 +85,9 @@ const pages = ids => [
   ['Settings · activity', '/settings#activity', { from: '/settings' }],
   ['Settings · account', '/settings#account', { from: '/settings' }],
   ['Settings · plan & usage', '/settings#usage', { from: '/settings' }],
+  ['Settings · billing', '/settings#billing', { from: '/settings' }],
+  ['Settings · billing · owed', '/settings#billing', { user: 'rae', from: '/' }],
+  ['Settings · billing · free', '/settings#billing', { user: 'nia', from: '/' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
   ['Settings · MCP connection', `/settings/mcp/${ids.mcp}`, { from: '/settings#account' }],
   ['Docs', '/docs', { from: '/' }],
@@ -108,7 +111,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },

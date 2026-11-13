@@ -1756,24 +1756,28 @@ export type SenderStandingRelease = {
 export type Usage = {
     billing: {
         /**
-         * Billing is not on yet: nothing is charged, and the prices below are information only.
+         * Usage is taken from the prepaid balance (enforcement is enforce).
          */
-        enabled: false;
+        enabled: boolean;
+        /**
+         * off or shadow: nothing is charged yet (shadow records what would be); enforce: usage is charged hourly. The balance is GET /v1/billing.
+         */
+        enforcement: 'off' | 'shadow' | 'enforce';
     };
     pricing: {
         currency: 'USD';
         /**
-         * Price per 1,000 messages, sent or received. SES mailbox simulator sends count like any other send.
+         * Price per 1,000 emails: each recipient of a sent email, each received message. SES mailbox simulator sends count like any other send.
          */
         perThousand: number;
         /**
-         * Sent messages included free each calendar month (UTC).
+         * Emails included free each calendar month (UTC), sent and received combined.
          */
-        freeSent: number;
+        freeEmails: number;
         /**
-         * Received messages included free each calendar month (UTC).
+         * Bytes of received mail older than 90 days stored free.
          */
-        freeReceived: number;
+        freeStorageBytes: number;
     };
     month: {
         /**
@@ -5238,6 +5242,180 @@ export type SupportAudienceHealth = {
     findings: Array<SupportFinding>;
 };
 
+export type BillingSummary = {
+    /**
+     * off: nothing is metered for billing. shadow: usage is recorded and priced but nothing is charged. enforce: usage is taken from the balance hourly.
+     */
+    enforcement: 'off' | 'shadow' | 'enforce';
+    mode: 'prepaid' | 'invoiced' | 'exempt';
+    state: {
+        /**
+         * paused: sends get 402 BALANCE_EXHAUSTED until credit is added.
+         */
+        sending: 'ok' | 'low' | 'paused';
+        /**
+         * grace: the balance is below $0 and received mail is still accepted; held: new received mail is stored but not delivered until a top-up.
+         */
+        receiving: 'ok' | 'grace' | 'held';
+        autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';
+    };
+    /**
+     * Null unless the caller is an owner or admin session, or a manage key or grant.
+     */
+    balance: {
+        paid: MicroCents;
+        promo: MicroCents & unknown;
+        unsettled: MicroCents & unknown;
+        available: MicroCents & unknown;
+    } | null;
+    free: {
+        month: string;
+        emails: {
+            limit: number;
+            used: number;
+            left: number;
+        };
+        storage: {
+            limitBytes: number;
+            /**
+             * Bytes of received mail older than 90 days.
+             */
+            agedBytes: string;
+        };
+    };
+    monthToDate: {
+        cost: MicroCents & unknown;
+    } | null;
+    grace: {
+        unpaidSince: string | null;
+        receiveHoldAt: string | null;
+        writeOffAt: string | null;
+    };
+    autoRecharge: {
+        enabled: boolean;
+        thresholdCents: number;
+        amountCents: number;
+        monthlyCapCents: number;
+        monthTotalCents: number;
+        /**
+         * Why Bane turned auto-recharge off (a card decline code, dispute or a removed card).
+         */
+        disabledReason: string | null;
+        pending: boolean;
+    } | null;
+    paymentMethod: {
+        brand: string;
+        last4: string;
+        expMonth: number;
+        expYear: number;
+    } | null;
+    prices: {
+        /**
+         * USD per 1,000 emails, sent (per recipient) or received (per message).
+         */
+        emailPerThousand: string;
+        omenPerThousand: string;
+        /**
+         * USD per GB-month for received mail older than 90 days, beyond the free GB.
+         */
+        storagePerGbMonth: string;
+        freeEmails: number;
+        freeStorageBytes: number;
+        topUpMinCents: number;
+        currency: 'USD';
+    };
+    /**
+     * Where a person adds credit.
+     */
+    topUpUrl: string;
+    /**
+     * Set when Anomaly made this workspace free (mode exempt): nothing is charged and sending never pauses for the balance. Usage is still measured, and monthToDate shows what it would cost.
+     */
+    freePlan: {
+        /**
+         * When the free plan ends; null: no end date.
+         */
+        until: string | null;
+    } | null;
+};
+
+/**
+ * Integer micro-cents (1¢ = 1,000,000) as a string.
+ */
+export type MicroCents = string;
+
+export type BillingUsagePoint = {
+    /**
+     * Start of the period, UTC.
+     */
+    start: string;
+    meter: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
+    /**
+     * send: recipients; receive: messages; omen: evaluations; storage: billable byte-days beyond the free GB; byo_*: reported only, $0.
+     */
+    quantity: string;
+};
+
+export type BillingLedgerEntry = {
+    id: string;
+    at: string;
+    kind: 'topup' | 'usage' | 'grant' | 'refund_hold' | 'refund_release' | 'dispute' | 'dispute_reversal' | 'write_off' | 'adjustment' | 'expire';
+    amount: MicroCents & unknown;
+    paid: MicroCents;
+    promo: MicroCents;
+    balanceAfter: MicroCents & unknown;
+    description: string;
+    detail: {
+        [key: string]: unknown;
+    };
+    paymentId: string | null;
+    invoiceUrl: string | null;
+    /**
+     * For a top-up: when its remaining credit expires, 12 months after purchase. Unused credit is not refundable.
+     */
+    expiresAt: string | null;
+};
+
+export type BillingPayment = {
+    id: string;
+    at: string;
+    kind: 'checkout' | 'saved_card' | 'recharge' | 'setup';
+    status: 'created' | 'pending' | 'requires_action' | 'succeeded' | 'failed' | 'canceled' | 'expired';
+    /**
+     * Credit bought, excluding tax.
+     */
+    amountCents: number;
+    taxCents: number | null;
+    totalCents: number | null;
+    card: {
+        brand: string;
+        last4: string;
+    } | null;
+    invoiceUrl: string | null;
+    invoicePdf: string | null;
+    receiptUrl: string | null;
+    failure: {
+        code: string;
+        message: string;
+    } | null;
+};
+
+export type BillingAutoRecharge = {
+    enabled: boolean;
+    /**
+     * Recharge when the balance falls below this ($5 to $1,000).
+     */
+    thresholdCents: number;
+    /**
+     * Credit to add each time ($20 to $1,000).
+     */
+    amountCents: number;
+    /**
+     * At most this much auto-recharge per calendar month (UTC), at least amountCents.
+     */
+    monthlyCapCents: number;
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -5515,6 +5693,19 @@ export type GetCurrentIdentityResponses = {
          * Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.
          */
         operator?: 'operator' | 'operator:read' | null;
+        /**
+         * Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.
+         */
+        billing?: {
+            enforcement: 'off' | 'shadow' | 'enforce';
+            /**
+             * Anomaly made this workspace free: never charged or paused for the balance.
+             */
+            free: boolean;
+            sending: 'ok' | 'low' | 'paused';
+            receiving: 'ok' | 'grace' | 'held';
+            autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped';
+        } | null;
     };
 };
 
@@ -23287,3 +23478,669 @@ export type GetSupportAudienceHealthResponses = {
 };
 
 export type GetSupportAudienceHealthResponse = GetSupportAudienceHealthResponses[keyof GetSupportAudienceHealthResponses];
+
+export type GetBillingData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/billing';
+};
+
+export type GetBillingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetBillingError = GetBillingErrors[keyof GetBillingErrors];
+
+export type GetBillingResponses = {
+    /**
+     * Success
+     */
+    200: BillingSummary;
+};
+
+export type GetBillingResponse = GetBillingResponses[keyof GetBillingResponses];
+
+export type GetBillingUsageData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * First day, UTC (default: the first of this month).
+         */
+        from?: string;
+        /**
+         * Last day, inclusive (default: today).
+         */
+        to?: string;
+        granularity?: 'hour' | 'day' | 'month';
+        meter?: 'send' | 'receive' | 'omen' | 'storage' | 'byo_send' | 'byo_receive';
+    };
+    url: '/v1/billing/usage';
+};
+
+export type GetBillingUsageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetBillingUsageError = GetBillingUsageErrors[keyof GetBillingUsageErrors];
+
+export type GetBillingUsageResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<BillingUsagePoint>;
+    };
+};
+
+export type GetBillingUsageResponse = GetBillingUsageResponses[keyof GetBillingUsageResponses];
+
+export type ListBillingLedgerData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/billing/ledger';
+};
+
+export type ListBillingLedgerErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListBillingLedgerError = ListBillingLedgerErrors[keyof ListBillingLedgerErrors];
+
+export type ListBillingLedgerResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<BillingLedgerEntry>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListBillingLedgerResponse = ListBillingLedgerResponses[keyof ListBillingLedgerResponses];
+
+export type ListBillingPaymentsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * nextCursor from the previous page.
+         */
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/billing/payments';
+};
+
+export type ListBillingPaymentsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListBillingPaymentsError = ListBillingPaymentsErrors[keyof ListBillingPaymentsErrors];
+
+export type ListBillingPaymentsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<BillingPayment>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListBillingPaymentsResponse = ListBillingPaymentsResponses[keyof ListBillingPaymentsResponses];
+
+export type GetBillingPaymentData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/billing/payments/{id}';
+};
+
+export type GetBillingPaymentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetBillingPaymentError = GetBillingPaymentErrors[keyof GetBillingPaymentErrors];
+
+export type GetBillingPaymentResponses = {
+    /**
+     * Success
+     */
+    200: BillingPayment;
+};
+
+export type GetBillingPaymentResponse = GetBillingPaymentResponses[keyof GetBillingPaymentResponses];
+
+export type CreateBillingTopUpData = {
+    body: {
+        /**
+         * Whole US cents, $20 to $10,000, excluding tax.
+         */
+        amountCents: number;
+        method: 'checkout' | 'saved_card';
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/billing/top-ups';
+};
+
+export type CreateBillingTopUpErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateBillingTopUpError = CreateBillingTopUpErrors[keyof CreateBillingTopUpErrors];
+
+export type CreateBillingTopUpResponses = {
+    /**
+     * Success
+     */
+    201: {
+        attemptId: string;
+        status: 'created' | 'pending' | 'requires_action' | 'succeeded' | 'failed' | 'canceled' | 'expired';
+        checkoutUrl: string | null;
+        expiresAt: string | null;
+    };
+};
+
+export type CreateBillingTopUpResponse = CreateBillingTopUpResponses[keyof CreateBillingTopUpResponses];
+
+export type CreateBillingTopUpLinkData = {
+    body: {
+        /**
+         * Whole US cents, $20 to $10,000, excluding tax.
+         */
+        amountCents: number;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/billing/top-up-links';
+};
+
+export type CreateBillingTopUpLinkErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateBillingTopUpLinkError = CreateBillingTopUpLinkErrors[keyof CreateBillingTopUpLinkErrors];
+
+export type CreateBillingTopUpLinkResponses = {
+    /**
+     * Success
+     */
+    201: {
+        attemptId: string;
+        url: string;
+        expiresAt: string;
+    };
+};
+
+export type CreateBillingTopUpLinkResponse = CreateBillingTopUpLinkResponses[keyof CreateBillingTopUpLinkResponses];
+
+export type UpdateBillingAutoRechargeData = {
+    body: BillingAutoRecharge;
+    path?: never;
+    query?: never;
+    url: '/v1/billing/auto-recharge';
+};
+
+export type UpdateBillingAutoRechargeErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateBillingAutoRechargeError = UpdateBillingAutoRechargeErrors[keyof UpdateBillingAutoRechargeErrors];
+
+export type UpdateBillingAutoRechargeResponses = {
+    /**
+     * Success
+     */
+    200: BillingSummary;
+};
+
+export type UpdateBillingAutoRechargeResponse = UpdateBillingAutoRechargeResponses[keyof UpdateBillingAutoRechargeResponses];
+
+export type DeleteBillingPaymentMethodData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/billing/payment-method';
+};
+
+export type DeleteBillingPaymentMethodErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteBillingPaymentMethodError = DeleteBillingPaymentMethodErrors[keyof DeleteBillingPaymentMethodErrors];
+
+export type DeleteBillingPaymentMethodResponses = {
+    /**
+     * Success
+     */
+    200: BillingSummary;
+};
+
+export type DeleteBillingPaymentMethodResponse = DeleteBillingPaymentMethodResponses[keyof DeleteBillingPaymentMethodResponses];
+
+export type CreateBillingCardSetupData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/billing/payment-method';
+};
+
+export type CreateBillingCardSetupErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateBillingCardSetupError = CreateBillingCardSetupErrors[keyof CreateBillingCardSetupErrors];
+
+export type CreateBillingCardSetupResponses = {
+    /**
+     * Success
+     */
+    201: {
+        checkoutUrl: string;
+        expiresAt: string;
+    };
+};
+
+export type CreateBillingCardSetupResponse = CreateBillingCardSetupResponses[keyof CreateBillingCardSetupResponses];

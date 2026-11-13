@@ -14,6 +14,7 @@ import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { AccountSwitcher } from './AccountSwitcher'
 import { StandingBanner } from './StandingBanner'
+import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
@@ -183,6 +184,7 @@ export function AppShell() {
   </>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <StandingBanner />
+    <BillingBanner />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
       {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
         : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />

@@ -50,11 +50,13 @@ const labels: Record<string, string> = {
   'campaign.pause': 'Paused a campaign', 'campaign.resume': 'Resumed a campaign', 'campaign.cancel': 'Cancelled a campaign', 'audience.bulk_apply': 'Changed contacts in bulk',
   'sending.pause': 'Paused sending', 'sending.resume': 'Resumed sending',
   'support.contact': 'You contacted support', 'support.view': 'Viewed this workspace',
+  'billing.topup': 'Added credit', 'billing.grant': 'Promotional credit from Bane', 'billing.adjustment': 'Adjustment by Bane', 'billing.refund_release': 'Refund canceled: credit restored',
+  'billing.dispute': 'Card payment disputed', 'billing.dispute_reversal': 'Dispute closed: credit restored', 'billing.write_off': 'Unpaid balance written off', 'billing.expire': 'Credit expired',
 }
 export const actionLabel = (action: string) => labels[action] ?? action
 // The area filter: each option is one action prefix, which the API takes as `action=<area>.`.
 export const activityAreas: { value: string; label: string }[] = [
   ['member.', 'Members'], ['workspace.', 'Workspace'], ['settings.', 'Settings'], ['api_key.', 'API keys'], ['agent_token.', 'Agent tokens'], ['inbox_key.', 'Inbox keys'], ['app_password.', 'App passwords'],
   ['domain.', 'Domains'], ['inbound_domain.', 'Receiving domains'], ['address.', 'Addresses'], ['inbox.', 'Inboxes'], ['webhook.', 'Webhooks'], ['inbound_webhook.', 'Inbound webhooks'],
-  ['endpoint.', 'Endpoints'], ['route.', 'Routes'], ['ritual.', 'Rituals'], ['connection.', 'Sending connection'], ['campaign.', 'Campaigns'], ['support.', 'Support'],
+  ['endpoint.', 'Endpoints'], ['route.', 'Routes'], ['ritual.', 'Rituals'], ['connection.', 'Sending connection'], ['campaign.', 'Campaigns'], ['billing.', 'Billing'], ['support.', 'Support'],
 ].map(([value, label]) => ({ value, label }))

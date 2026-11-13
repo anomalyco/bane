@@ -450,13 +450,13 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
   const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools:plain}}));
   // Budget the full-grant JSON-RPC response, including discovery, not just an ordinary manage grant.
-  assert.equal(plain.length, 29); assert.ok(bytes <= 50_000, `${bytes} bytes`);
+  assert.equal(plain.length, 30); assert.ok(bytes <= 50_000, `${bytes} bytes`);
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
@@ -941,6 +941,13 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   const listed = await (await request('/api/auth/accounts','GET',undefined,as(personal))).json() as {accounts:{id:string;email:string;workspaces:{id:string}[]}[];active:string;limit:number};
   assert.deepEqual(listed.accounts.map(a=>[a.id,a.email,a.workspaces.map(w=>w.id)]),[[personal.id,personal.email,[personal.workspace]],[work.id,work.email,[work.workspace]]]);
   assert.deepEqual([listed.active,listed.limit],[personal.id,5]);
+  // Billing's free-account flag binds to one account's issuer subject: in a shared browser it frees that account's
+  // workspaces only, whichever account the tab is on.
+  const free = async (p: Person) => ((await (await request('/v1/me','GET',undefined,as(p))).json()) as {billing:{free:boolean}|null}).billing?.free;
+  await db.query(`SELECT billing_set_person_free($1, true, 'Anomaly staff account', NULL, 'script')`, [work.id]);
+  assert.deepEqual([await free(personal), await free(work), (await db.query('SELECT count(*)::int AS n FROM billing_free_people WHERE issuer=$1 AND subject=$2', [issuer, work.subject])).rows[0].n], [false, true, 1]);
+  await db.query(`SELECT billing_set_person_free($1, false, 'Anomaly staff account', NULL, 'script')`, [work.id]);
+  assert.deepEqual([await free(personal), await free(work)], [false, false]);
 
   // No route answers one account with the other's data. Each account creates marked records, then every GET route
   // without a path parameter is read as each account, with and without the other's workspace named.
@@ -3228,7 +3235,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      assert.equal(fullListing.result.tools.length, 29); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 30); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -7328,7 +7335,7 @@ describe('Billing: Stripe', () => {
   });
 
   test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
-    const { db, deliver, send } = await stripeFixture(t);
+    const { runtime, db, deliver, send } = await stripeFixture(t);
     const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
     for (const [options, code] of [[{ secret: 'whsec_other' }, 'STRIPE_SIGNATURE_INVALID'], [{ t: Math.floor(Date.now() / 1000) - 301 }, 'STRIPE_SIGNATURE_INVALID'],
       [{ t: Math.floor(Date.now() / 1000) + 301 }, 'STRIPE_SIGNATURE_INVALID'], [{ livemode: true }, 'STRIPE_LIVEMODE_MISMATCH']] as const) {
@@ -7339,6 +7346,14 @@ describe('Billing: Stripe', () => {
     const signed = await signedStripeEvent('checkout.session.completed', object);
     assert.equal((await send(signed.body.replace('"paid"', '"unpaid"'), signed.signature)).status, 400, 'The signature covers the exact body.');
     assert.equal((await send(signed.body)).status, 400, 'The signature header is required.');
+    // Without the Stripe keys an unsigned request is still refused at authentication; a signed one gets 503 so Stripe retries.
+    const keys = runtime.config.billing;
+    runtime.config.billing = {};
+    try {
+      assert.equal((await send(signed.body)).status, 400);
+      const waiting = await send(signed.body, signed.signature);
+      assert.deepEqual([waiting.status, ((await waiting.json()) as Json).error.code], [503, 'BILLING_NOT_CONFIGURED']);
+    } finally { runtime.config.billing = keys; }
     assert.equal((await send(signed.body, `${signed.signature.replace(/v1=.*/, 'v1=' + '0'.repeat(64))},${signed.signature.split(',')[1]}`)).status, 200, 'Any v1 may match (secret rotation).');
     for (const [type, foreign] of [['checkout.session.completed', object], ['customer.created', { id: 'cus_other', object: 'customer' }], ['charge.dispute.created', { id: 'dp_other', payment_intent: 'pi_console', amount: 100 }]] as const) {
       const reply = await deliver(type, foreign);
@@ -7493,7 +7508,7 @@ describe('Billing: Stripe', () => {
     const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
     await post('usage', `usage:${wid}:spent`, -2000n * UC);
-    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
     await assert.rejects(refund(3001), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
     let heldWhenCalled: string[] = [];
     fake.onRequest = async (method, path) => { if (method === 'POST' && path === '/v1/credit_notes') heldWhenCalled = (await ledger()).map(r => r.kind); };
@@ -7518,7 +7533,7 @@ describe('Billing: Stripe', () => {
     const second = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
     await deliver('checkout.session.completed', fake.payCheckout((await attempt(second.attemptId)).stripe_checkout_session));
     fake.refundStatus = 'pending';
-    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, reason: 'Synthetic refund', operator: 'operator:fixture' });
+    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
     assert.equal(slow.status, 'pending');
     assert.equal((await account()).balance, String(2000n * UC));
     const stripeRefund = (await db.query('SELECT stripe_refund FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].stripe_refund;
@@ -7633,7 +7648,7 @@ describe('Billing: Stripe', () => {
     await db.query('UPDATE billing_accounts SET free_emails_used = 3000 WHERE workspace_id = $1', [wid]);
     await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
     assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
-    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, reason: 'Unused credit', operator: 'operator:fixture' });
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Unused credit', operator: 'operator:fixture' });
     await assert.rejects(refund(201), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
     const done = await refund();
     assert.equal(done.status, 'succeeded');
@@ -7783,6 +7798,407 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(audit.length, 2, 'Initial subscription plus first provider POST must remain the only consent decisions after repeated POST and GET.');
     assert.equal(audit.filter(row => row.source === 'rfc8058-post').length, 1);
     assert.equal(audit.filter(row => row.source === 'footer-get').length, 0, 'Later footer navigation must not relabel provider-originated consent.');
+  });
+});
+
+describe('Billing: API, MCP and notices', () => {
+  // A Hosted workspace with a shared connection; billing_config and billing_accounts start at their migration defaults.
+  async function hostedBilling(runtime: import('./src/core.js').Runtime, db: pg.Client) {
+    const wid = runtime.config.workspaceId, pool = '111122223333';
+    Object.assign(runtime.config, { multiTenant: true });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    return wid;
+  }
+  const enforcement = (db: pg.Client, mode: 'off' | 'shadow' | 'enforce') => db.query('UPDATE billing_config SET mode=$1 WHERE singleton', [mode]);
+  const credit = (db: pg.Client, wid: string, kind: string, source: string, paid: bigint, promo = 0n, detail: Json = {}) =>
+    db.query(`SELECT billing_post($1,$2,$3,$4::bigint,$5::bigint,$6::jsonb,'stripe') AS r`, [wid, kind, source, paid.toString(), promo.toString(), JSON.stringify(detail)]).then(r => r.rows[0].r);
+  const asRole = async (db: pg.Client, wid: string, role: string) => db.query('UPDATE workspace_members SET role=$3 WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId, role]);
+
+  test('permissions: amounts and ledger for owners, admins and manage credentials; money moves only from an owner or admin session', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      error(await local('GET', '/v1/billing'), 404, 'NOT_FOUND'); // Hosted only.
+      await hostedBilling(runtime, db);
+      await enforcement(db, 'enforce');
+      await credit(db, wid, 'topup', 'attempt:bpa_fixture_one', 2_500_000_000n);
+      await credit(db, wid, 'grant', 'grant:fixture-promo', 0n, 500_000_000n);
+      await db.query(`SELECT billing_post($1,'usage','usage:fixture',-1240000::bigint*20,0,'{"meters":{"send":{"quantity":1000},"receive":{"quantity":240}},"costUc":"24800000","charged":true,"from":"2026-11-12T13:00:00+00:00","to":"2026-11-12T15:00:00+00:00"}','system')`, [wid]);
+      await credit(db, wid, 'adjustment', 'adjustment:fixture-internal', 100_000_000n, 0n, { reason: 'Internal note never shown to customers', ticketRef: 'T-1' });
+      const key = (permissions: string[], domains: string[] = []) => local('POST', '/v1/api-keys', { name: unique('billing'), permissions, domains }).then(r => { const k = ok(r, 201); secrets.add(k.secret); return k.secret as string; });
+      const manage = await key(['manage']), reader = await key(['read']), scoped = await key(['manage'], ['billing.example']);
+
+      // Owner session: amounts, the ledger in plain words (operator notes stay internal), and /v1/me carries the state.
+      const owner = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([owner.enforcement, owner.mode, owner.state, owner.balance.paid, owner.balance.promo], ['enforce', 'prepaid', { sending: 'ok', receiving: 'ok', autoRecharge: 'off' }, '2575200000', '500000000']);
+      assert.deepEqual([owner.free.emails.limit, owner.prices.emailPerThousand, owner.topUpUrl], [3000, '0.20', `${PUBLIC_ORIGIN}/settings#billing`]);
+      const ledger = page(await local('GET', '/v1/billing/ledger?limit=3'));
+      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Bane'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Bane']]);
+      assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
+      const rest = ok(await local('GET', `/v1/billing/ledger?cursor=${ok(await local('GET', '/v1/billing/ledger?limit=3')).nextCursor}`));
+      assert.deepEqual([rest.data.map((e: Json) => [e.kind, e.paymentId, e.balanceAfter]), rest.nextCursor], [[['topup', 'bpa_fixture_one', '2500000000']], null]);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).billing, { enforcement: 'enforce', free: false, sending: 'ok', receiving: 'ok', autoRecharge: 'off' });
+      assert.equal(ok(await request('GET', '/v1/me', manage)).billing, null, 'Only dashboard sessions carry it.');
+
+      // A manage key reads amounts and may ask for a top-up link (Stripe isn't configured here), never charge a card.
+      assert.equal(ok(await request('GET', '/v1/billing', manage)).balance.available, owner.balance.available);
+      assert.equal(page(await request('GET', '/v1/billing/ledger', manage)).length, 4);
+      error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }), 503, 'BILLING_NOT_CONFIGURED');
+      error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 1999 }), 422, 'VALIDATION_FAILED');
+      for (const [method, path, body] of [['POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'saved_card' }], ['PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }],
+        ['POST', '/v1/billing/payment-method', undefined], ['DELETE', '/v1/billing/payment-method', undefined]] as const)
+        error(await request(method, path, manage, body), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Read-only keys see the state without amounts; domain-restricted keys see nothing.
+      const read = ok(await request('GET', '/v1/billing', reader));
+      assert.deepEqual([read.balance, read.monthToDate, read.autoRecharge, read.paymentMethod, read.state.sending], [null, null, null, null, 'ok']);
+      error(await request('GET', '/v1/billing/ledger', reader), 403, 'PERMISSION_DENIED');
+      error(await request('GET', '/v1/billing/payments', reader), 403, 'PERMISSION_DENIED');
+      error(await request('POST', '/v1/billing/top-up-links', reader, { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
+      for (const path of ['/v1/billing', '/v1/billing/usage', '/v1/billing/ledger']) error(await request('GET', path, scoped), 403, 'UNRESTRICTED_KEY_REQUIRED');
+
+      // The owner session reaches package B (not configured here); a member is refused everything that moves money.
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 2000 }), 422, 'VALIDATION_FAILED');
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 503, 'BILLING_NOT_CONFIGURED');
+      error(await local('POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'checkout' }), 503, 'BILLING_NOT_CONFIGURED');
+      await asRole(db, wid, 'member');
+      try {
+        const member = ok(await local('GET', '/v1/billing'));
+        assert.deepEqual([member.balance, member.state.sending], [null, 'ok']);
+        error(await local('GET', '/v1/billing/ledger'), 403, 'PERMISSION_DENIED');
+        error(await local('POST', '/v1/billing/top-up-links', { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
+        for (const [method, path, body] of [['POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'checkout' }], ['PUT', '/v1/billing/auto-recharge', { enabled: false, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }],
+          ['POST', '/v1/billing/payment-method', undefined], ['DELETE', '/v1/billing/payment-method', undefined]] as const)
+          error(await local(method, path, body), 403, 'PERMISSION_DENIED');
+      } finally { await asRole(db, wid, 'owner'); }
+
+      // The state follows the balance: debt pauses sending (enforced, prepaid) and starts the received-mail grace.
+      await db.query(`SELECT billing_post($1,'usage','usage:fixture-debt',-3000000000,-500000000,'{}','system')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=3000 WHERE workspace_id=$1`, [wid]);
+      const paused = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([paused.state.sending, paused.state.receiving, typeof paused.grace.receiveHoldAt], ['paused', 'grace', 'string']);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).billing.sending, 'paused');
+      await enforcement(db, 'shadow');
+      assert.equal(ok(await local('GET', '/v1/billing')).state.sending, 'low', 'Shadow never pauses.');
+    });
+  });
+
+  test('money routes reach Stripe: a manage key gets a top-up link once per Idempotency-Key; the owner pays, saves the card, sets auto-recharge and removes the card', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const wid = await hostedBilling(runtime, db);
+      runtime.config.billing = { stripe: { secretKey: 'sk_test_fake', webhookSecret: STRIPE_TEST_WEBHOOK_SECRET, automaticTax: false, apiBase: STRIPE_TEST_BASE } };
+      // The fixture's own fetch guard stays outside: Stripe is faked for this subtest only.
+      await t.test('through the fake Stripe', async st => {
+        const fake = fakeStripe(st, () => false);
+        const manage = ok(await local('POST', '/v1/api-keys', { name: 'Billing agent', permissions: ['manage'] }), 201).secret; secrets.add(manage);
+        const link = await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' });
+        const first = ok(link, 201);
+        assert.match(first.url, /^https:\/\/checkout\.stripe\.test\//);
+        assert.deepEqual(ok(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' }), 201), first, 'A retry returns the same link.');
+        error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 6000 }, { 'Idempotency-Key': 'link-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        assert.equal(fake.count(/^POST \/v1\/checkout\/sessions$/), 1);
+        const pending = ok(await request('GET', `/v1/billing/payments/${first.attemptId}`, manage));
+        assert.deepEqual([pending.kind, pending.status, pending.amountCents], ['checkout', 'pending', 5000]);
+        assert.equal((await db.query('SELECT created_by FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].created_by.startsWith('key:'), true);
+        // Without a saved card, auto-recharge can't be turned on.
+        error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 409, 'PAYMENT_METHOD_REQUIRED');
+        // A person pays on the Checkout page; Stripe's webhook credits it and saves the card.
+        const session = (await db.query('SELECT stripe_checkout_session FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].stripe_checkout_session;
+        const event = await signedStripeEvent('checkout.session.completed', fake.payCheckout(session));
+        assert.equal((await fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST', headers: { 'stripe-signature': event.signature, 'content-type': 'application/json' }, body: event.body }))).status, 200);
+        const funded = ok(await local('GET', '/v1/billing'));
+        assert.deepEqual([funded.balance.paid, funded.paymentMethod.brand, funded.paymentMethod.last4], ['5000000000', 'visa', '4242']);
+        const [topup] = page(await local('GET', '/v1/billing/ledger'));
+        assert.deepEqual([topup.kind, topup.description, topup.paymentId, typeof topup.invoiceUrl], ['topup', 'Credit added', first.attemptId, 'string']);
+        assert.equal(topup.expiresAt.slice(0, 10), new Date(new Date(topup.at).setUTCFullYear(new Date(topup.at).getUTCFullYear() + 1)).toISOString().slice(0, 10), 'A top-up expires 12 months after purchase.');
+        const [paid] = page(await local('GET', '/v1/billing/payments'));
+        assert.deepEqual([paid.id, paid.status, paid.card.last4, typeof paid.invoiceUrl, typeof paid.receiptUrl], [first.attemptId, 'succeeded', '4242', 'string', 'string']);
+        // An operator refund: the audit row and the Idempotency-Key commit in the transaction that holds the refund
+        // (same xmin as the refund_hold ledger row); a retry returns the refund, another body is refused, and a refusal
+        // leaves no audit row.
+        await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+        const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, basis: 'billing_error', reason: 'Customer was charged for a top-up twice' };
+        const refund = ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' }));
+        assert.match(refund.refundId, /^brf_/);
+        assert.deepEqual(ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' })), refund);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900 }, 'live', { 'Idempotency-Key': 'refund-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        const [hold] = (await db.query(`SELECT xmin::text AS x,paid_uc::text AS paid FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold'`, [wid])).rows;
+        const audits = async () => (await db.query(`SELECT xmin::text AS x,reason,summary->'before'->>'balance_uc' AS before,summary->'after'->>'balance_uc' AS after,internal,retain_until>at+interval '6 years 11 months' AS kept
+          FROM audit_events WHERE workspace_id=$1 AND action='billing.refund'`, [wid])).rows;
+        assert.deepEqual([hold.paid, await audits()], ['-1000000000', [{ x: hold.x, reason: refundBody.reason, before: '5000000000', after: '4000000000', internal: true, kept: true }]]);
+        // Stripe's top-up is in the customer's Activity (the ledger trigger), kept 7 years; the operator's refund is internal.
+        assert.deepEqual((await db.query(`SELECT actor_type,via,internal,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events WHERE workspace_id=$1 AND action='billing.topup'`, [wid])).rows,
+          [{ actor_type: 'stripe', via: 'webhook', internal: false, kept: true }]);
+        assert.deepEqual(page(await local('GET', '/v1/activity?action=billing.')).map(e => e.action), ['billing.topup']);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }), 409, 'REFUND_EXCEEDS_BALANCE');
+        assert.equal((await audits()).length, 1, 'A refused refund leaves no audit row.');
+        // Unused credit is refundable only for a billing error, a legal requirement or an account Anomaly closes.
+        error(await local('POST', refundPath, { attemptId: first.attemptId, reason: 'Customer no longer needs the credit' }), 422);
+        error(await local('POST', refundPath, { ...refundBody, basis: 'unused_credit' }), 422);
+        // Anomaly closes the account without cause: what is left of every top-up goes back to its card.
+        const closed = ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds;
+        assert.deepEqual(closed.map((r: Json) => [r.attemptId, r.amountCents]), [[first.attemptId, 4000]]);
+        assert.deepEqual(ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds, [], 'Nothing is left to refund twice.');
+        assert.deepEqual((await db.query(`SELECT detail->>'basis' AS basis FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold' ORDER BY id`, [wid])).rows.map(r => r.basis), ['billing_error', 'account_closure']);
+        // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
+        const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
+        assert.deepEqual([on.state.autoRecharge, on.autoRecharge.enabled, on.autoRecharge.thresholdCents, on.autoRecharge.monthlyCapCents], ['on', true, 1500, 30000]);
+        const removed = ok(await local('DELETE', '/v1/billing/payment-method'));
+        assert.deepEqual([removed.paymentMethod, removed.autoRecharge.enabled, removed.state.autoRecharge], [null, false, 'off']);
+        assert.equal(fake.count(/^POST \/v1\/payment_methods\/[^/]+\/detach$/), 1);
+        const setup = ok(await local('POST', '/v1/billing/payment-method'), 201);
+        assert.match(setup.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+      });
+    });
+  });
+
+  test('usage by meter: day, hour and month totals; received mail and Omens only for credentials that may read all received mail', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), day = new Date().toISOString().slice(0, 10);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES
+        ($1,date_trunc('day',now(),'UTC'),'send',40),($1,date_trunc('day',now(),'UTC')+interval '1 hour','send',2),($1,date_trunc('day',now(),'UTC'),'receive',7),($1,date_trunc('day',now(),'UTC'),'omen',3)`, [wid]);
+      const usage = ok(await local('GET', '/v1/billing/usage')).data;
+      assert.deepEqual(usage.map((p: Json) => [p.start, p.meter, p.quantity]), [[`${day}T00:00:00Z`, 'omen', '3'], [`${day}T00:00:00Z`, 'receive', '7'], [`${day}T00:00:00Z`, 'send', '42']]);
+      assert.deepEqual(ok(await local('GET', `/v1/billing/usage?granularity=hour&meter=send&from=${day}&to=${day}`)).data.map((p: Json) => p.quantity), ['40', '2']);
+      assert.equal(ok(await local('GET', '/v1/billing/usage?granularity=month')).data.find((p: Json) => p.meter === 'send').start.slice(8), '01T00:00:00Z');
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Usage reader', permissions: ['read'] }), 201).secret; secrets.add(reader);
+      assert.deepEqual(ok(await request('GET', '/v1/billing/usage', reader)).data.map((p: Json) => p.meter), ['send']);
+      assert.deepEqual(ok(await request('GET', '/v1/billing/usage?meter=receive', reader)).data, []);
+      error(await local('GET', '/v1/billing/usage?from=2026-01-10&to=2026-01-01'), 422, 'VALIDATION_FAILED');
+      error(await local('GET', '/v1/billing/usage?granularity=hour&from=2026-01-01&to=2026-03-01'), 422, 'VALIDATION_FAILED');
+      // Plan & usage carries the combined free allowance and whether billing charges yet.
+      const plan = ok(await local('GET', '/v1/usage'));
+      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1_000_000_000 }]);
+    });
+  });
+
+  test('OpenAPI and MCP: billing reads and a top-up link are tools; nothing that charges a card is, and the webhook and operator routes are hidden', async () => {
+    const { createOpenApiApp } = await import('./src/app.js'), { buildMcpCatalog, DASHBOARD_MONEY } = await import('./src/mcp-catalog.js'), { resourceActions } = await import('./src/mcp-resources.js');
+    const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } }) as Json;
+    const ids = (path: string) => Object.values(spec.paths[path] ?? {}).map(o => (o as Json).operationId);
+    assert.deepEqual([ids('/v1/billing'), ids('/v1/billing/usage'), ids('/v1/billing/ledger'), ids('/v1/billing/payments'), ids('/v1/billing/payments/{id}'), ids('/v1/billing/top-ups'), ids('/v1/billing/top-up-links'), ids('/v1/billing/auto-recharge'), ids('/v1/billing/payment-method').sort()],
+      [['getBilling'], ['getBillingUsage'], ['listBillingLedger'], ['listBillingPayments'], ['getBillingPayment'], ['createBillingTopUp'], ['createBillingTopUpLink'], ['updateBillingAutoRecharge'], ['createBillingCardSetup', 'deleteBillingPaymentMethod']]);
+    assert.ok(!Object.keys(spec.paths).some(p => p === '/v1/billing/stripe' || p.startsWith('/v1/operator/billing')), 'The Stripe webhook and operator tools are not public.');
+    assert.equal(spec.components.schemas.MicroCents.type, 'string');
+    const catalog = buildMcpCatalog(app);
+    assert.deepEqual(resourceActions('billing'), { get: 'getBilling', usage: 'getBillingUsage', ledger: 'listBillingLedger', payments: 'listBillingPayments', payment: 'getBillingPayment', topUpLink: 'createBillingTopUpLink' });
+    for (const name of DASHBOARD_MONEY) assert.equal(catalog.get(name), undefined, `${name} is never an agent call`);
+    const ops = Object.values(resourceActions('billing')!).map(name => catalog.get(name)!);
+    assert.deepEqual(ops.map(op => [op.tool.name, op.toolset, op.permission, op.write, op.confirm]), [
+      ['getBilling', 'admin', 'read', false, false], ['getBillingUsage', 'admin', 'read', false, false], ['listBillingLedger', 'admin', 'manage', false, false],
+      ['listBillingPayments', 'admin', 'manage', false, false], ['getBillingPayment', 'admin', 'manage', false, false], ['createBillingTopUpLink', 'admin', 'manage', true, true]]);
+    assert.match(catalog.get('createBillingTopUpLink')!.tool.description!, /for a person to open and pay; agents cannot pay/);
+  });
+
+  test('owner notices: one email per episode to owners and admins; shadow and exempt are suppressed; a crashed send is retried after its lease', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = await hostedBilling(runtime, db), platform = unique('platform'), pool = '111122223333';
+      const { notifyJob, noticeEmail } = await import('./src/billing/notify.js');
+      Object.assign(runtime.config, { platformDomainWorkspace: platform, notifyFrom: 'billing@platform.example' });
+      await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+      await db.query(`UPDATE workspaces SET name=$2 WHERE id=$1`, [wid, 'Northwind\nInc']);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [platform, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('platform.example',$1,$1,'verified')`, [platform]);
+      const notice = (kind: string, dedupe: string, data: Json = {}) => db.query('SELECT billing_notice($1,$2,$3,$4::jsonb) AS id', [wid, kind, dedupe, JSON.stringify(data)]).then(r => r.rows[0].id as string | null);
+      const run = async (id: string) => notifyJob(runtime, { noticeId: id }, { id: `billing.notify:${id}`, attempts: 1, workspaceId: wid });
+      const status = async (id: string | null) => (await db.query('SELECT status FROM billing_notices WHERE id=$1', [id])).rows[0]?.status;
+      const sent = async () => (await db.query(`SELECT to_addresses,subject,snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 ORDER BY created_at`, [platform])).rows;
+
+      // Shadow: recorded as suppressed, no job, no email.
+      await enforcement(db, 'shadow');
+      const shadow = await notice('low_balance', `low_balance:${wid}:shadow`);
+      assert.equal(await status(shadow!), 'suppressed');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='billing.notify'`, [wid])).rows[0].n, 0);
+
+      // Enforced and prepaid: one row per dedupe key, one email however often the job runs.
+      await enforcement(db, 'enforce');
+      await credit(db, wid, 'topup', 'attempt:bpa_fixture_low', 480_000_000n);
+      const low = await notice('low_balance', `low_balance:${wid}:1`, { totalUc: '480000000' });
+      assert.equal(await notice('low_balance', `low_balance:${wid}:1`), null, 'The dedupe key is unique.');
+      await run(low!); await run(low!);
+      assert.equal(await status(low!), 'sent');
+      const [email] = await sent();
+      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Bane: Northwind Inc balance is low ($4.80)']);
+      for (const part of ['What happened', 'about 27,000 more emails', 'What Bane did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
+      assert.equal((await sent()).length, 1);
+
+      // A send that crashed mid-lease is retried once the lease runs out, under the same idempotency key.
+      const failed = await notice('recharge_failed', 'recharge_failed:bpa_fixture_declined', { code: 'insufficient_funds', last4: '4242' });
+      await db.query(`UPDATE billing_notices SET status='sending',lease_until=now()+interval '5 minutes' WHERE id=$1`, [failed]);
+      await run(failed!);
+      assert.equal((await sent()).length, 1, 'A live lease belongs to another runner.');
+      await db.query(`UPDATE billing_notices SET lease_until=now()-interval '1 second' WHERE id=$1`, [failed]);
+      await run(failed!);
+      assert.equal(await status(failed!), 'sent');
+      const declined = (await sent()).find(r => r.subject === 'Bane couldn\'t add credit to Northwind Inc');
+      assert.match(declined.text, /card ending 4242 and the charge failed: the card has insufficient funds\./);
+
+      // Exempt accounts are never emailed, even when a job is already queued.
+      const paused = await notice('sends_paused', `sends_paused:${wid}:1`);
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
+      await run(paused!);
+      assert.equal(await status(paused!), 'suppressed');
+      assert.equal(await notice('receive_held', `receive_held:${wid}:1`).then(status), 'suppressed');
+      assert.equal((await sent()).length, 2);
+
+      // The other bodies say what Bane did, the dates and the fix.
+      const unpaidSince = new Date('2026-11-01T10:00:00Z'), base = { workspace: 'W', link: 'https://bane.example/settings#billing', freeLeft: 0, unpaidSince, data: {} };
+      const debt = -1_240_000_000n as import('./src/billing/money.js').MicroCents;
+      assert.match(noticeEmail('sends_paused', { ...base, totalUc: debt }).text, /402 BALANCE_EXHAUSTED.*451.*accepted until Nov 8, 2026\. Nothing is deleted\./s);
+      assert.equal(noticeEmail('receive_hold_soon', { ...base, totalUc: debt }).subject, 'Received mail for W will be held on Nov 8, 2026');
+      assert.match(noticeEmail('receive_held', { ...base, totalUc: debt }).text, /owed \$12\.40 since Nov 1, 2026.*written off, but the hold stays until a top-up/s);
+    });
+  });
+
+  test('operator billing tools: credits, adjustments, write-offs and the mode are audited with the change; everyone else is refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), base = `/v1/operator/billing/${wid}`;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      error(await request('POST', `${base}/credits`, key.secret, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      error(await request('GET', base, key.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic support helper']);
+      assert.equal(ok(await local('GET', base)).account, null);
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+
+      // A promotional credit: the ledger row and its audit row commit in the same (sub)transaction; a retry with the
+      // same Idempotency-Key returns the first answer and posts nothing.
+      const grant = ok(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage', ticketRef: 'T-42' }, 'live', { 'Idempotency-Key': 'grant-1' }));
+      assert.deepEqual([grant.applied, grant.account.promo_uc, grant.account.balance_uc], [true, '1000000000', '0']);
+      assert.deepEqual(ok(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage', ticketRef: 'T-42' }, 'live', { 'Idempotency-Key': 'grant-1' })), grant);
+      const [entry] = (await db.query(`SELECT xmin::text AS x,kind,source_id,promo_uc::text,actor FROM billing_ledger WHERE workspace_id=$1`, [wid])).rows;
+      const [audit] = (await db.query(`SELECT xmin::text AS x,action,reason,ticket_ref,actor_id AS operator_id,summary->'before'->>'promo_uc' AS before,summary->'after'->>'promo_uc' AS after
+        FROM audit_events WHERE workspace_id=$1 AND action LIKE 'billing.%' AND retain_until>at+interval '6 years 11 months'`, [wid])).rows;
+      assert.deepEqual([entry.kind, entry.source_id, entry.promo_uc, entry.actor], ['grant', `grant:${manager!.userId}:grant-1`, '1000000000', `operator:${manager!.userId}`]);
+      assert.deepEqual([audit.action, audit.reason, audit.ticket_ref, audit.operator_id, audit.before, audit.after, audit.x], ['billing.credit_promo', 'Goodwill after an outage', 'T-42', manager!.userId, '0', '1000000000', entry.x]);
+      // Paid credit, a signed adjustment and the debt they leave; a write-off clears the debt but not unpaid_since.
+      ok(await local('POST', `${base}/credits`, { amountCents: 500, bucket: 'paid', reason: 'Refund outside Stripe, ticket T-43' }));
+      ok(await local('POST', `${base}/adjustments`, { amountCents: -2000, reason: 'Drift fix for the November usage' }));
+      error(await local('POST', `${base}/adjustments`, { amountCents: 0, reason: 'Drift fix for the November usage' }), 422, 'VALIDATION_FAILED');
+      const owed = ok(await local('GET', base));
+      assert.deepEqual([owed.account.balance_uc, owed.position.balanceUc, typeof owed.account.unpaid_since], [-1_500_000_000, '-1500000000', 'string']);
+      const written = ok(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }));
+      assert.deepEqual([written.account.balance_uc, typeof written.account.unpaid_since], ['0', 'string']);
+      const before = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n;
+      error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }), 409, 'NOTHING_OWED');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n, before, 'A refused change leaves no audit row.');
+      const mode = ok(await local('PUT', `${base}/mode`, { mode: 'exempt', reason: 'Anomaly’s own workspace' }));
+      assert.equal(mode.account.mode, 'exempt');
+      assert.deepEqual(ok(await local('GET', base)).ledger.map((l: Json) => l.kind), ['write_off', 'adjustment', 'adjustment', 'grant']);
+      error(await local('GET', '/v1/operator/billing/no-such-workspace'), 404, 'NOT_FOUND');
+    });
+  });
+
+  test('free workspaces and people: never gated or charged, usage still metered; a person’s flag binds to their identity and follows ownership; operator-only and audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), me = manager!.userId, base = `/v1/operator/billing/${wid}`;
+      await enforcement(db, 'enforce');
+      const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
+      const gate = async (w = wid) => (await db.query('SELECT billing_gate($1, 10, false) AS g', [w])).rows[0].g;
+      const mode = async (w = wid) => (await db.query('SELECT mode,free_via FROM billing_accounts WHERE workspace_id=$1', [w])).rows[0] ?? { mode: 'prepaid', free_via: null };
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_emails_used) VALUES ($1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,3000)`, [wid]);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [false, true], 'A prepaid workspace at $0 past its free emails is gated.');
+      // Operators only.
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      const on = { free: true, until, reason: 'Partner workspace, courtesy of Anomaly' };
+      error(await local('PUT', `${base}/free`, on), 403, 'OPERATOR_REQUIRED');
+      error(await request('PUT', `/v1/operator/billing/people/${me}/free`, key.secret, on), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      error(await local('PUT', `${base}/free`, { ...on, until: new Date(Date.now() - 1000).toISOString() }), 422, 'VALIDATION_FAILED');
+
+      // The workspace flag: free until a date, audited with the change; customers see the free plan and no gate.
+      ok(await local('PUT', `${base}/free`, on));
+      const [audit] = (await db.query(`SELECT xmin::text AS x,reason,summary->'after'->>'mode' AS mode FROM audit_events WHERE workspace_id=$1 AND action='billing.free_on'`, [wid])).rows;
+      assert.deepEqual([audit.reason, audit.mode, audit.x], [on.reason, 'exempt', (await db.query('SELECT xmin::text AS x FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].x]);
+      const free = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([free.mode, free.freePlan, free.state.sending], ['exempt', { until: until.replace(/\.\d{3}Z$/, 'Z') }, 'ok']);
+      assert.equal(ok(await local('GET', '/v1/me')).billing.free, true);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [true, false], 'A free workspace is never gated.');
+      // Usage is metered and settled at $0, with what it would have cost.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now())-interval '1 hour','send',2000)`, [wid]);
+      await db.query(`SELECT billing_settle($1, date_trunc('hour', now()))`, [wid]);
+      const [usage] = (await db.query(`SELECT paid_uc::text,promo_uc::text,detail->>'costUc' AS cost,detail->>'charged' AS charged FROM billing_ledger WHERE workspace_id=$1 AND kind='usage'`, [wid])).rows;
+      assert.deepEqual(usage, { paid_uc: '0', promo_uc: '0', cost: '40000000', charged: 'false' });
+      const metered = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([metered.balance.paid, metered.monthToDate.cost], ['0', '40000000'], 'The month shows what free usage would cost.');
+      // Expiry: the hourly sweep returns it to prepaid; the operator view keeps the expired flag for the record.
+      await db.query(`UPDATE billing_accounts SET free_until=now()-interval '1 second' WHERE workspace_id=$1`, [wid]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.equal((await mode()).mode, 'prepaid');
+      const expired = ok(await local('GET', base)).free;
+      assert.deepEqual([expired.free, expired.workspace.expired, expired.workspace.reason], [false, true, on.reason]);
+      assert.equal(ok(await local('GET', '/v1/billing')).freePlan, null);
+
+      // A person's flag: the workspaces they own are free, the ones they only belong to are not; it binds to their
+      // sign-in identity, so a changed email doesn't matter.
+      const other = unique('free-other'), owner2 = unique('user');
+      await db.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$1,$1)', [other]);
+      await db.query(`INSERT INTO bane_users (id,name,email,email_verified) VALUES ($1,'Second owner',$2,true)`, [owner2, `${owner2}@example.com`]);
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member')`, [unique('wm'), other, owner2, unique('wm'), me]);
+      error(await local('PUT', `/v1/operator/billing/people/${owner2}/free`, { free: true, reason: 'A friend of the company' }), 422, 'NO_SIGN_IN_IDENTITY');
+      const granted = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: true, reason: 'Anomaly staff account', ticketRef: 'OPS-1' }));
+      assert.deepEqual(granted.workspaces.map((w: Json) => [w.workspaceId, w.mode, w.via]), [[wid, 'exempt', 'account']]);
+      assert.equal((await mode(other)).mode, 'prepaid', 'A member’s workspace is not free.');
+      assert.deepEqual((await db.query(`SELECT workspace_id,user_id,action FROM audit_events WHERE action LIKE 'billing.free_%' AND actor_id=$1 AND (workspace_id=$2 OR workspace_id IS NULL AND user_id=$1) ORDER BY action`, [me, wid])).rows.map(r => [r.workspace_id, r.user_id, r.action]),
+        [[null, me, 'billing.free_account_on'], [wid, null, 'billing.free_on'], [wid, null, 'billing.free_owner_on']]);
+      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, `renamed-${me}@example.com`]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.deepEqual(await mode(), { mode: 'exempt', free_via: 'account' }, 'Bound to the identity, not the email.');
+      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, AUTH_EMAIL]);
+      // Ownership transfer re-evaluates: handing the workspace to someone else ends it; taking another one over starts it.
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('wm'), wid, owner2]);
+      await db.query(`UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+      assert.equal((await mode()).mode, 'prepaid');
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [other, me]);
+      assert.deepEqual(await mode(other), { mode: 'exempt', free_via: 'account' });
+      const view = ok(await local('GET', `/v1/operator/billing/${other}`)).free;
+      assert.deepEqual([view.free, view.via, view.people.find((p: Json) => p.userId === me).free.reason], [true, 'account', 'Anomaly staff account']);
+      // Removing the flag ends it everywhere they own.
+      const revoked = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: false, reason: 'Left the partner program' }));
+      assert.deepEqual(revoked.workspaces.map((w: Json) => [w.workspaceId, w.mode]), [[other, 'prepaid']].sort());
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_free_people WHERE user_id=$1', [me])).rows[0].n, 0);
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+
+      // The scripts: a workspace until a date, and a person by issuer subject (never an address).
+      const { setBillingFree } = await import('./scripts/set-billing-free.js');
+      await assert.rejects(setBillingFree(db, ['workspace', wid, 'on', '--until', '2020-01-01', '--reason', 'Past dates are refused']), /future date/);
+      const scripted = await setBillingFree(db, ['workspace', wid, 'on', '--until', new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), '--reason', 'Conference sponsor this week']) as { old: Json; new: Json };
+      assert.deepEqual([scripted.old.free, scripted.new.free, scripted.new.via], [false, true, 'workspace']);
+      await assert.rejects(setBillingFree(db, ['account', AUTH_SUBJECT, 'on', '--reason', 'Anomaly staff account'], ''), /ACCOUNT_ISSUER/);
+      await assert.rejects(setBillingFree(db, ['account', AUTH_EMAIL, 'on', '--reason', 'Anomaly staff account']), /No user with that subject/, 'An address is not an identity.');
+      const person = await setBillingFree(db, ['account', AUTH_SUBJECT, 'on', '--reason', 'Anomaly staff account']) as { userId: string; workspaces: Json[] };
+      assert.deepEqual([person.userId, person.workspaces.map(w => [w.workspaceId, w.via]).sort()], [me, [[other, 'account'], [wid, 'workspace']].sort()]);
+      assert.deepEqual((await db.query(`SELECT coalesce(workspace_id,'-') AS w,action,actor_type,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events
+        WHERE via='script' AND action LIKE 'billing.free%' AND (workspace_id IN ($1,$2) OR workspace_id IS NULL AND user_id=$3) ORDER BY action,w`, [wid, other, me])).rows.map(r => [r.w, r.action, r.actor_type, r.kept]).sort(),
+        [['-', 'billing.free_account_on', 'operator', true], [wid, 'billing.free_on', 'operator', true], [other, 'billing.free_owner_on', 'operator', true], [wid, 'billing.free_owner_on', 'operator', true]].sort());
+    });
+  });
+
+  test('billing scripts: the mode and the installation switch change with their audit row', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = await hostedBilling(runtime, db);
+      const [{ setBillingMode }, { setBillingEnforcement }] = await Promise.all([import('./scripts/set-billing-mode.js'), import('./scripts/set-billing-enforcement.js')]);
+      await assert.rejects(setBillingMode(db, [wid, 'free', '--reason', 'Anomaly workspace exemption']), /Usage/);
+      await assert.rejects(setBillingMode(db, ['no-such-workspace', 'exempt', '--reason', 'Anomaly workspace exemption']), /No workspace/);
+      assert.deepEqual(await setBillingMode(db, [wid, 'exempt', '--reason', 'Anomaly workspace exemption']), { old: 'prepaid', new: 'exempt', reason: 'Anomaly workspace exemption', via: 'script' });
+      assert.equal((await db.query('SELECT mode FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].mode, 'exempt');
+      await assert.rejects(setBillingEnforcement(db, ['enforce', '--receive-hold', 'yes', '--reason', 'Billing goes live']), /on or off/);
+      // Billing launches enforced (300); a rollback to shadow and back stamps enforced_at again.
+      await setBillingEnforcement(db, ['shadow', '--reason', 'Roll back before the storage notice']);
+      const live = await setBillingEnforcement(db, ['enforce', '--storage-from', '2027-02-10', '--bill-simulated', 'on', '--reason', 'Billing goes live']);
+      assert.deepEqual([live.old.mode, live.new.mode, live.new.bill_simulated, live.new.storage_billing_from, typeof live.new.enforced_at], ['shadow', 'enforce', true, '2027-02-10', 'string']);
+      await setBillingEnforcement(db, ['shadow', '--storage-from', 'none', '--reason', 'Roll back to shadow']);
+      const config = (await db.query('SELECT mode,storage_billing_from,enforced_at IS NOT NULL AS stamped FROM billing_config')).rows[0];
+      assert.deepEqual([config.mode, config.storage_billing_from, config.stamped], ['shadow', null, true]);
+      // The workspace's mode is a billing event (kept 7 years); the installation switch belongs to no workspace or person.
+      assert.deepEqual((await db.query(`SELECT summary,reason,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events WHERE workspace_id=$1 AND action='billing.mode'`, [wid])).rows,
+        [{ summary: { before: { mode: 'prepaid' }, after: { mode: 'exempt' } }, reason: 'Anomaly workspace exemption', kept: true }]);
+      assert.deepEqual((await db.query(`SELECT action FROM hosted_operator_audit WHERE workspace_id='installation' AND action LIKE 'set-billing-%' ORDER BY at`)).rows.map(r => r.action),
+        ['set-billing-enforcement', 'set-billing-enforcement', 'set-billing-enforcement']);
+    });
   });
 });
 
@@ -10783,9 +11199,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
       assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
-      // Plan & usage shows the same limit, the step it is on and the steps above it, with pricing as information only.
+      // Plan & usage shows the same limit, the step it is on and the steps above it, the price and the combined free allowance.
       const usage = ok(await request('GET','/v1/usage',key));
-      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: false }, { currency: 'USD', perThousand: 0.2, freeSent: 3000, freeReceived: 3000 }, false]);
+      // Billing launches enforced (migration 249); the workspace-wide switch is billing_config.
+      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1000000000 }, false]);
       assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100, 1000, 10000]]);
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
