@@ -189,7 +189,8 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
   return <div className="dns-wait">
     <p>New records usually appear within minutes, sometimes up to an hour. Bane checks every 20 seconds while this page is open, and keeps checking after you leave.</p>
     {domain.releasesAt && <p>If the sending records aren’t found within 72 hours, {domain.name} is released and you’d add it again ({hoursLeft(domain.releasesAt)} h left).</p>}
-    <p>One-click setup isn’t available yet, so add the records yourself. Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && ' · '}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
+    <p>One-click setup isn’t available yet, so add the records yourself.</p>
+    <p className="dns-guides">Guides: {guides.map(([name, url], index) => <span key={name}>{index > 0 && <span className="dns-guides-dot" aria-hidden="true"> · </span>}<a href={url} target="_blank" rel="noreferrer">{name}</a></span>)}</p>
   </div>
 }
 

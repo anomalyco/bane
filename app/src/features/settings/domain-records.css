@@ -106,3 +106,12 @@
 .ui-cards.domain-records .ui-card__line { height: auto; overflow: visible; white-space: normal; }
 .ui-cards.domain-records .ui-card__segment { display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: var(--space-6); overflow: visible; overflow-wrap: anywhere; }
 .ui-cards.domain-records .ui-card__label { margin-right: 0; }
+
+/* Touch: every copy button and DNS guide link has a 44 px target, and neighbours never overlap (rows are at least 44 px apart). */
+@media (pointer: coarse) {
+  .ui-button.copy-action.dns-copy::before { inset: -12px; }
+  .dns-row { padding-block: var(--space-12); }
+  .dns-guides { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-4); }
+  .dns-guides-dot { display: none; }
+  .dns-wait a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding-inline: var(--space-8); }
+}
