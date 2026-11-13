@@ -4,7 +4,7 @@ import { Button, DropdownMenu, IconButton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
-import { Markdown } from './markdown'
+import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
 import { createSocketTransport, supportOrigin } from './socket'
 import { supportStore, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
@@ -159,7 +159,7 @@ function StreamText({ text, live, last, restored }: { text: string; live: boolea
   const growing = live && last && !restored
   const shown = useSmoothText(text, growing)
   const revealing = shown.length < text.length
-  return <div className="support-text"><Markdown text={revealing ? shown.replace(/[*`[]$/, '') : shown} streaming={growing || revealing} tail={last && (growing || revealing) ? <Caret /> : null} /></div>
+  return <div className="support-text"><Markdown text={growing || revealing ? settled(shown) : shown} tail={last && (growing || revealing) ? <Caret /> : null} /></div>
 }
 function useSmoothText(text: string, live: boolean) {
   const [count, setCount] = useState(() => live ? 0 : text.length)

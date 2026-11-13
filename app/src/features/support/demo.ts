@@ -14,7 +14,8 @@ type Step =
   | { ticket: true }
   | { pause: number }
 
-const greeting = (name: string) => `Hi ${name}, I see you sent **November product update** yesterday with 42% opens. What are we working on today?`
+// Clicks, not opens: Apple Mail Privacy Protection opens every email it delivers, so open rates say little.
+const greeting = (name: string) => `Hi ${name}, I see you sent **November product update** yesterday with a 6.1% click rate. What are we working on today?`
 
 const investigate: Step[] = [
   { pause: 300 },
