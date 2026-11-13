@@ -213,8 +213,8 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
-.rcv-to { display: block; min-width: 0; }
-.rcv-table:not(.ui-cards) .rcv-targets { flex-wrap: nowrap; max-width: 100%; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.rcv-to { display: block; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); }
+.rcv-to > .rcv-targets { flex-wrap: nowrap; }
 .addr-step li > .rcv-match { flex: 0 1 auto; }
 .rcv-step__body .cluster > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--button-pad-x, 11px)); }
 @media (max-width: 640px) {
