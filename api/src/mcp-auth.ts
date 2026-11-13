@@ -1,337 +1,13 @@
-import { mcp } from '@better-auth/mcp';
-import { createResourceServerChallenge } from '@better-auth/oauth-provider';
-import { APIError } from 'better-auth/api';
-import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
-import { createRoute, z } from '@hono/zod-openapi';
-import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
-import { actor, ApiError, digest, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
-import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
-import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin, reserveSignIn } from './google-auth.js';
-import { workspaces } from './db/workspaces.js';
-import { agentTokens } from './db/core.js';
-import { authAccount, authUser } from './db/google-auth.js';
-import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
+import {createRoute,z} from '@hono/zod-openapi';
+import {sql} from 'drizzle-orm';
+import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
+import {protectedResourceMetadata} from './oidc-resource.js';
+export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
+import {auditContext,auditInsert} from './audit.js';
 
-const scopes = ['bane:read', 'bane:send', 'bane:manage', 'offline_access'];
-const canonicalScope = (value: string) => value.replace(/^opensend:(read|send|manage|live)$/, 'bane:$1');
-const scopeList = (scope: string) => scope.split(' ').map(canonicalScope);
-const stripLegacyScope = (scope: string) => scopeList(scope).filter(value => value && value !== 'bane:live').join(' ');
-const permissions: Permission[] = ['read', 'send', 'manage'];
-const originOf = (runtime: Runtime) => new URL(runtime.config.publicUrl).origin;
-const resourceOf = (runtime: Runtime) => `${originOf(runtime)}/mcp`;
-const issuerOf = (runtime: Runtime) => `${originOf(runtime)}/api/auth`;
-
-// Consent references persist unchanged through code exchange and refresh. A
-// two-field reference was issued in default; it must never follow a user elsewhere.
-const workspaceTag = (workspaceId: string) => workspaceId === 'default' ? '' : encodeURIComponent(workspaceId);
-const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(split_part(split_part(${oauthConsent.referenceId},'|boxes:',1),'|receiving',1), '|', 3)`, workspaceTag(workspaceId));
-function originalGrant(reference: string | null) {
-  const receiving=reference?.endsWith('|receiving')??false;if(receiving)reference=reference!.slice(0,-10);
-  const [base,boxList,...extra]=reference?.split('|boxes:')??[];
-  if(extra.length||boxList!==undefined&&!/^[A-Za-z0-9_-]{1,120}(?:,[A-Za-z0-9_-]{1,120}){0,19}$/.test(boxList))return null;
-  reference=base??null;
-  const match = reference?.match(/^mcp_(v2_)?[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
-  if (!match) return null;
-  const legacy = !match[1];
-  if (legacy && !scopeList(match[2]!).includes('bane:live')) return null;
-  const values = stripLegacyScope(match[2]!).split(' ').filter(Boolean);
-  if (!values.length || !values.every(value => scopes.includes(value))) return null;
-  try { return { receiving,inboxIds:boxList?boxList.split(','):null,scopes: values, legacy, workspaceId: match[3] ? decodeURIComponent(match[3]) : 'default', memberCeiling: !!match[4] }; }
-  catch { return null; }
-}
-function grantPermissions(values: readonly string[]): Permission[] {
-  return permissions.filter(permission => values.includes(`bane:${permission}`));
-}
-function invalidGrant(): never {
-  throw new APIError('BAD_REQUEST', { error: 'invalid_grant', error_description: 'This Bane approval is no longer valid.' });
-}
-
-// Each auth instance belongs to one request. One reference is reused when the
-// consent endpoint internally resumes authorize, then persists through refresh.
-// It also captures the original scope ceiling: later consent edits can only
-// reduce an existing identity, never elevate an already queued job.
-export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string,consentInboxes?:string[],receiving=false) {
-  const authorizationId = crypto.randomUUID();
-  const resource = resourceOf(runtime);
-  return mcp({
-    resource, loginPage: '/mcp/login', consentPage: '/mcp/consent', scopes,
-    resources: [{ identifier: resource, name: 'Bane MCP', allowedScopes: scopes, accessTokenTtl: 300 }],
-    grantTypes: ['authorization_code', 'refresh_token'], accessTokenExpiresIn: 300,
-    refreshTokenExpiresIn: 30 * 24 * 60 * 60, refreshTokenReuseInterval: 0, codeExpiresIn: 600,
-    allowDynamicClientRegistration: true, allowUnauthenticatedClientRegistration: true,
-    allowPublicClientPrelogin: true, clientRegistrationRequirePKCE: true,
-    clientRegistrationDefaultScopes: ['bane:read'], clientRegistrationAllowedScopes: scopes,
-    enforcePerClientResources: true, storeTokens: 'hashed', storeClientSecret: 'hashed',
-    clientPrivileges: () => false, resourcePrivileges: () => false,
-    postLogin: {
-      page: '/mcp/consent', shouldRedirect: () => false,
-      consentReferenceId: async ({ user, scopes: requested }) => {
-        if (!user || !await isApprovedUser(runtime, user.id) || !requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length) invalidGrant();
-        const member = await membershipForApprovedUser(runtime.db, user.id, { multiTenant: runtime.config.multiTenant, workspaceId: consentWorkspace, bootstrapDefaultOwner: false });
-        if (!member || (member.role === 'member' && requested.includes('bane:manage'))) invalidGrant();
-        const tag = workspaceTag(member.workspaceId);
-        if(consentInboxes){if(member.role==='member'||!consentInboxes.length||consentInboxes.length>20||new Set(consentInboxes).size!==consentInboxes.length||consentInboxes.some(id=>!/^[A-Za-z0-9_-]{1,120}$/.test(id)))invalidGrant();
-          const found=await runtime.db.execute(sql`SELECT id FROM mailboxes WHERE workspace_id=${member.workspaceId} AND kind='inbox' AND (delete_after IS NULL OR delete_after>now()) AND id=ANY(${sql.param(consentInboxes)}::text[])`);if(found.rowCount!==consentInboxes.length)invalidGrant();}
-        return `mcp_v2_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}${consentInboxes?'|boxes:'+consentInboxes.join(','):receiving?'|receiving':''}`;
-      },
-    },
-    extensions: [{ claims: { accessToken: async ({ user, client, referenceId, scopes: requested, resources }) => {
-      if (!user || !referenceId || resources?.length !== 1 || resources[0] !== resource) invalidGrant();
-      const [consent] = await runtime.db.select({ id: oauthConsent.id }).from(oauthConsent)
-        .where(and(eq(oauthConsent.userId, user.id), eq(oauthConsent.clientId, client.clientId), eq(oauthConsent.referenceId, referenceId))).limit(1);
-      if (!consent) invalidGrant();
-      const grant = await loadGrant(runtime, `mcp_${consent.id}`);
-      if (!grant || (grant.legacy && !requested.includes('bane:live')) || !requested.every(scope => scope === 'bane:live' || grant.scopes.includes(scope))) invalidGrant();
-      return { bane_grant: grant.actor.keyId };
-    } } }],
-  });
-}
-
-async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db) {
-  if (!/^mcp_[A-Za-z0-9_-]{1,128}$/.test(keyId)) return null;
-  const [row] = await db.select({
-    id: oauthConsent.id, userId: oauthConsent.userId, clientId: oauthConsent.clientId,
-    scopes: oauthConsent.scopes, referenceId: oauthConsent.referenceId, resources: oauthConsent.resources,
-    clientDisabled: oauthClient.disabled, clientScopes: oauthClient.scopes,
-    resourceDisabled: oauthResource.disabled, resourceScopes: oauthResource.allowedScopes,
-    email: authUser.email, emailVerified: authUser.emailVerified, googleHostedDomain: authUser.googleHostedDomain,
-  }).from(oauthConsent)
-    .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId))
-    .innerJoin(oauthClientResource, eq(oauthClientResource.clientId, oauthClient.clientId))
-    .innerJoin(oauthResource, and(eq(oauthResource.identifier, oauthClientResource.resourceId), eq(oauthResource.identifier, resourceOf(runtime))))
-    .innerJoin(authUser, eq(authUser.id, oauthConsent.userId))
-    .innerJoin(authAccount, and(eq(authAccount.userId, authUser.id), eq(authAccount.providerId, 'google'), ne(authAccount.accountId, '')))
-    .where(eq(oauthConsent.id, keyId.slice(4))).limit(1).for('share');
-  // One joined SHARE lock retains consent, client/resource policy and Google
-  // approval through the caller's dispatch transaction.
-  if (!row?.userId || row.clientDisabled || row.resourceDisabled || row.resources?.length !== 1 || row.resources[0] !== resourceOf(runtime) ||
-    !currentGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
-  const original = originalGrant(row.referenceId);
-  if (!original) return null;
-  // Before v2, live authority had to survive every policy intersection, not just the original consent.
-  const policies = [row.scopes, row.clientScopes, row.resourceScopes].map(list => list?.map(canonicalScope));
-  if (original.legacy && policies.some(policy => policy && !policy.includes('bane:live'))) return null;
-  const member = await membershipForApprovedUser(db, row.userId, { multiTenant: runtime.config.multiTenant, workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
-  if (!member) return null;
-  const role = original.memberCeiling ? 'member' : member.role;
-  const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'bane:manage') && policies.every(list => (list ?? scopes).includes(scope)));
-  const granted = grantPermissions(allowed);
-  if (!granted.length) return null;
-  const actor: Actor = { grantId:row.id, receivingConsent:original.receiving,keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
-  return { actor,inboxIds:original.inboxIds, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
-}
-
-export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
-  const g=await loadGrant(runtime,keyId,db);return g&&!g.inboxIds?g.actor:null;
-}
-function deniedToken(runtime: Runtime) {
-  return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bane authorization is required.' }, id: null }, {
-    status: 401, headers: { 'Cache-Control': 'no-store', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${originOf(runtime)}/.well-known/oauth-protected-resource/mcp", scope="bane:read"` },
-  });
-}
-const invalidJws=new Map<string,number>();
-type PublicKeySet = Awaited<ReturnType<ReturnType<typeof createAuth>['api']['getJwks']>>;
-type KeySnapshot = { issuer: string; keys: Map<string, PublicKeySet['keys'][number]>; expires: number; refreshAfter: number };
-const keySnapshots = new WeakMap<object, KeySnapshot>();
-async function verificationKey(runtime: Runtime, kid: string) {
-  const scope = runtime.jwksCacheScope ?? runtime.db, issuer = issuerOf(runtime), now = Date.now();
-  let entry = keySnapshots.get(scope);
-  if (!entry || entry.issuer !== issuer) {
-    entry = { issuer, keys: new Map(), expires: 0, refreshAfter: 0 };
-    keySnapshots.set(scope, entry);
-  }
-  if (entry.expires > now && entry.keys.has(kid)) return entry.keys.get(kid);
-  if (now >= entry.refreshAfter) {
-    // Reserve the next read before awaiting it. Cache only completed public keys,
-    // never an adapter or a pending DB query belonging to another Worker request.
-    entry.refreshAfter = now + 60_000;
-    const jwks = await createAuth(runtime, { mcp: true }).api.getJwks();
-    entry.keys = new Map(jwks.keys.flatMap(key => key.kid ? [[key.kid, key] as const] : []));
-    entry.expires = now + 300_000;
-  }
-  if (entry.expires <= now) throw new Error('No current MCP verification keys');
-  return entry.keys.get(kid);
-}
-export async function withMcpAuthorization(runtime: Runtime, request: Request, handler: (actor: Actor|import('./core.js').MailboxAccess) => Promise<Response>): Promise<Response> {
-  const authorization = parseAccessTokenAuthorization(request.headers.get('authorization'));
-  if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
-  const parts=/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/.exec(authorization.token);
-  if(!parts) return deniedToken(runtime);
-  let kid: string;
-  try {
-    const h=JSON.parse(Buffer.from(parts[1]!,'base64url').toString()),p=JSON.parse(Buffer.from(parts[2]!,'base64url').toString());
-    if(h.alg!=='ES256' || typeof h.kid!=='string' || !h.kid || typeof p.sub!=='string' || typeof p.exp!=='number') return deniedToken(runtime);
-    kid=h.kid;
-  } catch {return deniedToken(runtime);}
-  const fingerprint=await digest(issuerOf(runtime)+'\n'+authorization.token);
-  if((invalidJws.get(fingerprint)??0)>Date.now())return deniedToken(runtime);
-  let actor: Actor|import('./core.js').MailboxAccess;
-  try {
-    const key = await verificationKey(runtime, kid);
-    if (!key) return deniedToken(runtime);
-    const claims = await verifyJwsAccessToken(authorization.token, { jwksFetch: async () => ({keys: [key]}),
-      verifyOptions: { issuer: issuerOf(runtime), audience: resourceOf(runtime), algorithms: ['ES256'], typ: 'at+jwt', requiredClaims: ['sub', 'exp', 'iat', 'client_id'] },
-    }).catch(() => null);
-    if (!claims) {
-      if(invalidJws.size>=1024)invalidJws.delete(invalidJws.keys().next().value!);
-      invalidJws.set(fingerprint,Date.now()+30000);return deniedToken(runtime);
-    }
-    try {
-      const auth = createAuth(runtime, { mcp: true });
-      await enforceDpopBinding({ payload: claims, authorization, proofJwt: request.headers.get('dpop'), method: request.method, url: request.url,
-        replayStore: createDpopReplayStore((await auth.$context).internalAdapter),
-      });
-    } catch (error) {
-      if (!isDpopBindingError(error)) throw error;
-      const challenge = createResourceServerChallenge(new APIError('UNAUTHORIZED', { error: error.code, message: error.message, error_description: error.message }), resourceOf(runtime), { challengeScopes: ['bane:read'] });
-      if (!challenge) return deniedToken(runtime);
-      const headers = new Headers(challenge.headers); headers.set('Cache-Control', 'no-store');
-      return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: challenge.message }, id: null }, { status: challenge.statusCode, headers });
-    }
-    const audience = claims.aud;
-    if (audience !== resourceOf(runtime) && !(Array.isArray(audience) && audience.length === 1 && audience[0] === resourceOf(runtime))) return deniedToken(runtime);
-    const keyId = claims.bane_grant ?? claims.opensend_grant;
-    if (typeof keyId !== 'string' || typeof claims.scope !== 'string' || !claims.scope || stripLegacyScope(claims.scope).split(' ').some(scope => !scopes.includes(scope))) return deniedToken(runtime);
-    const grant = await loadGrant(runtime, keyId);
-    if (!grant || claims.sub !== grant.userId || claims.client_id !== grant.clientId || (grant.legacy && !scopeList(claims.scope).includes('bane:live'))) return deniedToken(runtime);
-    const tokenScopes = stripLegacyScope(claims.scope).split(' ').filter(scope => grant.scopes.includes(scope));
-    const granted = grantPermissions(tokenScopes);
-    if (!granted.length) return deniedToken(runtime);
-    if(grant.inboxIds && await (await import('./auth.js')).chargeGrantBudget(runtime,grant.actor.workspaceId,grant.actor.keyId)>runtime.config.apiRateLimitPerMinute){
-      const limited=oauthError(429,'slow_down','The inbox approval exceeded its minute request budget.');limited.headers.set('Retry-After','60');return limited;
-    }
-    actor = grant.inboxIds?{workspaceId:grant.actor.workspaceId,keyId:grant.actor.keyId,admin:false,mailboxIds:grant.inboxIds,permissions:['read',...(granted.includes('send')||granted.includes('manage')?['send' as const]:[])]}:{ ...grant.actor, permissions: granted };
-  } catch {
-    log('warn', { operation: 'mcp-authorization', code: 'AUTH_UNAVAILABLE' });
-    return oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.');
-  }
-  return handler(actor);
-}
-
-function oauthError(status: number, error: string, description: string) {
-  return Response.json({ error, error_description: description }, { status, headers: { 'Cache-Control': 'no-store' } });
-}
-async function boundedBody(request: Request, limit = 64 * 1024): Promise<string> {
-  if (Number(request.headers.get('content-length')) > limit) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'OAuth request is too large.');
-  const reader = request.body?.getReader();
-  if (!reader) return '';
-  const chunks: Uint8Array[] = []; let length = 0;
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      length += chunk.value.byteLength;
-      if (length > limit) { await reader.cancel(); throw new ApiError(413, 'REQUEST_TOO_LARGE', 'OAuth request is too large.'); }
-      chunks.push(chunk.value);
-    }
-  } finally { reader.releaseLock(); }
-  const bytes = new Uint8Array(length); let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
-}
-const machineEndpoints = new Set(['/oauth2/token', '/oauth2/register', '/oauth2/introspect', '/oauth2/revoke']);
-const sessionReads = new Set(['/oauth2/get-consents', '/oauth2/get-consent']);
-const sessionWrites = new Set(['/oauth2/consent', '/oauth2/delete-consent']);
-export function isMcpAuthPath(path: string) {
-  return path === '/jwks' || path === '/oauth2/authorize' || machineEndpoints.has(path) || sessionReads.has(path) || sessionWrites.has(path);
-}
-function publicCors(response: Response) {
-  const headers = new Headers(response.headers);
-  headers.set('Access-Control-Allow-Origin', '*');
-  headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
-  headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, DPoP');
-  headers.set('Access-Control-Expose-Headers', 'WWW-Authenticate, DPoP-Nonce');
-  headers.delete('Access-Control-Allow-Credentials');
-  return new Response(response.body, { status: response.status, headers });
-}
-async function protocolRequest(runtime: Runtime, request: Request): Promise<Response> {
-  const url = new URL(request.url); const path = url.pathname.slice('/api/auth'.length);
-  const machine = machineEndpoints.has(path); const cors = machine || path === '/jwks';
-  if (request.method === 'OPTIONS' && cors) return publicCors(new Response(null, { status: 204 }));
-  const expected = machine || sessionWrites.has(path) ? 'POST' : 'GET';
-  if (request.method !== expected) return oauthError(405, 'invalid_request', 'Unsupported HTTP method.');
-  try {
-    if (url.search.length > 16 * 1024) return oauthError(400, 'invalid_request', 'OAuth request is too large.');
-    if (path === '/oauth2/register') {
-      // Node and Workers overwrite this header with the socket/edge peer, never X-Forwarded-For.
-      const peer = await digest(request.headers.get('x-bane-client-ip') ?? request.headers.get('x-opensend-client-ip') ?? 'unknown');
-      const { rows: [budget] } = await runtime.db.execute<{used: number; reset_at: string}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used)
-        VALUES (${runtime.config.workspaceId},${`public:oauth-register:${peer}`},date_trunc('hour',now()),1)
-        ON CONFLICT (workspace_id,key_id) DO UPDATE SET
-          used=CASE WHEN excluded.window_start>api_request_budgets.window_start THEN 1 ELSE least(api_request_budgets.used+1,11) END,
-          window_start=greatest(excluded.window_start,api_request_budgets.window_start) RETURNING used,window_start+interval '1 hour' AS reset_at`);
-      if (budget!.used > 10) {
-        const result = oauthError(429, 'slow_down', 'Too many client registrations. Retry after the hourly window resets.');
-        result.headers.set('Retry-After', new Date(budget!.reset_at).toUTCString());
-        return publicCors(result);
-      }
-    }
-    if (sessionWrites.has(path)) requireDashboardOrigin(runtime, request.headers);
-    const auth = createAuth(runtime, { mcp: true });
-    // Init starts immediately (including resource seeding). Observe its failure
-    // before any validation branch can return and leave a rejected promise.
-    await auth.$context;
-    if (sessionWrites.has(path) || sessionReads.has(path)) {
-      const session = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true, disableRefresh: true } });
-      if (!session || !await isApprovedUser(runtime, session.user.id)) return oauthError(401, 'access_denied', 'An approved Google session is required.');
-    }
-    const headers = new Headers(request.headers);
-    if (machine) headers.delete('cookie'); // Protocol clients never inherit browser/session authority.
-    let body: string | undefined;
-    if (request.method === 'POST') body = await boundedBody(request);
-    if (path === '/oauth2/register') {
-      const input: unknown = JSON.parse(body ?? '');
-      if (!input || typeof input !== 'object' || Array.isArray(input)) return publicCors(oauthError(400, 'invalid_client_metadata', 'Invalid client metadata.'));
-      const metadata = input as Record<string, unknown>;
-      if (typeof metadata.scope === 'string') metadata.scope = stripLegacyScope(metadata.scope);
-      // No attacker-selected network fetches in Workers: CIMD, remote JWKS,
-      // request objects, and back-channel logout are deliberately not enabled.
-      if (metadata.jwks_uri !== undefined || metadata.backchannel_logout_uri !== undefined || metadata.request_uris !== undefined ||
-        (metadata.subject_type !== undefined && metadata.subject_type !== 'public') ||
-        (metadata.token_endpoint_auth_method !== undefined && !['none', 'client_secret_basic', 'client_secret_post'].includes(String(metadata.token_endpoint_auth_method)))) {
-        return publicCors(oauthError(400, 'invalid_client_metadata', 'Use authorization code with PKCE and a public or client-secret client.'));
-      }
-      // Legacy desktop clients omit application_type. Infer native only for
-      // exact loopback hosts; keep the provider's remaining URI checks intact.
-      if (metadata.application_type === undefined && Array.isArray(metadata.redirect_uris) && metadata.redirect_uris.length > 0 &&
-        metadata.redirect_uris.every(uri => {
-          if (typeof uri !== 'string' || uri.includes('#') || !/^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d*)?(?:[/?]|$)/i.test(uri)) return false;
-          try {
-            const redirect = new URL(uri);
-            return ['http:', 'https:'].includes(redirect.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname) &&
-              !redirect.username && !redirect.password;
-          } catch { return false; }
-        })) metadata.application_type = 'native';
-      body = JSON.stringify(metadata);
-      headers.delete('content-length');
-    }
-    if (path === '/oauth2/token' && body && headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) {
-      const params = new URLSearchParams(body), scope = params.get('scope');
-      if (scope && stripLegacyScope(scope) !== scope) {
-        params.set('scope', stripLegacyScope(scope)); body = params.toString(); headers.delete('content-length');
-      }
-    }
-    if (path === '/oauth2/authorize') {
-      url.searchParams.set('scope', stripLegacyScope(url.searchParams.get('scope') ?? 'bane:read'));
-      if (!url.searchParams.has('resource')) url.searchParams.set('resource', resourceOf(runtime));
-      const resources = url.searchParams.getAll('resource');
-      if (resources.length !== 1 || resources[0] !== resourceOf(runtime)) return oauthError(400, 'invalid_target', 'Request the canonical Bane MCP resource.');
-    }
-    const result = await auth.handler(new Request(url, { method: request.method, headers, body }));
-    // OAuth errors and redirect state belong to the protocol, not the Google
-    // dashboard error page. Do not rewrite them into Bane API envelopes.
-    return cors ? publicCors(result) : result;
-  } catch (error) {
-    const result = error instanceof ApiError ? oauthError(error.status, 'invalid_request', error.message) :
-      error instanceof SyntaxError ? oauthError(400, 'invalid_request', 'Invalid request body.') :
-        oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.');
-    if (!(error instanceof ApiError) && !(error instanceof SyntaxError)) log('warn', { operation: 'mcp-oauth', code: 'AUTH_UNAVAILABLE' });
-    return cors ? publicCors(result) : result;
-  }
-}
-
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
-// How a client's self-chosen name is shown, on the approval page and in the connections list:
+const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean()}).openapi('McpConnection');
+const Binding=z.object({workspaceId:z.string().min(1).max(200),receiving:z.boolean()}).strict().openapi('McpConnectionBinding');
+// How a client's self-chosen name is shown in the connections list (ported from #90):
 // - Every space, line break and control character, and the blank cells U+2800, U+FFFC and U+1D159, become one space.
 // - Characters that are never drawn are dropped: default-ignorable code points (soft hyphen, grapheme joiner,
 //   direction marks and overrides, word joiners, fillers, tags), lone surrogates and annotation marks.
@@ -342,7 +18,7 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, character => ({ 
 const NAME_BLANK = /[\s\p{Cc}\p{Zl}\p{Zp}\u2800\uFFFC\u{1D159}]+/gu, NAME_SHOWN = /[\p{L}\p{N}\p{P}\p{S}]/u;
 const NAME_HIDDEN = /^[\p{Default_Ignorable_Code_Point}\p{Cs}\uFFF9-\uFFFB]$/u;
 const NAME_JOINER = /^[\u200C\u200D]$/, NAME_SELECTOR = /^[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]$/u;
-function clientLabel(name: string | null | undefined) {
+export function clientLabel(name: string | null | undefined) {
   const out: string[] = [];
   // A joiner needs a shown character after it.
   const settle = () => { while (out.length && NAME_JOINER.test(out.at(-1)!)) out.pop(); };
@@ -357,162 +33,52 @@ function clientLabel(name: string | null | undefined) {
   const label = out.join('').trim();
   return NAME_SHOWN.test(label) ? label : '';
 }
-function page(title: string, content: string) {
-  const nonce = crypto.randomUUID();
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Bane</title><style nonce="${nonce}">@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}*{box-sizing:border-box;letter-spacing:-0.01em}body{margin:0;background:#fafafa;color:#202020;font:16px/1.5 Inter,Arial,sans-serif;letter-spacing:-0.01em}main{max-width:520px;margin:12vh auto;padding:24px}h1{font-size:22px;line-height:1.25;margin:0 0 24px;font-weight:600}p{margin:16px 0}ul{padding-left:22px;margin:20px 0}li{margin:8px 0}.identity{color:#555;overflow-wrap:anywhere}.actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:28px}button{font:inherit;letter-spacing:inherit;padding:10px 18px;border:1px solid #bbb;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button[value=approve],button[value=signin]{background:#202020;color:white;border-color:#202020}button:focus-visible{outline:2px solid #345ad4;outline-offset:3px}small{font-size:14px}.warn{border:1px solid #bbb;border-radius:6px;padding:12px 14px;overflow-wrap:anywhere}a{color:inherit}strong{font-weight:600}</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`, {
-    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'; font-src 'self'; base-uri 'none'; frame-ancestors 'none'` },
+function owner(c:Ctx) {
+  const principal=c.get('actor');
+  if(principal.credential!=='dashboard') throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use your dashboard session.');
+  return principal.keyId.slice('user_'.length);
+}
+export function registerMcpAuth(app:App) {
+  for(const path of ['/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp']) app.on(['GET','HEAD','OPTIONS'],path,c=>{
+    c.header('Access-Control-Allow-Origin','*');
+    return c.req.method==='OPTIONS'?c.body(null,204):c.json(protectedResourceMetadata(c.env));
   });
-}
-const scopeLabels: Record<string, string> = {
-  'bane:read': 'Read email, audience, delivery, and account data',
-  'bane:send': 'Send email and manage campaigns',
-  'bane:manage': 'Full account access, including sending and managing credentials',
-  'offline_access': 'Stay connected for up to 30 days without signing in again',
-};
-function consentFormHeaders(runtime: Runtime, request: Request) {
-  const headers = new Headers(request.headers);
-  if (request.method !== 'POST') return headers;
-  const origin = headers.get('origin');
-  if (origin && origin !== 'null') {
-    requireDashboardOrigin(runtime, headers);
-    return headers;
-  }
-  const expected = new URL(runtime.config.publicUrl).origin;
-  const referer = headers.get('referer');
-  try {
-    if (referer && new URL(referer).origin === expected) {
-      // Some browser-mediated OAuth handoffs omit Origin on ordinary HTML form
-      // submissions. Normalize a verified same-origin Referer for Better Auth's
-      // internal consent endpoint; dashboard API writes remain Origin-only.
-      headers.set('origin', expected);
-      return headers;
-    }
-  } catch { /* Invalid referers fail through the normal origin guard below. */ }
-  if (origin === 'null' && headers.get('sec-fetch-site') === 'same-origin' && headers.get('sec-fetch-mode') === 'navigate' &&
-    headers.get('sec-fetch-dest') === 'document' && headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === 'application/x-www-form-urlencoded') {
-    // Sandboxed browser handoffs can serialize a same-origin form with an opaque
-    // Origin. Fetch Metadata is browser-controlled and still distinguishes this
-    // top-level same-origin navigation from a cross-site form submission.
-    headers.set('origin', expected);
-    return headers;
-  }
-  requireDashboardOrigin(runtime, headers);
-  return headers;
-}
-const McpConnection = z.object({ id: z.string(), clientId: z.string(), name: z.string().nullable(), userEmail: z.string(), scopes: z.array(z.string()), createdAt: z.string(), updatedAt: z.string() }).openapi('McpConnection');
-function dashboardOwner(c: Parameters<typeof actor>[0]) {
-  const identity = actor(c, 'manage');
-  if (identity.credential !== 'dashboard' || !identity.keyId.startsWith('user_')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'MCP connections can only be managed from an approved dashboard session.');
-  return identity;
-}
-async function consentPage(runtime: Runtime, request: Request) {
-  try {
-    const requestHeaders = consentFormHeaders(runtime, request);
-    const form = request.method === 'POST' ? new URLSearchParams(await boundedBody(request, 20 * 1024)) : null;
-    const query = form?.get('oauth_query') ?? new URL(request.url).search.slice(1);
-    if (query.length > 16 * 1024 || !query) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
-    const params = new URLSearchParams(query); const clientId = params.get('client_id');
-    if (!clientId) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
-    const consentWorkspace = runtime.config.multiTenant ? form?.get('workspace') ?? undefined : undefined;
-    const consentInboxes=form?.get('access')==='inboxes'?form.getAll('inbox'):undefined;
-    const auth = createAuth(runtime, { mcp: true, consentWorkspace,consentInboxes,receiving:form?.get('receiving')==='yes' });
-    // This server-only call verifies Better Auth's signed/expiring OAuth query
-    // before any client name, scope, redirect, or approval is displayed or used.
-    await auth.api.getOAuthClientPublicPrelogin({ body: { client_id: clientId, oauth_query: query } });
-    const requested = (params.get('scope') ?? '').split(' ').filter(Boolean);
-    if (!requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length || params.getAll('resource').length !== 1 || params.get('resource') !== resourceOf(runtime)) {
-      return page('Invalid connection request', '<p>Restart the connection from your MCP client.</p>');
-    }
-    const session = await auth.api.getSession({ headers: requestHeaders, query: { disableCookieCache: true, disableRefresh: true } });
-    const member = session && runtime.config.multiTenant ? await membershipForApprovedUser(runtime.db, session.user.id, { multiTenant: true, workspaceId: consentWorkspace, bootstrapDefaultOwner: false }) : null;
-    const approvedSession = session && (!runtime.config.multiTenant || member) && await isApprovedUser(runtime, session.user.id) ? session : null;
-    if (member?.role === 'member' && requested.includes('bane:manage')) return page('Administrator approval required', '<p>Reconnect requesting read or send access instead of manage access.</p>');
-    const action = form?.get('action');
-    if (action === 'signin') {
-      await reserveSignIn(runtime,request.headers);
-      const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
-      const result = await auth.handler(new Request(`${issuerOf(runtime)}/sign-in/social`, { method: 'POST', headers,
-        body: JSON.stringify({ provider: 'google', callbackURL: `${originOf(runtime)}/mcp/consent?${query}`, errorCallbackURL: `${originOf(runtime)}/?auth=error` }),
-      }));
-      return redirectResult(result);
-    }
-    if (form && action !== 'approve' && action !== 'deny') return oauthError(400, 'invalid_request', 'Choose an approval action.');
-    if (form && approvedSession) {
-      const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
-      return redirectResult(await auth.handler(new Request(`${issuerOf(runtime)}/oauth2/consent`, { method: 'POST', headers, body: JSON.stringify({ accept: action === 'approve', oauth_query: query }) })));
-    }
-    const hidden = `<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">` + (member ? `<input type="hidden" name="workspace" value="${escapeHtml(member.workspaceId)}">` : '');
-    if (!approvedSession || (new URL(request.url).pathname === '/mcp/login' && (params.get('prompt') ?? '').split(' ').includes('login'))) {
-      return page('Connect Bane', `<form method="post" action="/mcp/login">${hidden}<p>Use your approved Google account to connect this client.</p><div class="actions"><button name="action" value="signin">Continue with Google</button></div></form>`);
-    }
-    const [client] = await runtime.db.select({ name: oauthClient.name, disabled: oauthClient.disabled, redirectUris: oauthClient.redirectUris }).from(oauthClient).where(eq(oauthClient.clientId, clientId)).limit(1);
-    if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to Bane.</p>');
-    const [workspace] = member ? await runtime.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, member.workspaceId)) : [];
-    const name = clientLabel(client.name) || 'This MCP client';
-    const redirectUri = params.get('redirect_uri') ?? client.redirectUris[0] ?? '';
-    let host = redirectUri; try { host = new URL(redirectUri).host || redirectUri; } catch { /* Show the raw value when it is not a URL. */ }
-    const hostname = host.replace(/:\d+$/, '');
-    const destination = ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? `an app on this computer (${escapeHtml(host)})` : `<strong>${escapeHtml(host)}</strong>`;
-    const warning = `<p class="warn"><strong>Self-registered client.</strong> Bane has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
-    const choices=(member?.role==='member'?[]:(await runtime.db.execute<{id:string;address:string}>(sql`SELECT id,address FROM mailboxes WHERE workspace_id=${member?.workspaceId??runtime.config.workspaceId} AND kind='inbox' AND (delete_after IS NULL OR delete_after>now()) ORDER BY address LIMIT 100`)).rows);
-    const inboxScope=choices.length?`<fieldset><legend>Connection scope</legend><label><input type="radio" name="access" value="workspace" checked> Workspace permissions above</label><label><input type="radio" name="access" value="inboxes"> Only selected inboxes (read, wait and permitted replies; no workspace tools)</label>${choices.map(b=>`<label><input type="checkbox" name="inbox" value="${escapeHtml(b.id)}">${escapeHtml(b.address)}</label>`).join('')}</fieldset>`:'';
-    const labels = requested.filter(scope => !(requested.includes('bane:manage') && ['bane:read', 'bane:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
-    return page(`Allow ${name} to access Bane?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}${inboxScope}<label><input name="receiving" value="yes" type="checkbox"> Include workspace receiving tools. Manage permits live handler and destination changes. Revoking this connection disables its destinations, inbox keys and ritual plan. Queued calls tied to this grant stop.</label><div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
-  } catch (error) {
-    if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
-    return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
-  }
-}
-async function redirectResult(result: Response) {
-  if (!result.ok) return result;
-  const payload: unknown = await result.json();
-  if (!payload || typeof payload !== 'object' || !('url' in payload) || typeof payload.url !== 'string') return oauthError(503, 'temporarily_unavailable', 'Unable to continue this connection.');
-  // Only Better Auth's validated/generated redirects reach this function.
-  const headers = new Headers(result.headers); headers.delete('Content-Type'); headers.set('Location', payload.url); headers.set('Referrer-Policy', 'no-referrer'); headers.set('Cache-Control', 'no-store');
-  return new Response(null, { status: 303, headers });
-}
-export function registerMcpAuth(app: App): void {
-  app.openapi(createRoute({ method: 'get', path: '/v1/mcp-connections', operationId: 'listMcpConnections', tags: ['Auth'], security, request: { query: PageQuery }, responses: { 200: response(pageSchema(McpConnection)), ...errors } }), async c => {
-    const identity = dashboardOwner(c); const query = c.req.valid('query');
-    const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
-      .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
-      .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
-    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, name: clientLabel(row.name) || null, scopes: row.scopes.map(canonicalScope).filter(scope => scope !== 'bane:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+  app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
+    const user=owner(c),{limit,cursor}=c.req.valid('query');
+    const {rows}=await c.env.db.execute<{id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired';workspace_id:string|null;receiving:boolean}>(sql`
+      WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT 'bane:'||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
+        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,g.receiving
+        FROM bane_resource_grants g WHERE g.user_id=${user}
+        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false FROM bane_expired_approvals WHERE user_id=${user})
+      SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${cursor?sql`WHERE a.id>${cursor}`:sql``} ORDER BY a.id LIMIT ${limit+1}`);
+    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
-    const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
-    const revoked = await c.env.db.transaction(async tx => {
-      const [connection] = await tx.select().from(oauthConsent).where(and(eq(oauthConsent.id, consentId), like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId))).limit(1).for('update');
-      if (!connection?.userId) return false;
-      const revokedAt = new Date().toISOString();
-      if (connection.referenceId) {
-        await tx.update(oauthAccessToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthAccessToken.clientId, connection.clientId), eq(oauthAccessToken.userId, connection.userId), eq(oauthAccessToken.referenceId, connection.referenceId)));
-        await tx.update(oauthRefreshToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthRefreshToken.clientId, connection.clientId), eq(oauthRefreshToken.userId, connection.userId), eq(oauthRefreshToken.referenceId, connection.referenceId)));
-      }
-      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.grantId, connectionId)));
-      await tx.delete(oauthConsent).where(eq(oauthConsent.id, consentId));
-      return true;
-    });
-    if (!revoked) throw new ApiError(404, 'NOT_FOUND', 'MCP connection was not found.');
-    return c.json({ id: connectionId, revoked: true as const }, 200);
+  // Chooses (or changes) the workspace an approval acts in. Credentials it created elsewhere stop at their next
+  // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.
+  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/workspace',operationId:'bindMcpConnection',tags:['Auth'],security,request:{params:IdParams,body:{required:true,content:{'application/json':{schema:Binding}}}},responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),receiving:z.boolean()})),...errors}}),async c=>{
+    const user=owner(c),{id}=c.req.valid('param'),{workspaceId,receiving}=c.req.valid('json');
+    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked,client_id,workspace_id,receiving FROM bane_resource_grants WHERE id=${id} AND user_id=${user}),
+      membership AS (SELECT role FROM workspace_members WHERE workspace_id=${workspaceId} AND user_id=${user} AND role IN ('owner','admin','member')),
+      bound AS (UPDATE bane_resource_grants SET workspace_id=${workspaceId},receiving=${receiving},updated_at=now() WHERE id=${id} AND user_id=${user} AND NOT revoked
+        AND EXISTS(SELECT FROM membership WHERE NOT ${receiving} OR role IN ('owner','admin')) RETURNING id),
+      audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.bind',workspaceId,userId:user,target:{type:'mcp_connection',id},
+        before:sql`jsonb_build_object('clientId',approval.client_id,'workspaceId',approval.workspace_id,'receiving',approval.receiving)`,after:{workspaceId,receiving}},{from:sql`bound, approval`})})
+      SELECT (SELECT revoked FROM approval) revoked,(SELECT role FROM membership) role,EXISTS(SELECT FROM bound) bound`);
+    if(result?.revoked==null) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
+    if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED','This MCP connection is revoked. Reconnect the client to approve it again.');
+    if(!result.role) throw new ApiError(403,'PERMISSION_DENIED','You are not a member of that workspace.');
+    if(!result.bound) throw new ApiError(403,'ADMIN_REQUIRED','Receiving tools need an owner or admin of that workspace.');
+    return c.json({id,workspaceId,receiving},200);
   });
-  for (const path of ['/jwks', '/oauth2/authorize', ...machineEndpoints, ...sessionReads, ...sessionWrites]) {
-    app.on(['GET', 'POST', 'OPTIONS'], `/api/auth${path}`, c => protocolRequest(c.env, c.req.raw));
-  }
-  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/api/auth']) {
-    app.on(['GET', 'HEAD', 'OPTIONS'], path, async c => {
-      if (c.req.method === 'OPTIONS') return publicCors(new Response(null, { status: 204 }));
-      try {
-        const url = new URL(c.req.raw.url);
-        if (path === '/.well-known/oauth-authorization-server') url.pathname = '/.well-known/oauth-authorization-server/api/auth';
-        return publicCors(await createAuth(c.env, { mcp: true }).handler(new Request(url, c.req.raw)));
-      } catch {
-        log('warn', { operation: 'mcp-discovery', code: 'AUTH_UNAVAILABLE' });
-        return publicCors(oauthError(503, 'temporarily_unavailable', 'Bane authorization is temporarily unavailable.'));
-      }
-    });
-  }
-  app.on(['GET', 'POST'], '/mcp/login', c => consentPage(c.env, c.req.raw));
-  app.on(['GET', 'POST'], '/mcp/consent', c => consentPage(c.env, c.req.raw));
+  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
+    const user=owner(c),{id}=c.req.valid('param');
+    const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now() WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
+      agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
+      removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)),
+      audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.revoke',workspaceId:sql`coalesce(revoked.workspace_id,${c.get('actor').workspaceId})`,userId:user,
+        target:{type:'mcp_connection',id},before:sql`jsonb_build_object('clientId',revoked.client_id,'scopes',revoked.permissions)`},{from:sql`revoked`})})
+      SELECT grant_key FROM revoked`);
+    if(!changed.rowCount) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
+    return c.json({id,revoked:true as const},200);
+  });
 }

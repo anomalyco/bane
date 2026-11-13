@@ -20,9 +20,10 @@ export const contactColumns: SkeletonColumn[] = [
 export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%', card: 'line' }, contactColumns[4]]
 export const listColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '24%', card: 'title' },
+  // A phone card gives consent two lines, two counts each, so all four fit at any width a count reaches.
   { key: 'subscribed', label: consentLabel('subscribed'), width: '12%', align: 'right', card: 'line' },
   { key: 'unknown', label: consentLabel('unknown'), width: '11%', align: 'right', card: 'inline' },
-  { key: 'unsubscribed', label: consentLabel('unsubscribed'), width: '13%', align: 'right', card: 'inline' },
+  { key: 'unsubscribed', label: consentLabel('unsubscribed'), width: '13%', align: 'right', card: 'line' },
   { key: 'suppressed', label: consentLabel('suppressed'), width: '12%', align: 'right', card: 'inline' },
   { key: 'total', label: 'Total', width: '11%', align: 'right', card: 'aside' },
   { key: 'created', label: 'Created', width: '17%', card: 'hide' },

@@ -114,7 +114,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
         <h2 className="vt-heading">Environment</h2>
         <div className="vt-env">
           <code className="vt-text">BANE_API_KEY</code>
-          <span>Created in the dashboard. <Button variant="ghost" className="vt-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with Google</Button></span>
+          <span>Created in the dashboard. <Button variant="ghost" className="vt-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button></span>
           {notice && <div className="vt-notice">{notice}</div>}
         </div>
       </section>

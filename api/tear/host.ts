@@ -16,7 +16,7 @@
 //   server and then fails in the client with ECONNRESET: a lost result after commit. (The three
 //   creates checked here write in that statement or transaction.)
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import type { PoolClient } from 'pg';
 
@@ -40,18 +40,25 @@ if (!url || !['localhost', '127.0.0.1', '[::1]'].includes(new URL(url).hostname)
 // Both are checked at startup and before every fixture.
 const DISPOSABLE = 'bane-tear: disposable test database, every row may be changed or deleted';
 const PUBLIC = 'http://127.0.0.1:8799';
-// Every worker (and every later run) on the database must share one auth secret: the JWKS key Better Auth stores
-// there is encrypted with it, so a per-process random secret fails every OAuth token after the first worker's.
+const fixtureIssuer='https://tear-issuer.invalid';
+const signer=generateKeyPairSync('ec',{namedCurve:'P-256'});
+const originalFetch=globalThis.fetch;
+globalThis.fetch=async(input,init)=>{
+  const u=new URL(input instanceof Request?input.url:String(input));
+  if(u.origin!==fixtureIssuer) return originalFetch(input,init);
+  if(u.pathname==='/.well-known/openid-configuration') return Response.json({issuer:fixtureIssuer,jwks_uri:fixtureIssuer+'/keys'});
+  if(u.pathname==='/keys') return Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),alg:'ES256',kid:'tear'}]});
+  return new Response(null,{status:404});
+};
 const env: Record<string, string> = {
-  DATABASE_URL: url, BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? 'bane-tear: fixed secret for disposable test databases only', PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
-  MULTI_TENANT: 'true', GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture', AUTH_ALLOWED_DOMAINS: 'example.com', AUTH_ALLOWED_EMAILS: '',
+  DATABASE_URL: url, BANE_ROOT_SECRET: process.env.BANE_ROOT_SECRET ?? 'bane-tear: fixed secret for disposable test databases only', PUBLIC_URL: PUBLIC, API_BASE_URL: PUBLIC,
+  MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ACCOUNT_ISSUER:fixtureIssuer, ACCOUNT_CLIENT_ID:'tear', ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', 
   ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear', S3_ENDPOINT: 'http://127.0.0.1:9',
   API_RATE_LIMIT_PER_MINUTE: '100000', DEFAULT_SES_REGION: 'us-east-1', SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
 };
 
 const pg = (await import('pg')).default;
 const { drizzle } = await import('drizzle-orm/node-postgres');
-const { makeSignature } = await import('better-auth/crypto');
 const { createApp, createOpenApiApp } = await import('../src/app.js');
 const { loadConfig } = await import('../src/config.js');
 const { s3Storage } = await import('../src/adapters/storage.js');
@@ -148,7 +155,7 @@ const admin = new pg.Pool({ connectionString: url, max: 4 });
 async function assertDisposable() {
   const { rows: [r] } = await admin.query(`SELECT shobj_description(d.oid, 'pg_database') AS marker, current_database() AS name,
     (SELECT count(*)::int FROM workspaces WHERE id <> 'default' AND id NOT LIKE 'tear\\_%') AS workspaces,
-    (SELECT count(*)::int FROM auth_user WHERE id NOT LIKE 'tear-user-%') AS users
+    (SELECT count(*)::int FROM bane_users WHERE id NOT LIKE 'tear-user-%') AS users
     FROM pg_database d WHERE d.datname = current_database()`);
   if (r?.marker !== DISPOSABLE) throw new Error(`tear host: refusing database ${r?.name ?? '(unknown)'}: it is not marked disposable. Create a dedicated, migrated database and mark it with COMMENT ON DATABASE ... IS '${DISPOSABLE}' (see tear/README.md).`);
   if (r.workspaces || r.users) throw new Error(`tear host: refusing database ${r.name}: it holds ${r.workspaces} workspaces and ${r.users} users that tear did not create.`);
@@ -194,13 +201,13 @@ type Grant = { access: string; refresh: string; clientId: string; consentId: str
 let fx: Fixture | null = null;
 
 async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
-  const id = `tear-user-${randomUUID()}`, token = `tear-token-${randomUUID()}`, memberId = randomUUID();
+  const id = `tear-user-${randomUUID()}`, token = randomBytes(32).toString('base64url'), memberId = randomUUID();
   const email = `${id}@example.com`;
-  await admin.query(`INSERT INTO auth_user (id,name,email,email_verified,google_hosted_domain) VALUES ($1,'tear',$2,true,'example.com')`, [id, email]);
-  await admin.query(`INSERT INTO auth_account (id,provider_id,account_id,user_id) VALUES ($1,'google',$2,$3)`, [randomUUID(), randomUUID(), id]);
-  await admin.query(`INSERT INTO auth_session (id,token,expires_at,user_id) VALUES ($1,$2,$3,$4)`, [randomUUID(), token, at(RealDate.now() + 86_400_000), id]);
+  await admin.query(`INSERT INTO bane_users (id,name,email,email_verified) VALUES ($1,'tear',$2,true)`, [id, email]);
+  await admin.query(`INSERT INTO bane_oidc_identities VALUES ($1,$2,$2)`, [fixtureIssuer,id]);
+  await admin.query(`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES ($1,$2,$3,$2,$4)`, [createHash('sha256').update(token).digest('hex'),id,fixtureIssuer,at(RealDate.now()+86_400_000)]);
   await admin.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,$4)`, [memberId, w, id, role]);
-  return { id, memberId, cookie: `bane.session_token=${encodeURIComponent(`${token}.${await makeSignature(token, env.BETTER_AUTH_SECRET!)}`)}` };
+  return { id, memberId, cookie: `bane.session_token=${token}` };
 }
 async function open() {
   await assertDisposable();
@@ -214,7 +221,7 @@ async function open() {
 async function close() {
   if (!fx) return;
   for (const slot of Object.values(fx.slots)) crash(slot);
-  await admin.query('DELETE FROM auth_user WHERE id = ANY($1)', [[fx.owner.id, fx.member.id]]);
+  await admin.query('DELETE FROM bane_users WHERE id = ANY($1)', [[fx.owner.id, fx.member.id]]);
   fx = null;
 }
 
@@ -257,35 +264,29 @@ async function callTool(g: string, name: string, args: object, slot: Slot | null
 }
 
 async function mintGrant(name: string, user: User, scope: string) {
-  const redirect = 'http://127.0.0.1/callback';
-  const reg = await send(null, 'POST', '/api/auth/oauth2/register', {}, { client_name: `tear-${name}`, redirect_uris: [redirect], token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope }, { 'x-bane-client-ip': randomUUID() });
-  if (reg.status !== 201) return { status: reg.status, step: 'register' };
-  const verifier = (randomUUID() + randomUUID()).replaceAll('-', ''), clientId = reg.body.client_id as string;
-  const q = new URLSearchParams({ response_type: 'code', client_id: clientId, redirect_uri: redirect, scope, state: randomUUID(), resource: `${PUBLIC}/mcp`, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-  const auth = await send(null, 'GET', `/api/auth/oauth2/authorize?${q}`, { cookie: user.cookie }, undefined, { accept: 'application/json' });
-  if (auth.status !== 200 || typeof auth.body?.url !== 'string') return { status: auth.status, step: 'authorize' };
-  const consent = await send(null, 'POST', '/api/auth/oauth2/consent', { cookie: user.cookie }, { accept: true, oauth_query: new URL(auth.body.url, PUBLIC).search.slice(1) });
-  const code = consent.status === 200 && typeof consent.body?.url === 'string' ? new URL(consent.body.url).searchParams.get('code') : null;
-  if (!code) return { status: consent.status, step: 'consent' };
-  const token = await send(null, 'POST', '/api/auth/oauth2/token', {}, new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId, redirect_uri: redirect, code, code_verifier: verifier, resource: `${PUBLIC}/mcp` }).toString(), { 'content-type': 'application/x-www-form-urlencoded' });
-  if (token.status !== 200) return { status: token.status, step: 'token' };
-  const row = (await admin.query('SELECT id FROM oauth_consent WHERE client_id=$1 AND user_id=$2', [clientId, user.id])).rows[0];
-  fx!.grants.set(name, { access: token.body.access_token, refresh: token.body.refresh_token, clientId, consentId: row.id, keyId: `mcp_${row.id}` });
+  const jti=randomUUID(), clientId='tear-'+randomUUID(), now=Math.floor(clock/1000);
+  const claims={iss:fixtureIssuer,sub:user.id,aud:PUBLIC+'/mcp',client_id:clientId,scope,jti,iat:now,exp:now+300};
+  const body=[{alg:'ES256',typ:'at+jwt',kid:'tear'},claims].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
+  const access=body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  const consentId='at_'+createHash('sha256').update(JSON.stringify([user.id,clientId])).digest('hex');
+  const result=await rpc(access,'tools/list',{},true);
+  if(result.status!==200)return {status:result.status};
+  fx!.grants.set(name,{access,refresh:'',clientId,consentId,keyId:'mcp_'+consentId});
   return { status: 'ok' };
 }
 async function refreshGrant(name: string) {
   const g = fx!.grants.get(name)!;
-  const r = await send(null, 'POST', '/api/auth/oauth2/token', {}, new URLSearchParams({ grant_type: 'refresh_token', client_id: g.clientId, refresh_token: g.refresh, resource: `${PUBLIC}/mcp` }).toString(), { 'content-type': 'application/x-www-form-urlencoded' });
-  if (r.status !== 200) return { status: 'denied' };
-  g.access = r.body.access_token; g.refresh = r.body.refresh_token;
-  return { status: 'ok' };
+  const claims=JSON.parse(Buffer.from(g.access.split('.')[1]!,'base64url').toString());
+  const user=[fx!.member,fx!.owner].find(u=>u.id===claims.sub);
+  if(!user || !(await admin.query('SELECT FROM bane_resource_grants WHERE id=$1 AND NOT revoked',[g.keyId])).rowCount)return {status:'denied'};
+  return mintGrant(name,user,claims.scope);
 }
 // A v3 agent token, as signed by a release before the HKDF key (v4): still verified during overlap.
 async function legacyToken(grant: Grant) {
   const id = `agt_${randomBytes(16).toString('hex')}`, exp = clock + 60_000, permissions = ['read', 'send', 'manage'];
   await admin.query('INSERT INTO agent_tokens (id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)', [id, fx!.w, grant.keyId, JSON.stringify(permissions), '[]', 'tear legacy', at(exp).toISOString()]);
   const payload = Buffer.from(JSON.stringify({ v: 3, id, grant: grant.keyId, permissions, domains: [], exp, nonce: randomBytes(16).toString('hex') })).toString('base64url');
-  const signature = createHmac('sha256', env.BETTER_AUTH_SECRET!).update(`opensend-agent-token-v1:${payload}`).digest('base64url');
+  const signature = createHmac('sha256', env.BANE_ROOT_SECRET!).update(`opensend-agent-token-v1:${payload}`).digest('base64url');
   return { id, secret: `os_agent_${payload}.${signature}` };
 }
 async function legacyKey() {
@@ -434,7 +435,7 @@ async function act(action: string): Promise<Obs> {
       case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
-    case 'receiving': await admin.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [f.grants.get(a1 ?? 'grant')!.consentId]); return {};
+    case 'receiving': await admin.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1', [f.grants.get(a1 ?? 'grant')!.consentId]); return {};
     case 'refresh': return refreshGrant(a1!);
     case 'remove': return { status: (await send(null, 'DELETE', `/v1/workspaces/current/members/${f.member.memberId}`, owner())).status };
     case 'promote': return { status: (await send(null, 'PATCH', `/v1/workspaces/current/members/${f.member.memberId}`, owner(), { role: 'admin' })).status };

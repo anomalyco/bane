@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { useMutation } from '@tanstack/react-query'
+import { useGuardedMutation } from '../../lib/single-flight'
 import { Send } from 'lucide-react'
 import { Alert, Button, ErrorText, SectionHeader, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
@@ -8,6 +8,7 @@ import { useApi, useApiQuery, usePublicOrigin, useSession } from '../../data/con
 import { request } from '../../data/live'
 import type { Domain } from '../../data/types'
 import './developer.css'
+import { PrivateAddress } from '../../components/PrivateAddress'
 
 const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simulator.amazonses.com`)
 
@@ -32,13 +33,13 @@ export function TestSend({ domain, onSent }: { domain: Domain; onSent?: (id: str
   const to = identity?.email
   const from = `hello@${domain.name}`
   const verified = domain.status === 'verified'
-  const test = useMutation({ mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
     onSuccess: data => onSent?.(data.id) })
   if (!to) return null
   return <>
     <div className="first-send-test">
       <Button loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to {to}{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? `From ${from} to ${to}.` : `Available once ${domain.name} is verified.`}</span>
+      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} />.</> : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>
@@ -52,7 +53,8 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
   const [language, setLanguage] = useState('curl')
   const to = identity?.email ?? 'you@example.com'
   const from = `hello@${domain?.name ?? 'acme.com'}`
-  const snippets = sendSnippets({ origin, apiKey, from, to })
+  // Until the installation's address is known (it always is once signed in), the examples stay empty.
+  const snippets = origin ? sendSnippets({ origin, apiKey, from, to }) : { curl: '', sdk: '' }
   return <section className="section stack developer-section" aria-label={title}>
     <SectionHeader title={title} />
     <div className="developer-client-bar">

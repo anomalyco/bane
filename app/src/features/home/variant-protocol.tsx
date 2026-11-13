@@ -84,7 +84,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
       <div className="vp-foot">
         <p>One API on Amazon SES, with a TypeScript SDK and an MCP server for coding agents.<br />Pay per email.</p>
         <div className="vp-actions">
-          <Button variant="ghost" className="vp-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with Google</Button>
+          <Button variant="ghost" className="vp-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button>
           <a className="vp-secondary" href="/docs">Read the docs</a>
           <code className="vp-install">npm i @banemx/sdk</code>
         </div>

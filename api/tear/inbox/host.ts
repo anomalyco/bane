@@ -42,8 +42,8 @@ const [{ createApp }, { dispatchAsMailboxAccess }, { nodeRuntime }, { storeIncom
   import('../../src/app.js'), import('../../src/auth.js'), import('../../src/adapters/node.js'), import('../../src/mailbox-ingest-store.js'),
   import('../../src/mailbox-receipts.js'), import('../../src/mailbox-store.js'), import('../../src/mailbox-ingest-input.js'),
 ]);
-const instance = nodeRuntime({ DATABASE_URL, BETTER_AUTH_SECRET: hex(64), GOOGLE_CLIENT_ID: 'tear-fixture', GOOGLE_CLIENT_SECRET: 'tear-fixture',
-  AUTH_ALLOWED_EMAILS: 'operator@example.com', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear' });
+const instance = nodeRuntime({ DATABASE_URL, BANE_ROOT_SECRET: hex(64), ACCOUNT_CLIENT_ID: 'tear-fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'tear-fixture',
+  AUTH_ALLOWED_SUBJECTS: 'tear-operator', PUBLIC_URL: 'http://127.0.0.1:9', ENABLE_LIVE_SES: 'false', S3_BUCKET: 'tear-fixture', S3_ACCESS_KEY_ID: 'tear', S3_SECRET_ACCESS_KEY: 'tear' });
 const runtime = instance.runtime;
 const app = createApp();
 const REGION = 'us-east-1', BUCKET = 'tear-fixture', TOPIC = `arn:aws:sns:${REGION}:111122223333:tear-inbound`;

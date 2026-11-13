@@ -1,5 +1,5 @@
 SET LOCAL lock_timeout='2s';
--- IMAP/SMTP access is free (a fair-use download throttle, 246, instead of a fee): migration 172's charge path goes.
+-- IMAP/SMTP access is free (a fair-use download throttle, 285, instead of a fee): migration 172's charge path goes.
 -- The trigger names (protocol_meter, protocol_end) stay; the function keeps only 177's auth notification, so open
 -- sessions still close when a password is revoked or the inbox is deleted.
 CREATE OR REPLACE FUNCTION inbox_protocol_meter() RETURNS trigger LANGUAGE plpgsql AS $$

@@ -1,4 +1,5 @@
 import type { AttachmentApi } from '../../data/types'
+import { imageTags } from '../../lib/html-scan'
 
 export function isRasterDataUrl(value: string): boolean {
   const content = value.slice(value.indexOf(',') + 1)
@@ -92,7 +93,7 @@ export function replaceEditorImageSources(document: Record<string, unknown>, sou
 }
 export function cidImageSources(html: string): Set<string> {
   const ids = new Set<string>()
-  for (const tag of html.match(/<img\b[^>]*>/gi) ?? []) {
+  for (const tag of imageTags(html)) {
     const match = /\ssrc\s*=\s*(["'])cid:([a-zA-Z0-9_.@-]{1,120})\1/i.exec(tag)
     if (match) ids.add(match[2])
   }

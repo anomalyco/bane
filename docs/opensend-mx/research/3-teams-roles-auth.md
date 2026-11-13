@@ -1,20 +1,8 @@
-**Make a workspace the tenant, not the login or the sending domain.** One verified person can belong to several workspaces and have a different role in each. Use Better Auth organizations for membership and invitations; let the OpenSend API enforce resource permissions for people, keys and agents alike. **Do not open public sign-up until that enforcement exists:** today every approved dashboard session receives unrestricted `manage` in `default` ([config.ts:49–61](/api/src/config.ts#L49), [google-auth.ts:161–174](/api/src/google-auth.ts#L161)).
-
-## Sign-up, sign-in and SSO
-
-The repo locks Better Auth **1.7.3**. It uses the PostgreSQL Drizzle adapter, JWT and `@better-auth/mcp` with the OAuth provider—not the organization, passkey, two-factor or SSO plugins ([package.json:28–40](/api/package.json#L28), [lockfile:2258–2265](/api/package-lock.json#L2258), [google-auth.ts:62–83](/api/src/google-auth.ts#L62)). Adding providers alone will not work: Google-only checks exist in profile validation, database hooks, session renewal, route allowlists and MCP grant resolution.
-
-| When | Recommendation |
-|---|---|
-| Launch | Keep Google; add built-in [GitHub](https://better-auth.com/docs/authentication/github) with verified email and no repository permissions, plus [email OTP](https://better-auth.com/docs/plugins/email-otp). Choose OTP over a second magic-link flow: a mail scanner opening a link cannot consume a typed code. No passwords. Link another provider only from a freshly authenticated account, not merely because emails match. |
-| Launch | Offer [passkeys](https://better-auth.com/docs/plugins/passkey) via `@better-auth/passkey` after verified sign-in, on one canonical authentication origin. Require a user-verified passkey or independent TOTP for owners/admins and fresh proof for sensitive changes. [Better Auth 2FA](https://better-auth.com/docs/plugins/2fa) supports TOTP and recovery codes; `allowPasswordless` enables enrollment, **not** automatic challenges on social or OTP sign-in. Enforce assurance server-side before granting workspace access. |
-| Teams needing SSO | Add org-bound [`@better-auth/sso`](https://better-auth.com/docs/plugins/sso): OIDC first, SAML 2.0 second. Require verified identity-domain ownership, owner-approved IdP configuration and an assertion from **that workspace’s** provider when SSO is enforced. Personal Google, OTP, passkey or another org’s SSO must not bypass it. A verified *sending* domain never grants membership. |
-
-**Workers:** Keep the request-local auth instance, [Drizzle/PostgreSQL](https://better-auth.com/docs/adapters/drizzle), [Hyperdrive with `pg` and `nodejs_compat`](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/), and disabled query caching ([api/README.md:148–156](/api/README.md#L148)). Organization, OTP, two-factor and passkey are suitable candidates on this stack; add their required schema mappings and use matching, patched package versions. Adapter support is not proof every callback runs in `workerd`. Validate each flow there, especially SSO: upstream reports [SAML XML/crypto and Worker CPU constraints](https://github.com/better-auth/better-auth/issues/10343). If native SAML fails, use a SAML-to-OIDC broker; retain one OpenSend session issuer.
+**Make a workspace the tenant.** One person may belong to several workspaces with different roles. The dashboard delegates sign-in to its configured OIDC issuer. See the [current identity and migration guide](../../../api/README.md#dashboard-sign-in).
 
 ## Membership and permissions
 
-Keep global users, provider accounts and sessions ([db/google-auth.ts:4–34](/api/src/db/google-auth.ts#L4)). Use the [organization plugin](https://better-auth.com/docs/plugins/organization) for `organization` (= workspace), `member` (unique workspace/user), `invitation`, and the session’s active organization. Use `createAccessControl` for fixed resource/action roles. Optional plugin **teams are groups within a workspace**, not tenants; defer nested teams and customer-defined roles. Add membership grants for environments, sending domains and receiving-address IDs. Tenant-owned records and parent/child references must agree on workspace, including queued jobs and stored attachments.
+Bane owns users, sessions, memberships and invitations. Workspace roles apply equally to dashboard and delegated requests.
 
 **Default role matrix** — permissions apply only in granted environments. Owner includes Admin; “metadata” excludes bodies, recipients, raw headers, attachments and secrets.
 

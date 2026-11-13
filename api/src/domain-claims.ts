@@ -49,7 +49,8 @@ export async function claimNameAllowed(name:string,publicUrl:string,platformOwne
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
-export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string) {
+/** `audit` builds the domain.create audit row from the reservation (`reserved`), written in the same statement for a new claim only. */
+export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string, audit?: (reserved: SQL) => SQL) {
   const owner=platformDomainOwner(runtime.config,workspace), root=platformHost(runtime.config.publicUrl);
   if (!await claimNameAllowed(name,runtime.config.publicUrl,owner)) throw notAllowed();
   // The platform domain's SES identity predates every claim and carries no claim tag: only the operator's adoption
@@ -62,13 +63,13 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
   const reserve = regionalSending(runtime) ? sql`${sql.identifier(runtime.config.trustedPool?'reserve_placed_claim':'reserve_regional_claim')}(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`;
   // One reservation, one statement. The profiler never gates or runs inside the create route.
-  const shadow = runtime.config.multiTenant && runtime.config.placementShadow;
+  const shadow = runtime.config.multiTenant && runtime.config.placementShadow, materialized = shadow || !!audit;
   const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null; created_at?: string; ever_proven?: boolean }) | null; fresh: boolean; recovering: boolean; error_code: string | null; reserved_at: string}>(
-    sql`${shadow ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve}), queued AS (
+    sql`${materialized ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve})` : sql``}${shadow ? sql`, queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.placement:'||id,'domain.placement',${workspace},jsonb_build_object('domainId',id)
-      FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}
+      FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}${audit ? sql`, audited AS (${audit(sql`reserved`)})` : sql``}
       SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim,now() AS reserved_at
-      FROM ${shadow ? sql`reserved` : reserve} r
+      FROM ${materialized ? sql`reserved` : reserve} r
       LEFT JOIN domain_claims dc ON dc.token=r.token`)).rows[0]!;
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
   if (row.error_code==='OPERATOR_ADOPTION_REQUIRED') throw new ApiError(409,row.error_code,'An operator must reattest this retained sending identity.');

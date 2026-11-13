@@ -1,4 +1,4 @@
-// Shared billing shapes. BillingPosition mirrors billing_position() (migration 242); BillingGate adds billing_gate()'s
+// Shared billing shapes. BillingPosition mirrors billing_position() (migration 281); BillingGate adds billing_gate()'s
 // decision. BillingSummary, LedgerEntry, PaymentView and AutoRechargeSettings mirror the public API (routes.ts).
 // Money fields are integer micro-cents as strings (see money.ts).
 export type Enforcement = 'off' | 'shadow' | 'enforce';

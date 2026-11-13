@@ -18,7 +18,7 @@ const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subd
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
-  listMcpConnections: dashboard, revokeMcpConnection: dashboard,
+  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
   listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
@@ -30,7 +30,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   updateWorkspaceSettings: shared, configureRegion: shared, provisionRegion: shared, configureRegionAutoValidation: shared,
   createDomain: 'Creates an SES identity/domain claim; the runner does not provision DNS or AWS resources.',
   deleteDomain: 'The verified claim is shared by every run.', configureDomainMailFrom: shared,
-  getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and Google session.',
+  getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and OIDC session.',
   receiveSesSnsEvent: 'Authenticated AWS ingress; indirect coverage via real SES feedback, never forge SNS.',
   unsubscribeOneClick: 'Leaves a persistent recipient opt-out; consent CRUD uses a fresh simulator contact instead.',
   importTemplateImage: 'Requires a remote HTTPS image source; test assets are generated in-process.',
@@ -42,17 +42,27 @@ const safeModeSkips: Partial<Record<Op, string>> = {
 };
 const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
 const SKIP: Partial<Record<Op,string>> = destructive ? {
-  createWorkspace: 'Google dashboard only; no public delete for a newly created workspace.',
+  createWorkspace: 'OIDC dashboard only; no public delete for a newly created workspace.',
   createConnection: 'Would replace or reconfigure the sole shared Hosted connection; happy path requires a dashboard owner.',
   deleteConnection: 'Would disconnect the fixture and release shared domain claims if authorization regressed.',
   provisionRegion: 'Queues real AWS resource provisioning; no run-owned region or rollback.',
   configureRegionAutoValidation: 'Changes SES validation behavior for shared configuration sets; no run-owned configuration set.',
   disableInboundDomain: 'Would disable receiving on the shared MX fixture if the Hosted guard regressed.',
   createInboundSubdomain: 'Hosted receiving has no wildcard claim; creating the first child could enable catch-all routing on the shared fixture.',
-  completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating Google session for the success flow.',
+  completeDomainDnsSetup: 'Needs the signed Domain Connect consent return and an initiating OIDC session for the success flow.',
   receiveSesSnsEvent: 'AWS-signed ingress only. Verified indirectly by real deliveries and feedback; never forge SNS.',
 } : safeModeSkips;
 SKIP.updateInboundScanPolicy='Changes a shared workspace-wide quarantine policy; covered by isolated acceptance.';
+// The audit trail's customer view and the support integration: a Google dashboard session, or a support grant minted by
+// an operator. The isolated acceptance suite covers them, including the 403 every customer credential gets.
+const supportInternal = 'Internal: needs a support grant minted by an operator; covered by isolated acceptance.';
+Object.assign(SKIP, {
+  listActivity: 'Google dashboard owners and admins only; covered by isolated acceptance.',
+  contactSupport: 'Google dashboard only; creates a support handoff; covered by isolated acceptance.',
+  getSupportContext: supportInternal, listSupportWorkspaces: supportInternal, listSupportDomains: supportInternal, listSupportEmails: supportInternal, getSupportEmail: supportInternal,
+  listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
+  getSupportRequest: supportInternal,
+});
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
 // The receiving MVP (routing, rituals, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
@@ -279,6 +289,7 @@ async function devBoundaries() {
   await denied('updateWorkspaceMember',{path:fake,body:{role:'member'}});
   await denied('removeWorkspaceMember',{path:fake});
   await denied('revokeMcpConnection',{path:fake});
+  await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
   await denied('revokeAgentToken',{path:fake},404,'NOT_FOUND');
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');

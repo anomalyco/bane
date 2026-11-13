@@ -26,7 +26,7 @@ export async function billingHourly(runtime: Runtime): Promise<void> {
 }
 
 /**
- * Credit lots (migration 249): one 'credit_expiring' notice per top-up 30 days before its remaining credit expires,
+ * Credit lots (migration 288): one 'credit_expiring' notice per top-up 30 days before its remaining credit expires,
  * then the expiry of every lot whose expiry hour has closed (billing_expire_lot settles the workspace first, so usage
  * before the expiry spends that credit). Bounded per run; the rest goes next hour.
  */

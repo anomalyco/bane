@@ -135,7 +135,7 @@ function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: s
   const visible = inboundVisible(state, row, addressId)
   const last = visible.at(-1)
   if (!last) return null
-  return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
+  return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, from: last.from, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
 }
 const webhookView = <T extends { url: string; headers: Webhook['headers'] }>(webhook: T) => ({ ...webhook, url: '••••' + webhook.url.slice(-4), headers: webhook.headers ?? [] })
 const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => webhookView(webhook)
@@ -970,6 +970,7 @@ export function createMockApi(): BaneApi {
         const tokens = s.agentTokens ??= []
         tokens.forEach(token => { if (token.grantId === connectionId) token.revokedAt ??= now() })
       }),
+      bindMcpConnection: (connectionId, input, signal) => run(signal, true, s => { Object.assign(find(s.mcpConnections ??= [], connectionId, 'MCP connection'), input, { updatedAt: now() }) }),
     },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),

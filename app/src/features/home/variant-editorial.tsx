@@ -35,7 +35,7 @@ export function EditorialHome({ onSignIn, onSignInIntent, busy, notice }: HomePr
         <p>An API, a TypeScript SDK and an MCP server for coding agents.<br />On Amazon SES. Pay per email.</p>
         <code className="ve-install">npm i @banemx/sdk</code>
         <div className="ve-actions">
-          <Button variant="ghost" className="ve-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with Google</Button>
+          <Button variant="ghost" className="ve-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button>
           <a className="ve-secondary" href="/docs">Read the docs</a>
         </div>
         {notice}

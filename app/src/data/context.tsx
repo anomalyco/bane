@@ -1,5 +1,5 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
@@ -10,8 +10,11 @@ import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, 
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
+import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
+import { useGuardedMutation } from '../lib/single-flight'
+import { SignInConsent } from '../components/LegalLinks'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
@@ -53,9 +56,11 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
+/** Pages anyone can open, signed in or not. */
+export const isPublicPath = (path: string) => path === '/docs' || path === '/legal' || path.startsWith('/legal/')
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
-  // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
-  const publicRoute = useLocation().pathname === '/docs'
+  // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
+  const publicRoute = isPublicPath(useLocation().pathname)
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
@@ -85,7 +90,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       }
     },
   })
-  const join = useMutation({
+  const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       await switchWorkspace(workspaceId)
@@ -108,7 +113,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
         result = await request<Identity>('/v1/me', {signal})
       }
       selectWorkspace(result.multiTenant ? result.workspaceId : null)
-      console.info('[Bane timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+      console.info('[Bane timing] Dashboard session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
   })
@@ -151,32 +156,28 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     void cache.prefetchQuery({ queryKey: ['bane', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
+  useEffect(() => { const denied = () => { if (!isPublicPath(window.location.pathname) && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
-  function googleUrl() {
+  function accountUrl() {
     // Assign path components rather than resolving an untrusted redirect parameter.
     const callback = new URL(window.location.origin)
     callback.pathname = window.location.pathname
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth')
-    const errorCallback = new URL(callback)
-    errorCallback.searchParams.set('auth', 'error')
-    // A new account goes straight to onboarding (its first step is known), unless it is joining by invitation link.
-    const onboarding = callback.pathname === '/' && !callback.searchParams.has('invitation') ? new URL('/onboarding', window.location.origin) : null
-    return request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href, ...(onboarding ? {newUserCallbackURL: onboarding.href} : {})}}).then(result => {
+    return request<{url: string}>('/api/auth/sign-in/account', {method: 'POST', body: {callbackURL: callback.href}}).then(result => {
       const url = new URL(result.url)
-      if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.')
+      if (url.protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
       return url.href
     })
   }
   function prepareLogin(event: { button: number }) {
     if (busy || event.button !== 0) return
-    const url = googleUrl()
+    const url = accountUrl()
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
@@ -184,7 +185,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : googleUrl())) }
+    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl())) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -198,12 +199,15 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     return multiTenant
   } })
   const authResult = new URLSearchParams(window.location.search).get('auth')
-  // not_approved: a verified Google account outside the invite list. The API has already saved it as an access request.
+  // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your Google address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This Google account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
-    : authResult === 'error' ? <Alert tone="danger">Google sign-in didn’t finish. It may have been cancelled; try again.</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your OIDC address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This OIDC account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'google_required' ? <Alert tone="danger">Bane requires Google sign-in. Try again and choose Google at Anomaly account.</Alert>
+    : authResult === 'method_required' ? <Alert tone="danger">Sign in again using the authentication method required by this installation.</Alert>
+    : authResult === 'interaction_required' ? <Alert tone="info">Your identity provider needs you to complete sign-in. Try again and follow its prompts.</Alert>
+    : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. Check that you used your invited or approved account.</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
-    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited Google account to review it. You join only after you confirm.</Alert>
+    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
@@ -212,21 +216,33 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
-        <h2>Sign in with Google</h2>
+        <h2>Sign in to Bane</h2>
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue with Google</Button>
+        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
+        <SignInConsent className="muted" />
       </> : <>
         <h2>Couldn’t check your session</h2>
-        <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
+        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
       </>}
       <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
     </div></main>}
   </SessionContext.Provider></ApiContext.Provider>
 }
-// The installation's public origin, for examples and connection URLs.
-export function usePublicOrigin() {
-  return useContext(SessionContext)?.identity?.origin || window.location.origin
+// The installation's canonical address (lib/public-origin.ts), for examples and connection URLs: PUBLIC_URL from
+// /v1/me when signed in, else from /health, never the page's own Host. null until known; foreign when the page is
+// open at another address.
+export function useCanonicalOrigin() {
+  const demo = useContext(ApiContext)?.mode === 'demo'
+  const identity = useContext(SessionContext)?.identity?.origin ?? null
+  const instance = useQuery({ queryKey: ['instance-origin'], enabled: !demo && !identity, staleTime: Infinity, gcTime: Infinity, retry: 2,
+    queryFn: async ({ signal }) => {
+      const response = await fetch('/health', { signal, headers: { Accept: 'application/json' } })
+      if (!response.ok) throw new Error('Couldn’t load this installation’s address.')
+      return ((await response.json()) as { origin?: string }).origin ?? null
+    } })
+  return { ...canonicalOrigin({ identity, instance: instance.data, demo, page: window.location.origin }), error: identity ? null : instance.error, retry: () => void instance.refetch() }
 }
+export function usePublicOrigin(): string | null { return useCanonicalOrigin().origin }
 export function useApi() {
   const api = useContext(ApiContext)
   if (!api) throw new Error('ApiProvider is required')
@@ -245,11 +261,16 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, sig
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+/** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
+ *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  return useMutation({
+  // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
+  // (lib/single-flight.ts). The operation is the write's source, the same in every render.
+  return useGuardedMutation({
+    operation: write.toString(), target,
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {

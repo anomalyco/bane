@@ -59,6 +59,14 @@ export const settingsColumns = {
     { key: 'attempts', label: 'Attempts', card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
+  // An activity card: what happened and when, then who did it to what, then where from.
+  activity: [
+    { key: 'when', label: 'When', width: 116, card: 'aside' },
+    { key: 'who', label: 'Who', width: '22%', card: 'line' },
+    { key: 'action', label: 'Action', width: '26%', card: 'title' },
+    { key: 'target', label: 'Target', width: '16%', card: 'inline' },
+    { key: 'from', label: 'From', skeleton: twoLines, card: 'line' },
+  ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
 const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains

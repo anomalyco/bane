@@ -77,9 +77,7 @@ export const shadowPlacement:JobHandler=async(runtime,payload,{workspaceId:wid})
     WHERE b.domain_id=${id} AND b.workspace_id=${wid} AND pc.kind='shared'`;
   const {rows:[w]}=await runtime.db.execute<Workspace>(sql`SELECT b.name,pc.paused_at IS NOT NULL AS held,
     (SELECT floor(extract(epoch FROM now()-w.created_at)/86400)::int FROM workspaces w WHERE w.id=b.workspace_id) AS "ageDays",
-    (SELECT u.google_hosted_domain FROM workspace_members m JOIN auth_user u ON u.id=m.user_id JOIN workspaces w ON w.id=m.workspace_id
-      WHERE m.workspace_id=b.workspace_id AND m.created_at=w.created_at AND m.role='owner' AND u.email_verified AND u.google_hosted_domain IS NOT NULL
-      ORDER BY m.id LIMIT 1) AS "verifiedDomain",
+    NULL::text AS "verifiedDomain",
     (SELECT CASE WHEN sum(h.accepted)>0 AND sum(h.bounces)*100<sum(h.accepted) AND sum(h.complaints)*5000<sum(h.accepted)
       AND max(h.hour) FILTER(WHERE h.accepted>0)>=now()-interval '2 days'
       THEN floor(extract(epoch FROM max(h.hour) FILTER(WHERE h.accepted>0)-min(h.hour) FILTER(WHERE h.accepted>0))/86400)::int END

@@ -1,6 +1,6 @@
 # bane
 
-Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, Google-only sign-in, and one public API shared by the dashboard, SDK, and MCP server.
+Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, OIDC sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
 ![Bane dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
 
@@ -57,8 +57,10 @@ or `arn:aws:iam::604439173067:role/github/bane-production`:
 
 | Environment | AWS Secrets Manager | Variables |
 |---|---|---|
-| `dev` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
-| `production` | `DATABASE_URL`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TYPESAFE_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `AUTH_ALLOWED_DOMAINS`, `AUTH_ALLOWED_EMAILS`, `PROD_DEPLOY_ENABLED` |
+| `dev` | `DATABASE_URL`, `BANE_ROOT_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`, `E2E_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `E2E_DOMAIN`, `E2E_DOMAIN_ID` |
+| `production` | `DATABASE_URL`, `BANE_ROOT_SECRET`, `ACCOUNT_CLIENT_PRIVATE_KEY`, `TYPESAFE_API_KEY`; `MAILGW_API_TOKEN` while the gateway is enabled | `PROD_DEPLOY_ENABLED` |
+
+For a self-hosted installation, register a confidential OIDC client with your issuer and follow the [dashboard sign-in setup](api/README.md#dashboard-sign-in).
 
 `MAILGW_API_TOKEN` is the IMAP/SMTP gateway's shared key and must equal the stage's `mail-gateway/api-token`. The committed `bane:mailGatewayEnabled` in `infra/pulumi/Pulumi.<stage>.yaml` decides how the Worker deploy treats it:
 
@@ -70,7 +72,7 @@ See the [dev turn-on runbook](gateway/PHASE2.md#dev-turn-on-runbook).
 **Both stages use the same key names.** The stage comes from the GitHub environment,
 which selects that environment's variables, and from the `bane/<stage>/` folder, which
 selects that stage's secrets. Never prefix a key with `DEV_` or `PROD_`; the deploy reads
-`bane/${stage}/DATABASE_URL` and `vars.AUTH_ALLOWED_DOMAINS` for either stage. Only dev
+`bane/${stage}/DATABASE_URL` and `vars.E2E_DOMAIN` for either stage. Only dev
 runs a live E2E, so only `bane/dev/` holds an `E2E_API_KEY`. `PROD_DEPLOY_ENABLED` keeps
 its name for now because the production freeze check reads it.
 
@@ -83,7 +85,7 @@ keys need read/send/manage on the dedicated **E2E** workspace, not on a customer
 
 **Production is frozen until the AWS account switch.** The renamed Worker expects `bane-*` pool resources that do not exist in the old production account. Leave `PROD_DEPLOY_ENABLED` unset or `false` until cutover. Only the coordinator should set it to the exact lowercase string `true`, **only** on the `production` GitHub Environment (not the repository or organization). The gate and deploy jobs both check the freeze. No required reviewers are configured; adding a reviewer rule would prompt twice because both jobs use `production`.
 
-**Before the first deployment:** preserve the existing sign-in allowlists. For each non-confidential list, set the environment variable above; the deploy passes it explicitly to Wrangler. GitHub may show plain variables in step logs. For a private list, set `AUTH_ALLOWED_EMAILS` or `AUTH_ALLOWED_DOMAINS` as a **Worker secret** out of band instead, and leave its GitHub variable empty. An empty variable sends no override: it preserves a Worker secret but does **not** preserve a dashboard-only plaintext binding. With neither configured the list is empty.
+**Sign-in policy is committed, not a variable.** Identity is the issuer subject; no address or address domain admits anyone. `api/wrangler.<stage>.jsonc` sets `ACCOUNT_REQUIRED_ACR` (Google) and `AUTH_STAFF_GOOGLE_DOMAINS` (staff sign-up by the Google Workspace domain of the sign-in's provider identity; empty, so off, until the account service's claim name is confirmed). Everyone else joins by invitation or is bound by subject by an operator (`api/scripts/list-signin-attempts.ts`). The old `AUTH_ALLOWED_EMAILS`/`AUTH_ALLOWED_DOMAINS` GitHub variables are no longer read; delete them, and any Worker secret of those names.
 
 **Local live E2E:** install API and SDK dependencies, build the SDK (`cd sdk && bun run build`), and privately export `BANE_E2E_API_KEY`. From `api/` run:
 
