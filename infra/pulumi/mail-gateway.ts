@@ -74,10 +74,19 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
     defaultActions: [{ type: "forward", targetGroupArn: group.arn }], tags }, opts));
 
   const log = new aws.cloudwatch.LogGroup(name, { name: `/ecs/${name}`, retentionInDays: 30, tags }, opts);
+  const legacyArns: pulumi.Output<string>[] = [];
   const secrets = Object.entries({ DATABASE_URL: "db-url", MAILGW_CERT_PEM: "tls-cert", MAILGW_KEY_PEM: "tls-key", MAILGW_API_TOKEN: "api-token" })
-    .map(([env, key]) => ({ name: env, valueFrom: new aws.secretsmanager.Secret(`${name}-${key}`, {
-      name: `bane/${stage}/mail-gateway/${key}`, tags,
-    }, opts).arn })); // Metadata only. Never create SecretVersion or read AWSCURRENT into state.
+    .map(([env, key]) => {
+      const legacyName = `bane/${stage}/mail-gateway/${key}`;
+      legacyArns.push(new aws.secretsmanager.Secret(`${name}-${key}`, { name: legacyName, tags }, opts).arn);
+      const secretName = `nightmail/${stage}/mail-gateway/${key}`;
+      // Physical IDs of the dev copies. Import takes the full ARN, including AWS's suffix.
+      const devSuffix: Record<string, string> = { "db-url": "uZZQGO", "tls-cert": "fbtr0G", "tls-key": "bcrZ9j", "api-token": "lghuLa" };
+      const secret = new aws.secretsmanager.Secret(`nightmail-mail-gateway-${key}`, {
+        name: secretName, tags: stage === "dev" ? { "renamed-from": legacyName } : tags,
+      }, { ...opts, import: stage === "dev" ? `arn:aws:secretsmanager:us-east-2:${account}:secret:${secretName}-${devSuffix[key]}` : undefined });
+      return { name: env, valueFrom: secret.arn };
+    });
   const assumeRolePolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole",
     Principal: { Service: "ecs-tasks.amazonaws.com" }, Condition: { StringEquals: { "aws:SourceAccount": account },
       ArnLike: { "aws:SourceArn": `arn:aws:ecs:us-east-2:${account}:*` } } }] });
@@ -89,7 +98,7 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
       { Effect: "Allow", Action: "ecr:GetAuthorizationToken", Resource: "*", Condition: { StringEquals: { "aws:RequestedRegion": "us-east-2" } } },
       { Effect: "Allow", Action: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], Resource: repo.arn },
       { Effect: "Allow", Action: ["logs:CreateLogStream", "logs:PutLogEvents"], Resource: `arn:aws:logs:us-east-2:${account}:log-group:/ecs/${name}:log-stream:gateway/${name}/*` },
-      { Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: secrets.map(secret => secret.valueFrom) },
+      { Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: [...legacyArns, ...secrets.map(secret => secret.valueFrom)] },
     ] }),
   }, iamOpts);
 
