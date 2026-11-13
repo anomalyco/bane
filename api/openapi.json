@@ -96,7 +96,7 @@
           },
           "receiving": {
             "type": "boolean",
-            "description": "Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the bane:manage scope."
+            "description": "Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the manage scope (nightmail:manage, or bane:manage)."
           },
           "profile": {
             "type": [
@@ -19912,6 +19912,13 @@
                     "host": {
                       "type": "string"
                     },
+                    "mcpScopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The OAuth scopes this installation's MCP server asks for, for read, send and manage (nightmail:read …, or bane:read … until the account service supports nightmail:*)."
+                    },
                     "connection": {
                       "$ref": "#/components/schemas/ConnectionSummary"
                     },
@@ -20008,6 +20015,7 @@
                     "domains",
                     "origin",
                     "host",
+                    "mcpScopes",
                     "connection",
                     "workspaces"
                   ]

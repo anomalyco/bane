@@ -2,16 +2,26 @@ import * as oauth from 'oauth4webapi';
 import { Buffer } from 'node:buffer';
 import { sql } from 'drizzle-orm';
 import { digest, log, type Actor, type Runtime, type DbExecutor, type Permission } from './core.js';
-import { productName } from './brand.js';
+import { oauthScopePrefixes, productName, requestedScopes } from './brand.js';
 
 const permissions: Permission[] = ['read', 'send', 'manage'];
-const SCOPES = permissions.map(p => `bane:${p}`);
-const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
-export function protectedResourceMetadata(runtime: Runtime) {
-  return { resource: audience(runtime), resource_name:productName, authorization_servers: [runtime.config.accountIssuer],
-    scopes_supported: SCOPES, bearer_methods_supported: ['header'],
+const descriptions: Record<Permission, string> = { read: 'Read workspace data.', send: 'Send email from the workspace.', manage: 'Manage workspace mail and resources.' };
+/**
+ * The /mcp resource a request reached: PUBLIC_URL's, or an earlier origin's this installation still serves
+ * (PREVIOUS_PUBLIC_URLS). A token stays tied to the resource it was minted for, so a grant made on the earlier origin
+ * keeps refreshing there; it is never checked against the new one. Remove after rename cleanup.
+ */
+const audience = (runtime: Runtime, url?: string) => {
+  const origin = url === undefined ? null : new URL(url).origin;
+  return new URL('/mcp', origin && runtime.config.previousOrigins?.includes(origin) ? origin : runtime.config.publicUrl).href;
+};
+export function protectedResourceMetadata(runtime: Runtime, url?: string) {
+  // Both scope sets are published and accepted (bane:* until cleanup), the requested ones (OAUTH_SCOPE_PREFIX) first.
+  const scopes = requestedScopes(runtime.config), published = [...scopes, ...oauthScopePrefixes.filter(prefix => !scopes[0]!.startsWith(`${prefix}:`)).flatMap(prefix => permissions.map(p => `${prefix}:${p}`))];
+  return { resource: audience(runtime, url), resource_name:productName, authorization_servers: [runtime.config.accountIssuer],
+    scopes_supported: published, bearer_methods_supported: ['header'],
     // Provisional extension name until the issuer publishes its metadata contract.
-    scope_descriptions:{'bane:read':'Read workspace data.', 'bane:send':'Send email from the workspace.', 'bane:manage':'Manage workspace mail and resources.'} };
+    scope_descriptions:Object.fromEntries(published.map(scope => [scope, descriptions[scope.split(':')[1] as Permission]])) };
 }
 
 // Cache only completed public metadata. Each Worker request owns its fetches.
@@ -42,7 +52,7 @@ const rolePermissions = (role: string): Permission[] => role === 'owner' || role
  * An MCP approval (one per account and client, as the account service's tokens name them) acting in one workspace,
  * or null. The approval is active (not revoked, its token not expired); the person who made it still belongs to the
  * workspace (and, self-hosted, is an allowlisted owner or admin); it acts with its scopes intersected with their role
- * there. Receiving tools need an owner or admin (receivingConsent), and changing them the bane:manage scope as well, as
+ * there. Receiving tools need an owner or admin (receivingConsent), and changing them the manage scope as well, as
  * every write does. Checked on every MCP tool call, and
  * whenever a credential or object the approval created is used in that workspace.
  */
@@ -133,7 +143,7 @@ function expectedAudience(resource: string, token: string) {
 }
 
 export async function authorizeResource(runtime: Runtime, request: Request, handler: (connection: McpConnection) => Promise<Response>) {
-  const resource = audience(runtime);
+  const resource = audience(runtime, request.url);
   const metadata = new URL('/.well-known/oauth-protected-resource/mcp', resource).href;
   // MCP clients expect a JSON-RPC envelope; the challenge itself lives in WWW-Authenticate (RFC 6750, RFC 9470). The
   // scope is every Nightmail scope: clients ask for what the challenge names, and the person narrows it when approving.
@@ -142,7 +152,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
     const message = error === 'insufficient_user_authentication' ? `${productName} requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.`
       : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : `This client has no active ${productName} approval for the requested access.`;
-    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${SCOPES.join(' ')}"${extra}` }});
+    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -163,7 +173,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     return denied(401, 'insufficient_user_authentication', `, acr_values="${requiredAcr}"`);
   }
   const scopes = new Set(typeof claims.scope === 'string' ? claims.scope.split(' ') : []);
-  const allowed = permissions.filter(p => scopes.has(`bane:${p}`));
+  const allowed = permissions.filter(p => oauthScopePrefixes.some(prefix => scopes.has(`${prefix}:${p}`)));
   if (!allowed.length) return denied(403);
   const proof = request.headers.get('dpop');
   if (proof) {

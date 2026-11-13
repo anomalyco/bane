@@ -18,7 +18,7 @@ export type McpConnection = {
      */
     workspaceId: string | null;
     /**
-     * Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the bane:manage scope.
+     * Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the manage scope (nightmail:manage, or bane:manage).
      */
     receiving: boolean;
     /**
@@ -6110,6 +6110,10 @@ export type GetCurrentIdentityResponses = {
         domains: Array<string>;
         origin: string;
         host: string;
+        /**
+         * The OAuth scopes this installation's MCP server asks for, for read, send and manage (nightmail:read …, or bane:read … until the account service supports nightmail:*).
+         */
+        mcpScopes: Array<string>;
         connection: ConnectionSummary;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.

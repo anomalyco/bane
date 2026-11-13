@@ -6,8 +6,8 @@
  *
  * Bane is becoming Nightmail (nightmail.com). Until that domain is live the hosted service stays on bane.mx: the
  * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. A name a customer may already
- * have (key prefix, DNS proof, header, scope) stays accepted forever; the `legacy*` lists below hold those.
- * Internal infrastructure (Workers, buckets, tables, SES resources, `bane:*` tags) keeps its names and is not here.
+ * have (key prefix, DNS proof, header, scope, cookie) stays accepted until the cutover, which removes them all at once
+ * (each site is marked "remove after rename cleanup"). Infrastructure names (Workers, buckets, SES resources) are not here.
  */
 export const productName = 'Nightmail';
 /** Lowercase, for identifiers. */
@@ -48,6 +48,13 @@ export const addresses = {
 export const sdkPackage = '@banemx/sdk';
 export const apiKeyEnv = 'BANE_API_KEY';
 export const mcpServerName = 'bane';
+
+/** OAuth scope prefixes the MCP server accepts (nightmail:read, …). Which one it asks for is OAUTH_SCOPE_PREFIX
+ * (config.ts): bane until account.anoma.ly supports nightmail:*. bane: remove after rename cleanup. */
+export const oauthScopePrefixes = [productSlug, 'bane'] as const;
+export type OauthScopePrefix = typeof oauthScopePrefixes[number];
+/** The scopes an installation asks for, for read, send and manage. */
+export const requestedScopes = (config: { oauthScopePrefix?: OauthScopePrefix }) => (['read', 'send', 'manage'] as const).map(p => `${config.oauthScopePrefix ?? 'bane'}:${p}`);
 
 /** Prefixes of the secrets this service issues, by kind. New secrets get these. */
 export const secretPrefixes = { apiKey: 'nm_', addressKey: 'nm_mbx_', agentToken: 'nm_agent_', supportGrant: 'nm_support_', notesKey: 'nm_notes_' } as const;
