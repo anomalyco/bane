@@ -454,10 +454,12 @@ export function RitualsPage() {
   const changes = incoming && saved ? changesBetween(saved.config, incoming.config, key, scriptChanged ? source : null) : null
   return <div className="stack inbound-stack ritual-page">
     <PageHeader title="Rituals" backTo="/receiving?tab=rituals" actions={<>
+      {/* Always in the header, so the buttons beside it never move; hidden until there's a saved ritual to delete. It
+          sits on the inner side (first here, last on a phone where the row starts at the left), so its reserved space
+          never pushes Endpoints and Trace off the content's edge. */}
+      <Button variant="danger" className="ritual-delete" data-hidden={!isSaved || undefined} disabled={!isSaved} onClick={() => setConfirmDelete(true)}>Delete</Button>
       <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving?tab=endpoints">Endpoints</Link>
       <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/trace">Trace</Link>
-      {/* Always in the header, so the buttons beside it never move; hidden until there's a saved ritual to delete. */}
-      <Button variant="danger" className="ritual-delete" data-hidden={!isSaved || undefined} disabled={!isSaved} onClick={() => setConfirmDelete(true)}>Delete</Button>
     </>} />
     <ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} guide={guides.rituals} />
     <RitualAgentCard ritual={keyValid ? key : ''} address={agentAddress && agentAddress.includes('@') ? agentAddress : null} />

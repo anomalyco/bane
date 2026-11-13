@@ -130,6 +130,14 @@ a.ui-tab { text-decoration: none; }
 .ui-tone--info { --tone-ink: var(--color-info); --tone-marker: var(--color-info-marker); --tone-bg: var(--color-info-bg); --tone-border: var(--color-info-border); }
 .ui-status { display: inline-flex; align-items: center; gap: var(--space-6); min-height: 20px; padding: 1px var(--space-6); border: 1px solid var(--tone-border); border-radius: 4px; background: var(--tone-bg); color: var(--tone-ink); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
 .ui-status__dot { width: 4px; height: 4px; flex-shrink: 0; background: var(--tone-marker); border-radius: 50%; }
+.ui-status-dot { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; white-space: nowrap; }
+.ui-status-dot > .ui-status__dot { width: 6px; height: 6px; }
+.ui-status-dot__value, .ui-status-dot__note { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The value keeps its whole width (up to the cell, less the dot); only the note gives way. */
+.ui-status-dot__value { flex: none; max-width: calc(100% - 14px); }
+.ui-status-dot__note { flex: 0 1 auto; color: var(--color-muted); }
+.ui-status-dot__note::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+.ui-status-dot--muted > .ui-status-dot__value { color: var(--color-muted); }
 .ui-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-12) var(--space-16); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--tone-ink); font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
 .ui-alert__title { font-weight: var(--font-weight-bold); margin-bottom: var(--space-4); }
 .ui-error-reference { display: block; margin-top: var(--space-4); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }

@@ -7,6 +7,7 @@ const FADES = [
   '.limits-table-scroll', '.docs-table-scroll', '.legal-table', '.docs-install > code', '.developer-url > code', '.trace-code',
   '.docs-sidebar', '.legal-toc', '.legal-switcher', '.settings-rail__groups', '.rcv-filters', '.mailbox-threads', '.mailbox-reader',
   '.delivery-timeline', '.template-picker', '.settings-key-domain-options', '.ritual-diff', '.ui-popover-scroll',
+  '.uin-list', '.uin-body',
 ].join(', ')
 
 // Marks the edges with content beyond them (data-more-above, -below, -left, -right) from scrolling, the area's size
