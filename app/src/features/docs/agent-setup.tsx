@@ -79,7 +79,7 @@ export function AgentPrompt({ prompt }: { prompt: string | null }) {
       <CopyAction value={prompt ?? ''} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>
-    <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code><MaskedText text={prompt ?? ''} /></code></pre>
+    <pre className="developer-code developer-code--prompt" tabIndex={0} aria-label="Agent prompt"><code><MaskedText text={prompt ?? ''} /></code></pre>
   </section>
 }
 

@@ -53,3 +53,4 @@
   .docs-header { padding-inline: 16px; }
   .docs-header nav a:not(:last-child) { display: none; }
 }
+@media (pointer: coarse) { .docs-header nav a { display: inline-flex; align-items: center; min-height: 44px; } }
