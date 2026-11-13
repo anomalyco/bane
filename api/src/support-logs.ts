@@ -2,7 +2,7 @@ import { log, type Config } from './core.js';
 
 // The customer's own requests, from this Worker's request lines in Workers Logs (api/README.md "Support integration"):
 // app.ts writes one `event: 'request'` line per request (route template, method, status, code, workspace, principal,
-// duration; PR #131) and Workers Logs keeps them about 3 days. Bane asks the Workers Observability telemetry API for
+// duration; PR #131) and Workers Logs keeps them about 3 days. Nightmail asks the Workers Observability telemetry API for
 // this Worker's request lines in the grant's workspaces only, then checks every returned line again here (defense in
 // depth: a line outside those workspaces is dropped, whatever the API answered) and builds its answer from an explicit
 // allow-list of fields. Never a message, address, user agent, URL, body or anything else a line might carry.

@@ -11,7 +11,7 @@ import { lockMailboxLane } from './mailbox-store.js';
 import { sendFromMailbox } from './mailbox-send.js';
 import { endpointPolicy, DEFAULT_POLICY } from './ritual-retry.js';
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
-import { loopHeader, loopHeaderNames } from './brand.js';
+import { loopHeader, loopHeaderNames, productName } from './brand.js';
 
 const base = '/v1/endpoints',
   meta = { security, tags: ['Endpoints'] },
@@ -327,7 +327,7 @@ export function registerEndpoints(app: App) {
     try {
       const result = row.type === 'webhook'
         ? await (await import('./inbound-webhook.js')).sendTestWebhook(c.env, (await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id))))[0]!, {})
-        : await postWebhook(c.env, pinnedUrl(row.type, await decrypt(c.env, row.encrypted_value!, w + ':endpoint:' + row.hook_id)), {}, JSON.stringify(renderChat(row.type, { [row.type === 'slack' ? 'text' : 'content']: `Test from Bane: ${endpointCall(name)} is connected.` })), null, w + ':endpoint:' + row.hook_id);
+        : await postWebhook(c.env, pinnedUrl(row.type, await decrypt(c.env, row.encrypted_value!, w + ':endpoint:' + row.hook_id)), {}, JSON.stringify(renderChat(row.type, { [row.type === 'slack' ? 'text' : 'content']: `Test from ${productName}: ${endpointCall(name)} is connected.` })), null, w + ':endpoint:' + row.hook_id);
       const ok = result.status >= 200 && result.status < 300;
       return c.json({ ok, status: result.status, error: ok ? null : `HTTP ${result.status}` }, 200);
     } catch (e) {
@@ -385,7 +385,7 @@ function registerForwardPages(app: App) {
     const token = c.req.param('token'), row = /^fwd_[0-9a-f]{64}$/.test(token) ? await pendingByToken(c.env.db, token) : undefined;
     if (!row) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed. Nothing will be forwarded unless a new request is allowed.</p>', 410);
     const address = await decrypt(c.env, row.encrypted_value, row.workspace_id + ':endpoint:' + row.hook_id);
-    return page(c, 'Allow email forwarding?', `<p><strong>${escapeHtml(row.request_from ?? 'A Bane workspace')}</strong> wants to forward the email it receives to <strong>${escapeHtml(address)}</strong>.</p><p>Forwarded messages arrive as plain text from that address, each with a link to stop. If you decline, this sender cannot ask again for 30 days.</p><form method="post"><button name="choice" value="allow">Allow forwarding</button><button name="choice" value="decline">Decline</button></form>`);
+    return page(c, 'Allow email forwarding?', `<p><strong>${escapeHtml(row.request_from ?? `A ${productName} workspace`)}</strong> wants to forward the email it receives to <strong>${escapeHtml(address)}</strong>.</p><p>Forwarded messages arrive as plain text from that address, each with a link to stop. If you decline, this sender cannot ask again for 30 days.</p><form method="post"><button name="choice" value="allow">Allow forwarding</button><button name="choice" value="decline">Decline</button></form>`);
   });
   app.post(confirm, async c => {
     const token = c.req.param('token');

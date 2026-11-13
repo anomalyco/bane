@@ -35,9 +35,9 @@ async function attemptBy(runtime: Runtime, column: 'id' | 'stripe_payment_intent
   return row ? readAttempt(runtime.db, row.id) : undefined;
 }
 /**
- * Whether an event is Bane's (the Stripe account may be shared with Console): the object carries a bane_attempt or
+ * Whether an event is Nightmail's (the Stripe account may be shared with Console): the object carries a bane_attempt or
  * bane_refund this installation wrote, or (charges, disputes, refunds, fraud warnings, payment intents) its payment
- * resolves to one of Bane's attempts. Everything else is ignored.
+ * resolves to one of Nightmail's attempts. Everything else is ignored.
  */
 async function ownerOf(runtime: Runtime, type: string, object: StripeObject): Promise<Owner | null> {
   if (type === 'payment_method.detached') {
@@ -107,7 +107,7 @@ async function apply(runtime: Runtime, cfg: StripeConfig, type: string, object: 
       for (const row of pending) await reconcileRefund(runtime, row.id);
       return;
     }
-    case 'refund.created': case 'refund.updated': return; // A refund Bane did not start (made in the Stripe dashboard): the operator reconciles it.
+    case 'refund.created': case 'refund.updated': return; // A refund Nightmail did not start (made in the Stripe dashboard): the operator reconciles it.
     case 'charge.dispute.created': await openDispute(runtime, a.id, object); return;
     case 'charge.dispute.closed': await closeDispute(runtime, a.id, object); return;
     case 'radar.early_fraud_warning.created': await fraudWarning(runtime, a.id, object); return;
@@ -120,7 +120,7 @@ const HANDLED = new Set(['checkout.session.completed', 'checkout.session.async_p
   'refund.created', 'refund.updated', 'charge.refunded', 'charge.dispute.created', 'charge.dispute.closed', 'radar.early_fraud_warning.created', 'payment_method.detached']);
 
 /**
- * Records and processes one verified event: deduplicated on its ID, filtered to Bane's objects, applied, then marked
+ * Records and processes one verified event: deduplicated on its ID, filtered to Nightmail's objects, applied, then marked
  * processed. A failure marks it failed (never a processed one, Console #6533) so the caller answers 500 and Stripe
  * redelivers. Returns what happened.
  */

@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, log, type Config } from '../core.js';
 import { formatUsd, microCents } from './money.js';
 import type { BillingGate } from './types.js';
+import { productName } from '../brand.js';
 
 /** True when this workspace is metered and may be gated: Hosted installations only, never the platform's own workspace. */
 export const billed = (config: Pick<Config, 'multiTenant' | 'platformDomainWorkspace'>, workspaceId: string) =>
@@ -17,7 +18,7 @@ export function billingGate(config: Pick<Config, 'multiTenant' | 'platformDomain
 }
 
 export const balanceExhausted = (config: Pick<Config, 'publicUrl'>, b: Pick<BillingGate, 'requiredUc' | 'availableUc'>) => new ApiError(402, 'BALANCE_EXHAUSTED',
-  `Sending is paused: this workspace's Bane balance is empty. Add credit at ${config.publicUrl}/settings#billing. Required ${formatUsd(microCents(b.requiredUc))}, available ${formatUsd(microCents(b.availableUc))}.`, undefined, true);
+  `Sending is paused: this workspace's ${productName} balance is empty. Add credit at ${config.publicUrl}/settings#billing. Required ${formatUsd(microCents(b.requiredUc))}, available ${formatUsd(microCents(b.availableUc))}.`, undefined, true);
 
 /**
  * Acts on a gate decision. Applies only to Hosted sending (`hosted` not null: BYO is free). Enforced and not ok:

@@ -1,6 +1,6 @@
 import type { Config } from './core.js';
 
-// The support platform's door into Bane (api/README.md "Support integration"): a Cloudflare service binding to the
+// The support platform's door into Nightmail (api/README.md "Support integration"): a Cloudflare service binding to the
 // `SupportPlatform` entrypoint (src/worker.ts), not a token. Only a Worker in the same account that declares a binding
 // to that entrypoint can call it, so the credential is the deploy configuration itself: it cannot leak, needs no
 // rotation, and is revoked by removing the binding or the entrypoint.
@@ -44,7 +44,7 @@ export type StaffCheck =
   | { ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string }
   | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' | 'NOT_OPERATOR' };
 
-// ---------- the support tokens Bane signs: handoffs (aud bane-support) and staff sign-ins (aud bane-support-staff) ----------
+// ---------- the support tokens Nightmail signs: handoffs (aud bane-support) and staff sign-ins (aud bane-support-staff) ----------
 
 type SigningKey = NonNullable<NonNullable<Config['support']>['signingKey']>;
 const b64 = (value: string) => Buffer.from(value, 'base64url');
@@ -86,7 +86,7 @@ export async function verifyStaffToken(config: Pick<Config, 'support' | 'publicU
 
 /**
  * Checks a handoff JWS that this installation signed (POST /v1/contact-support): the signature against its own key, the
- * audience, the issuer and the 10-minute expiry. The signature only proves Bane issued it; whether it was already used is
+ * audience, the issuer and the 10-minute expiry. The signature only proves Nightmail issued it; whether it was already used is
  * the handoff row's business, which minting checks atomically.
  */
 export async function verifyHandoffToken(config: Pick<Config, 'support' | 'publicUrl'>, token: string, now = Date.now()): Promise<{ ok: true; claims: HandoffClaims } | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'SUPPORT_NOT_CONFIGURED' }> {
@@ -147,7 +147,7 @@ export function supportPlatform(dispatch: (request: Request) => Promise<Response
       call<{ id: string; token: string; userId: string; workspaceIds: string[]; ticketRef: string; contentShared: boolean; contentWorkspaceId: string | null; expiresAt: string }>('POST', '/v1/operator/support/grants', body),
     revokeGrant: (grantId: string) => call<{ id: string; revoked: true }>('POST', `/v1/operator/support/grants/${grantId}/revoke`, {}),
     /**
-     * A staff sign-in token from the staff-sign-in redirect: Bane's own signature, audience, issuer and expiry, and that its
+     * A staff sign-in token from the staff-sign-in redirect: Nightmail's own signature, audience, issuer and expiry, and that its
      * subject is still an operator now. Returns its jti and expiry: the support Worker accepts each jti once.
      */
     async verifyStaff(token: string): Promise<StaffCheck> {

@@ -1,4 +1,4 @@
-import { headerPrefix, publicOrigin } from './brand.js'
+import { headerPrefix, productName, publicOrigin } from './brand.js'
 export interface UploadAttachmentBytesOptions {
   apiUrl: string
   token: string
@@ -54,6 +54,6 @@ export async function uploadAttachmentBytes(options: UploadAttachmentBytesOption
     const error = data && 'error' in data ? data.error : undefined
     throw new BaneUploadError(error?.message ?? 'Attachment upload failed.', error?.code ?? `HTTP_${response.status}`, response.status, error?.requestId ?? response.headers.get('x-request-id') ?? undefined)
   }
-  if (!data || !('id' in data) || typeof data.id !== 'string') throw new BaneUploadError('Bane returned an invalid attachment response.', 'INVALID_RESPONSE', response.status, response.headers.get('x-request-id') ?? undefined)
+  if (!data || !('id' in data) || typeof data.id !== 'string') throw new BaneUploadError(`${productName} returned an invalid attachment response.`, 'INVALID_RESPONSE', response.status, response.headers.get('x-request-id') ?? undefined)
   return data as UploadedAttachment
 }

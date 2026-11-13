@@ -1,4 +1,5 @@
 import type { MxReport } from './db/mailbox.js';
+import { productName } from './brand.js';
 
 // Known inbound mail hosts. Used only to name what currently receives a domain's mail.
 const PROVIDERS: [RegExp, string][] = [
@@ -80,7 +81,7 @@ export async function checkMx(domain: string, region: string, signal?: AbortSign
   }
   if (records.every(record => /^inbound-smtp\.[a-z0-9-]+\.amazonaws\.com$/.test(record.host))) return { ...base, state: 'wrong_region', records, providers, message: `MX points to Amazon SES in another region. Change it to ${expected.value}.` };
   const split = records.length > 1;
-  return { ...base, state: 'conflict', records, providers, ...(split ? { split } : {}), message: `${providers.join(', ')} currently receives mail for ${domain}${split ? ` through ${records.length} MX records` : ''}. Changing the MX record moves all of its mail to Bane; use a subdomain to keep the existing mailboxes.` };
+  return { ...base, state: 'conflict', records, providers, ...(split ? { split } : {}), message: `${providers.join(', ')} currently receives mail for ${domain}${split ? ` through ${records.length} MX records` : ''}. Changing the MX record moves all of its mail to ${productName}; use a subdomain to keep the existing mailboxes.` };
 }
 
 export const mxBlocksEnable = (report: MxReport) => ['conflict', 'mixed', 'wrong_region', 'null_mx', 'cname'].includes(report.state);

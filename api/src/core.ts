@@ -62,7 +62,7 @@ export interface Config {
   platformAccount?: string;
   /** The one Hosted workspace that may own the installation's own domain (PUBLIC_URL's host). */
   platformDomainWorkspace?: string;
-  /** Hosted only: From for Bane's own owner notices (sender standing), on the platform workspace's domain. */
+  /** Hosted only: From for Nightmail's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
   support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string } };
@@ -251,7 +251,7 @@ export function admits(guard: () => unknown) {
   try { guard(); return true; }
   catch (error) { if (error instanceof ApiError && (error.status === 403 || error.status === 404 || error.code.endsWith('_NOT_CONFIGURED'))) return false; throw error; }
 }
-// Received mail a Bane credential can read: dashboard members read addressed mail; unrestricted manage credentials read
+// Received mail a Nightmail credential can read: dashboard members read addressed mail; unrestricted manage credentials read
 // the whole workspace; everything else reads none. Used by mailboxAuth, the unified logs and the MCP listing.
 export function actorMailAccess(actor: Actor): MailboxAccess | null {
   if (actor.domains.length) return null;
@@ -360,7 +360,7 @@ export const databaseConflict = (error: unknown) => !(error instanceof ApiError)
 export const databaseUnavailable = (background = false) => new ApiError(503, 'DATABASE_UNAVAILABLE', background ? 'The database was briefly unavailable; the job will be retried.' : 'The database is briefly unavailable. Retry the request.', undefined, true);
 export { errorCodeOf, errorTypeOf, log, setLogContext, stackFrames } from './log.js';
 /**
- * One line for an unexpected failure: its code, error class, SQLSTATE and Bane's own stack frames. Never a message:
+ * One line for an unexpected failure: its code, error class, SQLSTATE and Nightmail's own stack frames. Never a message:
  * neither the error's nor an ApiError's, whose text can quote request data (a template variable, a filename).
  */
 export function logError(error: unknown, fields: Record<string, unknown> & { code: string; message?: never }, level: 'error' | 'warn' = 'error') {

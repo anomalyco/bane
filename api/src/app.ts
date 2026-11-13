@@ -12,10 +12,10 @@ import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
-import { headerPrefix, requestHeaderNames } from './brand.js';
+import { headerPrefix, productName, requestHeaderNames } from './brand.js';
 
 type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
-// Internal areas: /v1/operator/* answers only Bane operators and /v1/support/* only support grants (src/support.ts).
+// Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
@@ -151,7 +151,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (!result.success) { const invalid = invalidFields(result.error.issues as readonly Issue[]); throw Object.assign(new ApiError(422, 'VALIDATION_FAILED', invalid.message, invalid.field), { logField: invalid.logField }); }
   } });
   if (registerOpenApi) {
-    app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: `A ${productName} API key. Credentials never belong in URLs.` });
     app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
     app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
   } else {

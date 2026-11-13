@@ -1,6 +1,6 @@
 # How sending limits work (Hosted)
 
-Hosted Bane gives each workspace a **sender score** (0–100) from the quality of what it sends. The score sets the **daily limit**. Bane stays out of the way unless something goes wrong: it **warns** first, then **holds marketing**, and **pauses** only for problems that put the shared pool at risk. These thresholds are public; how Bane detects abuse is not.
+Hosted Nightmail gives each workspace a **sender score** (0–100) from the quality of what it sends. The score sets the **daily limit**. Nightmail stays out of the way unless something goes wrong: it **warns** first, then **holds marketing**, and **pauses** only for problems that put the shared pool at risk. These thresholds are public; how Nightmail detects abuse is not.
 
 Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, `standing`), the `account.standing.changed` webhook event, and `connection.standing` on `GET /v1/me`. Self-hosted and bring-your-own-AWS installations get the score for display only.
 
@@ -43,7 +43,7 @@ Everything here is in the API: `GET /v1/sender-score` (score, factors, `limit`, 
 
 ## When something goes wrong: the ladder
 
-Bane checks every 10 minutes. Every line needs a **count and a rate together**, so a few events never trip a small sender. Rates are over accepted mail in the window (24 hours of events against 48 hours of accepted mail, so late feedback is counted fairly).
+Nightmail checks every 10 minutes. Every line needs a **count and a rate together**, so a few events never trip a small sender. Rates are over accepted mail in the window (24 hours of events against 48 hours of accepted mail, so late feedback is counted fairly).
 
 | Signal | ① Warn | ② Restrict | ③ Pause |
 | --- | --- | --- | --- |
@@ -65,7 +65,7 @@ Bounces alone hold marketing; they stop everything only when **transactional mai
 
 ## Getting back
 
-| Step | By itself | Owner (dashboard, after the fix checklist) | Bane |
+| Step | By itself | Owner (dashboard, after the fix checklist) | Nightmail |
 | --- | --- | --- | --- |
 | ① Warn | clears after 24 hours under 80% of its line | – | – |
 | ② Restrict | – | 24 hours after it started, once every 14 days, when the last 24 hours are under the warn line: marketing resumes at 50% of its allowance for 48 hours | a second restrict within 14 days |
@@ -81,4 +81,4 @@ A Hosted campaign with more than 100 recipients sends a **probe** first: the fir
 
 ## The `account.standing.changed` event
 
-Subscribe a webhook to `account.standing.changed` to hear about every change of step, a campaign quarantine, and an owner's or Bane's release. `data` has `step`, `previousStep`, `reasons` (code, metric, value, count, threshold, minimum, window, message), `since`, `version`, `sequence` (per workspace, always increasing: ignore a sequence you have already seen), `marketingHeld`, `change` and `actor.kind` (`system`, `owner` or `operator`).
+Subscribe a webhook to `account.standing.changed` to hear about every change of step, a campaign quarantine, and an owner's or Nightmail's release. `data` has `step`, `previousStep`, `reasons` (code, metric, value, count, threshold, minimum, window, message), `since`, `version`, `sequence` (per workspace, always increasing: ignore a sequence you have already seen), `marketingHeld`, `change` and `actor.kind` (`system`, `owner` or `operator`).

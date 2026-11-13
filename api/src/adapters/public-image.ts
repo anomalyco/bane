@@ -30,7 +30,7 @@ function imageType(data: Uint8Array): PublicImage['contentType'] | undefined {
 }
 /**
  * Bounded read of an image download: status, type and the 8 MiB limit. `fromBytes` takes the type
- * from the image's own bytes instead of the Content-Type header, for Bane's own mail-object links,
+ * from the image's own bytes instead of the Content-Type header, for Nightmail's own mail-object links,
  * which serve every attachment as application/octet-stream.
  */
 export async function readPublicImage(response: Response, fromBytes = false): Promise<PublicImage> {

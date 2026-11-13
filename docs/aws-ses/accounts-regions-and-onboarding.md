@@ -2,16 +2,16 @@
 
 [Hub](README.md)
 
-Research date: **2026-09-08**. This document describes AWS SES facts and a proposed Bane onboarding model; it does not describe a completed AWS integration.
+Research date: **2026-09-08**. This document describes AWS SES facts and a proposed Nightmail onboarding model; it does not describe a completed AWS integration.
 See [credentials and IAM](credentials-and-iam.md) for trust, credentials, scoped policies, and security controls.
 
-**Verified facts** are supported by official AWS sources cited inline. **Recommended design** is a Bane proposal. **Unverified constraints** are release gates, not claims of functionality. Context7 and live official AWS references were consulted; no customer AWS account was connected, changed, or sent mail during this research.
+**Verified facts** are supported by official AWS sources cited inline. **Recommended design** is a Nightmail proposal. **Unverified constraints** are release gates, not claims of functionality. Context7 and live official AWS references were consulted; no customer AWS account was connected, changed, or sent mail during this research.
 
 ## 1. Choose whose AWS account sends the mail
 
-| Model | AWS principal used for SES | Quota, billing, and reputation boundary | Recommended Bane treatment |
+| Model | AWS principal used for SES | Quota, billing, and reputation boundary | Recommended Nightmail treatment |
 | --- | --- | --- | --- |
-| Platform-owned SES account | Bane's execution role | Platform account/Region | Managed sending product; Bane owns abuse prevention, production approval, spend, and account risk |
+| Platform-owned SES account | Nightmail's execution role | Platform account/Region | Managed sending product; Nightmail owns abuse prevention, production approval, spend, and account risk |
 | Customer-owned SES account through AssumeRole | Assumed role in customer account | Customer account/Region | Preferred bring-your-own-SES connection; isolate queues, credentials, resources, and feedback by customer connection |
 | Customer-owned SES account through IAM user keys | Dedicated customer IAM user | Customer account/Region | Explicit fallback, with additional secret-storage/rotation risk |
 | Platform sends using customer's SES identity authorization | Platform delegate principal plus customer's identity ARN | Delegate/platform account quotas, billing, and bounce/complaint reputation; identity remains owned by customer | Separate advanced delegation mode, not a synonym for AssumeRole |
@@ -29,7 +29,7 @@ Recommended associated records:
 - **Regional account state:** production/sandbox status, sending enabled, enforcement status, quota/rate snapshot, observation time, last error, and available features.
 - **Regional resources:** identity ARN and verification/DKIM/MAIL FROM state, configuration-set names/ARNs and event destinations, templates, contact lists, and optional SES tenant ARN.
 - **Runtime boundaries:** rate limiter and outstanding recipient reservations, transactional/marketing queues, idempotency scope, suppression/consent policy, and circuit-breaker state per account/Region.
-- **Feedback routing:** authenticated event source, actual sending account/Region, configuration set, optional tenant, SES message ID, and Bane message/campaign correlation.
+- **Feedback routing:** authenticated event source, actual sending account/Region, configuration set, optional tenant, SES message ID, and Nightmail message/campaign correlation.
 - **Audit metadata:** who connected or changed a capability, the approved policy version, connection suspension reason, and credential refresh/revocation status; never full credentials or private message content.
 
 Resources with the same name in two accounts or Regions are different resources. An STS success must not mark all Regions ready; a successful send in one Region must not mark another production-enabled. Avoid caches keyed only by domain or configuration-set name. [A2, A3]
@@ -53,9 +53,9 @@ Resources with the same name in two accounts or Regions are different resources.
 
 New SES accounts start in the sandbox **per Region**. In the sandbox, sending is limited to verified recipients/domains or the SES mailbox simulator, with a default 200 recipients per rolling 24 hours and 1 recipient per second. Account-level suppression bulk/API management is disabled in sandbox. After production access, recipients no longer need verification, but sending identities still do. Quotas remain finite and use-case-specific unless AWS explicitly reports otherwise. [A5, A6]
 
-A production request requires the customer to describe their use case, website, and whether most mail is marketing or transactional. It is not a switch Bane can guarantee will be approved. `PutAccountDetails` is a separate administrative permission and workflow, not a requirement for reading an existing connection. AWS can request additional information. Domain verification and truthful consent/feedback handling should precede the request. [A5]
+A production request requires the customer to describe their use case, website, and whether most mail is marketing or transactional. It is not a switch Nightmail can guarantee will be approved. `PutAccountDetails` is a separate administrative permission and workflow, not a requirement for reading an existing connection. AWS can request additional information. Domain verification and truthful consent/feedback handling should precede the request. [A5]
 
-**Recommended design:** allow setup and simulator-based checks while sandboxed; block real marketing campaigns. Display the exact Region requiring approval. A customer's existing approval in another Region is not sufficient. Never imply that paying Bane automatically removes SES sandbox restrictions.
+**Recommended design:** allow setup and simulator-based checks while sandboxed; block real marketing campaigns. Display the exact Region requiring approval. A customer's existing approval in another Region is not sufficient. Never imply that paying Nightmail automatically removes SES sandbox restrictions.
 
 ### Sending quota versus monitoring
 
@@ -63,7 +63,7 @@ A production request requires the customer to describe their use case, website, 
 
 Quotas count **recipients**, not API calls: To, Cc, and Bcc recipients all matter. The 24-hour quota is a rolling window, not a reset at local midnight. AWS can accept short rate bursts, but the advertised sending rate is not a promise of sustained application throughput. Other applications using the same SES account share its quota. [A6, A8]
 
-**Recommended design:** compute a labeled snapshot estimate, maintain a central recipient-based rate limiter for each account/Region, and reserve headroom for transactional traffic. Refresh counters, but rely on AWS quota/throttling errors as authoritative. Keep usage history and send outcomes in Bane; use SES event publishing and optional CloudWatch/VDM metrics for monitoring. Never treat `SentLast24Hours` as an exact synchronous concurrency counter.
+**Recommended design:** compute a labeled snapshot estimate, maintain a central recipient-based rate limiter for each account/Region, and reserve headroom for transactional traffic. Refresh counters, but rely on AWS quota/throttling errors as authoritative. Keep usage history and send outcomes in Nightmail; use SES event publishing and optional CloudWatch/VDM metrics for monitoring. Never treat `SentLast24Hours` as an exact synchronous concurrency counter.
 
 `SendingEnabled = false`, account enforcement, configuration-set sending disablement, and tenant pause are distinct blockers. Increasing IAM permissions or quota cannot fix a reputation suspension. Do not automatically re-enable sending after AWS or a customer paused it; surface the reason and require the appropriate remediation/approval. [A3, A9, A10]
 
@@ -73,7 +73,7 @@ Quotas count **recipients**, not API calls: To, Cc, and Bcc recipients all matte
 
 SES identities can be domains or individual email addresses. Domain verification supports sending from addresses/subdomains under the domain, while advanced settings or overrides can require explicit child identities. Verify the exact identity used for the intended flow and inspect more-specific identities rather than assuming inherited configuration always wins. Every sending Region needs the appropriate identity; DNS records are public and global, but SES verification state is not. [A2, A4]
 
-**Recommended default:** customer-controlled sending domain/subdomain plus Easy DKIM. Prefer a dedicated sending subdomain when the customer wants operational separation, while recognizing it does not guarantee independent mailbox-provider reputation. Domain verification is not recipient consent, trademark ownership, or authorization for another Bane workspace to use the domain.
+**Recommended default:** customer-controlled sending domain/subdomain plus Easy DKIM. Prefer a dedicated sending subdomain when the customer wants operational separation, while recognizing it does not guarantee independent mailbox-provider reputation. Domain verification is not recipient consent, trademark ownership, or authorization for another Nightmail workspace to use the domain.
 
 ### Recommended bounded onboarding sequence
 
@@ -87,10 +87,10 @@ The creation API is not permission to edit DNS. Route 53 requires separate permi
 
 ### DKIM choices
 
-| Mode | Verified AWS behavior | Bane recommendation / constraint |
+| Mode | Verified AWS behavior | Nightmail recommendation / constraint |
 | --- | --- | --- |
 | Easy DKIM | SES manages signing keys and gives DNS CNAME records; the usual setup publishes three records | Default for new onboarding; use exact returned hosted-zone targets rather than hardcoding `dkim.amazonses.com` |
-| BYODKIM | Customer supplies private signing key/selector; publishes public key in DNS; SES signs | Advanced opt-in. Handle private key as a secret and preserve existing configuration; not a prerequisite for Bane |
+| BYODKIM | Customer supplies private signing key/selector; publishes public key in DNS; SES signs | Advanced opt-in. Handle private key as a secret and preserve existing configuration; not a prerequisite for Nightmail |
 | Deterministic Easy DKIM (DEED) | Replica identity inherits Easy DKIM configuration from same-named parent in another Region and reuses parent's DNS records | Optional multi-region setup; still create/observe each regional identity and get replication permission |
 
 DEED requires an Easy DKIM parent, not BYODKIM or a manually signed parent. A replica cannot itself be a parent. Parent key rotations/length changes propagate; the parent cannot be deleted while replicas remain. DEED does **not** automatically confer production approval or mirror every identity/configuration setting. Required permissions include replica creation and `ses:ReplicateEmailIdentityDKIMSigningKey` on the parent with an approved `ses:ReplicaRegion` scope. [A12, A13]
@@ -113,7 +113,7 @@ DMARC requires a passing **aligned** SPF or DKIM result; both mechanisms are des
 
 Customer-managed record publication is the lowest-privilege default. If offering delegated DNS, use a dedicated customer-approved subdomain/zone and a separate credential boundary with explicit record permissions and a revocation plan. Delegating a zone grants control of names beneath it and is broader than adding three DKIM CNAMEs; explain the distinction. Do not represent a CNAME record as an IAM role or an identity sending-authorization policy.
 
-DNS removal, delegation withdrawal, or key rotation can break future authentication without invalidating Bane login sessions. Recheck SES state and alert on regressions; do not quietly restore customer-removed records.
+DNS removal, delegation withdrawal, or key rotation can break future authentication without invalidating Nightmail login sessions. Recheck SES state and alert on regressions; do not quietly restore customer-removed records.
 
 ## 4. Feedback is an onboarding requirement
 
@@ -139,7 +139,7 @@ Do not infer API/SMTP/receiving/feature parity from the presence of a Region in 
 
 ### SES tenant resources are not AWS accounts
 
-AWS SES tenants are regional, flat resources inside one AWS account; they cannot span accounts and are not automatically replicated across Regions. They group associated identities, configuration sets, and templates and provide tenant reputation visibility and targeted sending enforcement. An SES tenant is not the same thing as a Bane workspace, an IAM role, or a separate account quota/billing boundary. [A10]
+AWS SES tenants are regional, flat resources inside one AWS account; they cannot span accounts and are not automatically replicated across Regions. They group associated identities, configuration sets, and templates and provide tenant reputation visibility and targeted sending enforcement. An SES tenant is not the same thing as a Nightmail workspace, an IAM role, or a separate account quota/billing boundary. [A10]
 
 A tenant send must specify a configuration set associated with that tenant, or use an identity whose default configuration set is associated with it. Manage resource associations explicitly and inspect defaults. The full tenant ARN format in the current SAR is `arn:aws:ses:REGION:ACCOUNT:tenant/TENANT_NAME/TENANT_ID`; do not fabricate it from the name alone. `ses:TenantName` can constrain sending; tenant ARNs scope tenant administration, not the send action's identity resource. [A10, A21]
 
@@ -149,7 +149,7 @@ Setting tenant suppression attributes requires scope and reasons together, or bo
 
 Default tenant count in the current guide is 10,000 per account, with quota-increase paths; this is not a hard product promise. Standard/Strict/None reputation policies affect automatic tenant pausing, and EventBridge exposes tenant status/reputation events. Tenants reduce some blast radius but do not justify claiming absolute isolation from account-level limits or AWS enforcement. [A10]
 
-**Recommended design:** store optional SES tenant identifiers on each regional connection and deliberately map them to Bane workspaces/streams. Do not enable tenants, change reputation policy, switch suppression scope, or re-enable a paused tenant as a side effect of sending. Multi-region tenants require separate provisioning and monitoring per Region.
+**Recommended design:** store optional SES tenant identifiers on each regional connection and deliberately map them to Nightmail workspaces/streams. Do not enable tenants, change reputation policy, switch suppression scope, or re-enable a paused tenant as a side effect of sending. Multi-region tenants require separate provisioning and monitoring per Region.
 
 ## 6. Cross-account identity ARN constraints
 

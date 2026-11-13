@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { ApiError, assertSharedAccount, lazyModule, type Config, type Runtime } from './core.js';
 import { connectionReady } from './states.js';
 import { setupResources } from './ses-setup.js';
+import { productName } from './brand.js';
 export { assertSharedAccount };
 
 type Credentials = NonNullable<Config['aws']>;

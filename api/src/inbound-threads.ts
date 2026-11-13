@@ -6,6 +6,7 @@ import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
 import { ApiError, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
@@ -32,7 +33,7 @@ const Message = z.object({
   id: z.string(), threadId: z.string(), addressIds: z.array(z.string()), direction: z.enum(['inbound', 'outbound']), status: z.string(),
   from: Address, to: z.array(Address), cc: z.array(Address), replyTo: z.array(Address), subject: z.string(), snippet: z.string(),
   text: z.string(), replyText: z.string(), receivedAt: z.string(), bodyTruncated: z.boolean(), attachmentCount: z.number().int(), read:z.boolean(), errorCode:z.string().nullable(), suppressionReason:SuppressionReason.nullable().optional(),
-  emailId: z.string().nullable(), messageId: z.string().nullable().describe('RFC Message-ID, not the Bane message ID (id).'),
+  emailId: z.string().nullable(), messageId: z.string().nullable().describe(`RFC Message-ID, not the ${productName} message ID (id).`),
   inReplyTo: z.string().nullable(), references: z.array(z.string()),
 }).openapi('InboundMessage');
 const Cursor = z.string().min(1).max(300).optional().describe('Opaque cursor from the preceding page, with the same filters.');
@@ -215,7 +216,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
-    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeAuthentication,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,authentication:Authentication.optional().describe('With includeAuthentication=true.'),automated:z.boolean().optional().describe('With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.'),html:z.string().nullable(),htmlTooComplex:z.boolean().describe('With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.'),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
+    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeAuthentication,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,authentication:Authentication.optional().describe('With includeAuthentication=true.'),automated:z.boolean().optional().describe('With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.'),html:z.string().nullable(),htmlTooComplex:z.boolean().describe(`With includeHtml=true: the HTML has more elements or deeper nesting than ${productName} parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.`),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
     // The same bounded parse every other reader of stored HTML uses; the body itself is returned as stored.
     const body=(html:string|null)=>q.includeHtml==='true'&&html?{html,htmlTooComplex:!boundedHtmlFragment(html,'document')}:{html:null,htmlTooComplex:false};

@@ -107,7 +107,7 @@ A simulator-only pass cannot prove real inbox placement, single-recipient VDM co
 
 ### Queues and retries
 
-- Immutable per-recipient jobs with a unique Bane request key; separate campaign job ID, application message ID, provider message ID and provider attempt ID.
+- Immutable per-recipient jobs with a unique Nightmail request key; separate campaign job ID, application message ID, provider message ID and provider attempt ID.
 - Retry known transient failures within a time budget. Do not replay successful bulk entries. A timeout after dispatch is an **ambiguous outcome**, not proof the provider rejected the send.
 - Standard SES send requests do not provide an application idempotency token guaranteeing exactly-once delivery. See the sending reference for SDK retry implications.
 - Time-critical transactional mail needs an expiry time; stop retrying an expired OTP/password-reset message. Marketing jobs need campaign cancellation/expiry and fresh consent checks.

@@ -303,8 +303,8 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   }
 });
 
-// Bane is the source of truth for the SES tenant status. Every pause and resume bumps provider_connections.tenant_generation;
-// hosted_tenant_status records, per regional tenant, what was applied at which generation. The job reads what Bane
+// Nightmail is the source of truth for the SES tenant status. Every pause and resume bumps provider_connections.tenant_generation;
+// hosted_tenant_status records, per regional tenant, what was applied at which generation. The job reads what Nightmail
 // wants now (desiredTenantStatus), applies it to every ready tenant that differs, finishes a resume once no ready tenant
 // may still be disabled, and runs again if a transition happened meanwhile. A transition while it runs cannot requeue
 // it, so the periodic reconcile (tenantStatusDrift) queues anything still out of line: every interleaving converges.

@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Bane API",
+    "title": "Nightmail API",
     "version": "0.1.0",
     "description": "Send, receive and reply to email on your own domains. 202 means queued, not delivered.",
     "x-quickstart": [
@@ -16,11 +16,11 @@
       {
         "title": "Send",
         "text": "202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.",
-        "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header \"Idempotency-Key: $(uuidgen)\" \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Bane\",\"text\":\"It works.\"}'"
+        "code": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --header \"Idempotency-Key: $(uuidgen)\" \\\n  --data '{\"from\":\"hello@acme.com\",\"to\":\"you@acme.com\",\"subject\":\"Hello from Nightmail\",\"text\":\"It works.\"}'"
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Nightmail receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Nightmail, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
       },
       {
         "title": "Reply",
@@ -33,7 +33,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "A Bane API key. Credentials never belong in URLs."
+        "description": "A Nightmail API key. Credentials never belong in URLs."
       },
       "dashboardSession": {
         "type": "apiKey",
@@ -1929,7 +1929,7 @@
           "html": {
             "type": "string",
             "maxLength": 524288,
-            "description": "Concrete Bane block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing."
+            "description": "Concrete Nightmail block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing."
           },
           "attachments": {
             "type": "array",
@@ -2511,7 +2511,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 40,
-            "description": "Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region."
+            "description": "Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region."
           },
           "kind": {
             "type": "string",
@@ -2596,7 +2596,7 @@
               "additionalProperties": false
             },
             "maxItems": 15,
-            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "screen": {
             "type": "boolean",
@@ -2740,7 +2740,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 40,
-            "description": "Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region."
+            "description": "Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region."
           },
           "kind": {
             "type": "string",
@@ -2825,7 +2825,7 @@
               "additionalProperties": false
             },
             "maxItems": 15,
-            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "screen": {
             "type": "boolean",
@@ -5478,7 +5478,7 @@
                   "proof_stale",
                   "identity_stale"
                 ],
-                "description": "cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date."
+                "description": "cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date."
               },
               "host": {
                 "type": "string"
@@ -5867,7 +5867,7 @@
               "additionalProperties": false
             },
             "maxItems": 10,
-            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved."
           }
         },
         "required": [
@@ -5945,7 +5945,7 @@
               "additionalProperties": false
             },
             "maxItems": 10,
-            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved."
           }
         }
       },
@@ -8882,7 +8882,7 @@
                   "additionalProperties": false
                 },
                 "maxItems": 10,
-                "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+                "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved."
               },
               "timeoutSeconds": {
                 "type": "integer",
@@ -10347,7 +10347,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Bane domain ID."
+            "description": "Nightmail domain ID."
           },
           "name": {
             "type": "string"
@@ -10661,7 +10661,7 @@
           },
           "parentDomainId": {
             "type": "string",
-            "description": "Bane domain ID of the parent."
+            "description": "Nightmail domain ID of the parent."
           },
           "parentName": {
             "type": "string"
@@ -11395,7 +11395,7 @@
               "string",
               "null"
             ],
-            "description": "RFC Message-ID, not the Bane message ID (id)."
+            "description": "RFC Message-ID, not the Nightmail message ID (id)."
           },
           "inReplyTo": {
             "type": [
@@ -11738,7 +11738,7 @@
               },
               "htmlTooComplex": {
                 "type": "boolean",
-                "description": "With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it."
+                "description": "With includeHtml=true: the HTML has more elements or deeper nesting than Nightmail parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it."
               },
               "attachments": {
                 "type": "array",
@@ -12432,7 +12432,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "Bane domain ID."
+            "description": "Nightmail domain ID."
           },
           "name": {
             "type": "string",
@@ -12519,7 +12519,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Nightmail for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -12576,7 +12576,7 @@
             },
             "maxItems": 15,
             "default": [],
-            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "autoSubmitted": {
             "type": "string",
@@ -12684,7 +12684,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 120,
-                "description": "A received attachment in this mailbox (matt_…) or a Bane attachment upload (attachment_…)."
+                "description": "A received attachment in this mailbox (matt_…) or a Nightmail attachment upload (attachment_…)."
               }
             },
             "required": [
@@ -12701,7 +12701,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Nightmail for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -12758,7 +12758,7 @@
             },
             "maxItems": 15,
             "default": [],
-            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
+            "description": "Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client."
           },
           "autoSubmitted": {
             "type": "string",
@@ -12778,7 +12778,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 120,
-            "description": "Bane message ID (msg_…) of a visible message in this thread."
+            "description": "Nightmail message ID (msg_…) of a visible message in this thread."
           },
           "expectedRecipients": {
             "type": "object",
@@ -13229,7 +13229,7 @@
               "bane",
               "inbound"
             ],
-            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
@@ -13308,7 +13308,7 @@
               "bane",
               "inbound"
             ],
-            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
@@ -13410,7 +13410,7 @@
               "additionalProperties": false
             },
             "maxItems": 10,
-            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved."
           },
           "addressIds": {
             "type": [
@@ -13479,7 +13479,7 @@
               "bane",
               "inbound"
             ],
-            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "junk": {
             "type": "string",
@@ -13576,7 +13576,7 @@
               "additionalProperties": false
             },
             "maxItems": 10,
-            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved."
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved."
           },
           "addressIds": {
             "type": [
@@ -13615,7 +13615,7 @@
               "bane",
               "inbound"
             ],
-            "description": "bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
+            "description": "bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key."
           },
           "overrideUrl": {
             "type": "string",
@@ -14624,7 +14624,7 @@
                   "system",
                   "stripe"
                 ],
-                "description": "member is a signed-in person; support is Bane support reading with your permission; system is Bane itself."
+                "description": "member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself."
               },
               "id": {
                 "type": [
@@ -14701,7 +14701,7 @@
               "userId",
               "email"
             ],
-            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in."
+            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in."
           },
           "summary": {
             "type": "object",
@@ -14900,7 +14900,7 @@
               },
               "authErrors": {
                 "type": "null",
-                "description": "Bane does not store failed sign-ins or rejected API keys; look up a request ID instead."
+                "description": "Nightmail does not store failed sign-ins or rejected API keys; look up a request ID instead."
               }
             },
             "required": [
@@ -15055,7 +15055,7 @@
             "properties": {
               "kind": {
                 "type": "string",
-                "description": "shared (Bane Hosted) or byo (their own AWS)."
+                "description": "shared (Nightmail Hosted) or byo (their own AWS)."
               },
               "region": {
                 "type": "string"
@@ -15799,7 +15799,7 @@
               "string",
               "null"
             ],
-            "description": "The error code Bane answered with."
+            "description": "The error code Nightmail answered with."
           },
           "principal": {
             "type": "string",
@@ -15842,7 +15842,7 @@
           },
           "found": {
             "type": "boolean",
-            "description": "Whether Bane logged or stored anything about this request for this customer."
+            "description": "Whether Nightmail logged or stored anything about this request for this customer."
           },
           "logs": {
             "type": "array",
@@ -16852,7 +16852,7 @@
                   "kind",
                   "region"
                 ],
-                "description": "shared (Bane Hosted pool) or byo."
+                "description": "shared (Nightmail Hosted pool) or byo."
               }
             },
             "required": [
@@ -16865,7 +16865,7 @@
               "lostSince",
               "connection"
             ],
-            "description": "What Bane stored at the last verification."
+            "description": "What Nightmail stored at the last verification."
           },
           "dns": {
             "type": "object",
@@ -18544,7 +18544,7 @@
                   "string",
                   "null"
                 ],
-                "description": "Why Bane turned auto-recharge off (a card decline code, dispute or a removed card)."
+                "description": "Why Nightmail turned auto-recharge off (a card decline code, dispute or a removed card)."
               },
               "pending": {
                 "type": "boolean"
@@ -19502,7 +19502,7 @@
           }
         ],
         "summary": "List connected agents and their agent tokens",
-        "description": "Agent tokens are how agents use Bane: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.",
+        "description": "Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.",
         "parameters": [
           {
             "schema": {
@@ -19935,11 +19935,11 @@
                         "operator:read",
                         null
                       ],
-                      "description": "Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else."
+                      "description": "Nightmail staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else."
                     },
                     "uiNotes": {
                       "type": "boolean",
-                      "description": "Bane staff only: this session may use staff UI notes. False for everyone else."
+                      "description": "Nightmail staff only: this session may use staff UI notes. False for everyone else."
                     },
                     "billing": {
                       "type": [
@@ -22187,7 +22187,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.",
+        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Nightmail records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.",
         "parameters": [
           {
             "schema": {
@@ -28768,7 +28768,7 @@
           }
         ],
         "summary": "Check email sendability without sending",
-        "description": "Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Bane generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.",
+        "description": "Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.",
         "requestBody": {
           "required": true,
           "content": {
@@ -28895,12 +28895,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { checkEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await checkEmail({\n  client,\n  body: {\n    \"from\": \"sender@example.com\",\n    \"subject\": \"Hello from Bane\",\n    \"stream\": \"transactional\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { checkEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await checkEmail({\n  client,\n  body: {\n    \"from\": \"sender@example.com\",\n    \"subject\": \"Hello from Nightmail\",\n    \"stream\": \"transactional\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/check' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"subject\": \"Hello from Bane\",\n  \"stream\": \"transactional\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/check' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"subject\": \"Hello from Nightmail\",\n  \"stream\": \"transactional\"\n}'"
           }
         ]
       }
@@ -29064,12 +29064,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendEmail({\n  client,\n  body: {\n    \"from\": \"sender@example.com\",\n    \"to\": \"recipient@example.com\",\n    \"cc\": [],\n    \"bcc\": [],\n    \"replyTo\": [],\n    \"kind\": \"transactional\",\n    \"attachments\": [],\n    \"subject\": \"Hello from Bane\",\n    \"text\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendEmail({\n  client,\n  body: {\n    \"from\": \"sender@example.com\",\n    \"to\": \"recipient@example.com\",\n    \"cc\": [],\n    \"bcc\": [],\n    \"replyTo\": [],\n    \"kind\": \"transactional\",\n    \"attachments\": [],\n    \"subject\": \"Hello from Nightmail\",\n    \"text\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"to\": \"recipient@example.com\",\n  \"cc\": [],\n  \"bcc\": [],\n  \"replyTo\": [],\n  \"kind\": \"transactional\",\n  \"attachments\": [],\n  \"subject\": \"Hello from Bane\",\n  \"text\": \"Your message is ready.\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/send' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"to\": \"recipient@example.com\",\n  \"cc\": [],\n  \"bcc\": [],\n  \"replyTo\": [],\n  \"kind\": \"transactional\",\n  \"attachments\": [],\n  \"subject\": \"Hello from Nightmail\",\n  \"text\": \"Your message is ready.\"\n}'"
           }
         ]
       }
@@ -29233,12 +29233,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendEmailBatch } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendEmailBatch({\n  client,\n  body: {\n    \"emails\": [\n      {\n        \"from\": \"sender@example.com\",\n        \"to\": \"recipient@example.com\",\n        \"cc\": [],\n        \"bcc\": [],\n        \"replyTo\": [],\n        \"kind\": \"transactional\",\n        \"attachments\": [],\n        \"subject\": \"Hello from Bane\",\n        \"text\": \"Your message is ready.\"\n      }\n    ]\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { sendEmailBatch } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await sendEmailBatch({\n  client,\n  body: {\n    \"emails\": [\n      {\n        \"from\": \"sender@example.com\",\n        \"to\": \"recipient@example.com\",\n        \"cc\": [],\n        \"bcc\": [],\n        \"replyTo\": [],\n        \"kind\": \"transactional\",\n        \"attachments\": [],\n        \"subject\": \"Hello from Nightmail\",\n        \"text\": \"Your message is ready.\"\n      }\n    ]\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/batch' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"emails\": [\n    {\n      \"from\": \"sender@example.com\",\n      \"to\": \"recipient@example.com\",\n      \"cc\": [],\n      \"bcc\": [],\n      \"replyTo\": [],\n      \"kind\": \"transactional\",\n      \"attachments\": [],\n      \"subject\": \"Hello from Bane\",\n      \"text\": \"Your message is ready.\"\n    }\n  ]\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/batch' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"emails\": [\n    {\n      \"from\": \"sender@example.com\",\n      \"to\": \"recipient@example.com\",\n      \"cc\": [],\n      \"bcc\": [],\n      \"replyTo\": [],\n      \"kind\": \"transactional\",\n      \"attachments\": [],\n      \"subject\": \"Hello from Nightmail\",\n      \"text\": \"Your message is ready.\"\n    }\n  ]\n}'"
           }
         ]
       }
@@ -31119,12 +31119,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createCampaign } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createCampaign({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"from\": \"sender@example.com\",\n    \"replyTo\": [],\n    \"subject\": \"Hello from Bane\",\n    \"attachments\": [],\n    \"audience\": {},\n    \"defaults\": {}\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createCampaign } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createCampaign({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"from\": \"sender@example.com\",\n    \"replyTo\": [],\n    \"subject\": \"Hello from Nightmail\",\n    \"attachments\": [],\n    \"audience\": {},\n    \"defaults\": {}\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/campaigns' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"from\": \"sender@example.com\",\n  \"replyTo\": [],\n  \"subject\": \"Hello from Bane\",\n  \"attachments\": [],\n  \"audience\": {},\n  \"defaults\": {}\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/campaigns' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"from\": \"sender@example.com\",\n  \"replyTo\": [],\n  \"subject\": \"Hello from Nightmail\",\n  \"attachments\": [],\n  \"audience\": {},\n  \"defaults\": {}\n}'"
           }
         ]
       },
@@ -31675,12 +31675,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { updateCampaign } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await updateCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1,\n    \"draft\": {\n      \"name\": \"Example\",\n      \"from\": \"sender@example.com\",\n      \"replyTo\": [],\n      \"subject\": \"Hello from Bane\",\n      \"attachments\": [],\n      \"tracking\": true,\n      \"audience\": {},\n      \"defaults\": {}\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { updateCampaign } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await updateCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1,\n    \"draft\": {\n      \"name\": \"Example\",\n      \"from\": \"sender@example.com\",\n      \"replyTo\": [],\n      \"subject\": \"Hello from Nightmail\",\n      \"attachments\": [],\n      \"tracking\": true,\n      \"audience\": {},\n      \"defaults\": {}\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://bane.mx/v1/campaigns/resource_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"draft\": {\n    \"name\": \"Example\",\n    \"from\": \"sender@example.com\",\n    \"replyTo\": [],\n    \"subject\": \"Hello from Bane\",\n    \"attachments\": [],\n    \"tracking\": true,\n    \"audience\": {},\n    \"defaults\": {}\n  }\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://bane.mx/v1/campaigns/resource_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"draft\": {\n    \"name\": \"Example\",\n    \"from\": \"sender@example.com\",\n    \"replyTo\": [],\n    \"subject\": \"Hello from Nightmail\",\n    \"attachments\": [],\n    \"tracking\": true,\n    \"audience\": {},\n    \"defaults\": {}\n  }\n}'"
           }
         ]
       },
@@ -35466,7 +35466,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.",
+        "description": "Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Nightmail’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.",
         "parameters": [
           {
             "schema": {
@@ -39912,7 +39912,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Explicitly queue idempotent setup of Bane-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.",
+        "description": "Explicitly queue idempotent setup of Nightmail-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.",
         "parameters": [
           {
             "schema": {
@@ -40078,7 +40078,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set SES Auto Validation for one Bane-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.",
+        "description": "Set SES Auto Validation for one Nightmail-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.",
         "parameters": [
           {
             "schema": {
@@ -51638,12 +51638,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { simulateInboxMessage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await simulateInboxMessage({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"from\": \"sender@example.com\",\n    \"subject\": \"Hello from Bane\",\n    \"text\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { simulateInboxMessage } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await simulateInboxMessage({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"from\": \"sender@example.com\",\n    \"subject\": \"Hello from Nightmail\",\n    \"text\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/simulate' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"subject\": \"Hello from Bane\",\n  \"text\": \"Your message is ready.\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inboxes/resource_123/simulate' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"from\": \"sender@example.com\",\n  \"subject\": \"Hello from Nightmail\",\n  \"text\": \"Your message is ready.\"\n}'"
           }
         ]
       }
@@ -53210,7 +53210,7 @@
         ],
         "operationId": "enableInboundDomain",
         "summary": "Enable receiving for a verified domain",
-        "description": "Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Bane S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.",
+        "description": "Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.",
         "parameters": [
           {
             "schema": {
@@ -53377,7 +53377,7 @@
         ],
         "operationId": "disableInboundDomain",
         "summary": "Stop receiving for a domain",
-        "description": "Removes the domain from the Bane receipt rule. Receiving addresses and stored messages are kept.",
+        "description": "Removes the domain from the Nightmail receipt rule. Receiving addresses and stored messages are kept.",
         "parameters": [
           {
             "schema": {
@@ -55599,12 +55599,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createInboundThread } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createInboundThread({\n  client,\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"addressId\": \"address_123\",\n    \"to\": [\n      \"recipient@example.com\"\n    ],\n    \"cc\": [],\n    \"bcc\": [],\n    \"subject\": \"Hello from Bane\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createInboundThread } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createInboundThread({\n  client,\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"addressId\": \"address_123\",\n    \"to\": [\n      \"recipient@example.com\"\n    ],\n    \"cc\": [],\n    \"bcc\": [],\n    \"subject\": \"Hello from Nightmail\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbound/threads' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"addressId\": \"address_123\",\n  \"to\": [\n    \"recipient@example.com\"\n  ],\n  \"cc\": [],\n  \"bcc\": [],\n  \"subject\": \"Hello from Bane\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbound/threads' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"addressId\": \"address_123\",\n  \"to\": [\n    \"recipient@example.com\"\n  ],\n  \"cc\": [],\n  \"bcc\": [],\n  \"subject\": \"Hello from Nightmail\"\n}'"
           }
         ]
       }
@@ -63273,7 +63273,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Bane support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.",
+        "description": "What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.",
         "parameters": [
           {
             "schema": {
@@ -63714,7 +63714,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -63866,7 +63866,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "The customer’s workspaces with their role, sending connection and resource counts. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "The customer’s workspaces with their role, sending connection and resource counts. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -64029,7 +64029,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -64192,7 +64192,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content). Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content). Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -64430,7 +64430,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "One sent or received email with its delivery events; its body only when the customer shared message content with this request. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "One sent or received email with its delivery events; its body only when the customer shared message content with this request. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -64591,7 +64591,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Delivery events of sent mail (send, delivery, bounce, complaint, reject, open, click), newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Delivery events of sent mail (send, delivery, bounce, complaint, reject, open, click), newest first. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -64812,7 +64812,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -65038,7 +65038,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -65213,7 +65213,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Balance, payments and the billing ledger of the workspaces the customer owns or administers. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Balance, payments and the billing ledger of the workspaces the customer owns or administers. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -65365,7 +65365,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "The audit trail the customer sees in Settings → Activity (who changed what, when, from where), for the workspaces they own or administer. Filter by time, action or actor; newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "The audit trail the customer sees in Settings → Activity (who changed what, when, from where), for the workspaces they own or administer. Filter by time, action or actor; newest first. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -65629,7 +65629,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "The customer’s own failed API requests over at most the last 3 days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Bane could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "The customer’s own failed API requests over at most the last 3 days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Nightmail could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -65842,7 +65842,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "What Bane recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last 3 days), the changes it made, campaign launches and routing versions. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "What Nightmail recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last 3 days), the changes it made, campaign launches and routing versions. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66003,7 +66003,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Delivery, bounce, complaint, open and click counts per day or hour over at most 30 days, optionally per campaign, From domain, recipient provider or stream, each rate with its numerator and denominator, plus findings. Created-cohort: an email counts in the bucket it was created in. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Delivery, bounce, complaint, open and click counts per day or hour over at most 30 days, optionally per campaign, From domain, recipient provider or stream, each rate with its numerator and denominator, plus findings. Created-cohort: an email counts in the bucket it was created in. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66241,7 +66241,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Bounces, deferrals and complaints over at most 30 days, grouped by recipient provider, then type and subtype, enhanced status and redacted diagnostic, with first and last seen and the campaigns behind them; complaints by feedback type; the first-send bounce rate; findings. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Bounces, deferrals and complaints over at most 30 days, grouped by recipient provider, then type and subtype, enhanced status and redacted diagnostic, with first and last seen and the campaigns behind them; complaints by feedback type; the first-send bounce rate; findings. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66466,7 +66466,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "One sending domain’s health: the stored verification, one live DNS read (SPF, DMARC, BIMI, the MAIL FROM’s MX and SPF), the DMARC alignment verdict, 30 days of volume and warm-up age, the marketing share and bulk-looking transactional mail, and findings. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "One sending domain’s health: the stored verification, one live DNS read (SPF, DMARC, BIMI, the MAIL FROM’s MX and SPF), the DMARC alignment verdict, 30 days of volume and warm-up age, the marketing share and bulk-looking transactional mail, and findings. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66627,7 +66627,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66790,7 +66790,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Recent campaigns, newest first: state, audience and size, tracking, sender, subject, pause reason and lifetime statistics. Never content. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Recent campaigns, newest first: state, audience and size, tracking, sender, subject, pause reason and lifetime statistics. Never content. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -66992,7 +66992,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "One campaign: what the list shows, plus hourly send pacing and, only when the customer shared message content in its workspace, the draft content. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "One campaign: what the list shows, plus hourly send pacing and, only when the customer shared message content in its workspace, the draft content. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -67153,7 +67153,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Checks one sent email against what filters and Bane’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Checks one sent email against what filters and Nightmail’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -67314,7 +67314,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -67475,7 +67475,7 @@
             "bearerAuth": []
           }
         ],
-        "description": "List hygiene: per list (the 20 largest) and overall, consent mix, suppressions by reason, engagement recency and stale share, role, free-mail and mistyped addresses, providers; recent imports with their bounce and complaint outcomes; findings. Counts only, never an address. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "description": "List hygiene: per list (the 20 largest) and overall, consent mix, suppressions by reason, engagement recency and stale share, role, free-mail and mistyped addresses, providers; recent imports with their bounce and complaint outcomes; findings. Counts only, never an address. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.",
         "parameters": [
           {
             "schema": {
@@ -68922,7 +68922,7 @@
           }
         ],
         "summary": "Set auto-recharge",
-        "description": "Hosted only; a signed-in owner or admin in the dashboard. Bane charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.",
+        "description": "Hosted only; a signed-in owner or admin in the dashboard. Nightmail charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.",
         "requestBody": {
           "required": true,
           "content": {

@@ -1,5 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Config } from './core.js';
+import { productName } from './brand.js';
 
 // Simulator feedback is not reputation evidence. Admission and dispatch,
 // however, consume capacity for every destination, including the simulator.
@@ -64,5 +65,5 @@ export function bulkFlags(mails: BulkInput[]) {
  * Restrict, an operator's hold, or a marketing hold placed before the standing took over (bounces only): marketing is
  * refused while transactional mail keeps flowing. `reason` is that older hold's own message.
  */
-export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', reason ? `${reason} Remove the addresses that bounced; Bane reviews the hold.`
+export const marketingHeld = (reason?: string | null) => new ApiError(409, 'MARKETING_HELD', reason ? `${reason} Remove the addresses that bounced; ${productName} reviews the hold.`
   : 'Marketing from this workspace is held while its sending standing is restricted: bounces or complaints crossed a published line (see GET /v1/sender-score). Transactional mail still sends. Fix the list, then release it from the dashboard or ask for a review.');

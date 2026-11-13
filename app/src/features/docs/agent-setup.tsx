@@ -9,7 +9,7 @@ import { recordsFor } from '../settings/domain-records'
 import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
 import { McpClientSetup, mcpAccess, useMcpUrl, type McpAccess } from './connect-agent'
 import './developer.css'
-import { apiKeyEnv, sdkPackage } from '../../../../api/src/brand'
+import { apiKeyEnv, productName, sdkPackage } from '../../../../api/src/brand'
 
 // The canonical public origin from /v1/me; the page origin stands in for demo mode.
 function receivingMx(domain: Domain) {
@@ -21,7 +21,7 @@ function receivingMx(domain: Domain) {
 // domain is undefined when the reader is signed out and the workspace's domains are unknown.
 export function agentPrompt({ origin, domain, email, multiTenant }: { origin: string; domain: Domain | null | undefined; email: string | null; multiTenant: boolean }) {
   const lines = [
-    'Set up Bane email in this project.',
+    `Set up ${productName} email in this project.`,
     '',
     `- API base URL: ${origin}`,
     `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
@@ -29,11 +29,11 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
     `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
   ]
   if (domain === undefined) {
-    lines.push('- Sending domain: use a verified domain from Domains in the Bane dashboard. Ask me which one before sending.')
+    lines.push(`- Sending domain: use a verified domain from Domains in the ${productName} dashboard. Ask me which one before sending.`)
     return lines.join('\n')
   }
   if (!domain) {
-    lines.push('- Sending domain: none yet. Ask me to add one under Domains in the Bane dashboard before sending.')
+    lines.push(`- Sending domain: none yet. Ask me to add one under Domains in the ${productName} dashboard before sending.`)
     return lines.join('\n')
   }
   const verified = domain.status === 'verified'
@@ -45,7 +45,7 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
   const mx = receivingMx(domain)
   // Hosted suggests reply.<domain>; never tell an agent to change the root MX, which would move the domain's existing mail.
   if (mx) lines.push(multiTenant
-    ? `- Receiving (optional, only if I ask for it): add an MX record on ${mx.name} pointing to ${mx.host} (priority ${mx.priority}); receiving turns on automatically once it resolves.${mx.name === domain.name ? '' : ` Don't change the MX records of ${domain.name} itself: that would move its existing mailboxes to Bane.`}`
+    ? `- Receiving (optional, only if I ask for it): add an MX record on ${mx.name} pointing to ${mx.host} (priority ${mx.priority}); receiving turns on automatically once it resolves.${mx.name === domain.name ? '' : ` Don't change the MX records of ${domain.name} itself: that would move its existing mailboxes to ${productName}.`}`
     : `- Receiving: enable it with POST /v1/inbound/domains/${domain.id}/enable, then point the MX record for ${mx.name} to ${mx.host} (priority ${mx.priority}).`)
   lines.push('- Inbound mail arrives as message.received webhooks (subscribe with POST /v1/inbound/webhooks); fetch full messages with GET /v1/inbound/messages/{messageId}.')
   return lines.join('\n')

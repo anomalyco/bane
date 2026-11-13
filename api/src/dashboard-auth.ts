@@ -4,6 +4,7 @@ import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Ru
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
+import { productName } from './brand.js';
 
 export async function reserveSignIn(runtime:Runtime,headers:Headers) {
   const peer=await digest(headers.get('x-bane-client-ip') ?? 'unknown');
@@ -18,7 +19,7 @@ export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requ
   // every other dashboard-only route (core.ts); 401 is for a caller with no session at all.
   if (headers.has('authorization')) throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use a signed-in dashboard session.');
   const user=await accountSessionUser(runtime,headers,requireCurrentEmail);
-  if (!user) throw new ApiError(401,'AUTH_REQUIRED','Sign in to Bane.');
+  if (!user) throw new ApiError(401,'AUTH_REQUIRED',`Sign in to ${productName}.`);
   return {userId:user.id,email:user.email};
 }
 export async function invitationRecipient(runtime:Runtime,headers:Headers) {
@@ -30,7 +31,7 @@ export { settleDefaultAccount };
 export function registerDashboardAuth(app: App) {
   app.on(['GET','POST','OPTIONS'],'/api/auth/*',accountBrowserRoute);
   app.openapi(createRoute({method:'get',path:'/v1/me',operationId:'getCurrentIdentity',tags:['Auth'],security,
-    responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),role:WorkspaceRole.nullable(),multiTenant:z.boolean(),simulated:z.boolean(),email:z.string().nullable(),name:z.string().nullable(),permissions:z.array(z.enum(['read','send','manage'])),domains:z.array(z.string()),origin:z.string().url(),host:z.string(),connection:ConnectionSummary.nullable().openapi({description:'The current workspace\'s hosted sending connection; null when self-hosted.'}),workspaces:z.array(Workspace).nullable().openapi({description:'A hosted dashboard session\'s workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.'}),operator:z.enum(['operator','operator:read']).nullable().optional().openapi({description:'Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.'}),uiNotes:z.boolean().optional().openapi({description:'Bane staff only: this session may use staff UI notes. False for everyone else.'}),
+    responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),role:WorkspaceRole.nullable(),multiTenant:z.boolean(),simulated:z.boolean(),email:z.string().nullable(),name:z.string().nullable(),permissions:z.array(z.enum(['read','send','manage'])),domains:z.array(z.string()),origin:z.string().url(),host:z.string(),connection:ConnectionSummary.nullable().openapi({description:'The current workspace\'s hosted sending connection; null when self-hosted.'}),workspaces:z.array(Workspace).nullable().openapi({description:'A hosted dashboard session\'s workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.'}),operator:z.enum(['operator','operator:read']).nullable().optional().openapi({description:`${productName} staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.`}),uiNotes:z.boolean().optional().openapi({description:`${productName} staff only: this session may use staff UI notes. False for everyone else.`}),
       billing:z.object({enforcement:z.enum(['off','shadow','enforce']),free:z.boolean().describe('Anomaly made this workspace free: never charged or paused for the balance.'),sending:z.enum(['ok','low','paused']),receiving:z.enum(['ok','grace','held']),autoRecharge:z.enum(['off','on','pending','failed','capped'])})
         .nullable().optional().openapi({description:'Hosted dashboard sessions: whether the workspace is free, whether an empty balance has paused sending or held received mail, and auto-recharge, so the dashboard can show it on its first frame. Null otherwise; GET /v1/billing has the detail.'})})),...errors}}),async c=>{
     const identity=c.get('actor'), userId=identity.keyId.startsWith('user_')?identity.keyId.slice(5):null;

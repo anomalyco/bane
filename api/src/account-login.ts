@@ -5,7 +5,7 @@ import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runt
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
-import { requestHeader } from './brand.js';
+import { productName, requestHeader } from './brand.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -15,7 +15,7 @@ class NotAdmitted extends Error { constructor(readonly reason: string) { super(r
 function loginIssue(error: unknown, requiredAcr?: string) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
   if (error instanceof AuthenticationMethodRequired || issuerError === 'unmet_authentication_requirements') {
-    if (requiredAcr === 'urn:anomaly:acr:google') return {reason:'google_required', message:'Bane requires Google sign-in. Try again and choose Google at Anomaly account.'};
+    if (requiredAcr === 'urn:anomaly:acr:google') return {reason:'google_required', message:`${productName} requires Google sign-in. Try again and choose Google at Anomaly account.`};
     return {reason:'method_required', message:'Sign in again using the authentication method required by this installation.'};
   }
   if (issuerError === 'interaction_required') return {reason:'interaction_required', message:'Your identity provider needs you to complete sign-in. Try again and follow its prompts.'};
@@ -87,7 +87,7 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   const verifier = oidc.generateRandomCodeVerifier(), nonce = oidc.generateRandomNonce();
   let params = new URLSearchParams({ client_id:client.client_id, response_type:'code', scope:'openid profile email', redirect_uri:callback,
     state, nonce, code_challenge_method:'S256', code_challenge:await oidc.calculatePKCECodeChallenge(verifier) });
-  // Adding an account: the account service shows its chooser, and Bane learns only the account picked there.
+  // Adding an account: the account service shows its chooser, and Nightmail learns only the account picked there.
   if (prompt) params.set('prompt', prompt);
   const requiredAcr = runtime.config.accountClient?.requiredAcr;
   // The required authentication context, and the provider identity behind the sign-in when staff sign-up is on.
@@ -181,7 +181,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!emailAtLogin && await pendingInvitation(db, emailAtLogin, invitation);
         if (!staff && !invited && !selfHosted) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved');
         userId = crypto.randomUUID();
-        const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? 'Bane user';
+        const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
         if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
         // The address is display and contact data. Verified addresses stay unique; a taken one is stored unverified.
         await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
@@ -250,7 +250,7 @@ export async function accountSessionPolicy(runtime: Runtime, headers: Headers) {
   return row && { subject: row.subject, staff: row.staff };
 }
 
-const signedOut = () => new ApiError(401, 'ACCOUNT_SIGNED_OUT', 'This account is no longer signed in to Bane in this browser.');
+const signedOut = () => new ApiError(401, 'ACCOUNT_SIGNED_OUT', `This account is no longer signed in to ${productName} in this browser.`);
 export async function accountSessionActor(runtime: Runtime, headers: Headers): Promise<Actor|null> {
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;

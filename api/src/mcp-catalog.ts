@@ -2,6 +2,7 @@ import { Validator, type Schema } from '@cfworker/json-schema';
 import type { Tool } from '@modelcontextprotocol/server';
 import { mailboxRoute, ownerRoute, receivingConsentRoute, type App } from './core.js';
 import { resourceInventory } from './mcp-resources.js';
+import { productName } from './brand.js';
 
 type ObjectValue = Record<string, any>;
 /** Toolsets group tools for advertising only; authority comes from the grant and the API. */
@@ -272,13 +273,13 @@ function successSchemas(spec: ObjectValue, operation: ObjectValue, pollPage: boo
 }
 
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
-  const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+  const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: `${productName} API`, version: '0.1.0' } });
   if (bytes(spec) > 2 * 1024 * 1024 || !object(spec.paths)) invalid('OpenAPI document exceeds its byte limit or has no paths.');
   inspectSpec(spec);
   const operations = new Map<string, McpOperation>();
   for (const [path, item] of Object.entries(spec.paths)) {
     if (!/^\/v1\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\})(?:\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\}))*$/.test(path)) continue;
-    // Support and operator routes are internal (Bane staff and support grants only): never an MCP tool.
+    // Support and operator routes are internal (Nightmail staff and support grants only): never an MCP tool.
     if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path) || INTERNAL_PATH.test(path)) continue;
     for (const [method, operation] of Object.entries(item as ObjectValue)) {
       if (!METHODS.has(method) || !object(operation)) continue;
@@ -346,16 +347,16 @@ export const HUMAN_STEPS: Record<string, string> = {
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
   listActivity: 'Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity).',
-  contactSupport: 'Human step: a signed-in person contacts Bane support from the dashboard.',
+  contactSupport: `Human step: a signed-in person contacts ${productName} support from the dashboard.`,
   createBillingTopUp: 'Human step: only a signed-in owner or admin charges the saved card or opens Checkout from the dashboard. Agents create a link a person pays (billing · topUpLink).',
   updateBillingAutoRecharge: 'Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard.',
-  createBillingCardSetup: 'Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach Bane or an agent.',
+  createBillingCardSetup: `Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach ${productName} or an agent.`,
   deleteBillingPaymentMethod: 'Human step: a signed-in owner or admin removes the saved card in the dashboard.',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
   getRitualVersion: 'Dashboard step: the rituals page’s long poll, so a person sees an agent’s saves live. Agents read the version from rituals · config (getRituals).',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
-/** Internal routes (Bane operators and support grants): never tools, and not listed in the customer coverage document. */
+/** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */
 export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
 export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;

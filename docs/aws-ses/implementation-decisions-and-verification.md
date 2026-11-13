@@ -2,7 +2,7 @@
 
 [Hub](README.md) · Prepared 2026-09-08 · The portable API is now implemented; [API README](../../api/README.md) records its verified scope and limits. Local HTTP acceptance, Docker and local Workers checks are distinct from the still-unrun live AWS integration gates below.
 
-This turns the reference research into a later build checklist. The initial scope is now a deployment-managed, environment-configured AWS connection and Bane-owned marketing consent with a hosted one-click unsubscribe page. The hosting stack remains undecided. [Root TODO](../../todo.md) records the selected defaults and deferred UI work; those decisions supersede the earlier alternatives in the research documents.
+This turns the reference research into a later build checklist. The initial scope is now a deployment-managed, environment-configured AWS connection and Nightmail-owned marketing consent with a hosted one-click unsubscribe page. The hosting stack remains undecided. [Root TODO](../../todo.md) records the selected defaults and deferred UI work; those decisions supersede the earlier alternatives in the research documents.
 
 ## Decisions that change the API/data model
 
@@ -11,7 +11,7 @@ This turns the reference research into a later build checklist. The initial scop
 | SES interface | SES API v2, current server-side SDK; classic SES only for missing legacy capabilities | [API inventory](api-and-sdk-inventory.md) |
 | AWS connection — selected | Deployment-managed environment configuration; attached workload role preferred where available; customer wizard deferred | [Root TODO](../../todo.md), [credentials](credentials-and-iam.md) |
 | Send scope | Every request resolves the configured account + authorized region and workspace; never arbitrary caller credentials/endpoints | [Accounts/regions](accounts-regions-and-onboarding.md) |
-| Marketing unsubscribe — selected | Bane-owned consent; hosted immediate all-marketing opt-out per workspace across regions, plus RFC 8058 POST support | [Root TODO](../../todo.md), [marketing tradeoff](marketing-consent-and-suppression.md) |
+| Marketing unsubscribe — selected | Nightmail-owned consent; hosted immediate all-marketing opt-out per workspace across regions, plus RFC 8058 POST support | [Root TODO](../../todo.md), [marketing tradeoff](marketing-consent-and-suppression.md) |
 | Delivery telemetry — selected | Ingest all ten relevant SES categories; expose all to webhooks, default seven processing/delivery events and opt-in engagement/subscription | [Root TODO](../../todo.md), [delivery/events](delivery-events-and-observability.md) |
 | Retry contract | Application idempotency plus explicit ambiguous provider outcomes, not “exactly once” | [Sending/templates](sending-and-templates.md) |
 | Bulk contract | One recipient per job; batch as an execution detail; persist per-entry results | [Sending/templates](sending-and-templates.md) |
@@ -34,7 +34,7 @@ This turns the reference research into a later build checklist. The initial scop
 
 **Consent/suppression/events:** purpose-scoped consent provenance and current projection, cross-region application blocks, exact-case provider suppression entries, trusted provider envelopes, delivery/engagement history and outgoing customer webhook attempts.
 
-These records deliberately separate the Bane tenant from the AWS account and the SES tenant. A resource name alone is never a tenant boundary.
+These records deliberately separate the Nightmail tenant from the AWS account and the SES tenant. A resource name alone is never a tenant boundary.
 
 ## Proposed capability tiers—not a promise of initial scope
 
@@ -42,7 +42,7 @@ These records deliberately separate the Bane tenant from the AWS account and the
 | --- | --- | --- |
 | Connect/read | Validate identity/account/region, discover quotas/identities/templates/configuration | No sends, DNS writes, production requests or paid-feature activation |
 | Transactional | Single sends, templates, attachments, idempotency, events and suppression | No uncontrolled marketing imports |
-| Marketing | Campaign queues, bulk, segmentation, consent/unsubscribe, pause/cancel | Bane-owned consent selected; provider compliance and runtime verification remain required |
+| Marketing | Campaign queues, bulk, segmentation, consent/unsubscribe, pause/cancel | Nightmail-owned consent selected; provider compliance and runtime verification remain required |
 | Administrative | Identity setup, template deployment, configuration sets, event provisioning, imports | Separate permissions and explicit writes |
 | Advanced | SES tenants, multi-region routing, validation, VDM, dedicated IPs, archiving | Availability, cost, IAM and acceptance checks per feature |
 

@@ -3,6 +3,7 @@ import { ApiError, lazyModule, log, type JobHandler, type Runtime } from './core
 import { jobs } from './db/core.js';
 import { sesSettings } from './db/ses-regions.js';
 import { enqueue, retryDatabaseFailures } from './jobs.js';
+import { productName } from './brand.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
 const THRESHOLDS = { bounceRate: { warning: 0.05, risk: 0.1 }, complaintRate: { warning: 0.001, risk: 0.005 } } as const;
@@ -103,7 +104,7 @@ export function reputationAlertText(input: { region: string; metric: Metric; lev
   const { warning, risk } = THRESHOLDS[input.metric];
   const rising = LEVELS.indexOf(input.level) > LEVELS.indexOf(input.previous);
   const title = `${emoji[input.level]} *${names[input.metric]} ${(rising ? risingText : fallingText)[input.level]}* · ${input.region}`;
-  return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in Bane>`;
+  return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in ${productName}>`;
 }
 
 const deliver: JobHandler = async (runtime, payload, job) => {
@@ -126,18 +127,18 @@ async function post(url: string, text: string) {
   if (!response.ok) throw new ApiError(503, 'REPUTATION_ALERT_FAILED', `Slack rejected the alert with HTTP ${response.status}.`, undefined, true);
 }
 const lineText: Record<string, string> = { complaints: 'spam complaints', screen: 'content-screen rejections', bounces: 'hard bounces' };
-/** A first-party (exempt) workspace crossed a pause line: Bane did not hold it, so a person has to look. */
+/** A first-party (exempt) workspace crossed a pause line: Nightmail did not hold it, so a person has to look. */
 export function exemptAlertText(p: Record<string, unknown>, publicUrl: string) {
   const n = (v: unknown) => Number(v ?? 0).toLocaleString('en-US');
   return `:rotating_light: *First-party workspace over the ${lineText[String(p.line)] ?? 'reputation'} line* · ${String(p.workspaceId ?? '')}\n`
     + `${n(p.bounces)} hard bounces and ${n(p.complaints)} complaints on ${n(p.sends)} sends; ${n(p.rejected)} of ${n(p.screened)} screened rejected. `
-    + `Bane did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in Bane>`;
+    + `${productName} did not ${p.scope === 'all' ? 'pause its sending' : 'hold its marketing'}: the workspace is exempt. Review it now; only an operator pauses it.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in ${productName}>`;
 }
 const operatorPage = (publicUrl: string, wid: unknown) => `${publicUrl.replace(/\/$/, '')}/operator/workspaces/${encodeURIComponent(String(wid ?? ''))}`;
-/** AWS paused a workspace's SES tenant: sending stops whatever Bane decides, so a person has to look now. */
+/** AWS paused a workspace's SES tenant: sending stops whatever Nightmail decides, so a person has to look now. */
 export function tenantPausedText(p: Record<string, unknown>, publicUrl: string) {
   return `:rotating_light: *AWS paused an SES tenant*${p.exempt ? ' of a first-party (exempt) workspace' : ''} · ${String(p.workspaceId ?? '')}\n`
-    + `${String(p.tenant ?? '')}: ${String(p.cause ?? 'no cause given')}. Bane paused the workspace to match; only an operator resumes it, after AWS reinstates the tenant.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in Bane>`;
+    + `${String(p.tenant ?? '')}: ${String(p.cause ?? 'no cause given')}. ${productName} paused the workspace to match; only an operator resumes it, after AWS reinstates the tenant.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in ${productName}>`;
 }
 // A storage hiccup or a timed-out post retries like other background work instead of losing the alert on its first failure.
 export const reputationAlertJobs = { [JOB]: retryDatabaseFailures(deliver) };

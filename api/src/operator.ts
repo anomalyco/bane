@@ -6,6 +6,7 @@ import { operatorRole, type OperatorRole } from './operator-identity.js';
 import { applyChange, type Change } from './standing.js';
 import { loadStanding, scoreView, StandingSchema } from './sender-score.js';
 import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
+import { productName } from './brand.js';
 
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
@@ -22,7 +23,7 @@ export async function operatorActor(c: Ctx, level: OperatorRole): Promise<Operat
   if (a?.credential !== 'dashboard') throw new ApiError(403, 'OPERATOR_REQUIRED', 'Use a signed-in operator session.');
   const { userId, email } = dashboardSession(c);
   const role = await operatorRole(c.env.db, userId);
-  if (!role || (level === 'operator' && role !== 'operator')) throw new ApiError(403, 'OPERATOR_REQUIRED', level === 'operator' ? 'This action needs the operator role.' : 'This area is for Bane operators.');
+  if (!role || (level === 'operator' && role !== 'operator')) throw new ApiError(403, 'OPERATOR_REQUIRED', level === 'operator' ? 'This action needs the operator role.' : `This area is for ${productName} operators.`);
   return { userId, email, role };
 }
 
@@ -38,8 +39,8 @@ const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
   connection: z.object({ region: z.string(), paused: z.boolean(), resuming: z.boolean(), pauseReason: z.string().nullable(), tenantGeneration: z.number().int(),
-    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLING', 'DISABLED']).describe('DISABLING: Bane asked AWS and does not know the outcome yet, so it treats the tenant as possibly disabled.'), generation: z.number().int(), appliedAt: z.string() }))
-      .describe('What Bane last applied to each regional SES tenant (none: never switched, so enabled).') }).nullable(),
+    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLING', 'DISABLED']).describe(`DISABLING: ${productName} asked AWS and does not know the outcome yet, so it treats the tenant as possibly disabled.`), generation: z.number().int(), appliedAt: z.string() }))
+      .describe(`What ${productName} last applied to each regional SES tenant (none: never switched, so enabled).`) }).nullable(),
   domains: z.array(z.object({ name: z.string(), region: z.string().nullable(), pool: z.string(), dkim: z.boolean(), mailFrom: z.boolean(), dmarc: z.string().nullable() })),
   members: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string() })), siblings: z.array(z.object({ id: z.string(), name: z.string() })),
   override: z.object({ daily: z.number().int(), expiresAt: z.string().nullable() }).nullable(), exempt: z.boolean(),
@@ -181,8 +182,8 @@ export function registerOperator(app: App) {
     const body = c.req.valid('json'), wid = c.req.valid('param').id;
     return c.json(await change(c, wid, body, 'operator-pause', current => {
       if (current.paused) throw new ApiError(409, 'ALREADY_PAUSED', 'This workspace is already paused.');
-      // The reason is for the audit and the operator timeline; customers see that Bane paused it after a review.
-      return { kind: 'operator', step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused by Bane after a review. Ask for a review from the dashboard for details.' }, reasons: operatorReason('OPERATOR_PAUSE', 'Bane paused sending after a review.') };
+      // The reason is for the audit and the operator timeline; customers see that Nightmail paused it after a review.
+      return { kind: 'operator', step: 'pause', pauseKind: 'full', pause: { message: `Hosted sending paused by ${productName} after a review. Ask for a review from the dashboard for details.` }, reasons: operatorReason('OPERATOR_PAUSE', `${productName} paused sending after a review.`) };
     }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/workspaces/{id}/resume', operationId: 'operatorResumeWorkspace',
@@ -199,7 +200,7 @@ export function registerOperator(app: App) {
     responses: { 200: response(done), ...errors } }), async c => {
     const body = c.req.valid('json'), wid = c.req.valid('param').id;
     return c.json(await change(c, wid, body, body.held ? 'operator-hold-marketing' : 'operator-release-marketing', current => body.held
-      ? { kind: 'operator', marketingHold: true, step: current.step === 'pause' ? 'pause' : 'restrict', reasons: current.step === 'pause' ? undefined : [{ ...operatorReason('OPERATOR_HOLD', 'Bane holds marketing after a review.')[0]!, step: 'restrict' }] }
+      ? { kind: 'operator', marketingHold: true, step: current.step === 'pause' ? 'pause' : 'restrict', reasons: current.step === 'pause' ? undefined : [{ ...operatorReason('OPERATOR_HOLD', `${productName} holds marketing after a review.`)[0]!, step: 'restrict' }] }
       : { kind: 'operator', marketingHold: false, step: current.step === 'restrict' ? 'warn' : current.step as Change['step'] }), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/workspaces/{id}/limit', operationId: 'operatorSetLimit',

@@ -6,7 +6,7 @@ import { safeForwardHtml } from './mailbox-send.js';
 import { readableMailboxKey } from './mailbox-setup.js';
 import { withMailObjects } from './mail-objects.js';
 import { decrypt, hmac, postWebhook, webhookSecret, webhookUrl } from './operations.js';
-import { webhookUserAgent } from './brand.js';
+import { productName, webhookUserAgent } from './brand.js';
 
 const s3commands = lazyModule(() => import('@aws-sdk/client-s3'));
 const POST_LIMIT=512*1024, RAW_INLINE_LIMIT = POST_LIMIT,
@@ -56,7 +56,7 @@ const EXAMPLE: { message: RenderMessage; raw: string } = {
     status: 'received',
     messageId: 'test@example.org',
     subject: 'Test delivery',
-    fromName: 'Bane',
+    fromName: productName,
     fromAddress: 'sender@example.org',
     to: [{ name: null, address: 'recipient@example.org' }],
     cc: [],
@@ -72,7 +72,7 @@ const EXAMPLE: { message: RenderMessage; raw: string } = {
     envelopeTo: ['recipient@example.org'],
     bodyTruncated: false,
   },
-  raw: 'From: Bane <sender@example.org>\r\nTo: recipient@example.org\r\nSubject: Test delivery\r\n\r\nTest delivery',
+  raw: `From: ${productName} <sender@example.org>\r\nTo: recipient@example.org\r\nSubject: Test delivery\r\n\r\nTest delivery`,
 };
 
 const group = (addresses: MailAddress[]) => ({
@@ -86,7 +86,7 @@ function priority(headers: Record<string, string>) {
   if (!value) return undefined;
   return /^[12]\b|^high|^urgent/.test(value) ? 'high' : /^[45]\b|^low|^non-urgent/.test(value) ? 'low' : 'normal';
 }
-/** inbound.new's documented email.received body, field for field. Bane adds rawUrl when raw is too large to inline. */
+/** inbound.new's documented email.received body, field for field. Nightmail adds rawUrl when raw is too large to inline. */
 function inboundPayload(m: RenderMessage, parts: Part[], raw: string | null, root: string, recipient: string, endpoint: { id: string; name: string }) {
   const from = group([{ name: m.fromName, address: m.fromAddress }]),
     to = group(m.to),
@@ -95,7 +95,7 @@ function inboundPayload(m: RenderMessage, parts: Part[], raw: string | null, roo
   const headers: Record<string, string> = Object.create(null);
   for (const h of m.headers) headers[h.name.toLowerCase()] ??= h.value;
   const attachments = parts.map(({ id, ...part }) => ({ ...part, downloadUrl: `${root}/parts/${encodeURIComponent(id)}` }));
-  // inbound strips scripts, handlers and javascript: URLs; Bane's quote sanitizer is an allow-list, so it is at least as strict.
+  // inbound strips scripts, handlers and javascript: URLs; Nightmail's quote sanitizer is an allow-list, so it is at least as strict.
   const cleaned = m.html ? safeForwardHtml(m.html) : null;
   return {
     event: 'email.received' as const,
@@ -135,7 +135,7 @@ function inboundPayload(m: RenderMessage, parts: Part[], raw: string | null, roo
     endpoint: { ...endpoint, type: 'webhook' as const },
   };
 }
-/** Bane's event, plus the message (text and HTML capped at 256 KiB together) and raw MIME when the webhook includes them. */
+/** Nightmail's event, plus the message (text and HTML capped at 256 KiB together) and raw MIME when the webhook includes them. */
 function banePayload(event: Event, m: RenderMessage, parts: Part[], raw: string | null, root: string, include: string[]) {
   const text = Buffer.from(m.text ?? '').subarray(0, BODY_INLINE_LIMIT),
     html = Buffer.from(m.html ?? '').subarray(0, BODY_INLINE_LIMIT - text.length);

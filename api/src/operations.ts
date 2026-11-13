@@ -35,7 +35,7 @@ import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js'
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
-import { requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
+import { productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -54,7 +54,7 @@ export const WebhookHeaders = z.array(z.object({
   const names = new Set(headers.map(h => h.name.toLowerCase()));
   if (names.size !== headers.length) ctx.addIssue({ code: 'custom', message: 'Header names must be unique regardless of case.' });
   if (headers.reduce((size, h) => size + h.name.length + Buffer.byteLength(h.value), 0) > 8192) ctx.addIssue({ code: 'custom', message: 'Header names and values exceed 8 KiB.' });
-}).describe('Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.');
+}).describe(`Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and ${productName} delivery headers are reserved.`);
 export const WebhookHeaderViews = z.array(z.object({ name: z.string(), hint: z.string().optional(), updatedAt: z.string().datetime().optional() })).describe('Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.');
 const webhookSchema = z.object({ id: z.string(), url: WebhookUrlHint, description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
 const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
@@ -66,7 +66,7 @@ const dnsState = z.enum(['pending','verified']);
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional() });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
 const receivingIssueSchema = z.object({
-  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','claimed','delegated','mx_missing','wrong_region','null_mx','proof_stale','identity_stale']).describe('cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.'),
+  code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','claimed','delegated','mx_missing','wrong_region','null_mx','proof_stale','identity_stale']).describe(`cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of ${productName}\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.`),
   host: z.string(), blocking: z.boolean().describe('True when receiving there cannot work until DNS or the choice changes.'), message: z.string(),
   provider: z.string().nullable().optional(), target: z.string().nullable().optional().describe('The existing CNAME target.'), suggestion: z.string().nullable().optional().describe('A free subdomain to use instead.'),
 }).openapi('ReceivingIssue');
@@ -345,7 +345,7 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
   const ready = verified && signed;
   dns.push({...(mx?.expected ?? expectedMx(row.name,hosted?.shared && hosted.regional ? 'us-east-2' : row.region)),purpose:'receiving',status:state(mx?.state==='active'),...(note ? {note} : {})});
   const dmarc=dmarcView(observation,value);
-  if(dmarc?.status==='missing' && observation?.recommend) dns.push({name:`_dmarc.${row.name}`,type:'TXT',value:'v=DMARC1; p=none',purpose:'dmarc',status:'pending',note:'Recommended only if no policy exists. Bane does not collect aggregate reports.'});
+  if(dmarc?.status==='missing' && observation?.recommend) dns.push({name:`_dmarc.${row.name}`,type:'TXT',value:'v=DMARC1; p=none',purpose:'dmarc',status:'pending',note:`Recommended only if no policy exists. ${productName} does not collect aggregate reports.`});
   return { id: row.id, name: row.name, region: row.region, verificationStatus, verified, dkimStatus: dkim?.Status ?? 'NOT_STARTED', dmarc, ready, sending:state(ready),receiving:state(mx?.state==='active' && value.VerificationStatus==='SUCCESS' && (hosted?.proven ?? true)), mailFromDomain: mailFrom?.MailFromDomain ?? null, mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
 }
 async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetEmailIdentityCommandOutput, mode:'create'|'read'|'verify'='read') {
@@ -379,7 +379,7 @@ function derivedReadiness(row: ClaimRow): Readiness {
   else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
   report.receiving=state(row.receiving_state==='active' || row.receiving_state==='lost');
   // Receiving: never suggest the root unless it already routes here or the owner chose it (an MX pasted at the root
-  // would take the domain's existing mail), and never one of Bane's own names. DNS checks refine this to a free host.
+  // would take the domain's existing mail), and never one of Nightmail's own names. DNS checks refine this to a free host.
   const ses=facts?.ses, chosen=facts?.receivingChoice ?? null;
   const rootActive=row.receiving_host===row.name || chosen===row.name || (facts?.mx?.expected.name===row.name && facts.mx.state==='active');
   const receivingName=(name:string)=>row.receiving_host ?? (chosen && !baneRecordUse(chosen,row.name,ses) ? chosen : (name===row.name && !rootActive) || baneRecordUse(name,row.name,ses) ? defaultReceivingHost(row.name,ses) : name);
@@ -411,7 +411,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
   let observed=observation ? (observation.mx.state==='active' || (observation.mx.state==='mixed' && observation.mx.expected.name===row.receiving_host) ? observation.mx.expected.name : null) : undefined;
   let note=observation ? observation.note ?? null : row.identity?.note ?? null;
   let issue=observation ? observation.issue : row.identity?.issue ?? null;
-  // Never route mail on a name Bane publishes for another purpose (custom MAIL FROM, ownership TXT, DKIM).
+  // Never route mail on a name Nightmail publishes for another purpose (custom MAIL FROM, ownership TXT, DKIM).
   const reserved=observed && observed!==row.receiving_host ? baneRecordIssue(observed,row.name,ses,row.region,null) : null;
   if (reserved) { issue=reserved; observed=null; }
   if (observed && observed!==row.receiving_host) {
@@ -822,7 +822,7 @@ export function registerOperations(app: App) {
     const a = workspaceActor(c); const [row] = c.env.config.multiTenant
       ? await c.env.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, a.workspaceId))
       : await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
-    return c.json({ name: row?.name ?? 'Bane' }, 200);
+    return c.json({ name: row?.name ?? productName }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
@@ -925,7 +925,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
-    description:'Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.',
+    description:`Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of ${productName}’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing ${productName}’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.`,
     request:{params:IdParams,body:json(z.object({host:domainName.nullable(),confirm:z.boolean().default(false)}).strict().openapi('ChooseReceivingHost'))},
     responses:{200:response(domainSchema),...errors}}),async c=>{
     const a=actor(c,'manage'); if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -933,7 +933,7 @@ export function registerOperations(app: App) {
     // DNS is read before the row lock; the locked write is fenced on the claim token.
     const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
     if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
-    if (host!==null && reservedPlatformName(host,c.env.config.publicUrl)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of Bane’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
+    if (host!==null && reservedPlatformName(host,c.env.config.publicUrl)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
     if (row.receiving_host && host!==row.receiving_host) throw new ApiError(409,'RECEIVING_HOST_ACTIVE',`${row.receiving_host} already receives mail for ${row.name}. Remove its MX record first; you can choose another host once it stops resolving.`,'host');
     let facts:Partial<IdentityFacts>={receivingChoice:null,issue:null};
     if (host!==null) {
@@ -1104,7 +1104,7 @@ export function registerOperations(app: App) {
     return c.json({ deleted: true }, 200);
   });
   // Reveal hands out a durable capability: whoever holds the secret can sign requests the receiver trusts, with no trace in
-  // Bane. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
+  // Nightmail. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
   // approval), at most REVEALS_PER_MINUTE times a minute per workspace, and every hand-out is recorded. Rotation stays open
   // to every manage credential: it breaks the receiver until it is updated, so it can't go unnoticed.
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/secret', operationId: 'revealWebhookSecret', tags: ['Webhooks'], security, description: `Read the endpoint's signing secret back. Only a dashboard session or an API key you created can: MCP approvals, the API keys they create and temporary agent tokens get 403 CREDENTIAL_DELEGATION_FORBIDDEN (they can rotate it instead). At most ${REVEALS_PER_MINUTE} reads a minute per workspace (429 REVEAL_RATE_LIMITED); each read is recorded with the credential and time.`, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
@@ -1373,7 +1373,7 @@ function registerPublicEvents(app: App) {
       return c.json({ accepted: true }, 202);
     }
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
-    // Mailbox receipt notifications arrive on a separate Bane-owned topic and carry no sending account.
+    // Mailbox receipt notifications arrive on a separate Nightmail-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
       const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
       if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
@@ -1383,11 +1383,11 @@ function registerPublicEvents(app: App) {
     // owned tenant ARN (src/standing.ts), before the mail checks below; both ingress paths use the same check.
     const tenantEvent = c.env.config.multiTenant && (message as { source?: unknown } | null)?.source === 'aws.ses' ? (await import('./standing.js')).tenantStatusEvent(message as Record<string, unknown>) : null;
     if (tenantEvent) {
-      if (binding?.kind !== 'shared') throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'SES tenant status events are accepted only from a Bane-owned shared feedback topic.');
+      if (binding?.kind !== 'shared') throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', `SES tenant status events are accepted only from a ${productName}-owned shared feedback topic.`);
       const tenantItem = { message: message as Record<string, unknown>, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region, topicKind: 'shared' as const };
       if (c.env.feedback) { await c.env.feedback.enqueue([tenantItem]); return c.json({ accepted: true }, 202); }
       const refused = await (await import('./standing.js')).ingestTenantStatus(c.env, tenantEvent, tenantItem);
-      if (refused) throw new ApiError(403, refused, 'This SES tenant status event does not match a tenant Bane owns on this topic.');
+      if (refused) throw new ApiError(403, refused, `This SES tenant status event does not match a tenant ${productName} owns on this topic.`);
       return c.json({ accepted: true }, 202);
     }
     verifySesAccount(c.env, message, envelope.TopicArn);

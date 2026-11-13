@@ -2,6 +2,7 @@ import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
 import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
 import {protectedResourceMetadata} from './oidc-resource.js';
+import { productName } from './brand.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
 import {auditContext,auditInsert} from './audit.js';
 import {AgentTokenRecord} from './auth.js';
@@ -87,7 +88,7 @@ export function registerMcpAuth(app:App) {
         before:sql`jsonb_build_object('clientId',approval.client_id,'workspaceId',approval.workspace_id)`,after:{workspaceId}},{from:sql`bound, approval`})})
       SELECT (SELECT revoked FROM approval) revoked,(SELECT role FROM membership) role,EXISTS(SELECT FROM bound) bound`);
     if(result?.revoked==null) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
-    if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED','This MCP connection is revoked in Bane.');
+    if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED',`This MCP connection is revoked in ${productName}.`);
     if(!result.role) throw new ApiError(403,'PERMISSION_DENIED','You are not a member of that workspace.');
     return c.json({id,workspaceId,receiving:false},200);
   });
@@ -109,7 +110,7 @@ export function registerMcpAuth(app:App) {
   const time=(value:string|null)=>value?new Date(value).toISOString():null;
   app.openapi(createRoute({method:'get',path:'/v1/agents',operationId:'listAgents',tags:['Auth'],security,
     summary:'List connected agents and their agent tokens',
-    description:'Agent tokens are how agents use Bane: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members\' agents that made tokens here. Dashboard session only.',
+    description:`Agent tokens are how agents use ${productName}: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.`,
     request:{query:z.object({includeInactive:z.enum(['true','false']).default('false').describe('Also list revoked and expired sign-ins and tokens.')})},responses:{200:response(z.object({data:z.array(Agent)}).openapi('AgentList')),...errors}}),async c=>{
     const user=owner(c),a=c.get('actor'),w=a.workspaceId,all=c.req.valid('query').includeInactive==='true';
     const admin=a.role==='owner'||a.role==='admin',live=all?sql``:sql`AND t.revoked_at IS NULL AND t.expires_at>now()`;

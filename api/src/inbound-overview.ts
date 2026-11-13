@@ -17,6 +17,7 @@ import { domains } from './db/operations.js';
 import { Endpoint, endpointSource, endpointView, type EndpointRow } from './ritual-endpoints.js';
 import type { Programs } from './ritual-pipeline.js';
 import { withRegionSettings } from './ses-region-state.js';
+import { productName } from './brand.js';
 
 type MailboxRow = typeof mailboxes.$inferSelect;
 type Deps = {
@@ -89,7 +90,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     toMore: z.string().nullable().describe('When toTruncated: the API path that lists every webhook subscribed to this address (listInboundWebhooks with addressId and eventType=message.received; follow nextCursor).'),
   }).openapi('InboundOverviewRoute');
   const OverviewDomain = z.object({
-    id: z.string().describe('Bane domain ID.'), name: z.string().describe('Receiving host: the domain, or the subdomain it receives at.'),
+    id: z.string().describe(`${productName} domain ID.`), name: z.string().describe('Receiving host: the domain, or the subdomain it receives at.'),
     status: deps.InboundDomainStatus, catchAll: deps.InboundCatchAll,
   }).openapi('InboundOverviewDomain');
   const Overview = z.object({

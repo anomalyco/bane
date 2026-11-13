@@ -120,7 +120,7 @@ const httpStatus = (error: unknown) => (error as { $metadata?: { httpStatusCode?
 
 export type RegionResources = { account: string; bucket: string; topicArn: string; ruleSetName: string };
 
-/** Idempotently creates the Bane-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
+/** Idempotently creates the Nightmail-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
 type Clients = { sts: STSClientType; s3: S3ClientType; sns: SNSClientType; ses: ReturnType<typeof pacedSes>; sdk: MailboxSetupSdk };
 async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses, sdk }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>): Promise<RegionResources & { rules: ReceiptRule[] }> {
   if (runtime.config.multiTenant && installationId===POOL_INSTALLATION) throw new ApiError(409,'POOL_RESOURCE_OWNERSHIP','Per-domain setup cannot manage hosted pool resources.');
@@ -251,7 +251,7 @@ export async function preparePoolReceiving(runtime:Runtime,region:string,account
 }
 
 /**
- * Makes the Bane receipt rules accept exactly the domains whose mailbox state wants mail.
+ * Makes the Nightmail receipt rules accept exactly the domains whose mailbox state wants mail.
  * Rules are packed up to the SES recipient quota. A rule is deleted instead of emptied:
  * a receipt rule with no recipients matches every address on every domain.
  */

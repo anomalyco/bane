@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { SQL, sql } from 'drizzle-orm';
 import type { OperatorRole } from './operator-identity.js';
 import { ApiError, dashboardSession, errors, notFound, response, webhookUrlHint, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { productName } from './brand.js';
 
 // The per-account audit trail (migration 260): one append-only table, written by recordAudit() inside the
 // caller's own transaction or statement, read by owners and admins (GET /v1/activity, customer-visible rows only),
@@ -191,7 +192,7 @@ export async function requireOperator(c: Ctx, level: OperatorRole): Promise<Oper
   const operator = await operatorActor(c, level);
   return { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId };
 }
-export const operatorRequired = () => new ApiError(403, 'OPERATOR_REQUIRED', 'This area is for Bane operators.');
+export const operatorRequired = () => new ApiError(403, 'OPERATOR_REQUIRED', `This area is for ${productName} operators.`);
 export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContext => ({ ...auditContext(c), actor: { type: 'operator', id: operator.id, userId: operator.userId, via: operator.via } });
 
 // ---------- reading the trail ----------
@@ -204,14 +205,14 @@ export const AuditEntry = z.object({
   at: z.string().describe('When it happened (ISO 8601, UTC).'),
   action: z.string().describe('What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view.'),
   actor: z.object({
-    type: z.enum(['member', 'api_key', 'mcp_grant', 'agent_token', 'inbox_key', 'app_password', 'operator', 'support', 'system', 'stripe']).describe('member is a signed-in person; support is Bane support reading with your permission; system is Bane itself.'),
+    type: z.enum(['member', 'api_key', 'mcp_grant', 'agent_token', 'inbox_key', 'app_password', 'operator', 'support', 'system', 'stripe']).describe(`member is a signed-in person; support is ${productName} support reading with your permission; system is ${productName} itself.`),
     id: z.string().nullable().describe('The member user ID, key ID, grant ID or support grant ID.'),
     label: z.string().nullable().describe('A short display name for the actor, such as a key name, or null.'),
     email: z.string().nullable().describe('The member’s email address, for member actors.'),
   }),
   via: z.string().describe('Where the action came from: dashboard, api, mcp, support, job, webhook.'),
   target: z.object({ type: z.string(), id: z.string().nullable() }).nullable().describe('The object acted on.'),
-  subject: z.object({ userId: z.string(), email: z.string().nullable() }).nullable().describe('The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in.'),
+  subject: z.object({ userId: z.string(), email: z.string().nullable() }).nullable().describe(`The member the event concerns when it is not the actor: the member whose role changed or whose support request let ${productName} support in.`),
   summary: z.record(z.string(), z.unknown()).describe('Before and after, with secrets and message content removed.'),
   reason: z.string().nullable(),
   requestId: z.string().nullable().describe('The x-request-id of the API request that made the change.'),
@@ -315,7 +316,7 @@ const OperatorQuery = AuditFilters.extend({ include: z.string().regex(/^(?:billi
 
 export function registerAudit(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/activity', operationId: 'listActivity', tags: ['Workspaces'], security: sessionOnly,
-    description: 'What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Bane support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.',
+    description: `What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time ${productName} support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.`,
     request: { query: AuditFilters }, responses: { 200: response(AuditPage), ...errors } }), async c => {
     const a = dashboardSession(c, true);
     return c.json(await customerTrail(c.env.db, [a.workspaceId], c.req.valid('query')), 200);

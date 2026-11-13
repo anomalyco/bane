@@ -1,5 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type DbExecutor, type Runtime } from './core.js';
+import { productName } from './brand.js';
 
 // Deliverability aggregates over a workspace's retained mail (30 days of sending_emails and their events), shared by
 // the support grant's reads (src/support-deliverability.ts) and, later, a customer /v1/metrics?groupBy= (decision D9).
@@ -97,12 +98,12 @@ export function rateFindings(c: Pick<Counts, 'accepted' | 'complained' | 'hardBo
   if (c.accepted > 0 && c.complained >= t.minimumEvents) {
     const r = c.complained / c.accepted, line = r >= t.complaint.critical ? 'critical' : r > t.complaint.serious ? 'serious' : r > t.complaint.notice ? 'notice' : null;
     if (line) out.push({ severity: line, code: 'COMPLAINT_RATE', scope, evidence: { complained: c.complained, accepted: c.accepted, rate: r, threshold: t.complaint[line as keyof typeof t.complaint] },
-      message: `${num(c.complained)} of ${num(c.accepted)} accepted emails${where} were marked as spam (${pct(r)}). ${line === 'critical' ? 'Gmail and Yahoo enforce 0.3%.' : line === 'serious' ? 'Gmail recommends staying under 0.1%.' : 'Bane’s policy line is 0.05%.'} Usual cause: mail people did not ask for (no opt-in, an old list, too frequent, a misleading subject).` });
+      message: `${num(c.complained)} of ${num(c.accepted)} accepted emails${where} were marked as spam (${pct(r)}). ${line === 'critical' ? 'Gmail and Yahoo enforce 0.3%.' : line === 'serious' ? 'Gmail recommends staying under 0.1%.' : `${productName}’s policy line is 0.05%.`} Usual cause: mail people did not ask for (no opt-in, an old list, too frequent, a misleading subject).` });
   }
   if (c.accepted > 0 && c.hardBounced >= t.minimumEvents) {
     const r = c.hardBounced / c.accepted, line = r > t.hardBounce.critical ? 'critical' : r > t.hardBounce.serious ? 'serious' : null;
     if (line) out.push({ severity: line, code: 'HARD_BOUNCE_RATE', scope, evidence: { hardBounced: c.hardBounced, accepted: c.accepted, rate: r, threshold: t.hardBounce[line] },
-      message: `${num(c.hardBounced)} of ${num(c.accepted)} accepted emails${where} hard-bounced (${pct(r)}). ${line === 'critical' ? 'Above 5% usually means an old, bought or mistyped list.' : 'Bane’s policy line is 2%.'} Stop mailing the source of the bounces and validate addresses at signup.` });
+      message: `${num(c.hardBounced)} of ${num(c.accepted)} accepted emails${where} hard-bounced (${pct(r)}). ${line === 'critical' ? 'Above 5% usually means an old, bought or mistyped list.' : `${productName}’s policy line is 2%.`} Stop mailing the source of the bounces and validate addresses at signup.` });
   }
   return out;
 }
@@ -358,7 +359,7 @@ export function parseDmarc(record: string | null, source: DmarcTags['source'], a
 
 const dnsCache = new Map<string, { until: number; value: LiveDns }>();
 /**
- * One budgeted read of the domain's public records through Bane's DNS-over-HTTPS reader (src/public-dns.ts): five
+ * One budgeted read of the domain's public records through Nightmail's DNS-over-HTTPS reader (src/public-dns.ts): five
  * labels at most (the domain's SPF, _dmarc, default._bimi, and the MAIL FROM's MX and SPF), 3 seconds in all, cached
  * 5 minutes. A label that did not answer in time is reported as missing with complete=false. DMARC falls back to the
  * stored observation (which follows the organizational domain) when the exact label has none.
@@ -397,7 +398,7 @@ export async function alignment(domain: string, claim: { dkim: string | null; si
 
 export function domainFindings(name: string, d: { dns: LiveDns | null; align: Awaited<ReturnType<typeof alignment>>; days: { at: string; accepted: number }[]; ageDays: number | null; bulk: { day: string; subject: string; emails: number }[]; marketingApi: number }): Finding[] {
   const out: Finding[] = [], dm = d.dns?.dmarc;
-  if (!d.align.dmarcPasses) out.push({ severity: 'critical', code: 'DMARC_UNALIGNED', scope: name, evidence: {}, message: `Mail from ${name} aligns neither DKIM nor SPF with the From domain, so it fails DMARC. Finish DKIM verification for ${name} in Bane (Domains), or verify a custom MAIL FROM under it.` });
+  if (!d.align.dmarcPasses) out.push({ severity: 'critical', code: 'DMARC_UNALIGNED', scope: name, evidence: {}, message: `Mail from ${name} aligns neither DKIM nor SPF with the From domain, so it fails DMARC. Finish DKIM verification for ${name} in ${productName} (Domains), or verify a custom MAIL FROM under it.` });
   if (d.dns && !dm?.record) out.push({ severity: 'serious', code: 'DMARC_MISSING', scope: name, evidence: {}, message: `${name} publishes no DMARC record. Gmail, Yahoo and Outlook require one from bulk senders: add a TXT at _dmarc.${name}: v=DMARC1; p=none; rua=mailto:dmarc@${name}` });
   else if (dm?.record && !dm.valid) out.push({ severity: 'serious', code: 'DMARC_INVALID', scope: name, evidence: {}, message: `The DMARC record for ${name} does not parse (it needs v=DMARC1 first and a p= of none, quarantine or reject).` });
   else if (dm?.p === 'none' && !dm.rua) out.push({ severity: 'notice', code: 'DMARC_NO_REPORTS', scope: name, evidence: {}, message: `DMARC for ${name} is p=none with no rua: nobody receives reports. Add rua=mailto:… and move to p=quarantine once mail aligns.` });
@@ -470,7 +471,7 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
   const perList = lists.map(list => ({ id: list.id, name: list.name, ...byList.get(list.id) ?? empty() }));
   const all = listId ? null : (await views(sql`''`, sql`audience_contacts c WHERE c.workspace_id = ${wid} AND c.deleted_at IS NULL`)).get('') ?? empty();
   // Imports: each committed import's contacts, now. Suppressions after the import stand for its bounces and complaints:
-  // the outcome of first mailing that list (Bane does not record which send first reached each imported contact).
+  // the outcome of first mailing that list (Nightmail does not record which send first reached each imported contact).
   const { rows: imports } = await db.execute<{ id: string; list_id: string | null; list_name: string | null; created_at: string; imported: number; errors: number; matched: number; hard_bounced: number; complained: number; unsubscribed: number }>(sql`WITH i AS (
       SELECT id, workspace_id, list_id, created_at, imported, errors, rows FROM audience_imports
       WHERE workspace_id = ${wid} AND status = 'committed' AND created_at >= now() - interval '90 days' ${listId ? sql`AND list_id = ${listId}` : sql``} ORDER BY created_at DESC LIMIT 10
@@ -528,7 +529,7 @@ export async function senderAlignment(db: DbExecutor, wid: string, fromDomain: s
 export function metadataFindings(m: LintMetadata, marketing: boolean): Finding[] {
   const out: Finding[] = [], f = (severity: Severity, code: string, message: string, evidence: Record<string, number> = {}) => out.push({ severity, code, message, scope: null, evidence });
   if (!m.parts.text && !m.parts.raw) f('notice', 'NO_TEXT_PART', 'There is no plain-text part. Some filters score HTML-only mail higher, and text-only clients show nothing: add a text version.');
-  if (marketing && !m.listUnsubscribe) f('serious', 'NO_LIST_UNSUBSCRIBE', 'Marketing mail without List-Unsubscribe: Gmail and Yahoo require one-click unsubscribe from bulk senders. Send it as a campaign or with kind=marketing so Bane adds it.');
+  if (marketing && !m.listUnsubscribe) f('serious', 'NO_LIST_UNSUBSCRIBE', `Marketing mail without List-Unsubscribe: Gmail and Yahoo require one-click unsubscribe from bulk senders. Send it as a campaign or with kind=marketing so ${productName} adds it.`);
   if (!m.alignment.dkimAligned && !m.alignment.spfAligned) f('critical', 'DMARC_UNALIGNED', `Neither DKIM nor the Return-Path (${m.alignment.returnPath}) aligns with ${m.alignment.fromDomain}, so this mail fails DMARC.`);
   if (m.subject.capitalsShare !== null && m.subject.length >= 10 && m.subject.capitalsShare > 0.5) f('notice', 'SUBJECT_CAPITALS', 'More than half the subject’s letters are capitals, which reads as shouting and as spam.', { capitalsShare: m.subject.capitalsShare });
   if (m.subject.exclamationRuns) f('notice', 'SUBJECT_PUNCTUATION', 'The subject has runs like !!! or ???. Filters penalize them: use one mark at most.', { runs: m.subject.exclamationRuns });

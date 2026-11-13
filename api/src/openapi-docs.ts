@@ -1,6 +1,6 @@
 import { webhookSignatureGuide } from './webhook-signature-guide.js';
 import type { App } from './core.js';
-import { apiKeyEnv, publicOrigin, sdkPackage } from './brand.js';
+import { apiKeyEnv, productName, publicOrigin, sdkPackage } from './brand.js';
 
 type Json = Record<string, any>;
 const METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
@@ -24,7 +24,7 @@ function sampleString(name: string, schema: Json): string {
   if (schema.format === 'date-time' || /(?:At|Date)$/i.test(name)) return '2026-09-18T19:00:00Z';
   if (schema.format === 'uri' || /url$/i.test(name)) return 'https://example.com/webhook';
   if (/region/i.test(name)) return 'us-east-1';
-  if (/subject/i.test(name)) return 'Hello from Bane';
+  if (/subject/i.test(name)) return `Hello from ${productName}`;
   if (/html/i.test(name)) return '<h1>Hello</h1><p>Your message is ready.</p>';
   if (/text|markdown|description|purpose/i.test(name)) return 'Your message is ready.';
   if (/name/i.test(name)) return 'Example';
@@ -75,7 +75,7 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
   const bodySchema = operation.requestBody?.content?.['application/json']?.schema;
   if (bodySchema) {
     options.body = sample(document, bodySchema, 'body');
-    const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from Bane', text: email.text ?? 'Your message is ready.' });
+    const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? `Hello from ${productName}`, text: email.text ?? 'Your message is ready.' });
     if (operation.operationId === 'sendEmail') options.body = completeEmail(options.body);
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
@@ -91,7 +91,7 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   if (query.length) target += `?${query.join('&')}`;
   const bodySchema = operation.requestBody?.content?.['application/json']?.schema;
   let body = bodySchema ? sample(document, bodySchema, 'body') : undefined;
-  const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from Bane', text: email.text ?? 'Your message is ready.' });
+  const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? `Hello from ${productName}`, text: email.text ?? 'Your message is ready.' });
   if (operation.operationId === 'sendEmail') body = completeEmail(body);
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
   const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url '${publicOrigin}${target}' \\`, `  --header "Authorization: Bearer $${apiKeyEnv}"`];
@@ -109,12 +109,12 @@ const quickstartCurl = `curl --request POST \\
   --header "Authorization: Bearer $${apiKeyEnv}" \\
   --header 'Content-Type: application/json' \\
   --header "Idempotency-Key: $(uuidgen)" \\
-  --data '{"from":"hello@acme.com","to":"you@acme.com","subject":"Hello from Bane","text":"It works."}'`;
+  --data '{"from":"hello@acme.com","to":"you@acme.com","subject":"Hello from ${productName}","text":"It works."}'`;
 export const quickstart: { title: string; text: string; code?: string }[] = [
   { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
   { title: 'Create an API key', text: `In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as ${apiKeyEnv} on your server and never ship it to a browser.` },
   { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.', code: quickstartCurl },
-  { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
+  { title: 'Receive (optional)', text: `Publish the receiving MX record from the domain page. Hosted ${productName} receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to ${productName}, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.` },
   { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
 ];
 // Guides beyond the first five minutes, for /docs.md and /llms.txt; the dashboard shows the same text as a Docs guide.
@@ -124,14 +124,14 @@ const tagOrder = ['Emails', 'Domains', 'Inbound addresses', 'Inbound threads', '
 const tagRank = (tag: string) => { const index = tagOrder.indexOf(tag); return index === -1 ? tagOrder.length : index; };
 
 export function createOpenApiDocument(app: App) {
-  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0', description: 'Send, receive and reply to email on your own domains. 202 means queued, not delivered.' } }) as Json;
+  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: `${productName} API`, version: '0.1.0', description: 'Send, receive and reply to email on your own domains. 202 means queued, not delivered.' } }) as Json;
   document.info['x-quickstart'] = quickstart;
   const used = [...new Set(operationEntries(document).map(entry => entry.operation.tags?.[0] ?? 'API'))];
   document.tags = used.sort((a, b) => tagRank(a) - tagRank(b)).map(name => ({ name }));
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;
-    // Support routes are internal: in the contract and the SDK for Bane's support platform, out of customer docs.
+    // Support routes are internal: in the contract and the SDK for Nightmail's support platform, out of customer docs.
     if (/^\/v1\/support\//.test(path)) operation['x-internal'] = true;
     operation['x-codeSamples'] = [
       { lang: 'TypeScript', label: 'TypeScript SDK', source: sdkSample(document, path, method, pathItem, operation) },
@@ -194,7 +194,7 @@ function guidesMarkdown() {
 // /docs/tags/<slug>.md and each operation at /docs/operations/<id>.md, so an agent loads only the part it needs
 // and no single file outgrows an agent's context as operations are added (scripts/check-agent-docs.ts caps each).
 export const tagSlug = (tag: string) => tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const intro = (document: Json) => `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`${sdkPackage}\`\n\n`;
+const intro = (document: Json) => `# ${productName} API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`${sdkPackage}\`\n\n`;
 
 /** What customers read: everything but internal operations (x-internal). */
 const publicEntries = (document: Json) => operationEntries(document).filter(entry => !entry.operation['x-internal']);
@@ -218,5 +218,5 @@ export function createTagMarkdownDocs(document: Json, slug: string): string | nu
 
 export function createLlmsText(document: Json): string {
   const groups = grouped(document, publicEntries(document));
-  return `# Bane\n\nBane is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  return `# ${productName}\n\n${productName} is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

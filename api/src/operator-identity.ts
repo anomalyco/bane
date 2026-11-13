@@ -1,7 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import type { DbExecutor } from './core.js';
 
-// The one link between a Bane platform operator role and a user identity. The role is a row in platform_operators,
+// The one link between a Nightmail platform operator role and a user identity. The role is a row in platform_operators,
 // keyed by platform_operators.user_id, which references bane_users(id) (migration 278; it referenced auth_user before
 // #89). Every lookup and grant goes through this file: the operator API (operatorActor), GET /v1/me
 // (sessionMemberships) and scripts/set-operator.ts. A grant names the person by issuer subject, never by address.

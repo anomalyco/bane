@@ -9,12 +9,12 @@ import { cached, registerSupportDeliverability } from './support-deliverability.
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
 import { keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
-import { secretPrefixes } from './brand.js';
+import { productName, secretPrefixes } from './brand.js';
 
-// Support integration (api/README.md "Support integration"). Internal: these routes are for Bane's operators and its
+// Support integration (api/README.md "Support integration"). Internal: these routes are for Nightmail's operators and its
 // support platform, never for customers.
 //
-// 1. A signed-in member presses "Contact support" (POST /v1/contact-support): Bane stores a handoff (workspace, user,
+// 1. A signed-in member presses "Contact support" (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
 //    page, recent request IDs, and whether they share message content for this request) and returns the support
 //    platform's URL carrying an Ed25519-signed handoff token.
 // 2. The support platform's server verifies who the customer is (that handoff, or an email whose From passed DMARC
@@ -22,7 +22,7 @@ import { secretPrefixes } from './brand.js';
 //    (POST /v1/operator/support/grants) with its operator credential.
 // 3. The agent gets only the grant (bane_support_…) in its environment. Every /v1/support/* route derives the customer
 //    from the grant alone; a workspaceId filter can only narrow it. Every call is written to audit_events, and each
-//    workspace's Activity shows "Bane support viewed this workspace" once per grant. Never secrets; message content only
+//    workspace's Activity shows "Nightmail support viewed this workspace" once per grant. Never secrets; message content only
 //    with the customer's own opt-in from the handoff.
 //
 // Access: /v1/operator/* answers only an operator (operatorGate), /v1/support/* only a live support grant (supportGate).
@@ -40,7 +40,7 @@ const EXPENSIVE = /^\/v1\/support\/(?:deliverability\/[^/]+|screen|campaigns(?:\
 export const supportWeight = (path: string) => EXPENSIVE.test(path) ? SUPPORT_EXPENSIVE_WEIGHT : 1;
 const GRANT_MAX_MINUTES = 120;
 const bearer = (c: Ctx) => c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
-const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', 'This area is for Bane support with an active support grant.');
+const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', `This area is for ${productName} support with an active support grant.`);
 
 /**
  * /v1/operator and /v1/operator/*: an operator's dashboard session, or the support platform through the SupportPlatform
@@ -96,12 +96,12 @@ export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
       SELECT m.workspace_id AS id, w.name, m.role FROM g JOIN workspace_members m ON m.user_id = g.user_id AND m.workspace_id = ANY(g.workspace_ids) JOIN workspaces w ON w.id = m.workspace_id
     ), logged AS (
       INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, actor_label, via, action, target_type, target_id, summary, ticket_ref, request_id, ip_network, user_agent, internal, retain_until)
-      SELECT (SELECT id FROM scope WHERE id = ${filter}), g.user_id, 'support', g.id, 'Bane support', 'support', 'support.read', 'user', g.user_id,
+      SELECT (SELECT id FROM scope WHERE id = ${filter}), g.user_id, 'support', g.id, ${`${productName} support`}::text, 'support', 'support.read', 'user', g.user_id,
         ${JSON.stringify(call)}::jsonb || jsonb_build_object('operator', g.operator_id, 'workspaces', (SELECT coalesce(jsonb_agg(id), '[]') FROM scope)), g.ticket_ref,
         ${context.requestId}, ${context.ipNetwork}, ${context.userAgent}, true, now() + interval '90 days' FROM g WHERE g.used <= ${limit}
     ), viewed AS (
       INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, actor_label, via, action, target_type, target_id, summary, ticket_ref, request_id, internal, retain_until)
-      SELECT s.id, g.user_id, 'support', g.id, 'Bane support', 'support', 'support.view', 'workspace', s.id,
+      SELECT s.id, g.user_id, 'support', g.id, ${`${productName} support`}::text, 'support', 'support.view', 'workspace', s.id,
         jsonb_strip_nulls(jsonb_build_object('ticket', g.ticket_ref, 'until', g.expires_at, 'handoff', g.handoff_id, 'member', g.user_id, 'contentShared', g.content_workspace_id = s.id)),
         g.ticket_ref, ${context.requestId}, false, now() + interval '1 year' FROM g, scope s WHERE g.used <= ${limit} AND (${filter}::text IS NULL OR s.id = ${filter})
       ON CONFLICT (actor_id, workspace_id) WHERE action = 'support.view' DO NOTHING
@@ -138,7 +138,7 @@ const Page = z.object({ cursor: z.string().max(200).optional().describe('nextCur
 const Since = z.object({ since: z.iso.datetime().optional().describe('Only items at or after this time (default: 7 days ago).') });
 const tags = ['Support (internal)'];
 const supportSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }];
-const describe = (text: string) => `${text} Internal: for Bane support with a support grant (bane_support_…), never for customers.`;
+const describe = (text: string) => `${text} Internal: for ${productName} support with a support grant (bane_support_…), never for customers.`;
 function scoped(c: Ctx, roles?: ('owner' | 'admin' | 'member')[]) {
   const scope = c.get('support')!, filter = c.req.query('workspaceId');
   const workspaces = scope.workspaces.filter(w => (!filter || w.id === filter) && (!roles || roles.includes(w.role)));
@@ -157,7 +157,7 @@ const strip = <T extends Record<string, unknown>>(row: T) => { const { at_text: 
 
 const WorkspaceSummary = z.object({
   id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']).describe('The customer’s role in this workspace.'), createdAt: z.string(),
-  sending: z.object({ kind: z.string().describe('shared (Bane Hosted) or byo (their own AWS).'), region: z.string(), state: z.string().nullable(), paused: z.boolean(), pauseReason: z.string().nullable(),
+  sending: z.object({ kind: z.string().describe(`shared (${productName} Hosted) or byo (their own AWS).`), region: z.string(), state: z.string().nullable(), paused: z.boolean(), pauseReason: z.string().nullable(),
     dailyLimitOverride: z.number().nullable() }).nullable().describe('The sending connection, or null when none is set up.'),
   counts: z.record(z.string(), z.number()).describe('How many of each resource the workspace has: domains, apiKeys, webhooks, inboxes, addresses, routes, endpoints, campaigns, templates, contacts (counted up to 100,000).'),
 }).openapi('SupportWorkspace');
@@ -353,7 +353,7 @@ export function registerSupportOperator(app: App) {
     return c.json({ ...row!, createdAt: new Date(row!.createdAt).toISOString(), expiresAt: new Date(row!.expiresAt).toISOString(), usedAt: row!.usedAt ? new Date(row!.usedAt).toISOString() : null }, 200);
   });
 
-  // Staff sign-in for the support Worker's internal pages: an operator's own dashboard session leaves Bane for the
+  // Staff sign-in for the support Worker's internal pages: an operator's own dashboard session leaves Nightmail for the
   // support site's /staff/callback with a 2-minute EdDSA JWS (aud bane-support-staff) naming them. The support Worker
   // verifies it through the binding (staff/verify, which also checks they are still an operator) and accepts each jti
   // once. The binding cannot mint one: staff-sign-in is not in its allow-list and refuses it here too.
@@ -439,7 +439,7 @@ export function registerSupport(app: App) {
     recentFailures: z.object({ since: z.string(), sends: z.array(z.record(z.string(), z.unknown())).describe('Failed, rejected, suppressed and bounced sends in the last 24 hours, by code.'),
       bounces: z.array(z.record(z.string(), z.unknown())).describe('Bounce, complaint and reject events in the last 24 hours, by reason.'),
       webhookDeliveries: z.array(z.record(z.string(), z.unknown())).describe('Webhook deliveries that failed in the last 24 hours, by webhook.'),
-      authErrors: z.null().describe('Bane does not store failed sign-ins or rejected API keys; look up a request ID instead.') }),
+      authErrors: z.null().describe(`${productName} does not store failed sign-ins or rejected API keys; look up a request ID instead.`) }),
     standing: z.array(Standing), recentActivity: z.array(AuditEntry).describe('The last 20 customer-visible audit entries (owner and admin workspaces).'),
     openEnforcement: z.array(z.object({ workspaceId: z.string(), kind: z.string(), since: z.string().nullable(), reason: z.string().nullable() })).describe('Paused sending and paused campaigns.'),
     handoff: z.object({ id: z.string(), page: z.string().nullable(), requestIds: z.array(z.string()), message: z.string().nullable(), createdAt: z.string() }).nullable().describe('What the customer sent from "Contact support", if the grant came from it.'),
@@ -592,7 +592,7 @@ export function registerSupport(app: App) {
   // The customer's own requests, from this Worker's request lines in Workers Logs (src/support-logs.ts).
   const DAY = 86_400_000, Retention = z.literal(`${LOG_RETENTION_DAYS} days`).describe('How long Workers Logs keep request lines.');
   const Principal = z.string().describe('How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.');
-  const RequestGroup = z.object({ route: z.string().describe('The route template (/v1/emails/:id), never a path.'), method: z.string(), status: z.number(), code: z.string().nullable().describe('The error code Bane answered with.'),
+  const RequestGroup = z.object({ route: z.string().describe('The route template (/v1/emails/:id), never a path.'), method: z.string(), status: z.number(), code: z.string().nullable().describe(`The error code ${productName} answered with.`),
     principal: Principal, count: z.number(), firstSeen: z.string(), lastSeen: z.string(),
     sampleRequestIds: z.array(z.string()).describe('Up to 5 of the latest, to look up with /v1/support/requests/{requestId}.') }).openapi('SupportRequestGroup');
   const RequestLog = z.object({
@@ -604,7 +604,7 @@ export function registerSupport(app: App) {
       truncated: z.boolean().describe(`More than ${LOG_ROWS.toLocaleString('en-US')} lines matched, so the counts are of a sample spread over the window: narrow it.`) }),
     computedAt: z.string(),
   }).openapi('SupportRequestLog');
-  app.openapi(createRoute({ ...meta('listSupportRequests', `The customer’s own failed API requests over at most the last ${LOG_RETENTION_DAYS} days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Bane could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds.`),
+  app.openapi(createRoute({ ...meta('listSupportRequests', `The customer’s own failed API requests over at most the last ${LOG_RETENTION_DAYS} days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests ${productName} could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds.`),
     path: '/v1/support/requests', request: { query: WorkspaceFilter.extend({
       status: z.enum(['error', '5xx', '4xx']).default('error').describe('error: every status of 400 or more (default); 5xx or 4xx only.'),
       since: z.iso.datetime().optional().describe(`Window start (default: 24 hours before until). At most ${LOG_RETENTION_DAYS} days back.`), until: z.iso.datetime().optional().describe('Window end (default: now).'),
@@ -626,7 +626,7 @@ export function registerSupport(app: App) {
     } catch (error) { if (error instanceof LogsUnavailable) return none('unavailable'); throw error; }
   });
   const RequestTrace = z.object({
-    requestId: z.string(), found: z.boolean().describe('Whether Bane logged or stored anything about this request for this customer.'),
+    requestId: z.string(), found: z.boolean().describe(`Whether ${productName} logged or stored anything about this request for this customer.`),
     logs: z.array(z.object({ at: z.string(), route: z.string(), method: z.string(), status: z.number(), code: z.string().nullable(), durationMs: z.number().nullable(), principal: Principal, workspaceId: z.string() }))
       .describe(`Its request lines from Workers Logs (the last ${LOG_RETENTION_DAYS} days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.`),
     logsAvailable: z.boolean().describe('False when this installation does not read Workers Logs or they did not answer; logs is then empty.'),
@@ -635,7 +635,7 @@ export function registerSupport(app: App) {
     routingVersions: z.array(z.object({ workspaceId: z.string(), version: z.number(), resourceId: z.string(), at: z.string() })).describe('Routing versions the request wrote.'),
     note: z.string(),
   }).openapi('SupportRequestTrace');
-  app.openapi(createRoute({ ...meta('getSupportRequest', `What Bane recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last ${LOG_RETENTION_DAYS} days), the changes it made, campaign launches and routing versions.`), path: '/v1/support/requests/{requestId}', request: { query: WorkspaceFilter, params: z.object({ requestId: z.string().regex(/^req_[0-9a-f]{32}$/) }) }, responses: { 200: response(RequestTrace), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta('getSupportRequest', `What ${productName} recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last ${LOG_RETENTION_DAYS} days), the changes it made, campaign launches and routing versions.`), path: '/v1/support/requests/{requestId}', request: { query: WorkspaceFilter, params: z.object({ requestId: z.string().regex(/^req_[0-9a-f]{32}$/) }) }, responses: { 200: response(RequestTrace), ...errors } }), async c => {
     const { scope, ids: list } = scoped(c), requestId = c.req.valid('param').requestId, db = c.env.db, observability = c.env.config.observability;
     let logs: z.infer<typeof RequestTrace>['logs'] = [], logsAvailable = false;
     if (observability) try {
@@ -649,7 +649,7 @@ export function registerSupport(app: App) {
       FROM mail_routing_audit WHERE request_id = ${requestId} AND workspace_id = ANY(${ids(list)}) LIMIT 50`) : { rows: [] };
     const changed = !!(auditEvents.length || campaigns.length || routing.length), found = changed || logs.length > 0;
     return c.json({ requestId, found, logs, logsAvailable, auditEvents, campaigns, routingVersions: routing.map(r => ({ ...r, at: new Date(r.at).toISOString() })),
-      note: changed ? 'Changes recorded for this request.' : found ? 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.'
+      note: changed ? 'Changes recorded for this request.' : found ? `Logged, but it changed nothing ${productName} stores: see logs for its route, status and error code.`
         : `Nothing recorded: the request changed nothing${logsAvailable ? ` and is not in the last ${LOG_RETENTION_DAYS} days of request logs` : ''}, belongs to another account, or is older than the retention window. Ask for the time, the route and the error code shown.` }, 200);
   });
   registerSupportDeliverability(app, meta, WorkspaceFilter);

@@ -1,3 +1,4 @@
+import { productName } from './brand.js'
 // Sender standing: the pure model behind the ten-minute standing job (standing.ts), GET /v1/sender-score and the
 // published thresholds (docs/sending-limits.md). No I/O here, so the job, the route and the tests share it.
 //
@@ -222,7 +223,7 @@ export type LimitRequest = { eligibleForAutoApproval: boolean; reasons: { code: 
  */
 export function limitRequestEligibility(o: { phase: ScoreState['phase'] | null; step: Step | null; days: { day: string; score: number | null }[]; steps: number; today: string; requested?: number }): LimitRequest {
   const reasons: LimitRequest['reasons'] = [], { minScore, scoreDays, quietDays, maxAuto } = LIMIT_REQUEST;
-  if (o.phase === null) reasons.push({ code: 'NO_STANDING', message: 'This workspace has no sender standing (Bane Hosted sending only), so a limit request goes to a person.' });
+  if (o.phase === null) reasons.push({ code: 'NO_STANDING', message: `This workspace has no sender standing (${productName} Hosted sending only), so a limit request goes to a person.` });
   else if (o.phase !== 'graded') reasons.push({ code: 'CALIBRATING', message: 'The score is still calibrating; it needs 100 real recipients and 24 hours first.' });
   // The 14 UTC days up to today, or up to yesterday before the job has written today's score.
   const byDay = new Map(o.days.map(d => [d.day, d.score])), end = Date.parse(o.today + 'T00:00:00Z') - (byDay.has(o.today) ? 0 : DAY_MS);
