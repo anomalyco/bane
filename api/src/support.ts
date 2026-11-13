@@ -3,6 +3,9 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, digest, errors, hasSessionCookie, id, json, log, notFound, randomSecret, response, timed, webhookUrlHint, type App, type AppEnv, type Ctx, type DbExecutor, type SupportScope } from './core.js';
 import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, operatorContext, operatorRequired, requireOperator, userEmail } from './audit.js';
+import { budgetedRead } from './deliverability.js';
+import { limitRequestEligibility, LIMIT_REQUEST, type Step } from './standing-model.js';
+import { registerSupportDeliverability } from './support-deliverability.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Bane's operators and its
 // support platform, never for customers.
@@ -24,6 +27,10 @@ import { AuditEntry, AuditFilters, auditContext, auditInsert, customerTrail, ope
 const SUPPORT_TOKEN = /^bane_support_[0-9a-f]{64}$/;
 /** Requests per minute per support grant. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
+/** The deliverability reads (src/support-deliverability.ts) aggregate up to 30 days of mail: each costs 5 of the 120. */
+export const SUPPORT_EXPENSIVE_WEIGHT = 5;
+const EXPENSIVE = /^\/v1\/support\/(?:deliverability\/[^/]+|screen|campaigns(?:\/[^/]+(?:\/lint)?)?|audience\/health|domains\/[^/]+\/health|emails\/[^/]+\/lint)$/;
+export const supportWeight = (path: string) => EXPENSIVE.test(path) ? SUPPORT_EXPENSIVE_WEIGHT : 1;
 const GRANT_MAX_MINUTES = 120;
 const bearer = (c: Ctx) => c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
 const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', 'This area is for Bane support with an active support grant.');
@@ -52,18 +59,18 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 /**
  * /v1/support/*: a live, unexpired, unrevoked support grant, else 403. One statement authenticates the grant, counts the
- * request against its minute budget, narrows it to the workspaces its user still belongs to, writes this call to the
+ * request against its minute budget (supportWeight: 5 for an aggregate read, else 1), narrows it to the workspaces its user still belongs to, writes this call to the
  * audit trail and, the first time a grant touches a workspace, the customer-visible "support.view" row.
  */
 export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const token = bearer(c);
   if (!c.env.config.multiTenant || !token || !SUPPORT_TOKEN.test(token)) throw supportRequired();
-  const filter = c.req.query('workspaceId') ?? null, context = auditContext(c), limit = SUPPORT_RATE_PER_MINUTE;
+  const filter = c.req.query('workspaceId') ?? null, context = auditContext(c), limit = SUPPORT_RATE_PER_MINUTE, weight = supportWeight(c.req.path);
   const query = Object.fromEntries(Object.entries(c.req.queries()).map(([k, v]) => [k.slice(0, 40), v.join(',').slice(0, 120)]).slice(0, 12));
   const call = { route: c.req.path.slice(0, 200), method: c.req.method, query }, hash = await digest(token);
   const { rows: [grant] } = await timed(c, 'support-db', () => c.env.db.execute<{ id: string; user_id: string; ticket_ref: string; operator_id: string; content_workspace_id: string | null; expires_at: string; used: number;
     workspaces: SupportScope['workspaces'] }>(sql`WITH g AS (
-      UPDATE support_grants SET used = CASE WHEN window_start = date_trunc('minute', now()) THEN least(used + 1, ${limit + 1}) ELSE 1 END,
+      UPDATE support_grants SET used = CASE WHEN window_start = date_trunc('minute', now()) THEN least(used + ${weight}::int, ${limit + 1}) ELSE ${weight}::int END,
         window_start = date_trunc('minute', now()), last_used_at = now()
       WHERE token_hash = ${hash} AND revoked_at IS NULL AND expires_at > now()
       RETURNING id, user_id, workspace_ids, ticket_ref, operator_id, content_workspace_id, handoff_id, expires_at, used
@@ -490,8 +497,35 @@ export function registerSupport(app: App) {
     return c.json({ data: rows.slice(0, q.limit).map(r => { const { url, sort: _s, ...rest } = strip(r) as typeof r & { sort?: unknown }; return { ...rest, endpoint: url ? webhookUrlHint(url) : '', createdAt: new Date(r.createdAt).toISOString(), updatedAt: new Date(r.updatedAt).toISOString() }; }),
       nextCursor: nextCursor(rows, q.limit) }, 200);
   });
-  app.openapi(createRoute({ ...meta('getSupportStanding', 'Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, and the last 24 hours of sends by status.'), path: '/v1/support/standing', request: { query: WorkspaceFilter }, responses: { 200: response(z.object({ data: z.array(Standing) })), ...errors } }), async c =>
-    c.json({ data: await standings(c.env.db, scoped(c).ids) }, 200));
+  const StandingDetail = Standing.extend({
+    history: z.object({
+      days: z.array(z.object({ day: z.string(), score: z.number().nullable(), quality: z.number().nullable(), limit: z.number().nullable(), step: z.string().nullable(),
+        accepted: z.number(), bounced: z.number(), complained: z.number(), rejected: z.number() })).describe('The published daily score, quality, limit and step, with the day’s real mail (accepted, hard-bounced, complained, screen-rejected), oldest first. The only source for days older than the 30 days mail is kept.'),
+      changes: z.array(z.object({ at: z.string(), kind: z.string().describe('step, limit, quarantine, release, tenant or operator.'), from: z.string().nullable(), to: z.string().nullable(), reasons: z.array(z.string()),
+        limitFrom: z.number().nullable(), limitTo: z.number().nullable() })).describe('Changes of standing (ladder steps, limit bands, quarantines, releases), newest first, at most 50.'),
+    }).describe('The last 60 days.'),
+    limitRequest: z.object({ eligibleForAutoApproval: z.boolean(), reasons: z.array(z.object({ code: z.string(), message: z.string() })).describe('Why not, when not.'), maxAuto: z.number(),
+      requested: z.number().nullable() }).describe(`"Request a higher limit" is approved automatically with a score of ${LIMIT_REQUEST.minScore} or more on each of the last ${LIMIT_REQUEST.scoreDays} days, no warn, restrict or pause in ${LIMIT_REQUEST.quietDays} days, and a request of at most ${LIMIT_REQUEST.maxAuto.toLocaleString('en-US')} a day. Anything else goes to a person.`),
+  }).openapi('SupportStandingDetail');
+  app.openapi(createRoute({ ...meta('getSupportStanding', 'Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically.'), path: '/v1/support/standing',
+    request: { query: WorkspaceFilter.extend({ requestedLimit: z.coerce.number().int().min(1).max(10_000_000).optional().describe('The daily limit the customer asks for, to check it against the automatic maximum.') }) },
+    responses: { 200: response(z.object({ data: z.array(StandingDetail) })), ...errors } }), async c => {
+    const list = scoped(c).ids, requested = c.req.valid('query').requestedLimit;
+    type History = { workspace_id: string; today: string; phase: 'seed' | 'calibrating' | 'graded' | null; step: Step | null; steps: number; days: z.infer<typeof StandingDetail>['history']['days']; changes: z.infer<typeof StandingDetail>['history']['changes'] };
+    const { rows, history } = await budgetedRead(c.env.db, async tx => ({ rows: await standings(tx, list), history: list.length ? (await tx.execute<History>(sql`SELECT w.id AS workspace_id, (now() AT TIME ZONE 'UTC')::date::text AS today,
+        s.phase, s.step, (SELECT count(*)::int FROM standing_events e WHERE e.workspace_id = w.id AND e.at > now() - interval '30 days' AND e.to_step IN ('warn','restrict','pause') AND e.to_step IS DISTINCT FROM e.from_step) AS steps,
+        (SELECT coalesce(json_agg(json_build_object('day', d.day::text, 'score', d.score::float8, 'quality', d.quality::float8, 'limit', d.daily_limit, 'step', d.step, 'accepted', d.accepted, 'bounced', d.bounced,
+          'complained', d.complained, 'rejected', d.rejected) ORDER BY d.day), '[]') FROM sender_score_daily d WHERE d.workspace_id = w.id AND d.day > (now() AT TIME ZONE 'UTC')::date - 60) AS days,
+        (SELECT coalesce(json_agg(x ORDER BY x.at DESC), '[]') FROM (SELECT e.at, e.kind, e.from_step AS "from", e.to_step AS "to", ARRAY(SELECT r->>'code' FROM jsonb_array_elements(e.reasons) r WHERE r ? 'code') AS reasons,
+          CASE WHEN jsonb_typeof(e.details->'from') = 'number' THEN (e.details->>'from')::numeric::int END AS "limitFrom", CASE WHEN jsonb_typeof(e.details->'to') = 'number' THEN (e.details->>'to')::numeric::int END AS "limitTo"
+          FROM standing_events e WHERE e.workspace_id = w.id AND e.at > now() - interval '60 days' ORDER BY e.at DESC, e.id DESC LIMIT 50) x) AS changes
+      FROM unnest(${ids(list)}) w(id) LEFT JOIN sender_standing s ON s.workspace_id = w.id`)).rows : [] }));
+    return c.json({ data: rows.map(row => {
+      const h = history.find(x => x.workspace_id === row.workspaceId)!;
+      return { ...row, history: { days: h.days, changes: h.changes.map(x => ({ ...x, at: new Date(x.at).toISOString() })) },
+        limitRequest: { ...limitRequestEligibility({ phase: h.phase, step: h.step, days: h.days, steps: h.steps, today: h.today, requested }), requested: requested ?? null } };
+    }) }, 200);
+  });
   const Billing = z.object({ available: z.boolean().describe('False until billing is enabled on this installation.'), data: z.array(z.object({ workspaceId: z.string(), account: z.record(z.string(), z.unknown()).nullable(),
     ledger: z.array(z.record(z.string(), z.unknown())).describe('The latest 50 ledger entries: top-ups, usage, refunds, disputes, credits.') })) }).openapi('SupportBilling');
   app.openapi(createRoute({ ...meta('getSupportBilling', 'Balance, payments and the billing ledger of the workspaces the customer owns or administers.'), path: '/v1/support/billing', request: { query: WorkspaceFilter }, responses: { 200: response(Billing), ...errors } }), async c => {
@@ -528,4 +562,5 @@ export function registerSupport(app: App) {
     return c.json({ requestId, found, auditEvents, campaigns, routingVersions: routing.map(r => ({ ...r, at: new Date(r.at).toISOString() })),
       note: found ? 'Changes recorded for this request.' : 'Nothing recorded: the request changed nothing, belongs to another account, or is older than the retention window. Ask for the time, the route and the error code shown.' }, 200);
   });
+  registerSupportDeliverability(app, meta, WorkspaceFilter);
 }
