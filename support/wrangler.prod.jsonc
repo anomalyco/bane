@@ -25,7 +25,7 @@
   "services": [
     // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
     { "binding": "BANE", "service": "bane-production", "entrypoint": "SupportPlatform" },
-    // Bane's public API, called with the support address's inbox key.
+    // Bane's public API, called with the support address's API key (limited to that address).
     { "binding": "BANE_API", "service": "bane-production" }
   ],
   // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
@@ -46,7 +46,7 @@
     // The inbound address ID (mbx_…) of SUPPORT_ADDRESS in the platform workspace (ws_90b0…), created 2026-11-13.
     "SUPPORT_ADDRESS_ID": "mbx_7e7e64495349496691b2ca188cf48b6e",
     "TICKET_TO": "ryan@anoma.ly",
-    // Straight to tickets, never to the agent (src/intake.ts): their own webhook and inbox key.
+    // Straight to tickets, never to the agent (src/intake.ts): their own webhook and API key.
     "INTAKE_ADDRESSES": "abuse@bane.mx,privacy@bane.mx,legal@bane.mx",
     // Console's inference gateway (Anthropic Messages API). The key is the CONSOLE_GATEWAY_KEY secret.
     "GATEWAY_URL": "https://opencode.ai/inference/anthropic/v1"

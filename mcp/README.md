@@ -29,7 +29,7 @@ The access token names you, not a workspace. Every workspace tool takes an optio
 - `setDefaultWorkspace({"workspace":"Acme"})` (plain MCP: `workspaces` with action `setDefault`) sets the default for this connection. You can also set it on the connection's page in **Settings → Account**.
 - With no default set, calls use your only workspace, else the workspace you used last in the dashboard. If neither applies they fail with `WORKSPACE_REQUIRED`; pass `workspace`.
 
-Credentials and objects a connection creates (API keys, agent tokens, endpoints, routes, inbox keys) belong to the workspace they were created in, and keep working only while you remain an owner or admin there and the connection is active.
+Credentials and objects a connection creates (API keys, agent tokens, endpoints, routes) belong to the workspace they were created in, and keep working only while you remain an owner or admin there and the connection is active.
 
 ### Several accounts
 
@@ -55,7 +55,7 @@ The client's sign-in ends with a redirect to `http://127.0.0.1:<port>/callback` 
 
 - **Paste back.** `opencode2 mcp auth bane` prints the sign-in URL. Open it on your laptop and approve; the browser then lands on a page that doesn't load. Copy that page's full address (`http://127.0.0.1:…/callback?code=…&state=…`) and paste it at OpenCode's prompt ("If the browser can't reach this machine, paste the URL it was redirected to"). The prompt needs an interactive terminal; the desktop and web apps have the same paste box in `/mcps`.
 - **Forward the port.** Fix the callback port in the server's config, `"oauth": { "callback_port": 19876 }`, and connect with `ssh -L 19876:127.0.0.1:19876 <host>`. The redirect then reaches OpenCode through the tunnel.
-- **No OAuth.** `"oauth": false` with `"headers": { "Authorization": "Bearer {env:BANE_INBOX_KEY}" }` works for [inbox keys](#agent-inboxes) (`bane_mbx_…`) only. `/mcp` doesn't accept API keys or agent tokens; use the stdio launcher below with an API key for workspace access without a browser.
+- **No OAuth.** `"oauth": false` with `"headers": { "Authorization": "Bearer {env:BANE_INBOX_KEY}" }` works for [API keys limited to addresses or an inbox](#agent-inboxes) (`bane_mbx_…`) only. `/mcp` doesn't accept workspace API keys or agent tokens; use the stdio launcher below with an API key for workspace access without a browser.
 
 ## Permissions
 
@@ -70,7 +70,7 @@ OAuth scopes map to the existing API permissions:
 
 Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's OIDC approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
-Each person lists their own approvals at `GET /v1/mcp-connections` (Settings → Account), sets an approval's default workspace with `POST /v1/mcp-connections/{id}/workspace`, and revokes one in Bane with `POST /v1/mcp-connections/{id}/revoke`. Revoking in Bane ends that client's access here and revokes or holds what it set up; signing the client in again at Anomaly account (a new consent there) starts a new approval, without what the revoked one created. To disconnect a client from your account everywhere, use **Connected apps** at [Anomaly account](https://account.anoma.ly/apps).
+A connected agent is an **agent token**, one of Bane's three credentials (with API keys and app passwords): its sign-in, plus the short-lived tokens it makes for scripts. Each person lists their agents with `GET /v1/agents` (the API keys page shows them with their access, last use and tokens), sets one's default workspace with `POST /v1/mcp-connections/{id}/workspace`, and revokes one in Bane with `POST /v1/agents/{id}/revoke`. Revoking in Bane ends that client's access here and every token it made, and revokes or holds what it set up; signing the client in again at Anomaly account (a new consent there) starts a new approval, without what the revoked one created. To disconnect a client from your account everywhere, use **Connected apps** at [Anomaly account](https://account.anoma.ly/apps).
 
 ## Arguments and results
 
@@ -113,7 +113,7 @@ On an API without the expected-recipient guard, MCP omits reply rather than send
 
 ### Temporary script tokens
 
-`createAgentToken` returns a signed, nonrefreshable `bane_agent_…` bearer token for temporary uncommitted scripts. The caller chooses a lifetime of 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, create mail client passwords for an inbox, or create, change or delete webhooks or read their signing secrets, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, put the token in `BANE_TOKEN` and run `npx @banemx/sdk upload <file> --api <https-origin>` so raw bytes stream directly to Bane instead of passing through MCP or model context.
+`createAgentToken` returns a signed, nonrefreshable `bane_agent_…` bearer token for temporary uncommitted scripts. The caller chooses a lifetime of 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, create mail client passwords for an inbox, or create, change or delete webhooks or read their signing secrets, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. It is listed under its agent (`GET /v1/agents`); revoking the agent revokes it. Do not commit it or place it in logs. For local files, put the token in `BANE_TOKEN` and run `npx @banemx/sdk upload <file> --api <https-origin>` so raw bytes stream directly to Bane instead of passing through MCP or model context.
 
 `queryAudience` runs the restricted AudienceQL language over contacts, lists and existing segments. It executes bounded `SELECT` reads. Mutations use `planAudienceMutation` followed by confirmed `applyAudiencePlan`, freezing at most 10,000 contact IDs for 15 minutes and rejecting stale contact updates. Supported mutations update contact names, consent and `properties.key` values, or add/remove matching contacts from a list. AudienceQL never exposes physical tables, joins, DDL, comments or multiple statements. Prior opt-outs require `confirmResubscribe`; suppression is never lifted.
 
@@ -129,17 +129,17 @@ Requests are not retried automatically. `idempotencyKey` is forwarded as `Idempo
 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
-The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An address-scoped `bane_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
+The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `BANE_API_URL` and `BANE_API_KEY`; writes additionally require `BANE_MCP_ALLOW_WRITES=true`. An API key limited to addresses (`bane_mbx_…`) exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
 
 ### Agent inboxes
 
-An agent can get its own expiring address, wait for mail and read it, with nothing but an inbox key. On hosted Bane pass the key as the bearer token; no OAuth is needed. For OpenCode:
+An agent can get its own expiring address, wait for mail and read it, with nothing but an API key limited to its inboxes. On hosted Bane pass the key as the bearer token; no OAuth is needed. For OpenCode:
 
 ```json
 {"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}
 ```
 
-Use a provisioning key (`POST /v1/inbound/keys` with `permissions: ["create","read","modify"]` and `addressIds: []`) to let the agent create inboxes, or the per-inbox key that `createInbox` returns to give it one inbox only. Either key sees only the inbox tools its permissions allow:
+Use an API key that creates inboxes (`POST /v1/api-keys` with `access: {"type":"addresses","addressIds":[],"mail":["create","read","modify"]}`) to let the agent create inboxes, or an API key for one inbox (`access: {"type":"inbox","inboxId":"mbx_…"}`, or `credential` on `createInbox`) to give it that inbox only; it stops working when the inbox is deleted. Either key sees only the inbox tools its permissions allow:
 
 | Tool | Does |
 |---|---|

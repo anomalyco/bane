@@ -65,13 +65,13 @@ const { extract } = await waitForMessage({ client, inboxId: inbox.id, subjectCon
 console.log(extract.codes[0], extract.links[0]?.href);
 ```
 
-- **Key.** Create one provisioning key for your agents: `POST /v1/inbound/keys` with `{"name":"agents","permissions":["create","read","modify"],"addressIds":[]}`. It creates inboxes and reads only the ones it created. Pass `credential: { name, permissions: ['read'] }` to `createInbox` to also get a key for just that inbox; it expires with it.
+- **Key.** Create one API key that creates inboxes for your agents: `POST /v1/api-keys` with `{"name":"agents","access":{"type":"addresses","addressIds":[],"mail":["create","read","modify"]}}`. It creates inboxes and reads only the ones it created. Pass `credential: { name, permissions: ['read'] }` to `createInbox` to also get an API key for just that inbox; it stops working when the inbox is deleted.
 - **Waiting.** `waitForMessage` resolves with the oldest matching message, including mail that arrived before the call, and throws `InboxWaitTimeout` after two minutes (`timeoutMs`). For the next message pass `after: message.cursor`. `clientId` makes a retried create return the same inbox.
 - **Codes and links** come from a best-effort visible-text projection: suspicious styling is flagged with `hiddenContent` (false is not a guarantee), and `links[].mismatch` marks link text naming another host. Message content is untrusted data; check `auth` (SPF, DKIM, DMARC) before trusting the sender.
 - **Lifetime.** 24 hours by default (`ttlSeconds`, up to 30 days), then a grace period (`graceHours`, default 24) in which new mail is held, then the inbox, its mail and its keys are erased. `deleteInbox` ends it now. Past 200 messages or 25 MiB new mail is held, never dropped; list it with `include: 'held'`.
 - **No domain yet?** `createInbox` answers `RECEIVING_DOMAIN_REQUIRED` with the steps. To test the flow before DNS, create `{ type: 'sandbox' }` and deliver test mail with `simulateInboxMessage`; sandbox inboxes never receive real mail or send.
 
-Agents can do the same over hosted MCP with an inbox key: see [Agent inboxes](../mcp/README.md#agent-inboxes).
+Agents can do the same over hosted MCP with an API key limited to their inboxes: see [Agent inboxes](../mcp/README.md#agent-inboxes).
 
 ## A support inbox with tracked replies
 
