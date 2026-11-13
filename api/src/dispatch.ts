@@ -103,7 +103,7 @@ export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDu
     const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
     try { return (await runDispatcher(runtime, { accountId, region, gate, priorityWake, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
     catch (error) {
-      log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', accountId, region, message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying next cycle.' });
+      log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', accountId, region }); // Retried on the next cycle.
       return 0;
     }
   };

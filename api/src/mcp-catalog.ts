@@ -58,7 +58,7 @@ const READ_LEVEL_WRITES = new Set(['createAgentToken']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
-const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection']);
+const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -225,7 +225,7 @@ const DESCRIPTIONS: Record<string, string> = {
   listRitualTemplates: 'Nine working starting points (Slack, Discord, JSON webhook, forward, newsletters, refund omen, block a domain, VIP allow-list, failed DMARC), filled in with this workspace’s endpoints.',
   createEndpoint: 'Create a named endpoint that rituals call as endpoints.<name>(…): type slack or discord (url is a write-only credential), webhook (signed JSON; secret returned once) or forward (address; the recipient confirms by emailed link, so the result is pending with a nextStep). preverify skips the email for addresses on a domain this workspace verified.',
   sendEndpointVerification: 'Email a forward recipient a new single-use confirmation link. Only the recipient can confirm by opening it and choosing Allow; poll getEndpoint for status.',
-  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
+  createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
   createBillingTopUpLink: 'Returns a Stripe Checkout link for a person to open and pay; agents cannot pay. Share the link with an owner or admin. Amount in whole cents, $20 to $10,000, excluding tax; the link expires in 23 hours and credit appears once Stripe confirms the payment.',
   createApiKey: 'Create a long-lived API key. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP, it is tied to this approval: it delivers while the approval is active and is paused when the approval is removed, resuming only with its URL and a new signing secret.',
@@ -277,7 +277,8 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   const operations = new Map<string, McpOperation>();
   for (const [path, item] of Object.entries(spec.paths)) {
     if (!/^\/v1\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\})(?:\/(?:[A-Za-z0-9_-]+|\{[A-Za-z][A-Za-z0-9_-]*\}))*$/.test(path)) continue;
-    if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path)) continue;
+    // Support and operator routes are internal (Bane staff and support grants only): never an MCP tool.
+    if (/^\/v1\/(?:auth|dashboard|events)(?:\/|$)/.test(path) || INTERNAL_PATH.test(path)) continue;
     for (const [method, operation] of Object.entries(item as ObjectValue)) {
       if (!METHODS.has(method) || !object(operation)) continue;
       const name = operation.operationId;
@@ -343,13 +344,17 @@ export const HUMAN_STEPS: Record<string, string> = {
   getDomainDnsSetup: 'Human step: Domain Connect opens the DNS provider in a browser. Agents can read the domain’s DNS records instead.',
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
+  listActivity: 'Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity).',
+  contactSupport: 'Human step: a signed-in person contacts Bane support from the dashboard.',
   createBillingTopUp: 'Human step: only a signed-in owner or admin charges the saved card or opens Checkout from the dashboard. Agents create a link a person pays (billing · topUpLink).',
   updateBillingAutoRecharge: 'Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard.',
   createBillingCardSetup: 'Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach Bane or an agent.',
   deleteBillingPaymentMethod: 'Human step: a signed-in owner or admin removes the saved card in the dashboard.',
-  revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
+  revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
+/** Internal routes (Bane operators and support grants): never tools, and not listed in the customer coverage document. */
+export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;
 /** Account administration that the API keeps to signed-in people (members, invitations, workspaces, BYO AWS). */
 export const ACCOUNT_STEPS = /^(?:listWorkspaces|createWorkspace|renameCurrentWorkspace|listWorkspaceMembers|inviteWorkspaceMember|createWorkspaceInvitation|listWorkspaceInvitations|revokeWorkspaceInvitation|updateWorkspaceMember|removeWorkspaceMember|getWorkspaceInvitation|acceptWorkspaceInvitation|getConnection|createConnection|deleteConnection|listConnectionRegions|refreshConnectionScan|importConnectionDomains|getConnectionRegionStatus|verifyConnection)$/;
 /** docs/mcp-coverage.md, generated from the catalog so the document cannot drift from the code. */
@@ -360,7 +365,7 @@ export function coverageMarkdown(catalog: ReadonlyMap<string, McpOperation>, spe
     if (op) byOperation.set(operation, `\`${name}\` · \`${action}\` · ${op.toolset}`);
   }
   const rows: string[] = [];
-  for (const item of Object.values(spec.paths ?? {}) as ObjectValue[]) for (const operation of Object.values(item)) {
+  for (const [path, item] of Object.entries(spec.paths ?? {}) as [string, ObjectValue][]) for (const operation of INTERNAL_PATH.test(path) ? [] : Object.values(item)) {
     const id = (operation as ObjectValue)?.operationId;
     if (typeof id !== 'string') continue;
     rows.push(`| \`${id}\` | ${byOperation.get(id) ?? HUMAN_STEPS[id] ?? (ACCOUNT_STEPS.test(id) ? 'Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS).' : 'UNCOVERED')} |`);

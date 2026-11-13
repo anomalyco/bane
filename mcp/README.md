@@ -7,8 +7,8 @@ If you authorised your client against `https://opensend.mx/mcp`, reconnect it to
 ## Connect
 
 1. Add the HTTPS URL as a remote HTTP MCP server in your client.
-2. Start OAuth authorization. Bane reuses your dashboard's Google session in the same browser/profile. If you are signed out, use the normal Google sign-in.
-3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
+2. Start OAuth authorization at the issuer advertised by Bane’s protected resource metadata.
+3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or ID token.
 
 Choose the catalog that fits your client:
 
@@ -32,9 +32,9 @@ OAuth scopes map to the existing API permissions:
 | `bane:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
 | `offline_access` | Obtain a rotating refresh token, valid for up to 30 days. |
 
-Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
+Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's OIDC approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
-Authenticated dashboard clients can inspect their approvals with `GET /api/auth/oauth2/get-consents` and revoke one with `POST /api/auth/oauth2/delete-consent` and JSON `{ "id": "consent-id" }`. Revocation requires the dashboard session and canonical Origin. These are not MCP tools.
+Each person lists their own approvals at `GET /v1/mcp-connections` (Settings → Account), chooses an approval's workspace and receiving with `POST /v1/mcp-connections/{id}/workspace`, and revokes one with `POST /v1/mcp-connections/{id}/revoke`.
 
 ## Arguments and results
 
@@ -85,7 +85,7 @@ Requests are not retried automatically. `idempotencyKey` is forwarded as `Idempo
 
 ## Hosting and safety
 
-- OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
+- OAuth discovery is available through the root and resource-path protected-resource metadata URLs. MCP clients register and authorize at the stage's account issuer using its discovery metadata.
 - HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
 - Long-lived keys created through MCP remain tied to the approval, and so do sending webhooks it sets up, changes or reads the signing secret of. While the approval is not active, the keys are refused and deliveries to those webhooks fail unsent (`APPROVAL_INACTIVE`). Removing the approval revokes the keys and pauses the webhooks; a webhook paused this way resumes only when its URL is sent again (`WEBHOOK_URL_REQUIRED` otherwise) and gets a new signing secret then. Provider notifications, unsubscribe links and browser consent are not agent tools. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
 - The deployment, not the OAuth grant, controls SES simulation. Simulation is not a dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
@@ -117,4 +117,12 @@ A typical run: `createInbox` → give the address to the sign-up form → `waitF
 
 ### Receiving consent
 
-To manage receiving, request `bane:manage` and explicitly approve receiving on the human OAuth screen. Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Endpoint URLs are write-only, so a Slack, Discord or webhook destination held this way resumes only after its URL is sent again (`ENDPOINT_URL_REQUIRED` otherwise). Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
+To manage receiving, request `bane:manage`, then turn on **Receiving tools** for the approval in Settings → Account (owners and admins only). Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Endpoint URLs are write-only, so a Slack, Discord or webhook destination held this way resumes only after its URL is sent again (`ENDPOINT_URL_REQUIRED` otherwise). Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
+
+## Account authorization and Bane approvals
+
+Set `ACCOUNT_ISSUER` to the HTTPS issuer that signs access tokens for this installation. Resource discovery is available at `${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp`. The resource indicator is the absolute `${PUBLIC_URL}/mcp` URI, including `/mcp`. Clients discover and request authorization at the issuer. During cutover each user authorizes their client again; existing Bane-issued grants cannot be exchanged at the new issuer.
+
+`bane:read`, `bane:send` and `bane:manage` request the corresponding Bane permissions. The resource verifies the JWT signature and audience, requires a matching Bane `(issuer, subject)` identity, and checks live workspace membership. Members cannot acquire `manage`. When the user belongs to several workspaces, the first token creates a pending approval and gets a 403 that names Settings → Account, where the user chooses its workspace; access starts on the next request. Hosted Bane also requires every access token to carry `acr=urn:anomaly:acr:google` (`ACCOUNT_REQUIRED_ACR`); other tokens get a 401 `insufficient_user_authentication` challenge. A sender-constrained access token requires its matching DPoP proof on every request.
+
+For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. The account issuer supplies the same public subject on dashboard sign-in and on MCP access tokens. Bane maintains one approval per user and client ID, including across token refreshes. In **Settings → Account**, revoke a client to block subsequent tokens from that client in Bane. Use the **Manage connected apps** link to revoke the grant at the issuer. The cutover shows legacy approvals as expired and revokes their tokens and derived credentials. Reconnect through the account service to authorize again.

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { actor, actorMailAccess, ApiError, dashboardSession, errors, json, notFound, response, security, type Actor, type App, type Ctx, type DbExecutor } from '../core.js';
-import { mutate, operatorActor, operatorRequestHash, writeOperatorAudit } from '../operator.js';
+import { mutate, operatorActor, operatorRequestHash, type OperatorAudit, type OperatorIdentity } from '../operator.js';
+import { operatorContext, recordAudit } from '../audit.js';
 import { MicroCentsJson } from './money.js';
 import { readBilling } from './state.js';
 import { chargeSavedCardTopUp, createCardSetup, createCheckoutTopUp, getPayment, listPayments, refundTopUp, removePaymentMethod, setAutoRecharge } from './stripe.js';
@@ -244,7 +245,7 @@ export function registerBilling(app: App) {
 }
 
 // ---------- operator tools (hidden from the public OpenAPI document) ----------
-// Each change goes through the operator API's mutate(): Idempotency-Key, and a hosted_operator_audit row with the
+// Each change goes through the operator API's mutate(): Idempotency-Key, and a billing.* audit row (#137) with the
 // reason, before and after, in the same transaction as the money (billing_post). Refunds call Stripe, which never
 // runs inside a transaction: package B holds the amount first, and the audit row commits right after.
 const Reason = z.string().trim().min(10).max(1000).describe('Why, for the audit log (at least 10 characters).');
@@ -269,6 +270,15 @@ type Posted = { applied: boolean; entryId?: string; balanceUc: string; promoUc: 
 const post = async (tx: DbExecutor, wid: string, kind: LedgerKind, source: string, paid: bigint, promo: bigint, detail: Record<string, unknown>, who: string) =>
   (await tx.execute<{ r: Posted }>(sql`SELECT billing_post(${wid}::text,${kind}::text,${source}::text,${paid.toString()}::bigint,${promo.toString()}::bigint,${JSON.stringify(detail)}::jsonb,${who}::text) AS r`)).rows[0]!.r;
 const isoAt = (column: ReturnType<typeof sql>) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
+/**
+ * An operator's billing change in the audit trail (#137): billing.<action>, kept 7 years (retention 'billing'), with the
+ * reason, ticket, before and after, in the transaction that makes the change. workspaceId null is a person's flag.
+ */
+const billingAudit = (tx: DbExecutor, c: Ctx, operator: OperatorIdentity, workspaceId: string | null, audit: OperatorAudit & { userId?: string }) =>
+  recordAudit(tx, operatorContext(c, { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId }), {
+    action: `billing.${audit.action.replace(/^billing-/, '').replace(/-/g, '_')}`, workspaceId, userId: audit.userId ?? null,
+    target: workspaceId ? { type: 'workspace', id: workspaceId } : { type: 'user', id: audit.userId ?? null },
+    before: audit.before, after: audit.after, reason: audit.reason, ticketRef: audit.ticketRef ?? null, retention: 'billing' });
 const sourceKey = (c: Ctx, operatorId: string) => { const key = c.req.header('Idempotency-Key'); return key ? `${operatorId}:${key}` : randomUUID(); };
 
 const OperatorFree = z.object({ free: z.boolean(), via: z.enum(['workspace', 'account']).nullable(), until: z.string().nullable(),
@@ -291,7 +301,7 @@ function registerOperatorBilling(app: App) {
         'workspace', (SELECT jsonb_build_object('at',${isoAt(sql`free_at`)},'until',${isoAt(sql`free_until`)},'reason',free_reason,'by',free_by,'expired',coalesce(free_until<=now(),false))
           FROM billing_accounts WHERE workspace_id=${wid} AND free_at IS NOT NULL),
         'people', coalesce((SELECT jsonb_agg(jsonb_build_object('userId',m.user_id,'email',u.email,'role',m.role,'free',f.free) ORDER BY m.role,u.email)
-          FROM workspace_members m JOIN auth_user u ON u.id=m.user_id
+          FROM workspace_members m JOIN bane_users u ON u.id=m.user_id
           LEFT JOIN LATERAL (SELECT jsonb_build_object('reason',p.reason,'until',${isoAt(sql`p.until`)},'grantedAt',${isoAt(sql`p.granted_at`)},'grantedBy',p.granted_by,'live',p.until IS NULL OR p.until>now()) AS free
             FROM billing_user_identities(m.user_id) i JOIN billing_free_people p ON p.issuer=i.issuer AND p.subject=i.subject ORDER BY p.granted_at DESC LIMIT 1) f ON true
           WHERE m.workspace_id=${wid}),'[]')) AS free`);
@@ -312,7 +322,7 @@ function registerOperatorBilling(app: App) {
       const after = await accountOf(tx, wid);
       return { result: { ok: true as const, ...('applied' in posted ? { applied: posted.applied, entryId: posted.entryId ?? null } : {}), account: after },
         audit: { action, before, after, reason: body.reason, ticketRef: body.ticketRef } };
-    });
+    }, (tx, audit) => billingAudit(tx, c, operator, wid, audit));
   };
   const Done = z.object({ ok: z.literal(true), applied: z.boolean().optional(), entryId: z.string().nullable().optional(), account: z.unknown() });
 
@@ -376,7 +386,7 @@ function registerOperatorBilling(app: App) {
     responses: { 200: response(z.object({ ok: z.literal(true), workspaces: z.array(z.object({ workspaceId: z.string(), free: z.boolean(), via: z.string().nullable(), until: z.string().nullable(), mode: z.string() })) })), ...errors } }), async c => {
     const operator = await operatorActor(c, 'operator'), userId = c.req.valid('param').userId, body = c.req.valid('json'), until = body.free ? futureUntil(body.until) : null, who = `operator:${operator.userId}`;
     if (!body.free && body.until) throw new ApiError(422, 'VALIDATION_FAILED', 'until applies only when making the account free.', 'until');
-    const { rows: [person] } = await c.env.db.execute<{ id: string | null; identities: number }>(sql`SELECT (SELECT id FROM auth_user WHERE id=${userId}) AS id,(SELECT count(*)::int FROM billing_user_identities(${userId})) AS identities`);
+    const { rows: [person] } = await c.env.db.execute<{ id: string | null; identities: number }>(sql`SELECT (SELECT id FROM bane_users WHERE id=${userId}) AS id,(SELECT count(*)::int FROM billing_user_identities(${userId})) AS identities`);
     if (!person?.id) notFound('User');
     if (body.free && !person.identities) throw new ApiError(422, 'NO_SIGN_IN_IDENTITY', 'This person has no sign-in identity to bind a free account to; they need to sign in once first.');
     type Changed = { workspaceId: string; free: boolean; via: string | null; until: string | null; mode: string };
@@ -386,10 +396,10 @@ function registerOperatorBilling(app: App) {
       const workspaces = r!.r.map(w => ({ ...w, until: w.until ? new Date(w.until).toISOString() : null }));
       for (const w of workspaces) {
         const was = owned.find(o => o.id === w.workspaceId)?.mode ?? 'prepaid';
-        if (was !== w.mode) await writeOperatorAudit(tx, c, operator, w.workspaceId, { action: body.free ? 'billing-free-owner-on' : 'billing-free-owner-off', before: { mode: was }, after: { mode: w.mode, via: w.via, userId }, reason: body.reason, ticketRef: body.ticketRef });
+        if (was !== w.mode) await billingAudit(tx, c, operator, w.workspaceId, { action: body.free ? 'billing-free-owner-on' : 'billing-free-owner-off', before: { mode: was }, after: { mode: w.mode, via: w.via, userId }, reason: body.reason, ticketRef: body.ticketRef });
       }
       return { result: { ok: true as const, workspaces }, audit: { action: body.free ? 'billing-free-account-on' : 'billing-free-account-off', before: { userId }, after: { userId, until, workspaces: workspaces.map(w => w.workspaceId) }, reason: body.reason, ticketRef: body.ticketRef } };
-    }), 200);
+    }, (tx, audit) => billingAudit(tx, c, operator, null, { ...audit, userId })), 200);
   });
 
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'post', path: '/v1/operator/billing/{wid}/refunds', operationId: 'operatorRefundTopUp',
@@ -407,7 +417,7 @@ function registerOperatorBilling(app: App) {
     const refund = await refundTopUp(c.env, { workspaceId: wid, attemptId: body.attemptId, amountCents: body.amountCents, basis: body.basis, reason: body.reason, operator: `operator:${operator.userId}`,
       onHeld: async (tx, held) => {
         const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
-        await writeOperatorAudit(tx, c, operator, wid, { action: 'billing-refund', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
+        await billingAudit(tx, c, operator, wid, { action: 'billing-refund', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
         if (key && !(await tx.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify({ refundId: held.refundId, status: 'held' })}::jsonb)
           ON CONFLICT DO NOTHING RETURNING 1`)).rows.length) throw new ApiError(409, 'IDEMPOTENCY_IN_PROGRESS', 'A request with this Idempotency-Key is already refunding; read the refund before trying again.', undefined, true);
       } });
@@ -431,7 +441,7 @@ function registerOperatorBilling(app: App) {
         const r = await refundTopUp(c.env, { workspaceId: wid, attemptId: lot.attempt_id, basis: 'account_closure', reason: body.reason, operator: `operator:${operator.userId}`,
           onHeld: async (tx, held) => {
             const after = await accountOf(tx, wid), before = { ...after, balance_uc: (BigInt(after.balance_uc) + held.amountUc).toString() };
-            await writeOperatorAudit(tx, c, operator, wid, { action: 'billing-refund-closure', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
+            await billingAudit(tx, c, operator, wid, { action: 'billing-refund-closure', before, after: { ...after, refundId: held.refundId, amountUc: held.amountUc.toString() }, reason: body.reason, ticketRef: body.ticketRef });
           } });
         refunds.push({ refundId: r.refundId, attemptId: lot.attempt_id, amountCents: lot.cents, status: r.status });
       } catch (error) { if (!(error instanceof ApiError && error.code === 'REFUND_EXCEEDS_BALANCE')) throw error; }   // spent meanwhile: nothing left of it

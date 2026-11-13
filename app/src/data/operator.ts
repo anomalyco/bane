@@ -7,7 +7,7 @@ export type OperatorRole = 'operator' | 'operator:read'
 export interface OperatorQueueItem { workspaceId: string; name: string; step: StandingStep; since: string; score: number | null; dailyLimit: number; reasons: { code: string; message: string }[]; paused: boolean; quarantined: number; watch: boolean; strikes: number }
 export interface OperatorDomain { name: string; region: string | null; pool: string; dkim: boolean; mailFrom: boolean; dmarc: string | null }
 /** What Bane last applied to one regional SES tenant; none listed means never switched (enabled). */
-export interface OperatorTenant { region: string; applied: 'ENABLED' | 'DISABLED'; generation: number; appliedAt: string }
+export interface OperatorTenant { region: string; applied: 'ENABLED' | 'DISABLING' | 'DISABLED'; generation: number; appliedAt: string }
 export interface OperatorMember { userId: string; email: string; role: string }
 export interface OperatorCampaign { id: string; name: string; state: string; pauseReason: { code?: string; message?: string } | null; quarantines: number }
 export interface OperatorWorkspace {

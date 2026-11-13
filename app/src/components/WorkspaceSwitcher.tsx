@@ -4,10 +4,13 @@ import { useApiMutation, useSession } from '../data/context'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
 import { fieldError, MutationError } from '../features/settings/shared'
 import { Button, Dialog, Field, Input, Select, useToast } from './ui'
+import { ContactSupportDialog } from './ContactSupport'
 
 const createValue = 'new-workspace'
+const supportValue = 'contact-support'
 
-// Multi-tenant only. Shown in the dashboard sidebar and the onboarding header.
+// Multi-tenant only. Shown in the dashboard sidebar and the onboarding header. Besides the workspaces it offers
+// New workspace… and Contact support…, which open their dialogs and leave the selection as it was.
 export function WorkspaceSwitcher() {
   const session = useSession()
   const toast = useToast()
@@ -17,6 +20,7 @@ export function WorkspaceSwitcher() {
   const memberships = useMembershipCache()
   const [switching, setSwitching] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [support, setSupport] = useState(false)
   async function changeWorkspace(id: string, path?: string) {
     // Detail routes belong to the previous workspace; keep only the section.
     const [section, child] = location.pathname.split('/').filter(Boolean)
@@ -26,9 +30,10 @@ export function WorkspaceSwitcher() {
     catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false); void memberships.refresh() }
   }
   const known = workspaces?.some(workspace => workspace.id === session?.identity?.workspaceId) ?? false
-  const options = workspaces ? [...workspaces.map(workspace => ({ value: workspace.id, label: workspace.name })), { value: createValue, label: 'New workspace…' }] : []
+  const options = workspaces ? [...workspaces.map(workspace => ({ value: workspace.id, label: workspace.name })), { value: createValue, label: 'New workspace…' }, { value: supportValue, label: 'Contact support…' }] : []
   return <>
-    <Select id="sidebar-workspace" aria-label="Workspace" value={known ? session?.identity?.workspaceId ?? '' : ''} onValueChange={id => { if (id === createValue) setCreating(true); else void changeWorkspace(id) }} options={options} disabled={switching || !workspaces} placeholder="Workspace" />
+    <Select id="sidebar-workspace" aria-label="Workspace" value={known ? session?.identity?.workspaceId ?? '' : ''} onValueChange={id => { if (id === createValue) setCreating(true); else if (id === supportValue) setSupport(true); else void changeWorkspace(id) }} options={options} disabled={switching || !workspaces} placeholder="Workspace" />
+    {support && <ContactSupportDialog onClose={() => { setSupport(false); requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus()) }} />}
     {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus()) }} onCreated={id => void changeWorkspace(id, '/')} />}
   </>
 }

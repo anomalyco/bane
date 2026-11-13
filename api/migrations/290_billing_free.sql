@@ -2,8 +2,8 @@ SET LOCAL lock_timeout='2s';
 -- Free (not billed) workspaces and people. billing_accounts.mode stays the one column the gate, settlement, notices and
 -- auto-recharge read: 'exempt' means free. It is derived here from two flags, both set only by operators (audited):
 --   - the workspace flag (free_at, with an optional reason and expiry), the exemption set-billing-mode has always set;
---   - a person's flag (billing_free_people), bound to their sign-in identity (issuer + subject, never an email): every
---     workspace they own is free while they own it.
+--   - a person's flag (billing_free_people), bound to their sign-in identity (issuer + subject from bane_oidc_identities,
+--     never an email): every workspace they own is free while they own it.
 -- paid_mode is what the workspace is when neither applies. A free workspace is never gated or charged; its usage is
 -- still metered and settled at $0 with the would-be cost recorded, so the cost of free accounts stays visible.
 ALTER TABLE billing_accounts
@@ -26,18 +26,11 @@ CREATE TABLE billing_free_people (
   PRIMARY KEY (issuer, subject));
 CREATE INDEX billing_free_people_user ON billing_free_people (user_id);
 
--- A user's sign-in identities. The one link between billing and identity storage: the OIDC table when it exists
--- (bane_oidc_identities, after the sign-in move), otherwise auth_account (Google's sub, or the account.anoma.ly pair).
-CREATE FUNCTION billing_user_identities(uid text) RETURNS TABLE(issuer text, subject text) LANGUAGE plpgsql STABLE AS $$
-BEGIN
-  IF to_regclass('bane_oidc_identities') IS NOT NULL THEN
-    RETURN QUERY EXECUTE 'SELECT issuer::text, subject::text FROM bane_oidc_identities WHERE user_id=$1' USING uid;
-  ELSE
-    RETURN QUERY EXECUTE $q$SELECT CASE WHEN provider_id='account' THEN account_id::jsonb->>0 ELSE 'https://accounts.google.com' END,
-        CASE WHEN provider_id='account' THEN account_id::jsonb->>1 ELSE account_id END
-      FROM auth_account WHERE user_id=$1 AND provider_id IN ('google','account') AND account_id<>''$q$ USING uid;
-  END IF;
-END $$;
+-- A user's sign-in identities (bane_oidc_identities, #89): issuer + subject, https://account.anoma.ly in production.
+-- The one link between billing and identity storage.
+CREATE FUNCTION billing_user_identities(uid text) RETURNS TABLE(issuer text, subject text) LANGUAGE sql STABLE AS $$
+  SELECT issuer::text, subject::text FROM bane_oidc_identities WHERE user_id=uid
+$$;
 
 -- Whether a workspace is free now, why, and until when (null: no end). Both flags may apply; the later end wins.
 CREATE FUNCTION billing_free_state(wid text) RETURNS jsonb LANGUAGE sql STABLE AS $$
@@ -138,3 +131,23 @@ BEGIN
   END LOOP;
   RETURN n;
 END $$;
+
+-- Money movements reach the audit trail (#137, audit_events) in the statement that posts them, with billing's 7-year
+-- retention and visible in the customer's Activity: top-ups, refunds, disputes, write-offs, expiries and the like from
+-- Stripe, jobs or a person. Hourly usage rows are not events. Operator changes are recorded by their routes instead
+-- (billing.* with the reason), so they are not written twice.
+CREATE FUNCTION billing_ledger_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO audit_events(workspace_id, user_id, actor_type, actor_id, via, action, target_type, target_id, summary, internal, retain_until)
+  VALUES (NEW.workspace_id, CASE WHEN NEW.actor LIKE 'user:%' THEN substr(NEW.actor, 6) END,
+    CASE WHEN NEW.actor='stripe' THEN 'stripe' WHEN NEW.actor LIKE 'user:%' THEN 'member' WHEN NEW.actor LIKE 'key:%' THEN 'api_key' ELSE 'system' END,
+    nullif(substr(NEW.actor, strpos(NEW.actor, ':') + 1), NEW.actor),
+    CASE WHEN NEW.actor='stripe' THEN 'webhook' WHEN NEW.actor LIKE 'user:%' THEN 'dashboard' WHEN NEW.actor LIKE 'key:%' THEN 'api' ELSE 'job' END,
+    'billing.' || NEW.kind, 'billing_ledger', NEW.id::text,
+    jsonb_build_object('amountUc', (NEW.paid_uc + NEW.promo_uc)::text, 'paidUc', NEW.paid_uc::text, 'promoUc', NEW.promo_uc::text,
+      'balanceAfterUc', (NEW.balance_after_uc + NEW.promo_after_uc)::text, 'source', left(NEW.source_id, 120)),
+    false, now() + interval '7 years');
+  RETURN NULL;
+END $$;
+CREATE TRIGGER billing_ledger_audit AFTER INSERT ON billing_ledger FOR EACH ROW
+  WHEN (NEW.kind <> 'usage' AND NEW.actor NOT LIKE 'operator:%') EXECUTE FUNCTION billing_ledger_audit();

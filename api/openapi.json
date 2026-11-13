@@ -20,20 +20,11 @@
       },
       {
         "title": "Receive (optional)",
-        "text": "Publish the receiving MX record from the domain page. Hosted Bane suggests a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
+        "text": "Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks."
       },
       {
         "title": "Reply",
         "text": "POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References."
-      }
-    ],
-    "x-guides": [
-      {
-        "id": "webhook-signatures",
-        "title": "Verify webhook signatures",
-        "language": "js",
-        "code": "import { createHmac, timingSafeEqual } from 'node:crypto'\n\n// secret: the webhook's signing secret (whsec_…). body: the raw request body, before JSON.parse.\nexport function verifyBaneWebhook(secret, headers, body) {\n  const id = headers['webhook-id'], timestamp = headers['webhook-timestamp']\n  if (!id || !timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false\n  const key = Buffer.from(secret.slice('whsec_'.length), 'base64')\n  const expected = createHmac('sha256', key).update(`${id}.${timestamp}.${body}`).digest()\n  return String(headers['webhook-signature'] ?? '').split(' ').some(part => {\n    const [version, signature = ''] = part.split(',')\n    const given = Buffer.from(signature, 'base64')\n    return version === 'v1' && given.length === expected.length && timingSafeEqual(given, expected)\n  })\n}",
-        "text": "Every webhook delivery (email events and inbound webhooks alike) carries Webhook-Id, Webhook-Timestamp (Unix seconds) and Webhook-Signature headers in the Standard Webhooks format. Compute HMAC-SHA256 over \"{Webhook-Id}.{Webhook-Timestamp}.{raw body}\" with the base64-decoded part of the signing secret after whsec_, and compare it in constant time to the value after v1, in Webhook-Signature. Reject timestamps more than five minutes old, and use Webhook-Id to skip a delivery you already handled. Standard Webhooks libraries (such as the standardwebhooks npm package) verify it too. The secret is shown once when you create a webhook; reveal or rotate it on the webhook’s page, or with revealWebhookSecret (from an API key you made: MCP approvals and agent tokens can only rotate it) and rotateWebhookSecret. Every reveal and rotation is recorded."
       }
     ]
   },
@@ -48,13 +39,13 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "bane.session_token",
-        "description": "Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-bane.session_token",
-        "description": "Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
     "schemas": {
@@ -87,6 +78,23 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "revoked",
+              "expired"
+            ]
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receiving": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -96,7 +104,10 @@
           "userEmail",
           "scopes",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "status",
+          "workspaceId",
+          "receiving"
         ]
       },
       "ApiError": {
@@ -145,6 +156,24 @@
         "required": [
           "error"
         ]
+      },
+      "McpConnectionBinding": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "receiving": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "receiving"
+        ],
+        "additionalProperties": false
       },
       "ConnectionSummary": {
         "type": [
@@ -304,7 +333,7 @@
           "tenant",
           "sendingPause"
         ],
-        "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
+        "description": "The current workspace's hosted sending connection; null when self-hosted."
       },
       "Workspace": {
         "type": "object",
@@ -3163,6 +3192,10 @@
               "message"
             ]
           },
+          "deliveredOnly": {
+            "type": "boolean",
+            "description": "After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled."
+          },
           "waiting": {
             "type": [
               "object",
@@ -3187,7 +3220,7 @@
               "reason",
               "until"
             ],
-            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. balance: the workspace's Bane balance is empty; releasing resumes when credit is added."
+            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest."
           }
         },
         "required": [
@@ -3199,6 +3232,7 @@
           "pacing",
           "pausedAt",
           "pauseReason",
+          "deliveredOnly",
           "waiting"
         ],
         "description": "The current launch: null until the campaign is sent or scheduled, and cleared by a new revision."
@@ -10270,6 +10304,25 @@
           "lastMessageAt": {
             "type": "string"
           },
+          "from": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "address"
+            ],
+            "description": "Sender of the newest visible message (the subject and snippet are from it). For a sent reply this is your own address."
+          },
           "addressIds": {
             "type": "array",
             "items": {
@@ -10286,6 +10339,7 @@
           "subject",
           "snippet",
           "lastMessageAt",
+          "from",
           "addressIds",
           "messageCount"
         ]
@@ -10816,6 +10870,10 @@
                   "null"
                 ]
               },
+              "htmlTooComplex": {
+                "type": "boolean",
+                "description": "With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it."
+              },
               "attachments": {
                 "type": "array",
                 "items": {
@@ -10864,6 +10922,7 @@
             },
             "required": [
               "html",
+              "htmlTooComplex",
               "attachments"
             ]
           }
@@ -13637,6 +13696,1024 @@
           "invitations"
         ]
       },
+      "AuditEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_."
+          },
+          "at": {
+            "type": "string",
+            "description": "When it happened (ISO 8601, UTC)."
+          },
+          "action": {
+            "type": "string",
+            "description": "What happened, as <area>.<verb>: api_key.create, member.role_change, domain.delete, support.view."
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member",
+                  "api_key",
+                  "mcp_grant",
+                  "agent_token",
+                  "inbox_key",
+                  "app_password",
+                  "operator",
+                  "support",
+                  "system",
+                  "stripe"
+                ],
+                "description": "member is a signed-in person; support is Bane support reading with your permission; system is Bane itself."
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member user ID, key ID, grant ID or support grant ID."
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "A short display name for the actor, such as a key name, or null."
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The member’s email address, for member actors."
+              }
+            },
+            "required": [
+              "type",
+              "id",
+              "label",
+              "email"
+            ]
+          },
+          "via": {
+            "type": "string",
+            "description": "Where the action came from: dashboard, api, mcp, support, job, webhook."
+          },
+          "target": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "description": "The object acted on."
+          },
+          "subject": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "userId": {
+                "type": "string"
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "userId",
+              "email"
+            ],
+            "description": "The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in."
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Before and after, with secrets and message content removed."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requestId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The x-request-id of the API request that made the change."
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client network (/24 or /48), never the full address."
+          },
+          "client": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The client family, such as \"Chrome 131 on macOS\"."
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "action",
+          "actor",
+          "via",
+          "target",
+          "subject",
+          "summary",
+          "reason",
+          "requestId",
+          "network",
+          "client"
+        ]
+      },
+      "SupportHandoff": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The support reference (sho_…). Quote it to support."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to continue with support, carrying the signed handoff; null when no support site is configured."
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The signed handoff (EdDSA JWS, 10 minutes), or null when signing is not configured."
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "Until when support can use this handoff to open read access (30 minutes, once)."
+          },
+          "shareContent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "url",
+          "token",
+          "expiresAt",
+          "shareContent"
+        ]
+      },
+      "SupportContext": {
+        "type": "object",
+        "properties": {
+          "grant": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "ticketRef": {
+                "type": "string"
+              },
+              "expiresAt": {
+                "type": "string"
+              },
+              "contentShared": {
+                "type": "boolean",
+                "description": "Whether this request may read email bodies (the customer opted in)."
+              },
+              "contentWorkspaceId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The one workspace whose email bodies this request may read, or null."
+              }
+            },
+            "required": [
+              "id",
+              "ticketRef",
+              "expiresAt",
+              "contentShared",
+              "contentWorkspaceId"
+            ]
+          },
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "email": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "email",
+              "createdAt"
+            ]
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupportWorkspace"
+            }
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupportDomain"
+            },
+            "description": "Up to 50 domains across the workspaces."
+          },
+          "recentFailures": {
+            "type": "object",
+            "properties": {
+              "since": {
+                "type": "string"
+              },
+              "sends": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "description": "Failed, rejected, suppressed and bounced sends in the last 24 hours, by code."
+              },
+              "bounces": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "description": "Bounce, complaint and reject events in the last 24 hours, by reason."
+              },
+              "webhookDeliveries": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "description": "Webhook deliveries that failed in the last 24 hours, by webhook."
+              },
+              "authErrors": {
+                "type": "null",
+                "description": "Bane does not store failed sign-ins or rejected API keys; look up a request ID instead."
+              }
+            },
+            "required": [
+              "since",
+              "sends",
+              "bounces",
+              "webhookDeliveries",
+              "authErrors"
+            ]
+          },
+          "standing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupportStanding"
+            }
+          },
+          "recentActivity": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "description": "The last 20 customer-visible audit entries (owner and admin workspaces)."
+          },
+          "openEnforcement": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "since": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "workspaceId",
+                "kind",
+                "since",
+                "reason"
+              ]
+            },
+            "description": "Paused sending and paused campaigns."
+          },
+          "handoff": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "page": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "requestIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "page",
+              "requestIds",
+              "message",
+              "createdAt"
+            ],
+            "description": "What the customer sent from \"Contact support\", if the grant came from it."
+          },
+          "links": {
+            "type": "object",
+            "properties": {
+              "requestIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Request IDs to look up with /v1/support/requests/{requestId}."
+              }
+            },
+            "required": [
+              "requestIds"
+            ]
+          }
+        },
+        "required": [
+          "grant",
+          "user",
+          "workspaces",
+          "domains",
+          "recentFailures",
+          "standing",
+          "recentActivity",
+          "openEnforcement",
+          "handoff",
+          "links"
+        ]
+      },
+      "SupportWorkspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "description": "The customer’s role in this workspace."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "sending": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "shared (Bane Hosted) or byo (their own AWS)."
+              },
+              "region": {
+                "type": "string"
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "paused": {
+                "type": "boolean"
+              },
+              "pauseReason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dailyLimitOverride": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "region",
+              "state",
+              "paused",
+              "pauseReason",
+              "dailyLimitOverride"
+            ],
+            "description": "The sending connection, or null when none is set up."
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "How many of each resource the workspace has: domains, apiKeys, webhooks, inboxes, addresses, routes, endpoints, campaigns, templates, contacts (counted up to 100,000)."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "role",
+          "createdAt",
+          "sending",
+          "counts"
+        ]
+      },
+      "SupportDomain": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sending": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "pending, verified, failed or lost."
+          },
+          "dkim": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mailFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dmarc": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receiving": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "off, pending, active or lost."
+          },
+          "lostSince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "workspaceId",
+          "id",
+          "name",
+          "region",
+          "createdAt",
+          "sending",
+          "dkim",
+          "mailFrom",
+          "dmarc",
+          "receiving",
+          "lostSince"
+        ]
+      },
+      "SupportStanding": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "connection": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {}
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "standing": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {},
+            "description": "The sender standing (step, reasons, score, daily limit) where the reputation system is enabled."
+          },
+          "last24h": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Sent mail in the last 24 hours by status (counted up to 50,000)."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "connection",
+          "limits",
+          "standing",
+          "last24h"
+        ]
+      },
+      "SupportEmail": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "received"
+            ]
+          },
+          "at": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "subject": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suppressionReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "campaignId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "simulated": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "providerMessageId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SES message ID, for provider-side lookups."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "id",
+          "direction",
+          "at",
+          "from",
+          "to",
+          "subject",
+          "status",
+          "errorCode",
+          "suppressionReason",
+          "campaignId",
+          "kind",
+          "simulated",
+          "providerMessageId"
+        ]
+      },
+      "SupportEmailDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SupportEmail"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SupportDeliveryEvent"
+                },
+                "description": "Delivery events for a sent email, oldest first."
+              },
+              "authentication": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": {},
+                "description": "SPF, DKIM and DMARC verdicts of a received email."
+              },
+              "content": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "html": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "subject",
+                  "text",
+                  "html"
+                ],
+                "description": "The body, only when the customer shared message content with this request and the email is in that workspace (grant.contentWorkspaceId); otherwise null."
+              }
+            },
+            "required": [
+              "events",
+              "authentication",
+              "content"
+            ]
+          }
+        ]
+      },
+      "SupportDeliveryEvent": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "emailId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "send, delivery, bounce, complaint, reject, open, click…"
+          },
+          "at": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "The provider’s event detail (bounce type and diagnostic, complaint feedback type)."
+          }
+        },
+        "required": [
+          "workspaceId",
+          "id",
+          "emailId",
+          "type",
+          "at",
+          "detail"
+        ]
+      },
+      "SupportWebhookDelivery": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "email",
+              "inbound"
+            ],
+            "description": "email: sending events; inbound: received mail."
+          },
+          "webhookId": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "The last four characters of the URL; URLs are credentials."
+          },
+          "eventType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "attempts": {
+            "type": "number"
+          },
+          "lastStatusCode": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "id",
+          "source",
+          "webhookId",
+          "endpoint",
+          "eventType",
+          "status",
+          "attempts",
+          "lastStatusCode",
+          "lastError",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "SupportBilling": {
+        "type": "object",
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "False until billing is enabled on this installation."
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "account": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": {}
+                },
+                "ledger": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  },
+                  "description": "The latest 50 ledger entries: top-ups, usage, refunds, disputes, credits."
+                }
+              },
+              "required": [
+                "workspaceId",
+                "account",
+                "ledger"
+              ]
+            }
+          }
+        },
+        "required": [
+          "available",
+          "data"
+        ]
+      },
+      "SupportRequestTrace": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "found": {
+            "type": "boolean",
+            "description": "Whether Bane stored anything about this request for this customer."
+          },
+          "auditEvents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "description": "Changes the request made."
+          },
+          "campaigns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "error": {}
+              },
+              "required": [
+                "workspaceId",
+                "id",
+                "name",
+                "state"
+              ]
+            },
+            "description": "Campaign launches the request started."
+          },
+          "routingVersions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "number"
+                },
+                "resourceId": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workspaceId",
+                "version",
+                "resourceId",
+                "at"
+              ]
+            },
+            "description": "Routing versions the request wrote."
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "found",
+          "auditEvents",
+          "campaigns",
+          "routingVersions",
+          "note"
+        ]
+      },
       "BillingSummary": {
         "type": "object",
         "properties": {
@@ -14451,6 +15528,187 @@
         ]
       }
     },
+    "/v1/mcp-connections/{id}/workspace": {
+      "post": {
+        "operationId": "bindMcpConnection",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpConnectionBinding"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "workspaceId": {
+                      "type": "string"
+                    },
+                    "receiving": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "workspaceId",
+                    "receiving"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { bindMcpConnection } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await bindMcpConnection({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"workspaceId\": \"workspace_123\",\n    \"receiving\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections/resource_123/workspace' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"workspaceId\": \"workspace_123\",\n  \"receiving\": false\n}'"
+          }
+        ]
+      }
+    },
     "/v1/mcp-connections/{id}/revoke": {
       "post": {
         "operationId": "revokeMcpConnection",
@@ -14717,7 +15975,7 @@
                       "items": {
                         "$ref": "#/components/schemas/Workspace"
                       },
-                      "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
+                      "description": "A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted."
                     },
                     "operator": {
                       "type": [
@@ -14937,7 +16195,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.",
+        "description": "A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.",
         "requestBody": {
           "required": true,
           "content": {
@@ -33471,7 +34729,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive results cached for up to 60 seconds; a change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). The score (0–100) grows from the quality of what the workspace sends: complaints, the spam screen, bounces, list quality, authentication and engagement, decayed with a 30-day half-life. Hosted: calibrating at 100/day until 100 real recipients were accepted and 24 hours passed; then the limit follows the score (65: 200, 70: 500, 75: 1,000, 80: 2,000, 85: 5,000, 90: 10,000 a day), moving at most +5 or −10 a day. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -38722,8 +39980,10 @@
                     "enum": [
                       "opencode",
                       "claude",
+                      "cursor",
                       "generic"
-                    ]
+                    ],
+                    "description": "opencode, claude (Claude Code), cursor, or generic for any other MCP client."
                   },
                   "auth": {
                     "type": "string",
@@ -53766,7 +55026,7 @@
           }
         ],
         "deprecated": true,
-        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "description": "Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.",
         "responses": {
           "200": {
             "description": "Success",
@@ -53916,7 +55176,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.",
+        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.",
         "requestBody": {
           "required": true,
           "content": {
@@ -55363,7 +56623,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.",
+        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {
@@ -57380,6 +58640,2514 @@
         ]
       }
     },
+    "/v1/activity": {
+      "get": {
+        "operationId": "listActivity",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Bane support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only entries at or after this time."
+            },
+            "required": false,
+            "description": "Only entries at or after this time.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only entries before this time."
+            },
+            "required": false,
+            "description": "Only entries before this time.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z_.]{0,63}$",
+              "description": "An exact action (api_key.create) or an area followed by a dot (api_key.)."
+            },
+            "required": false,
+            "description": "An exact action (api_key.create) or an area followed by a dot (api_key.).",
+            "name": "action",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "member",
+                "api_key",
+                "mcp_grant",
+                "agent_token",
+                "inbox_key",
+                "app_password",
+                "operator",
+                "support",
+                "system",
+                "stripe"
+              ]
+            },
+            "required": false,
+            "name": "actorType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "actorId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^req_[0-9a-f]{32}$",
+              "description": "Only what one API request (its x-request-id) changed."
+            },
+            "required": false,
+            "description": "Only what one API request (its x-request-id) changed.",
+            "name": "requestId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Pass as cursor for older entries; null at the end."
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listActivity } from '@banemx/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await listActivity({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url \"${BANE_ORIGIN}/v1/activity\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\""
+          }
+        ]
+      }
+    },
+    "/v1/contact-support": {
+      "post": {
+        "operationId": "contactSupport",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Hosted: start a support request from the dashboard. Returns a support reference and, when configured, the support site’s URL carrying a signed handoff (this workspace, you, the page and recent request IDs). Support reads message content only if shareContent is true, only in this workspace and only for this request (one grant, within 30 minutes). Any member may contact support.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "support",
+                      "appeal",
+                      "limit_request"
+                    ],
+                    "default": "support"
+                  },
+                  "page": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "pattern": "^\\/[^\\s]*$",
+                    "description": "The dashboard path the person was on."
+                  },
+                  "requestIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^req_[0-9a-f]{32}$"
+                    },
+                    "maxItems": 5,
+                    "default": [],
+                    "description": "x-request-id values of recent failed requests."
+                  },
+                  "shareContent": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Let support read message content (email bodies) in this workspace, for this request only."
+                  },
+                  "message": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportHandoff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { contactSupport } from '@banemx/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await contactSupport({\n  client,\n  body: {\n    \"kind\": \"support\",\n    \"requestIds\": [],\n    \"shareContent\": false\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url \"${BANE_ORIGIN}/v1/contact-support\" \\\n  --header \"Origin: $BANE_ORIGIN\" \\\n  --cookie \"$BANE_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"support\",\n  \"requestIds\": [],\n  \"shareContent\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/support/context": {
+      "get": {
+        "operationId": "getSupportContext",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportContext"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSupportContext } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportContext({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/context' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/workspaces": {
+      "get": {
+        "operationId": "listSupportWorkspaces",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "The customer’s workspaces with their role, sending connection and resource counts. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportWorkspace"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportWorkspaces } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportWorkspaces({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/workspaces' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/domains": {
+      "get": {
+        "operationId": "listSupportDomains",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportDomain"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportDomains } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportDomains({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/domains' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/emails": {
+      "get": {
+        "operationId": "listSupportEmails",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content). Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only items at or after this time (default: 7 days ago)."
+            },
+            "required": false,
+            "description": "Only items at or after this time (default: 7 days ago).",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sent",
+                "received"
+              ],
+              "default": "sent"
+            },
+            "required": false,
+            "name": "direction",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 40,
+              "description": "Sent: queued, accepted, delivered, bounced, complained, failed, suppressed, canceled…; received: received, held…"
+            },
+            "required": false,
+            "description": "Sent: queued, accepted, delivered, bounced, complained, failed, suppressed, canceled…; received: received, held…",
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 254,
+              "description": "Only mail to or from this exact address."
+            },
+            "required": false,
+            "description": "Only mail to or from this exact address.",
+            "name": "address",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportEmail"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportEmails } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportEmails({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/emails' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/emails/{id}": {
+      "get": {
+        "operationId": "getSupportEmail",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "One sent or received email with its delivery events; its body only when the customer shared message content with this request. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportEmailDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSupportEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/emails/resource_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/events": {
+      "get": {
+        "operationId": "listSupportEvents",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Delivery events of sent mail (send, delivery, bounce, complaint, reject, open, click), newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only items at or after this time (default: 7 days ago)."
+            },
+            "required": false,
+            "description": "Only items at or after this time (default: 7 days ago).",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "emailId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 40
+            },
+            "required": false,
+            "name": "type",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportDeliveryEvent"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportEvents } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportEvents({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/events' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/webhook-deliveries": {
+      "get": {
+        "operationId": "listSupportWebhookDeliveries",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "nextCursor from the previous page."
+            },
+            "required": false,
+            "description": "nextCursor from the previous page.",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only items at or after this time (default: 7 days ago)."
+            },
+            "required": false,
+            "description": "Only items at or after this time (default: 7 days ago).",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "delivered",
+                "failed",
+                "paused"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "webhookId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportWebhookDelivery"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportWebhookDeliveries } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportWebhookDeliveries({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/webhook-deliveries' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/standing": {
+      "get": {
+        "operationId": "getSupportStanding",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, and the last 24 hours of sends by status. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SupportStanding"
+                      }
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSupportStanding } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportStanding({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/standing' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/billing": {
+      "get": {
+        "operationId": "getSupportBilling",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Balance, payments and the billing ledger of the workspaces the customer owns or administers. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportBilling"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSupportBilling } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportBilling({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/billing' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/audit": {
+      "get": {
+        "operationId": "listSupportAudit",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "The audit trail the customer sees in Settings → Activity (who changed what, when, from where), for the workspaces they own or administer. Filter by time, action or actor; newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only entries at or after this time."
+            },
+            "required": false,
+            "description": "Only entries at or after this time.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Only entries before this time."
+            },
+            "required": false,
+            "description": "Only entries before this time.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z_.]{0,63}$",
+              "description": "An exact action (api_key.create) or an area followed by a dot (api_key.)."
+            },
+            "required": false,
+            "description": "An exact action (api_key.create) or an area followed by a dot (api_key.).",
+            "name": "action",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "member",
+                "api_key",
+                "mcp_grant",
+                "agent_token",
+                "inbox_key",
+                "app_password",
+                "operator",
+                "support",
+                "system",
+                "stripe"
+              ]
+            },
+            "required": false,
+            "name": "actorType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "actorId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^req_[0-9a-f]{32}$",
+              "description": "Only what one API request (its x-request-id) changed."
+            },
+            "required": false,
+            "description": "Only what one API request (its x-request-id) changed.",
+            "name": "requestId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AuditEntry"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listSupportAudit } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listSupportAudit({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/audit' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/support/requests/{requestId}": {
+      "get": {
+        "operationId": "getSupportRequest",
+        "tags": [
+          "Support (internal)"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "What Bane recorded for one API request (the x-request-id a customer quotes): the changes it made, campaign launches and routing versions. Requests that changed nothing leave no database record. Internal: for Bane support with a support grant (bane_support_…), never for customers.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^req_[0-9a-f]{32}$"
+            },
+            "required": true,
+            "name": "requestId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Only this workspace; it must be one of the grant’s. Omit for all of them."
+            },
+            "required": false,
+            "description": "Only this workspace; it must be one of the grant’s. Omit for all of them.",
+            "name": "workspaceId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupportRequestTrace"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-internal": true,
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getSupportRequest } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getSupportRequest({\n  client,\n  path: {\n    \"requestId\": \"request_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/support/requests/request_123' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/billing": {
       "get": {
         "operationId": "getBilling",
@@ -59191,6 +62959,9 @@
     },
     {
       "name": "Agent inboxes"
+    },
+    {
+      "name": "Support (internal)"
     },
     {
       "name": "Billing"

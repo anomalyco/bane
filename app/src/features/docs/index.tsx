@@ -1,19 +1,23 @@
-import { useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { Alert, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApi, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
-import { AgentPrompt, McpSetup, agentPrompt } from './agent-setup'
+import { useApi, useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
+import { AgentPrompt, agentPrompt } from './agent-setup'
+import { guides, type Guide } from './guides'
 import { SendingLimitsGuide } from '../score/limits'
 import './docs.css'
 
 type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
 type QuickstartStep = { title: string; text: string; code?: string }
-type Guide = { id: string; title: string; text: string; code?: string; language?: string }
-type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]; 'x-guides'?: Guide[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
+type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 const methods = ['get', 'post', 'put', 'patch', 'delete']
+// Tag names are API identifiers (ApiKeys); people read them with spaces (API keys).
+const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent sign-ins and tokens' : tag
+// Examples are written for bane.mx; this instance's own origin goes in their place, so a copied command works here.
+const here = (code: string, origin: string) => code.replaceAll('https://bane.mx', origin)
 function operationTitle(value: string) {
   return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => /^mcp$/i.test(word) ? 'MCP' : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' ')
 }
@@ -36,7 +40,8 @@ function operations(document?: Document): Operation[] {
   const result: Operation[] = []
   for (const [path, pathItem] of Object.entries(document.paths)) for (const method of methods) {
     const operation = pathItem[method]
-    if (!operation?.operationId) continue
+    // Internal operations (x-internal: support tooling) stay out of the public docs; a tag left empty has no group.
+    if (!operation?.operationId || operation['x-internal'] === true) continue
     result.push({ id: operation.operationId, method, path, tag: operation.tags?.[0] ?? 'API', summary: operation.summary ?? operationTitle(operation.operationId), description: operation.description ?? '', parameters: [...(Array.isArray(pathItem.parameters) ? pathItem.parameters : []), ...(Array.isArray(operation.parameters) ? operation.parameters : [])], requestBody: operation.requestBody, responses: operation.responses ?? {}, samples: operation['x-codeSamples'] ?? [] })
   }
   // Groups follow the document's tag order (Emails and Domains first); operations keep path order within a group.
@@ -45,19 +50,25 @@ function operations(document?: Document): Operation[] {
   return result.map((operation, index) => ({ operation, index })).sort((a, b) => rank(a.operation.tag) - rank(b.operation.tag) || a.index - b.index).map(item => item.operation)
 }
 
+// The installation's canonical address (useCanonicalOrigin). The page renders its examples only once it is known, and
+// never on another host, so every example below has it.
+const DocsOrigin = createContext('')
+const useDocsOrigin = () => useContext(DocsOrigin)
+/** Shown instead of any example when the docs are open somewhere other than the installation's own address. */
+function ForeignHost({ origin }: { origin: string }) {
+  const page = window.location.host, canonical = new URL(origin).host
+  return <article className="docs-operation docs-foreign"><Alert tone="danger" title="This isn’t this Bane installation’s address">
+    These docs are open at <strong>{page}</strong>, but this installation is at <strong>{canonical}</strong>. Examples, keys and agent setup are only shown at its own address, so nothing you copy sends a key somewhere else. <a href={`${origin}/docs${window.location.hash}`}>Open the docs at {canonical}</a>.
+  </Alert></article>
+}
+
 function Quickstart({ steps }: { steps: QuickstartStep[] }) {
+  const origin = useDocsOrigin()
+  steps = steps.map(step => step.code ? { ...step, code: here(step.code, origin) } : step)
   return <section className="docs-section docs-quickstart" aria-labelledby="docs-quickstart"><h2 id="docs-quickstart">Quickstart</h2>
     <ol>{steps.map(step => <li key={step.title}><strong>{step.title}.</strong> {step.text}
       {step.code && <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0}><code>{step.code}</code></pre><CopyAction value={step.code} label={`Copy ${step.title} example`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>}</li>)}</ol>
   </section>
-}
-
-// Guides from the API document (api/src/openapi-docs.ts), each at its own #id so the dashboard can link straight to it.
-function Guides({ guides }: { guides: Guide[] }) {
-  return <>{guides.map(guide => <section key={guide.id} id={guide.id} className="docs-section docs-guide" aria-labelledby={`${guide.id}-title`}><h2 id={`${guide.id}-title`}>{guide.title}</h2>
-    <p>{guide.text}</p>
-    {guide.code && <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0}><code>{guide.code}</code></pre><CopyAction value={guide.code} label={`Copy ${guide.title} example`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>}
-  </section>)}</>
 }
 
 function SchemaDefinition({ document, input }: {document: Document; input: Schema}) {
@@ -76,7 +87,9 @@ function SchemaDefinition({ document, input }: {document: Document; input: Schem
   </div>
 }
 
-function OperationPage({ document, operation }: {document: Document; operation: Operation}) {
+function OperationPage({ document, operation: raw }: {document: Document; operation: Operation}) {
+  const origin = useDocsOrigin()
+  const operation = useMemo(() => ({ ...raw, samples: raw.samples.map(sample => ({ ...sample, source: here(sample.source, origin) })) }), [raw, origin])
   const [language, setLanguage] = useState(operation.samples[0]?.label ?? 'TypeScript SDK')
   useEffect(() => setLanguage(operation.samples[0]?.label ?? 'TypeScript SDK'), [operation.id])
   const sample = operation.samples.find(item => item.label === language) ?? operation.samples[0]
@@ -100,8 +113,18 @@ function OperationPage({ document, operation }: {document: Document; operation: 
   </article>
 }
 
-// Overview sections that can be linked to: agent setup (as on the former Developer page) and sending limits.
-const sectionAnchors = new Set(['agent-prompt', 'mcp', 'webhook-signatures', 'sending-limits'])
+// Overview sections that can be linked to: agent setup (as on the former Developer page) and sending limits. #mcp now has its own guide.
+const sectionAnchors = new Set(['agent-prompt', 'sending-limits'])
+const guideOf = (anchor: string) => anchor.startsWith('guide-') ? guides.find(guide => `guide-${guide.id}` === anchor) : undefined
+
+function GuidePage({ guide }: { guide: Guide }) {
+  const index = guides.indexOf(guide), next = guides[index + 1]
+  return <article className="docs-operation docs-guide">
+    <header className="docs-operation-header"><span className="docs-eyebrow">Guide</span><h1>{guide.title}</h1><p>{guide.summary}</p></header>
+    {guide.body()}
+    <nav className="docs-section docs-guide-next" aria-label="More guides">{next ? <a href={`#guide-${next.id}`}>Next: {next.title}</a> : <a href="#">Back to the overview</a>}</nav>
+  </article>
+}
 
 // Workspace admins (and demo mode) get a prompt with this workspace's domain; null while it loads.
 // Members and signed-out readers get the general prompt, so they never call /v1/domains.
@@ -111,7 +134,7 @@ function useAgentPrompt() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const demo = useApi().mode === 'demo'
   const withDomain = (Boolean(identity) || demo) && canAdminister
-  const origin = usePublicOrigin()
+  const origin = useDocsOrigin()
   const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { enabled: withDomain })
   if ((!identity && !demo && checkingSession) || (withDomain && domains.isPending)) return null
   // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
@@ -127,40 +150,51 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
     {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
-    {document.info['x-guides']?.length ? <Guides guides={document.info['x-guides']} /> : null}
+    <section className="docs-section" aria-labelledby="docs-guides"><h2 id="docs-guides">Guides</h2><div className="docs-resource-list">
+      {guides.map(guide => <a key={guide.id} href={`#guide-${guide.id}`}><strong>{guide.title}</strong><span>{guide.summary}</span></a>)}
+    </div></section>
     <AgentPrompt prompt={prompt} />
-    <McpSetup chooseAccess />
     <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/@banemx/sdk">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
-      <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
+      <a href="/docs.md"><strong>Markdown reference</strong><span>API index for agents and text tools, with a complete reference per tag.</span></a>
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>
       <a href="/openapi.json"><strong>OpenAPI 3.1</strong><span>Machine-readable schemas and generated code examples.</span></a>
     </div></section>
     <section id="sending-limits" className="docs-section" aria-labelledby="sending-limits-title"><h2 id="sending-limits-title">How sending limits work</h2><SendingLimitsGuide /></section>
     <section className="docs-section"><h2 className="docs-section-heading">API operations<span>{all.length}</span></h2>
-      <div className="docs-overview-groups">{groups.map(group => <section key={group}><h3>{group}<span>{all.filter(operation => operation.tag === group).length}</span></h3><div>{all.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span><code>{operation.path}</code></a>)}</div></section>)}</div>
+      <div className="docs-overview-groups">{groups.map(group => <section key={group}><h3>{tagTitle(group)}<span>{all.filter(operation => operation.tag === group).length}</span></h3><div>{all.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span><code>{operation.path}</code></a>)}</div></section>)}</div>
     </section>
   </article>
 }
 
 export function DocsPage() {
+  const site = useCanonicalOrigin()
   const query = useQuery<Document>({queryKey: ['public-openapi'], queryFn: async ({signal}) => { const response = await fetch('/openapi.json', {signal}); if (!response.ok) throw new Error('Couldn’t load the API definition.'); return response.json() }})
   const all = useMemo(() => operations(query.data), [query.data])
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(() => window.location.hash.slice(1))
   useEffect(() => { const change = () => setSelected(window.location.hash.slice(1)); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
-  useEffect(() => { if (selected && all.length && !sectionAnchors.has(selected) && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
+  // Old #mcp links open the MCP guide; anything else unknown falls back to the overview.
+  useEffect(() => { if (selected === 'mcp') { history.replaceState(null, '', `${window.location.pathname}#guide-mcp`); setSelected('guide-mcp') } }, [selected])
+  useEffect(() => { if (selected && selected !== 'mcp' && all.length && !sectionAnchors.has(selected) && !guideOf(selected) && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
+  // A guide or operation opens at its top.
+  useEffect(() => { if (selected && !sectionAnchors.has(selected)) window.scrollTo(0, 0) }, [selected])
   useEffect(() => { if (all.length && sectionAnchors.has(selected)) window.document.getElementById(selected)?.scrollIntoView({ block: 'start' }) }, [all.length, selected])
   const filtered = search.trim() ? all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(search.trim().toLowerCase())) : all
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
+  const guide = guideOf(selected)
+  const q = search.trim().toLowerCase()
+  const shownGuides = q ? guides.filter(item => `${item.title} ${item.summary}`.toLowerCase().includes(q)) : guides
   return <div className="docs-page">
-    <header className="docs-header"><Link className="docs-brand" to="/"><strong>Bane</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
+    <header className="docs-header"><Link className="docs-brand" to="/"><strong>Bane</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="#guide-mcp">Connect an agent</a><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
     <div className="docs-layout">
-      <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
-        <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && search.trim() ? <p className="muted docs-nav-empty">No matching operations.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
+      <aside className="docs-sidebar"><Input type="search" aria-label="Search the documentation" placeholder="Search guides and API" value={search} onChange={event => setSearch(event.target.value)} />
+        <nav aria-label="Guides and API operations">
+          {shownGuides.length > 0 && <div className="docs-nav-group docs-nav-group--guides"><h2>Guides</h2>{!q && <a href="#" data-active={!selected || undefined}><span>Overview and quickstart</span></a>}{shownGuides.map(item => <a key={item.id} href={`#guide-${item.id}`} data-active={selected === `guide-${item.id}` || undefined}><span>{item.title}</span></a>)}</div>}
+          {query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q ? !shownGuides.length && <p className="muted docs-nav-empty">Nothing matches.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{tagTitle(group)}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
-      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</main>
+      <main className="docs-main">{site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <EmptyState title="Loading documentation…" />) : <DocsOrigin.Provider value={site.origin}>{guide ? <GuidePage guide={guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</DocsOrigin.Provider>}</main>
     </div>
   </div>
 }

@@ -201,6 +201,28 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   console.log(`Quarantine: ${tagged.length} acceptance test${tagged.length === 1 ? '' : 's'} quarantined${tagged.length ? ` (${tagged.map(t => `#${t.issue ?? '?'}`).join(', ')}); the nightly runs them` : ''}.`);
 }
 
+// 6. Identity is (issuer, subject). An issuer can assert a verified address that the sign-in method never vouched for
+// (a GitHub-made account that links a personal Google account signs in with acr=google and its GitHub-verified work
+// address), so nothing may admit, link or authorize a person by email. These names belonged to the removed email
+// paths; one in the API sources, scripts or OIDC migrations means such a path came back. A line that must name one
+// (the startup refusal of the removed settings) carries `premerge-identity: allowed`.
+{
+  const forbidden: [RegExp, string][] = [
+    [/\bclaim_bane_legacy_user\b|\bbane_legacy_claims?\b/, 'links a subject to an existing user by email'],
+    [/\bAUTH_ALLOWED_(?:EMAILS|DOMAINS)\b|\ballowed(?:Emails|Domains)\b|\bsignupApproved\b|\bgoogle_hosted_domain\b/, 'admits or authorizes by email address or domain'],
+  ];
+  const files = (dir: string, keep: (name: string) => boolean): string[] => readdirSync(new URL(dir, api), { withFileTypes: true })
+    .flatMap(e => e.isDirectory() ? files(`${dir}${e.name}/`, keep) : keep(e.name) ? [`${dir}${e.name}`] : []);
+  const scanned = [...files('src/', n => n.endsWith('.ts')), ...files('scripts/', n => n.endsWith('.ts') && n !== 'check-premerge.ts'),
+    ...files('migrations/', n => Number(n.slice(0, 3)) >= 270)];
+  let hits = 0;
+  for (const path of scanned) readFileSync(new URL(path, api), 'utf8').split('\n').forEach((text, i) => {
+    if (text.includes('premerge-identity: allowed')) return;
+    for (const [pattern, why] of forbidden) if (pattern.test(text)) hits++, fail('Identity', `${text.match(pattern)![0]} ${why}. Identity is (issuer, subject): admit or link a person by subject (see api/src/account-policy.ts), never by address.`, `api/${path}`, i + 1);
+  });
+  if (!hits) console.log(`Identity: ${scanned.length} API, script and OIDC migration files admit and link people by subject only.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

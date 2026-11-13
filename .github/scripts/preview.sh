@@ -17,7 +17,7 @@ mkdir -p "$tmp"
 admin() { PGPASSWORD=fixture-admin psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -qAt "$@"; }
 url() { echo "postgresql://postgres:fixture-admin@127.0.0.1:$PGPORT/$1"; }
 secret=$(openssl rand -hex 36)
-migrate() { DATABASE_URL=$(url "$2") BETTER_AUTH_SECRET=$secret PUBLIC_URL=http://127.0.0.1:$port MULTI_TENANT=true DEFAULT_SES_REGION=us-east-2 node --import tsx "$1/src/migrate.ts" > "$tmp/migrate-$2-$(basename "$1").log" 2>&1 || { tail -n 30 "$tmp/migrate-$2-$(basename "$1").log"; echo "::error title=Preview migrations::$3 failed (log above)."; exit 1; }; }
+migrate() { DATABASE_URL=$(url "$2") BANE_ROOT_SECRET=$secret BETTER_AUTH_SECRET=$secret ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google PUBLIC_URL=http://127.0.0.1:$port MULTI_TENANT=true DEFAULT_SES_REGION=us-east-2 node --import tsx "$1/src/migrate.ts" > "$tmp/migrate-$2-$(basename "$1").log" 2>&1 || { tail -n 30 "$tmp/migrate-$2-$(basename "$1").log"; echo "::error title=Preview migrations::$3 failed (log above)."; exit 1; }; }
 for db in preview_fresh preview_upgrade; do admin -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"; done
 
 # 1. Fresh, and upgraded from the base's schema. The base's migrate.ts runs with this checkout's dependencies.
@@ -56,7 +56,7 @@ writeFileSync('wrangler.preview.jsonc', JSON.stringify(config, null, 2));
 JS
 started=$SECONDS
 ./node_modules/.bin/wrangler dev --config wrangler.preview.jsonc --local --ip 127.0.0.1 --port "$port" --test-scheduled \
-  --var "BETTER_AUTH_SECRET:$secret" --var GOOGLE_CLIENT_ID:preview --var GOOGLE_CLIENT_SECRET:preview --var TYPESAFE_API_KEY:preview \
+  --var "BANE_ROOT_SECRET:$secret" --var ACCOUNT_CLIENT_PRIVATE_KEY:preview --var TYPESAFE_API_KEY:preview \
   > "$tmp/wrangler.log" 2>&1 &
 wrangler=$!
 trap 'kill "$wrangler" 2>/dev/null || :' EXIT

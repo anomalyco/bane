@@ -3,6 +3,7 @@ import {registerInboxConnection} from './inbox-connection.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { actor, ApiError, errors, json, response, security, type App, type Ctx, type DbExecutor } from './core.js';
+import { recordAudit } from './audit.js';
 import { mailMessages, mailAttachments, retainedMail } from './db/mailbox.js';
 import { lockMailboxLane } from './mailbox-store.js';
 import { rolledBack } from './routing.js';
@@ -175,7 +176,10 @@ async function save(tx: DbExecutor, c: Ctx, w: string, config: Config, version: 
   return { version: next, config };
 }
 const versionHeader = z.object({ 'if-match': z.string().max(32).optional() });
-async function edit(c: Ctx, change: (config: Config) => Config) {
+// Every saved version is audited with its version and what changed, never a ritual's source.
+type EditAudit = { action: string; target?: { type: string; id: string }; after?: (config: Config) => Record<string, unknown> };
+const counts = (x: Config) => ({ rituals: x.rituals.length, attachments: x.attachments.length, senderLists: Object.keys(x.senderLists).length });
+async function edit(c: Ctx, change: (config: Config) => Config, audit: EditAudit) {
   const w = ritualAdmin(c, true).workspaceId;
   return c.env.db.transaction(async (tx) => {
     await lockMailboxLane(tx, w, 'address');
@@ -184,15 +188,16 @@ async function edit(c: Ctx, change: (config: Config) => Config) {
     if (expected !== undefined && expected !== String(s.version))
       throw new ApiError(409, 'VERSION_CONFLICT', `Routing is now at version ${s.version}. Reload before saving.`);
     const result = await save(tx, c, w, RitualConfig.parse(change(s.config)), s.version);
+    await recordAudit(tx, c, { action: audit.action, workspaceId: w, target: audit.target ?? { type: 'rituals', id: w }, before: { version: s.version }, after: { version: result.version, ...audit.after?.(result.config) } });
     c.header('ETag', `"${result.version}"`);
     return result;
   });
 }
 export function registerRituals(app: App) {
-  app.openapi(createRoute({...meta,method:'get',path:path+'/history',operationId:'listRitualVersions',summary:'List saved ritual versions, newest first',request:{query:z.object({cursor:z.coerce.number().int().positive().optional(),limit:z.coerce.number().int().min(1).max(100).default(25)})},responses:{200:response(z.object({data:z.array(z.object({version:z.number(),actor:z.string()})),nextCursor:z.number().nullable()})),...errors}}),async c=>{const w=ritualAdmin(c).workspaceId,q=c.req.valid('query'),rows=(await c.env.db.execute<{version:number;actor:string}>(sql`SELECT version,actor FROM mail_ritual_versions WHERE workspace_id=${w} AND version<${q.cursor??2147483647} ORDER BY version DESC LIMIT ${q.limit+1}`)).rows;return c.json({data:rows.slice(0,q.limit),nextCursor:rows.length>q.limit?rows[q.limit-1].version:null},200)});
-  app.openapi(createRoute({...meta,method:'post',path:path+'/restore',operationId:'restoreRitualVersion',summary:'Recompile a retained version and restore it as a new version',request:{headers:versionHeader,body:json(z.object({version:z.number().int().positive()}))},responses:ok}),async c=>{const w=ritualAdmin(c,true).workspaceId,v=c.req.valid('json').version,row=(await c.env.db.execute<{config:Config}>(sql`SELECT config FROM mail_ritual_versions WHERE workspace_id=${w} AND version=${v}`)).rows[0];if(!row)throw new ApiError(404,'NOT_FOUND','Version no longer retained.');return c.json(await edit(c,()=>row.config),200)});
+  app.openapi(createRoute({...meta,method:'get',path:path+'/history',operationId:'listRitualVersions',summary:'List saved ritual versions, newest first',request:{query:z.object({cursor:z.coerce.number().int().positive().optional(),limit:z.coerce.number().int().min(1).max(100).default(25)})},responses:{200:response(z.object({data:z.array(z.object({version:z.number(),actor:z.string()})),nextCursor:z.number().nullable()})),...errors}}),async c=>{const w=ritualAdmin(c).workspaceId,q=c.req.valid('query'),rows=(await c.env.db.execute<{version:number;actor:string}>(sql`SELECT version,actor FROM mail_ritual_versions WHERE workspace_id=${w} AND version<${Math.min(q.cursor??2147483647,2147483647)} ORDER BY version DESC LIMIT ${q.limit+1}`)).rows;return c.json({data:rows.slice(0,q.limit),nextCursor:rows.length>q.limit?rows[q.limit-1].version:null},200)});
+  app.openapi(createRoute({...meta,method:'post',path:path+'/restore',operationId:'restoreRitualVersion',summary:'Recompile a retained version and restore it as a new version',request:{headers:versionHeader,body:json(z.object({version:z.number().int().positive()}))},responses:ok}),async c=>{const w=ritualAdmin(c,true).workspaceId,v=c.req.valid('json').version,row=v>2147483647?undefined:(await c.env.db.execute<{config:Config}>(sql`SELECT config FROM mail_ritual_versions WHERE workspace_id=${w} AND version=${v}`)).rows[0];if(!row)throw new ApiError(404,'NOT_FOUND','Version no longer retained.');return c.json(await edit(c,()=>row.config,{action:'ritual.restore',after:x=>({restoredVersion:v,...counts(x)})}),200)});
   const evalSettings=RitualConfig.pick({evaluateDomains:true,evaluateRoutes:true});
-  app.openapi(createRoute({...meta,method:'put',path:path+'/omens',operationId:'setOmenOptIns',summary:'Set the domains and routes that may send inbound evidence to Jev',request:{headers:versionHeader,body:json(evalSettings)},responses:ok}),async c=>c.json(await edit(c,x=>({...x,...c.req.valid('json')})),200));
+  app.openapi(createRoute({...meta,method:'put',path:path+'/omens',operationId:'setOmenOptIns',summary:'Set the domains and routes that may send inbound evidence to Jev',request:{headers:versionHeader,body:json(evalSettings)},responses:ok}),async c=>c.json(await edit(c,x=>({...x,...c.req.valid('json')}),{action:'ritual.omens',after:x=>({evaluateDomains:x.evaluateDomains,evaluateRoutes:x.evaluateRoutes})}),200));
   registerEndpoints(app);
   registerInboxConnection(app);
   const DiagnosticSchema = z.object({ ritual: z.string().optional(), line: z.number().int(), column: z.number().int(), endLine: z.number().int(), endColumn: z.number().int(), message: z.string(), hint: z.string().optional() }).openapi('RitualDiagnostic');
@@ -244,8 +249,8 @@ export function registerRituals(app: App) {
   });
   const params=z.object({key:z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/)}),item=path+'/scripts/{key}';
   app.openapi(createRoute({...meta,method:'get',path:item,operationId:'getRitual',summary:'Read one reusable script',request:{params},responses:{200:response(Ritual),...errors}}),async c=>{const {key}=c.req.valid('param'),s=await current(c.env.db,ritualAdmin(c).workspaceId),r=s.config.rituals.find(x=>x.key===key);if(!r)throw new ApiError(404,'NOT_FOUND','Script not found.');return c.json(r,200)});
-  app.openapi(createRoute({...meta,method:'put',path:item,operationId:'saveRitual',summary:'Create or update one reusable script',request:{params,headers:versionHeader,body:json(Ritual)},responses:ok}),async c=>{const {key}=c.req.valid('param'),r=c.req.valid('json');if(key!==r.key)throw new ApiError(422,'INVALID_KEY','Script key must match the URL.');return c.json(await edit(c,s=>({...s,rituals:[...s.rituals.filter(h=>h.key!==key),r]})),200)});
-  app.openapi(createRoute({...meta,method:'delete',path:item,operationId:'deleteRitual',summary:'Remove a script and detach it everywhere',request:{params,headers:versionHeader},responses:ok}),async c=>{const {key}=c.req.valid('param');return c.json(await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)})),200)});
+  app.openapi(createRoute({...meta,method:'put',path:item,operationId:'saveRitual',summary:'Create or update one reusable script',request:{params,headers:versionHeader,body:json(Ritual)},responses:ok}),async c=>{const {key}=c.req.valid('param'),r=c.req.valid('json');if(key!==r.key)throw new ApiError(422,'INVALID_KEY','Script key must match the URL.');return c.json(await edit(c,s=>({...s,rituals:[...s.rituals.filter(h=>h.key!==key),r]}),{action:'ritual.save',target:{type:'ritual',id:key},after:()=>({key})}),200)});
+  app.openapi(createRoute({...meta,method:'delete',path:item,operationId:'deleteRitual',summary:'Remove a script and detach it everywhere',request:{params,headers:versionHeader},responses:ok}),async c=>{const {key}=c.req.valid('param');return c.json(await edit(c,s=>({...s,rituals:s.rituals.filter(h=>h.key!==key),attachments:s.attachments.filter(h=>h.ritual!==key)}),{action:'ritual.delete',target:{type:'ritual',id:key},after:()=>({key})}),200)});
   app.openapi(
     createRoute({
       ...meta,
@@ -256,7 +261,7 @@ export function registerRituals(app: App) {
       request: { headers: versionHeader, body: json(z.object({ attachments: z.array(Binding).max(256) })) },
       responses: ok,
     }),
-    async (c) => c.json(await edit(c, (config) => ({ ...config, ...c.req.valid('json') })), 200),
+    async (c) => c.json(await edit(c, (config) => ({ ...config, ...c.req.valid('json') }), { action: 'ritual.attach', after: (x) => ({ attachments: x.attachments.length, rituals: [...new Set(x.attachments.map((b) => b.ritual))] }) }), 200),
   );
   app.openapi(
     createRoute({
@@ -293,7 +298,7 @@ export function registerRituals(app: App) {
       request: { headers: versionHeader, body: json(RitualConfig) },
       responses: ok,
     }),
-    async (c) => c.json(await edit(c, () => c.req.valid('json')), 200),
+    async (c) => c.json(await edit(c, () => c.req.valid('json'), { action: 'ritual.apply', after: counts }), 200),
   );
   const dry = z
     .object({

@@ -81,7 +81,7 @@ export interface ApiKey { revokedAt?: string | null; id: string; name: string; p
 export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'read_send' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }
 export interface AgentTokenSummary { id: string; grantId: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
-export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate }
+export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate; status?: 'active'|'expired'|'revoked'; workspaceId?: string | null; receiving?: boolean }
 export interface CampaignTemplateDraft { name: string; description: string; subject: string; previewText?: string; fromName?: string; replyTo: string[]; html?: string; attachments: string[] }
 export interface CampaignTemplate { id: string; url: string; revision: number; draft: CampaignTemplateDraft; published: CampaignTemplateDraft | null; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
 export interface CampaignTemplateSummary { id: string; url: string; revision: number; name: string; description: string; subject: string; published: boolean; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
@@ -129,7 +129,7 @@ export interface Inbox {
   status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
   send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
 }
-export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; credential?: { name: string; permissions: ('read' | 'modify')[] } }
+export interface InboxInput { type: Inbox['type']; domain?: string; name?: string; ttlSeconds: number; send?: { enabled: boolean }; credential?: { name: string; permissions: ('read' | 'modify' | 'send')[] } }
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
   id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
@@ -143,7 +143,8 @@ export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
 export interface InboundAddressPatch { displayName?: string | null; aliases?: string[] }
 export type InboundThreadView = MailboxThreadView
-export interface InboundThread { id: string; subject: string; snippet: string; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
+/** from: the newest visible message's sender (absent on older API responses). */
+export interface InboundThread { id: string; subject: string; snippet: string; from?: MailAddress; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
 export interface InboundMessage {
   id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
   from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string
@@ -153,7 +154,8 @@ export interface InboundMessage {
   read?: boolean
 }
 export interface InboundAttachment { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }
-export interface InboundMessageDetail extends InboundMessage { html: string | null; attachments: InboundAttachment[] }
+// htmlTooComplex: the HTML is past the API's parsing budget; show the text instead of rendering it.
+export interface InboundMessageDetail extends InboundMessage { html: string | null; htmlTooComplex?: boolean; attachments: InboundAttachment[] }
 export interface InboundAddressState { addressId: string; unreadCount: number; archived: boolean; starred: boolean; trashed: boolean; spam: boolean; labels: string[] }
 export interface InboundThreadPatch { addressId?: string; read?: boolean; starred?: boolean; archived?: boolean; trashed?: boolean; spam?: boolean; addLabels?: string[]; removeLabels?: string[] }
 export interface InboundRecipients { to: string[]; cc: string[]; bcc: string[] }
@@ -191,7 +193,7 @@ export interface ReceivedEmail {
 }
 export interface ReceivedEmailDetail extends ReceivedEmail {
   sentAt: ISODate | null; cc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
-  text: string; replyText: string; html: string | null; bodyTruncated: boolean; headers?: { name: string; value: string }[]
+  text: string; replyText: string; html: string | null; htmlTooComplex?: boolean; bodyTruncated: boolean; headers?: { name: string; value: string }[]
   attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
   verdicts?: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
   sizeBytes?: number | null; rawUrl?: string | null
@@ -267,7 +269,7 @@ export interface BaneApi {
   lists: { list(input?: PageRequest & { counts?: boolean }, signal?: AbortSignal): Promise<PageResult<AudienceList>>; get(id: string, signal?: AbortSignal): Promise<AudienceList>; create(input: { name: string }, signal?: AbortSignal): Promise<AudienceList>; remove(id: string, signal?: AbortSignal): Promise<void> }
   segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: SegmentInput & { listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
-  credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void> }
+  credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void>; bindMcpConnection(id: string, input: { workspaceId: string; receiving: boolean }, signal?: AbortSignal): Promise<void> }
   domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
   mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; receivedEmail(id: string, signal?: AbortSignal, delivery?: boolean): Promise<ReceivedEmailDetail>
     keys(includeRevoked: boolean, signal?: AbortSignal): Promise<MailboxKey[]>

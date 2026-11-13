@@ -91,7 +91,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
       UPDATE billing_notices SET status='sending',lease_until=now()+interval '5 minutes'
       WHERE id=${noticeId} AND workspace_id=${job.workspaceId} AND (status='pending' OR (status='sending' AND lease_until<now())) RETURNING id,kind,data,workspace_id)
     SELECT l.id,l.kind,l.data,c.mode AS enforcement,coalesce(a.mode,'prepaid') AS mode,a.unpaid_since,w.name,billing_position(l.workspace_id) AS position,
-      ARRAY(SELECT u.email FROM workspace_members m JOIN auth_user u ON u.id=m.user_id WHERE m.workspace_id=l.workspace_id AND m.role IN ('owner','admin') ORDER BY u.email LIMIT 20) AS recipients
+      ARRAY(SELECT u.email FROM workspace_members m JOIN bane_users u ON u.id=m.user_id WHERE m.workspace_id=l.workspace_id AND m.role IN ('owner','admin') ORDER BY u.email LIMIT 20) AS recipients
     FROM leased l CROSS JOIN billing_config c LEFT JOIN billing_accounts a ON a.workspace_id=l.workspace_id LEFT JOIN workspaces w ON w.id=l.workspace_id WHERE c.singleton`);
   if (!notice) return;
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE billing_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END
@@ -115,7 +115,7 @@ export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
   const email = noticeEmail(notice.kind, { workspace: oneLine(notice.name ?? ''), link: `${runtime.config.publicUrl.replace(/\/$/, '')}/settings#billing`, totalUc,
     freeLeft: Number(position.freeEmailsLeft ?? 0), unpaidSince: notice.unpaid_since ? new Date(notice.unpaid_since) : null, data: notice.data ?? {} });
   const { sendSystemEmail } = await import('../sending.js');
-  await sendSystemEmail(runtime, sender, { from, to: notice.recipients, subject: email.subject, text: email.text, idempotencyKey: `billing:${notice.id}` });
+  await sendSystemEmail(runtime, sender, { from, to: notice.recipients, subject: email.subject, text: email.text, idempotencyKey: `billing:${notice.id}`, billingNotice: notice.id });
   await settle('sent');
   log('info', { code: 'BILLING_NOTIFIED', workspaceId: job.workspaceId, kind: notice.kind, recipients: notice.recipients.length, simulated: isSimulatedSes(runtime) });
 });

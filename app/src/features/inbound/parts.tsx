@@ -1,7 +1,8 @@
 import { Archive, Asterisk, AtSign, Ban, Bot, Clock, Forward, Hash, Inbox, MessageSquare, Plus, ScrollText, Webhook } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { Link } from 'react-router'
 import { outcomes } from './concepts'
-import { PRIVATE_TITLE, PrivateAddress } from '../../components/PrivateAddress'
+import { PrivateAddress, useMasked } from '../../components/PrivateAddress'
 import { isMailbox } from '../../lib/private-address'
 import { typeLabel, type RouteEntry, type Target, type TargetType } from './overview'
 
@@ -22,7 +23,16 @@ const wild = (text: string) => text.split('*').map((part, i) => <span key={i}>{i
 export function Match({ value, host = true }: { value: string; host?: boolean }) {
   const at = value.lastIndexOf('@'), local = at < 0 ? value : value.slice(0, at), domain = host && at >= 0 ? value.slice(at) : ''
   if (!isMailbox(value)) return <span className="rcv-match" title={value}><span className="rcv-match__local">{wild(local)}</span>{domain && <span className="rcv-match__host">{domain}</span>}</span>
-  return <span className="rcv-match private-address" title={PRIVATE_TITLE}><span className="rcv-match__local" aria-hidden="true">{wild(local.slice(0, 2))}<span className="private-address__rest">{wild(local.slice(2))}</span></span>{domain && <span className="rcv-match__host private-address__rest" aria-hidden="true">{domain}</span>}<span className="sr-only">{local + domain}</span></span>
+  return <MaskedMatch local={local} domain={domain} />
+}
+// The masked form holds the first two characters of the local part; the rest and the host arrive when it is revealed.
+function MaskedMatch({ local, domain }: { local: string; domain: string }) {
+  const masked = useMasked(local + domain), shown = [...local].slice(0, 2).join('')
+  return <span {...masked.root} className="rcv-match private-address">
+    <span ref={masked.box} className="private-address__value">{masked.revealed
+      ? <><span className="rcv-match__local">{wild(local)}</span>{domain && <span className="rcv-match__host">{domain}</span>}</>
+      : <>{wild(shown)}<span className="private-address__rest" aria-hidden="true" /></>}</span>
+  </span>
 }
 
 export const targetName = (t: Target, ownId?: string | null) => t.type === 'inbox' ? (t.id === ownId ? 'Inbox' : `${t.name} inbox`) : t.type in outcomes ? outcomes[t.type as keyof typeof outcomes] : t.name
@@ -40,7 +50,7 @@ export function Chain({ keys, empty }: { keys: string[]; empty?: ReactNode }) {
   return <span className="rcv-chain">{keys.map((k, i) => <span key={k}>{i > 0 && <span className="rcv-chain__then" aria-hidden="true">→</span>}<code>{k}</code></span>)}</span>
 }
 
-/** One plain line about a concept, with an example in code type. */
-export function ConceptLine({ line, example }: { line: string; example?: string }) {
-  return <p className="rcv-concept"><span>{line}</span>{example && <code>{example}</code>}</p>
+/** One plain line about a concept, with an example in code type and a link to its guide. */
+export function ConceptLine({ line, example, guide }: { line: ReactNode; example?: string; guide?: string }) {
+  return <p className="rcv-concept"><span>{line}</span>{example && <code>{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
 }

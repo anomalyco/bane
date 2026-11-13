@@ -165,7 +165,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
         {standing?.reasons.length ? <ul className="op-reasons">{standing.reasons.map(reason => <li key={reason.code}><span>{reason.message}</span><span className="muted">{reason.code}{reason.window ? ` · ${reason.window}` : ''} · {reason.step}</span></li>)}</ul> : null}
         <Rows rows={[
           ['Pause', connection?.paused ? `${standing?.pauseKind === 'bounce' ? 'Bounce-only' : 'Full'}${connection.pauseReason ? ` · ${connection.pauseReason}` : ''}` : 'Not paused'],
-          ['SES tenants', !connection ? '—' : connection.resuming ? 'Enabling before sending resumes' : connection.tenants.length ? connection.tenants.map(t => `${t.region} ${t.applied === 'DISABLED' ? 'disabled' : 'enabled'}`).join(' · ') : 'Enabled'],
+          ['SES tenants', !connection ? '—' : connection.resuming ? 'Enabling before sending resumes' : connection.tenants.length ? connection.tenants.map(t => `${t.region} ${t.applied === 'DISABLED' ? 'disabled' : t.applied === 'DISABLING' ? 'possibly disabled' : 'enabled'}`).join(' · ') : 'Enabled'],
           ['Marketing', standing?.marketingRelease ? `Released at ${standing.marketingRelease.percent}% until ${when(standing.marketingRelease.until)}` : standing?.marketingHeld ? 'Held' : 'Flowing'],
           ['Self-service', !offer ? '—' : offer.available ? `${label(offer.action ?? 'none')} available` : offer.reason ? `${offer.reason}${offer.availableAt ? ` From ${when(offer.availableAt)}.` : ''}` : 'Nothing to release'],
           ['Version', standing ? `${standing.version} · sequence ${standing.sequence}` : '—'],

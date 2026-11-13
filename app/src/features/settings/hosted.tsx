@@ -1,10 +1,11 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
 import { ArrowUpRight, Info, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, Input, SectionHeader, Skeleton, StatusBadge } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, CopyButton, Input, SectionHeader, Select, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
+import type { McpConnection, WorkspaceMembership } from '../../data/types'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
@@ -15,17 +16,19 @@ import { MutationError } from './shared'
 import { PlanUsage } from './usage'
 import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
+import { ActivitySection } from './activity'
+import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'usage' | 'billing' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -52,6 +55,7 @@ export function HostedSettings() {
           {section === 'members' && <Team />}
           {section === 'sending' && <><SectionHeader title="Sending" /><SendingRows /></>}
           {section === 'webhooks' && <WebhooksSection note={false} />}
+          {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
           {section === 'billing' && <BillingSection row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
@@ -129,21 +133,53 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
+  const apps = useApiDef(queries.mcpConnections())
+  const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'MCP connection revoked')
+  const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Name" hint="From your Google account">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
+    <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
+    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={app.name||app.clientId} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
+      :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
+    {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
+    <MutationError error={revoke.error}/>
+    {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
+    {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
-// Members and invitations appear together once both are known, so the second table never pushes down.
+// Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools
+// need an owner or admin there. Save keeps its place whether or not it is shown, so choosing never moves the row.
+function McpApproval({ app, workspaces, onRevoke }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void }) {
+  const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
+  const [receiving, setReceiving] = useState(app.receiving ?? false)
+  const bind = useApiMutation((api, input: { workspaceId: string; receiving: boolean }) => api.credentials.bindMcpConnection(app.id, input), 'Saved')
+  const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
+  const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
+  const name = app.name || app.clientId
+  return <Row title={name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
+    <span className="settings-mcp">
+      <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}
+        options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={id => { setWorkspaceId(id); if (!admin(id)) setReceiving(false) }} />
+      <Checkbox label="Receiving tools" checked={receiving} disabled={bind.isPending || !admin(workspaceId)} onCheckedChange={setReceiving} />
+      <Button variant="primary" loading={bind.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} onClick={() => { bind.mutate({ workspaceId, receiving }) }}>Save</Button>
+      <Button variant="danger" aria-label={`Revoke MCP access for ${name}`} onClick={onRevoke}>Revoke</Button>
+      {bind.error ? <div className="settings-name-error"><MutationError error={bind.error} /></div> : null}
+    </span>
+  </Row>
+}
+// Members and invitations appear together once both are known, so the second table never pushes down. Gated on the
+// first answer (isFetched), not isPending: the tables below retry a failed read when they mount, and a retry with no
+// data is pending again, so gating on isPending unmounted them and remounted them in a loop of requests.
 function Team() {
   const access = useWorkspaceAccess()
   const [inviting, setInviting] = useState(false)
   const members = useApiDef(queries.workspaceMembers())
   const invitations = useApiDef(queries.workspaceInvitations())
   const owner = access.role === 'owner'
-  if (members.isPending || invitations.isPending) return <div className="settings-team-skeleton" aria-busy="true"><SectionHeader title="Members" /></div>
+  if (!members.isFetched || !invitations.isFetched) return <div className="settings-team-skeleton" aria-busy="true"><SectionHeader title="Members" /></div>
   return <><Members owner={owner} onInvite={() => setInviting(true)} /><Invitations owner={owner} /><InviteDialog open={inviting} owner={owner} onOpenChange={setInviting} /></>
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
@@ -35,7 +36,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
   const client = useQueryClient()
   const sync = useConnectionCache()
   const workspaceId = useSession()?.identity?.workspaceId
-  return useMutation({
+  return useGuardedMutation({
     gcTime: 0,
     mutationFn: write,
     onSuccess: connection => {
@@ -457,7 +458,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   }
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
-  const prompt = agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  const prompt = origin ? agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true }) : null
   const scopes = [
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },

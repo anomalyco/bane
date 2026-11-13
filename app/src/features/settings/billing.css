@@ -40,6 +40,9 @@
 .billing-method svg { color: var(--color-muted); }
 .billing-add__custom { width: 100%; margin-top: var(--space-12); }
 .billing-add__confirm { margin: 0; text-wrap: pretty; }
+.billing-add__terms { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.billing-add__terms a, .billing-section > .usage-note a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
+@media (hover: hover) { .billing-add__terms a:hover, .billing-section > .usage-note a:hover { color: var(--color-text); } }
 .billing-add .ui-alert { margin-top: var(--space-12); }
 
 @media (max-width: 640px) {

@@ -3,7 +3,7 @@
 // Postgres comes from CLS_PG_URL (an admin connection, as the CI service provides), else a container of the CI image
 // when Docker is running, else a temporary initdb cluster. The database and role are created here and removed on stop().
 import { execFileSync, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
@@ -25,7 +25,6 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
   const api = join(repo, 'api');
   const require = createRequire(join(api, 'package.json'));
   const pg = require('pg');
-  const { makeSignature } = await import(require.resolve('better-auth/crypto'));
   const home = mkdtempSync(join(tmpdir(), 'bane-cls-'));
   const cleanups = [];
   let stopped = false;
@@ -69,8 +68,8 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     const secret = randomBytes(36).toString('hex');
     const envFor = port => ({
       PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: `http://127.0.0.1:${port}`, API_BASE_URL: `http://127.0.0.1:${port}`, HOST: '127.0.0.1', PORT: String(port),
-      MULTI_TENANT: 'true', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
-      AUTH_ALLOWED_EMAILS: 'dana@northwind.example', AUTH_ALLOWED_DOMAINS: 'northwind.example', GOOGLE_CLIENT_ID: 'fixture', GOOGLE_CLIENT_SECRET: 'fixture', BETTER_AUTH_SECRET: secret,
+      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
     });
@@ -113,13 +112,13 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     const sessions = {};
     // One signed-in member per workspace, inserted as the acceptance suite seeds sessions.
     async function signIn(key, email, fullName, workspace) {
-      const token = randomBytes(16).toString('hex'), userId = 'user_' + key;
-      await db.query('INSERT INTO auth_user (id,name,email,email_verified,google_hosted_domain) VALUES ($1,$2,$3,true,$4)', [userId, fullName, email, email.split('@')[1]]);
-      await db.query("INSERT INTO auth_account (id,provider_id,account_id,user_id) VALUES ($1,'google',$2,$3)", ['acct_' + key, 'sub_' + key, userId]);
+      const token = randomBytes(32).toString('base64url'), userId = 'user_' + key;
+      await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[userId,fullName,email]);
+      await db.query("INSERT INTO bane_oidc_identities VALUES('https://account.anoma.ly',$1,$1)",[userId]);
       await db.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$1) ON CONFLICT DO NOTHING', [workspace.id, workspace.name]);
       await db.query('INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,$4)', ['wm_' + key, workspace.id, userId, workspace.role ?? 'owner']);
-      await db.query("INSERT INTO auth_session (id,token,expires_at,user_id) VALUES ($1,$2,now()+interval '2 hours',$3)", ['sess_' + key, token, userId]);
-      const cookie = `${token}.${await makeSignature(token, secret)}`;
+      await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,'https://account.anoma.ly',$2,now()+interval '2 hours')",[createHash('sha256').update(token).digest('hex'),userId]);
+      const cookie = token;
       const call = async (method, path, body, status) => {
         const r = await fetch(origin + path, { method, headers: { origin, cookie: `bane.session_token=${encodeURIComponent(cookie)}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
         const text = await r.text();
@@ -272,12 +271,18 @@ export async function seed(fx) {
   const conn = await hosted(db, 'ws_northwind');
   const nw = await domain(db, 'ws_northwind', conn, 'northwind.example', { receiving: true });
   const sendingDomain = await domain(db, 'ws_northwind', conn, 'mail.northwind.example', { mailFrom: true, dmarc: 'none' });
-  await db.query("INSERT INTO auth_user (id,name,email,email_verified) VALUES ('user_sam','Sam Okafor','sam@northwind.example',true),('user_lee','Lee Park','lee@northwind.example',true)");
+  await db.query("INSERT INTO bane_users (id,name,email,email_verified) VALUES ('user_sam','Sam Okafor','sam@northwind.example',true),('user_lee','Lee Park','lee@northwind.example',true)");
   await db.query("INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ('wm_sam','ws_northwind','user_sam','admin'),('wm_lee','ws_northwind','user_lee','member')");
   await dana.api('POST', '/v1/api-keys', { name: 'Production', permissions: ['send'], domains: ['mail.northwind.example'] }, 201);
   await dana.api('POST', '/v1/api-keys', { name: 'Billing worker', permissions: ['send'], domains: [] }, 201);
   const hook = await dana.api('POST', '/v1/webhooks', { description: 'Delivery events', url: 'https://hooks.northwind.example/bane', eventTypes: ['email.delivered', 'email.bounced', 'email.complained'] }, 201);
   await dana.api('POST', '/v1/workspaces/current/invitations', { email: 'ops@northwind.example', role: 'member' }, 201);
+  // Settings → Activity: the calls above write their own audit rows; a teammate joining and a support grant's read go
+  // in as SQL (once the audit table exists on this branch).
+  if ((await db.query("SELECT to_regclass('audit_events') IS NOT NULL AS ok")).rows[0].ok) await db.query(`INSERT INTO audit_events
+    (workspace_id,user_id,actor_type,actor_id,actor_label,via,action,target_type,target_id,summary,reason,request_id,ip_network,user_agent,internal,at,retain_until) VALUES
+    ('ws_northwind','user_sam','member','user_sam',NULL,'dashboard','member.join','member','user_sam','{"after":{"role":"admin"}}',NULL,'req_fixture_join','198.51.100.0/24','Safari 18 on macOS',false,now()-interval '6 days',now()+interval '1 year'),
+    ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The signed-out homepage's figures, as the minute job publishes them.
   const hourly = Array.from({ length: 24 }, (_, i) => 1200 + (i * 7919) % 900);

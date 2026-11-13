@@ -2,7 +2,7 @@
 // each condition lights up true or false, omen answers fill in, then the actions and where the mail ends up.
 // Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves the page.
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { Alert, Button, EmptyState, ErrorState, Field, Input, PageHeader, SkeletonText, Tabs, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery } from '../../data/context'
@@ -140,7 +140,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
   const position = (row: number, step: number) => flat.findIndex(f => f.row === row && f.step === step)
   const done = at >= flat.length
   return <div className="trace-view" data-done={done || undefined}>
-    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `${result.trace.length} ${result.trace.length === 1 ? 'ritual' : 'rituals'} ran · ${result.steps} steps` : 'No ritual runs on this mail.'}</span>
+    <div className="trace-view__bar"><span className="muted">{result.trace.length ? `Ran ${result.trace.length === 1 ? `the ${result.trace[0]!.key} ritual` : `${result.trace.length} rituals`}: each check lights up true or false, then what it did.` : 'No ritual runs on this mail.'}</span>
       <div className="cluster">{!done && <Button size="sm" variant="ghost" onClick={skip}>Show all</Button>}</div></div>
     {result.recipients.map(rcpt => {
       const rows = result.trace.map((row, r) => ({ row, r })).filter(x => x.row.recipient === rcpt.address)
@@ -178,10 +178,10 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
           <span className="trace-result__title">Result</span>
           <span className="trace-result__items">
             {rcpt.dropped ? <span className="trace-chip"><TargetIcon type="drop" size={13} />{outcomes.drop}</span> : <>
-              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} />{inboxName(id)}</span>)}
+              {rcpt.junk && <span className="trace-chip" data-tone="warning">Stored as junk</span>}
+              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} /><PrivateAddress value={inboxName(id)} /></span>)}
               {(rcpt.webhooks ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type={hook(id)?.type ?? 'webhook'} size={13} />{hook(id)?.name ?? 'Webhook'}</span>)}
               {!rcpt.inboxes?.length && !rcpt.webhooks?.length && <span className="trace-chip"><TargetIcon type="store" size={13} />{outcomes.store}</span>}
-              {rcpt.junk && <span className="trace-chip" data-tone="warning">Junk</span>}
               {(rcpt.labels ?? []).map(l => <span key={l} className="trace-chip trace-chip--label">{l}</span>)}
             </>}
             {(rcpt.warnings ?? []).map(w => <span key={w} className="trace-warning">{w}</span>)}
@@ -210,15 +210,18 @@ export function useDryRun() {
 export function TracePage() {
   const [params] = useSearchParams()
   const options = useApiDef(queries.inboundAddressOptions())
-  const preferred = params.get('to') ?? undefined
+  // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
+  const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
   const overview = useOverview({ limit: 100 })
   const saved = useApiQuery(['ritual-config'], (_api, signal) => request<{ config: { rituals: { key: string; source: string }[] } }>('/v1/rituals', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)
   const recent = useRecentMail()
   const [picked, setChoice] = useState<EmailChoice | null>(null)
   const choice = picked ?? defaultChoice(recent.data, preferred ?? addresses[0] ?? '')
-  // The form shows once recent mail and the routes are known, so its first paint is its final layout.
-  const ready = (recent.data !== undefined || !!recent.error) && (overview.data !== undefined || !!overview.error)
+  // The form shows once recent mail and the routes are known, so its first paint is its final layout. Gated on the first
+  // answer (isFetched), not data or error: the picker retries a failed read when it mounts, and that retry clears the
+  // error, so a gate on the error unmounted the picker and remounted it in a loop of requests.
+  const ready = recent.isFetched && (overview.data !== undefined || !!overview.error)
   const [to, setTo] = useState(preferred ?? '')
   const dry = useDryRun()
   const view = useRef<HTMLDivElement>(null)
@@ -240,7 +243,7 @@ export function TracePage() {
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
         <Input id="trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens answer their default; set answers when you try a ritual in its editor.</span></div>
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Rituals run as saved. Omens (questions for Bane’s AI) give their default answer here; to set answers, try a ritual in its editor.</span></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>

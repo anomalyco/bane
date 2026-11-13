@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { useNavigate, useLocation } from 'react-router'
+import { Link, useNavigate, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, CreditCard } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Input, Pagination, SectionHeader, Skeleton, StatusBadge, Switch, Tabs, useToast, type Column } from '../../components/ui'
@@ -116,7 +116,9 @@ function CardControl({ summary: b }: { summary: BillingSummary | undefined }) {
 
 // Auto-recharge: the switch and Save in the section header, three amounts in dollars as rows. Without a card the switch
 // is off and says why. Save keeps its place whether or not it shows, so editing never moves anything.
-const RECHARGE_NOTE = 'Bane charges your saved card when the balance falls below the threshold, up to the monthly limit. A failed charge turns it off.'
+// Every way credit is added names the terms it is sold under: refunds and the 12-month expiry (Terms §5.7).
+const TERMS = <>By adding credit you agree to the <Link to="/legal/terms#refunds-and-credit-expiry">Terms (refund and expiry policy)</Link>.</>
+const RECHARGE_NOTE = <>Bane charges your saved card when the balance falls below the threshold, up to the monthly limit. A failed charge turns it off. {TERMS}</>
 const RECHARGE_ROWS = [['threshold', 'When balance falls below', '$5 to $1,000'], ['amount', 'Add', '$20 to $1,000 each time'], ['cap', 'Monthly limit', '']] as const
 function AutoRecharge({ summary: b, Row }: { summary: BillingSummary | undefined; Row: (props: RowProps) => ReactNode }) {
   const settings = b?.autoRecharge
@@ -250,6 +252,7 @@ function AddCredit({ open, onOpenChange, summary: b }: { open: boolean; onOpenCh
         <button type="button" role="radio" aria-checked={method === 'checkout'} className="billing-method" disabled={working} onClick={() => setMethod('checkout')}><ArrowUpRight size={16} aria-hidden="true" /><span>Pay with Stripe Checkout</span></button>
       </div>
     </>}
+    <p className="muted billing-add__terms">{TERMS}</p>
     {charge.waiting && <p className="muted" role="status">Charging {card ? cardLabel(card) : 'your card'}…</p>}
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
   </Dialog>

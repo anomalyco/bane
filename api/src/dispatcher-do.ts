@@ -8,8 +8,8 @@ function initDeps() {
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
     import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log }, { feedbackSink, workWake }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, feedbackSink, workWake,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, setLogContext }, { feedbackSink, workWake }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, setLogContext, feedbackSink, workWake,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -97,6 +97,7 @@ export class DispatcherShard extends DurableObject<Env> {
     let deps: Awaited<ReturnType<typeof loadDeps>> | undefined;
     try {
       deps = await loadDeps();
+      deps.setLogContext({ service: 'worker', deploy: (this.env as unknown as Record<string, unknown>).DEPLOY_SHA });
       const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
       const runtime = await this.runtime();
@@ -117,9 +118,9 @@ export class DispatcherShard extends DurableObject<Env> {
       }
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
-      if (!deps) console.error('DISPATCHER_DEPS_FAILED', error);
-      else { const { ApiError, log } = deps;
-      log('error', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying.', stack: error instanceof Error && !(error instanceof ApiError) ? error.stack?.split('\n').slice(1, 4).join('\n') : undefined }); }
+      if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
+      else {
+      deps.logError(error, { code: error instanceof deps.ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity) }); }
       await this.closePool();
       await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
     } finally {
@@ -135,7 +136,7 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
+    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
   }
 
   private async closePool() {

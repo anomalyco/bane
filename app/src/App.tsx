@@ -18,6 +18,7 @@ const settings = chunk(() => import('./features/settings'))
 const docs = chunk(() => import('./features/docs'))
 const inbound = chunk(() => import('./features/inbound'))
 const operator = chunk(() => import('./features/operator'))
+const legal = chunk(() => import('./features/legal'))
 const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
 const loadLogs = logs.preload
@@ -27,7 +28,8 @@ const loadSettings = settings.preload
 const loadDocs = docs.preload
 const loadInbound = inbound.preload
 const loadOperator = operator.preload
-Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator })
+const loadLegal = legal.preload
+Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/receiving': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs, '/operator': loadOperator, '/legal': loadLegal })
 const LogsPage = logs.page(m => m.LogsPage)
 const LogDetailPage = logs.page(m => m.LogDetailPage)
 const CampaignsPage = campaigns.page(m => m.CampaignsPage)
@@ -64,11 +66,13 @@ const OverviewPage = overview.page(m => m.OverviewPage)
 const OperatorPage = operator.page(m => m.OperatorPage)
 const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OnboardingPage = onboarding.page(m => m.OnboardingPage)
+const LegalPage = legal.page(m => m.LegalPage)
 
 // Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
 const noop = () => {}
 const initialPath = window.location.pathname
-if (initialPath === '/onboarding') loadOnboarding().catch(noop)
+if (initialPath === '/legal' || initialPath.startsWith('/legal/')) loadLegal().catch(noop)
+else if (initialPath === '/onboarding') loadOnboarding().catch(noop)
 else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') loadHome().catch(noop) /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
 else if (initialPath === '/') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
@@ -112,7 +116,7 @@ function useRememberDashboardReady() {
 }
 export function App() {
   useRememberDashboardReady()
-  return <AppErrorBoundary><Routes><Route path="docs" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><DocsPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
+  return <AppErrorBoundary><Routes><Route path="docs" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><DocsPage /></Suspense></ChunkFallback.Provider>} /><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
@@ -130,7 +134,7 @@ export function App() {
     <Route path="contacts" element={<Moved to={() => '/audience'} />} /><Route path="contacts/:id" element={<Moved to={params => `/audience/contacts/${id(params)}`} />} />
     <Route path="lists" element={<Moved to={() => '/audience/lists'} />} /><Route path="lists/:id" element={<Moved to={params => `/audience/lists/${id(params)}`} />} />
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
-    <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} />
+    <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
