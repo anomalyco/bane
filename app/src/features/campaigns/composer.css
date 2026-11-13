@@ -58,8 +58,13 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-inspector [data-re-inspector-toggle-item] { border-color: #a8a8a8; background: #fff; color: #181818; }
 .composer-inspector [data-re-inspector-toggle-item][data-active] { background: #181818; color: #fff; }
 .composer-inspector-hint { margin: 12px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.5; }
-@media (max-width: 900px) {
+@media (max-width: 899px) {
   .composer-inspector { inset-block-start: 64px; inset-inline: 8px; width: auto; max-height: calc(100dvh - 72px - var(--tab-bar-height, 56px) - env(safe-area-inset-bottom)); }
+}
+/* From 900 to 1199 px there is no room beside the sheet (campaigns.css reserves 320 px from 1200): the panel docks along the bottom of the page and the page scrolls the email clear of it (empty space after the sheet inside the scroll area, so nothing moves or resizes), so the sheet, its toolbar and Undo/Redo stay in view and the email keeps its width. */
+@media (min-width: 900px) and (max-width: 1199px) {
+  .composer-inspector { inset-block: auto 16px; inset-inline: calc(var(--sidebar-width) + 16px) 24px; width: auto; max-width: 680px; margin-inline: auto; height: min(300px, 36dvh); max-height: none; }
+  .campaign-compose-workspace:has(.composer-inspector:not([hidden])) .campaign-compose-scroll::after { content: ''; display: block; height: calc(min(300px, 36dvh) + 16px); }
 }
 @media (max-width: 700px) {
   .composer-toolbar { margin-inline: calc(-1 * var(--space-12)); padding-inline: var(--space-12); }
