@@ -10,7 +10,8 @@ import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, S
 import { useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, ReportCard, StandingCard, useNextSteps, useSenderScore } from '../score'
-import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns, recentCampaignColumns, RegionStatus } from './skeletons'
+// `logColumns` here are Overview's compact set of Logs' columns (skeletons.tsx).
+import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns as logColumns, recentCampaignColumns, RegionStatus } from './skeletons'
 import { logHref, useLogRowIntent } from '../logs/rows'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
@@ -119,7 +120,7 @@ function LatestEmails() {
   const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={latestColumns} />}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {
