@@ -64,6 +64,9 @@
 @media (max-width: 640px) {
   .settings-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-12); height: auto; min-height: 53px; padding-block: var(--space-8); }
   .settings-row__label > span { overflow: visible; white-space: normal; }
+  .settings-row__label a { position: relative; }
+  .settings-row__label a::after { content: ''; position: absolute; inset-block: -14px; inset-inline: 0; }
+  .settings-score { min-height: 44px; }
   .settings-row:has(.settings-name, .settings-inline > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
   .settings-row:has(.settings-name, .settings-inline > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
   .settings-inline:has(> code) { flex-wrap: nowrap; min-width: 0; max-width: 100%; }

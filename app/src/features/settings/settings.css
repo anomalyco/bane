@@ -81,6 +81,13 @@
 .webhook-headers__actions > .ui-button--ghost:first-child:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .webhook-header-names { display: flex; gap: var(--space-6); min-width: 0; white-space: nowrap; }
 .webhook-header-names > :first-child { overflow: hidden; text-overflow: ellipsis; }
+/* A phone's fingers need 44px: the show and remove buttons (36px wide before), and the Add header / Replace headers buttons (36px tall). */
+@media (max-width: 640px) {
+  .webhook-header-row .ui-icon-button.ui-button--sm { width: 44px; height: 44px; }
+  .webhook-header-row__value .ui-input { padding-inline-end: 44px; }
+  .webhook-header-row__value .ui-icon-button { inset-inline-end: 0; }
+  .webhook-headers__actions .ui-button { min-height: 44px; }
+}
 @container webhook-headers (max-width: 420px) {
   .webhook-headers__rows { gap: var(--space-12); }
   .webhook-header-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name remove" "value value" "error error"; row-gap: var(--space-8); }
