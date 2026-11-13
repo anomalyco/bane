@@ -285,7 +285,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   }}>
     <div className="composer-toolbar">
       <div className="composer-tools ui-scroll-fade" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
-        <DropdownMenu label="Insert" trigger={<Button size="sm" variant="ghost" disabled={inactive}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
+        <DropdownMenu label="Insert" align="start" trigger={<Button size="sm" variant="ghost" disabled={inactive}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
           { label: 'Text', icon: <Type size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setParagraph().run()) },
           { label: 'Heading', icon: <Heading2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHeading({ level: 2 }).run()) },
           { label: 'Button', icon: <MousePointer2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setButton().run()) },
