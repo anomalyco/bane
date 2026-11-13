@@ -5,6 +5,7 @@ import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runt
 import { getCookie, setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { requestHeader } from './brand.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
@@ -36,7 +37,7 @@ async function provider(runtime: Runtime) {
 
 // A browser keeps one session per account it connected, in its own cookie (a slot): `session_token` (slot 0, the
 // name every earlier build used) and `session_token.1` to `.4`. Each request acts as exactly one of them, the account
-// named by X-Bane-Account (one per tab) or, without the header, the browser's default (`bane.account`). Separate
+// named by X-Nightmail-Account (one per tab) or, without the header, the browser's default (`bane.account`). Separate
 // cookies, rather than one cookie listing every session, mean signing in, signing out or a session expiring only ever
 // writes that account's own cookie: two tabs changing different accounts at once can't lose or bring back each other's
 // session, and each cookie carries its own expiry.
@@ -56,7 +57,7 @@ async function sessionJar(runtime: Runtime, headers: Headers): Promise<Jar> {
     if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) slots.push({ slot, hash: await digest(token) });
   }
   // An unknown or malformed account name matches no session: the request is refused rather than acting as another account.
-  const header = headers.get('x-bane-account'), preferred = cookieValue(headers, cookieName(runtime, 'account'));
+  const header = requestHeader(headers, 'account'), preferred = cookieValue(headers, cookieName(runtime, 'account'));
   return { slots, selected: header === null ? null : accountId.test(header) ? header : '', preferred: preferred && accountId.test(preferred) ? preferred : null };
 }
 const hashes = (jar: Jar) => sql.param(jar.slots.map(s => s.hash));
@@ -253,7 +254,7 @@ const signedOut = () => new ApiError(401, 'ACCOUNT_SIGNED_OUT', 'This account is
 export async function accountSessionActor(runtime: Runtime, headers: Headers): Promise<Actor|null> {
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
-  const selected = headers.get('x-bane-workspace') ?? headers.get('x-opensend-workspace');
+  const selected = requestHeader(headers, 'workspace');
   const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string}>(sql`
     WITH active AS MATERIALIZED (${activeSession(runtime, jar)}),
     member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM active s JOIN bane_users u ON s.user_id=u.id
@@ -278,7 +279,7 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
  * signed out, expired or revoked since), it now names the account actually used, so a stale default never lingers.
  */
 export function settleDefaultAccount(c: Ctx, userId: string) {
-  if (c.req.header('x-bane-account') !== undefined) return;
+  if (requestHeader(c.req.raw.headers, 'account') !== null) return;
   const name = cookieName(c.env, 'account');
   if (cookieValue(c.req.raw.headers, name) !== userId) setCookie(c, name, userId, cookieOptions(c.env, SESSION_SECONDS));
 }
@@ -362,7 +363,7 @@ export async function accountBrowserRoute(c: Ctx) {
     return c.json(await accountList(runtime, c, await jar(), connection));
   }
   if (path === '/api/auth/accounts/switch' && c.req.method === 'POST') {
-    // Only the browser's default (for new tabs and links) is stored; each tab sends its own account with X-Bane-Account.
+    // Only the browser's default (for new tabs and links) is stored; each tab sends its own account with X-Nightmail-Account.
     const { account } = await body(z.object({ account: z.string().regex(accountId) }).strict());
     const { accounts } = await connectedAccounts(runtime, await jar());
     if (!accounts.some(connected => connected.id === account)) throw signedOut();

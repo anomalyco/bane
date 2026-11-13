@@ -59,7 +59,22 @@ export const shownPrefix = (secret: string) => secret.slice(0, secret.lastIndexO
 export const ownSecretPattern = /\b(?:nm|bane|os)_[A-Za-z0-9_.-]{20,}/g;
 
 /** User-Agent of the webhook deliveries this service makes. */
-export const webhookUserAgent = 'Bane-Webhooks/1.0';
+export const webhookUserAgent = `${productName}-Webhooks/1.0`;
+/** Marks a test delivery to a webhook. Bane-Test is still sent too (remove after rename cleanup). */
+export const webhookTestHeaders = [`${productName}-Test`, 'Bane-Test'] as const;
+
+/** Request headers are X-Nightmail-<name>. */
+export const headerPrefix = `X-${productName}-`;
+/** A request header's accepted names, current first: X-Nightmail-, then X-Bane- and X-OpenSend- (remove after rename cleanup). */
+export const requestHeaderNames = (name: string) => [productSlug, ...legacySlugs].map(slug => `x-${slug}-${name.toLowerCase()}`);
+/** The first accepted name a request carries. */
+export const requestHeader = (headers: { get(name: string): string | null }, name: string) => {
+  for (const candidate of requestHeaderNames(name)) { const value = headers.get(candidate); if (value !== null) return value; }
+  return null;
+};
+/** Added to mail a ritual forwards; any accepted name on incoming mail stops a forwarding loop. */
+export const loopHeader = `${headerPrefix}Loop`;
+export const loopHeaderNames = requestHeaderNames('loop');
 
 /** The Domain Connect provider ID registered with DNS providers (domain-connect/bane.mx.mail.json). Never follows the brand. */
 export const domainConnectProviderId = 'bane.mx';
