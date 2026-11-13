@@ -13,6 +13,7 @@ import { limitSummary, useSendingLimit } from '../overview/setup'
 import { openScoreAbout } from '../../lib/score-about'
 import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
+import { TeamSkeleton } from './skeletons'
 import { PlanUsage } from './usage'
 import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
@@ -94,7 +95,7 @@ function EditableName({ initial }: { initial: string }) {
   const changed = name.trim() !== initial && name.trim() !== ''
   // Save keeps its place whether or not it is shown, so typing never moves the field.
   return <form className="settings-name" onSubmit={submit}>
-    <Input aria-label="Workspace name" className="settings-name-input" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} />
+    <Input aria-label="Workspace name" title={name} className="settings-name-input" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} />
     <Button type="submit" variant="primary" loading={save.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined}>Save</Button>
     {save.error ? <div className="settings-name-error"><MutationError error={save.error} /></div> : null}
   </form>
@@ -187,6 +188,6 @@ function Team() {
   const members = useApiDef(queries.workspaceMembers())
   const invitations = useApiDef(queries.workspaceInvitations())
   const owner = access.role === 'owner'
-  if (!members.isFetched || !invitations.isFetched) return <div className="settings-team-skeleton" aria-busy="true"><SectionHeader title="Members" /></div>
+  if (!members.isFetched || !invitations.isFetched) return <TeamSkeleton />
   return <><Members owner={owner} onInvite={() => setInviting(true)} /><Invitations owner={owner} /><InviteDialog open={inviting} owner={owner} onOpenChange={setInviting} /></>
 }

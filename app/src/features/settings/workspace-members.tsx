@@ -8,6 +8,7 @@ import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { settingsColumns } from './skeletons'
 
 // A phone shares an invitation link through the system share sheet; everything can copy it.
 const canShare = () => typeof navigator.share === 'function'
@@ -29,13 +30,16 @@ function RoleGuide({ owner }: { owner: boolean }) {
 }
 // What a role change does, said before it happens. A promotion to owner can't be taken back by the person granting it.
 function roleChange(member: WorkspaceMember, role: WorkspaceRole) {
-  const who = member.name || member.email
-  if (role === 'owner') return { title: `Make ${who} an owner?`, description: `Owners can do everything, including changing your role or removing you. Only another owner can undo this.`, confirm: 'Make owner', danger: true }
-  if (role === 'admin') return { title: `Make ${who} an admin?`, description: member.role === 'owner' ? `${who} stops being an owner. Admins manage keys, domains, webhooks, sending and members, but not owners.` : 'Admins manage keys, domains, webhooks, sending and members, but not owners.', confirm: 'Make admin', danger: false }
-  return { title: `Change ${who} to member?`, description: 'They keep sending email and editing content, and lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
+  const name = member.name || 'this member'
+  const who = member.name || <PrivateAddress value={member.email} />
+  if (role === 'owner') return { title: `Make ${name} an owner?`, description: `Owners can do everything, including changing your role or removing you. Only another owner can undo this.`, confirm: 'Make owner', danger: true }
+  if (role === 'admin') return { title: `Make ${name} an admin?`, description: member.role === 'owner' ? <>{who} stops being an owner. Admins manage keys, domains, webhooks, sending and members, but not owners.</> : 'Admins manage keys, domains, webhooks, sending and members, but not owners.', confirm: 'Make admin', danger: false }
+  return { title: `Change ${name} to member?`, description: 'They keep sending email and editing content, and lose access to keys, domains, webhooks, sending and members at once.', confirm: 'Change to member', danger: false }
 }
 
 
+const [nameColumn, emailColumn, roleColumn, memberActions] = settingsColumns.members
+const [inviteEmail, inviteRole, inviteExpires, inviteActions] = settingsColumns.invitations
 export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
   const session = useSession()
   const members = useApiDef(queries.workspaceMembers())
@@ -51,20 +55,20 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
   return <section className="section stack settings-rule">
     <SectionHeader title="Members" actions={<Button onClick={onInvite}>Invite teammate</Button>} />
     <MutationError error={update.error} />
-    {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable loading={members.isPending} skeletonRows={2} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
-      { key: 'name', label: 'Name', width: '28%', render: member => <>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</> },
-      { key: 'email', label: 'Email', width: '34%', card: 'line', render: member => <span className="settings-break"><PrivateAddress value={member.email} /></span> },
-      { key: 'role', label: 'Role', width: 160, card: 'inline', render: member => manageable(member) && !lastOwner(member) ? <Select aria-label={`Role for ${member.name || 'this member'}`} value={member.role} onValueChange={role => { if (role !== member.role) setChanging({ member, role: role as WorkspaceRole }) }} disabled={update.isPending} options={roleOptions(owner)} /> : roleLabel[member.role], cardRender: member => roleLabel[member.role] },
+    {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable className="settings-people" loading={members.isPending} skeletonRows={2} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
+      { ...nameColumn, render: member => <span className="settings-cell settings-cell--two" title={`${member.name || '—'}${member.userId === session?.identity?.id ? ' · You' : ''}`}>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</span>, cardRender: member => <>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</> },
+      { ...emailColumn, render: member => <PrivateAddress value={member.email} /> },
+      { ...roleColumn, render: member => manageable(member) && !lastOwner(member) ? <Select aria-label={`Role for ${member.name || 'this member'}`} value={member.role} onValueChange={role => { if (role !== member.role) setChanging({ member, role: role as WorkspaceRole }) }} disabled={update.isPending} options={roleOptions(owner)} /> : roleLabel[member.role], cardRender: member => roleLabel[member.role] },
       // A phone puts the role and Remove in the row's action sheet.
-      { key: 'actions', label: '', align: 'right', card: 'end', render: member => manageable(member) && !lastOwner(member) ? <Button variant="danger" onClick={() => setRemoving(member)}>Remove</Button> : null,
+      { ...memberActions, render: member => manageable(member) && !lastOwner(member) ? <Button variant="danger" onClick={() => setRemoving(member)}>Remove</Button> : null,
         cardRender: member => manageable(member) && !lastOwner(member) ? <DropdownMenu label={`Actions for ${member.name || 'this member'}`} title={member.name || <PrivateAddress value={member.email} />} items={[
           ...roleOptions(owner).filter(option => option.value !== member.role).map(option => ({ label: `Make ${option.label.toLowerCase()}`, hint: roleHint[option.value], disabled: update.isPending, onSelect: () => setChanging({ member, role: option.value }) })),
           { label: 'Remove from workspace', destructive: true, onSelect: () => setRemoving(member) },
-        ]} /> : null },
+        ]} /> : <span className="settings-card-end" /> },
     ]} />}
     <RoleGuide owner={owner} />
     <ConfirmDialog open={changing !== null} onOpenChange={open => { if (!open) setChanging(null) }} title={change?.title ?? ''} description={change?.description ?? ''} confirmLabel={change?.confirm} danger={change?.danger} pending={update.isPending} onConfirm={async () => { if (changing) await update.mutateAsync({ id: changing.member.id, role: changing.role }) }} />
-    <ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null) }} title={`Remove ${removing?.name || removing?.email || 'member'}?`} description="They lose access to this workspace immediately. You can invite them again later." confirmLabel="Remove member" danger pending={remove.isPending} onConfirm={async () => { if (removing) await remove.mutateAsync(removing.id) }} />
+    <ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null) }} title={`Remove ${removing?.name || 'this member'}?`} description={removing && !removing.name ? <><PrivateAddress value={removing.email} /> loses access to this workspace immediately. You can invite them again later.</> : 'They lose access to this workspace immediately. You can invite them again later.'} confirmLabel="Remove member" danger pending={remove.isPending} onConfirm={async () => { if (removing) await remove.mutateAsync(removing.id) }} />
   </section>
 }
 
@@ -75,18 +79,18 @@ export function Invitations({ owner }: { owner: boolean }) {
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
   return <section className="section stack settings-rule">
     <SectionHeader title="Invitations" />
-    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={2} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={2} empty={<EmptyState title="No pending invitations" />} columns={[
-      { key: 'email', label: 'Email', width: '40%', render: invitation => <span className="settings-break"><PrivateAddress value={invitation.email} /></span> },
-      { key: 'role', label: 'Role', width: 160, card: 'line', render: invitation => roleLabel[invitation.role] },
-      { key: 'expires', label: 'Expires', card: 'inline', render: invitation => date(invitation.expiresAt), cardRender: invitation => `Expires ${date(invitation.expiresAt)}` },
-      { key: 'actions', label: '', align: 'right', width: 160, card: 'end', render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span>,
+    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable className="settings-people" loading={invitations.isPending} skeletonRows={2} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={2} empty={<EmptyState title="No pending invitations" />} columns={[
+      { ...inviteEmail, render: invitation => <PrivateAddress value={invitation.email} /> },
+      { ...inviteRole, render: invitation => roleLabel[invitation.role] },
+      { ...inviteExpires, render: invitation => date(invitation.expiresAt), cardRender: invitation => `Expires ${date(invitation.expiresAt)}` },
+      { ...inviteActions, render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span>,
         cardRender: invitation => <DropdownMenu label="Actions for this invitation" title="Invitation" items={[
           ...canShare() ? [{ label: 'Share invitation link', onSelect: () => void shareLink(invitation.acceptUrl, toast) }] : [],
           { label: 'Copy invitation link', onSelect: () => void copyLink(invitation.acceptUrl, toast) },
           ...owner || invitation.role !== 'owner' ? [{ label: 'Revoke invitation', destructive: true, onSelect: () => setRevoking(invitation) }] : [],
         ]} /> },
     ]} />}
-    <ConfirmDialog open={revoking !== null} onOpenChange={open => { if (!open) setRevoking(null) }} title={`Revoke invitation for ${revoking?.email ?? 'this address'}?`} description="The invitation link stops working." confirmLabel="Revoke invitation" danger pending={revoke.isPending} onConfirm={async () => { if (revoking) await revoke.mutateAsync(revoking.id) }} />
+    <ConfirmDialog open={revoking !== null} onOpenChange={open => { if (!open) setRevoking(null) }} title="Revoke this invitation?" description={revoking ? <>The invitation link for <PrivateAddress value={revoking.email} /> stops working.</> : ''} confirmLabel="Revoke invitation" danger pending={revoke.isPending} onConfirm={async () => { if (revoking) await revoke.mutateAsync(revoking.id) }} />
   </section>
 }
 

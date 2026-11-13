@@ -55,6 +55,9 @@
 .domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
 @media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
+.settings-cell, .settings-webhook-events { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-card-end { flex: none; width: 44px; height: 44px; }
+.settings-cell.settings-cell--two { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; }
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
@@ -84,6 +87,9 @@
 }
 .settings-issues { margin: 0; padding-left: var(--space-20); }
 .settings-issues li + li { margin-top: var(--space-6); }
+.settings-choices.settings-choices--events { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12) var(--space-24); }
+@media (max-width: 1100px) { .settings-choices.settings-choices--events { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .settings-choices.settings-choices--events { grid-template-columns: minmax(0, 1fr); } }
 .settings-job-state { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); font-size: var(--text-xs); }
 .settings-job-error { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-danger); font-size: var(--text-xs); }
 .settings-choices {
@@ -195,7 +201,11 @@
 .activity-from > span { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
 .activity-from > span + span { flex: 0 1 auto; min-width: 0; }
 .activity-more { display: flex; justify-content: center; }
-.activity-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* The details dialog is narrow: one fact per row, label beside value, so a long value never runs into the next one. */
+.activity-facts { grid-template-columns: 1fr; gap: 0; border-top: 1px solid var(--color-border-muted); }
+.activity-facts > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: baseline; gap: var(--space-12); padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); }
+.activity-facts dt { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.activity-facts dd { text-align: left; }
 .activity-summary h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
 .activity-changes { display: flex; flex-direction: column; margin: 0; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .activity-changes > div { display: grid; grid-template-columns: minmax(96px, 30%) minmax(0, 1fr); gap: var(--space-12); padding-block: var(--space-8); border-bottom: 1px solid var(--color-border-muted); }
