@@ -13,14 +13,7 @@ out=${GITHUB_OUTPUT:-/dev/stdout} summary=${GITHUB_STEP_SUMMARY:-/dev/stderr}
 decide() { echo "pulumi=$1" >> "$out"; echo "tenant_status=${tenant_status:-true}" >> "$out"; echo "$2" >> "$summary"; exit 0; }
 [[ $stage =~ ^(dev|production)$ && $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <dev|production> <sha>" >&2; exit 2; }
 
-repo="repos/$GITHUB_REPOSITORY" base=
-ids=$(gh api "$repo/actions/workflows/deploy.yml/runs?branch=$stage&status=success&per_page=30" |
-  jq -r --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.head_repository.full_name == $repo) | .id')
-for id in $ids; do
-  base=$(gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100" |
-    jq -r --arg re "^Deploy $stage [0-9a-f]{40}$" '[.jobs[] | select(.conclusion == "success" and (.name | test($re))) | .name | split(" ")[2]][0] // empty')
-  [[ -n $base ]] && break
-done
+base=${DEPLOYED_BASE:-$(bash .github/scripts/deployed-sha.sh "$stage")}
 if [[ -z $base ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$base" "$sha"; then
   decide true "No deployed $stage commit is an ancestor of $sha; running Pulumi."
 fi

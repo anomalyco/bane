@@ -59,9 +59,10 @@ runs:
               --proto '=https' --proto-redir '=https' \
               --aws-sigv4 "aws:amz:us-east-1:lambda" \
               --request POST --url "$url" \
-              --fail --silent --show-error --max-time 20
+              --fail --silent --show-error --max-time 20 \
+              --write-out '%{stderr}\nissuer-status:%{http_code}\nretry-after:%header{retry-after}\n'
         }
-        response=$(cloudflare_retry mint)
+        response=$(cloudflare_retry --issuer mint)
         token=$(printf '%s' "$response" | jq -er '.token | strings')
         expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
         case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
