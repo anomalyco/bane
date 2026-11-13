@@ -1,17 +1,13 @@
 # CI: what runs where, and how to fix it
 
-Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev push CI and dev E2E both passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
+Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`. Production requires a green live E2E for the exact SHA and green CI for its code tree.
 
-## Merging into `dev`: the merge queue (one step from on)
+## Merging into `dev`: the merge queue
 
-CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs the required checks (`build`, `acceptance`) on `merge_group`, and the deploy accepts the queue's pushes. The queue is not on yet. `dev` restricts pushes to thdxr and R44VC0RP, and under that classic restriction the queue may push only when the same classic rule requires it. That is the "Require merge queue" checkbox in Settings → Branches → `dev`, which neither the REST nor the GraphQL API exposes. A ruleset-based queue was tried on Nov 12: GitHub refused its merge of #103 with `branch_protection_failure`, so that ruleset (`dev merge queue`) is kept disabled.
-
-**To turn it on** (needs GitHub's sudo confirmation): on the `dev` rule, tick Require merge queue (merge commit, build concurrency 5, merge up to 5, only non-failing, 30-minute timeout) and untick "Require branches to be up to date before merging". From then on, `gh pr merge <n>` adds a green PR to the queue. The queue merges it onto the latest `dev` and the entries ahead of it, runs the required checks on exactly that commit, and merges only if they pass. Only accounts allowed to push `dev` can add PRs.
-
-**Until then:** `gh pr update-branch <n>` and then `gh pr merge <n> --merge --auto` (auto-merge is enabled) merge a PR as soon as its checks pass. Any merge to `dev` in the meantime makes it BEHIND again.
+`gh pr merge <n>` enqueues a PR. The queue is enabled on the **classic `dev` branch protection**, not the disabled `dev merge queue` ruleset. It merges onto the latest `dev` and the entries ahead of it only after the required `merge_group` checks (`build`, `acceptance`) pass. Only accounts allowed to push `dev` can enqueue.
 
 - **Why:** with "require branches to be up to date", parallel PRs went BEHIND after every merge and re-ran CI each time; without it, two PRs that pass alone could break `dev` together (a migration number both picked, a route one added and the other's check missed). The queue removes both.
-- **Cost (once on):** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between "merge" and the merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
+- **Cost:** each PR's required checks run twice, once on the PR and once in the queue (about 3 minutes of latency between enqueue and merge). The queue builds up to five entries at once, so a burst of PRs doesn't wait in series.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
 - **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares just that PR's step.
@@ -26,15 +22,17 @@ CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs
 | Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health, live dev E2E | ~2–3 min, plus ~1 min when Pulumi has work |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
-| Push to `production` | Deploy production | Requires a passing dev push CI and dev E2E for the exact SHA; no approval (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
+| Push to `production` | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) | ~2 min, plus the session |
 
 `build` and `acceptance` are required on `dev`.
 
 ## Releasing to production
 
-1. **Dev.** A push to `dev` starts CI and `Deploy dev` at the same time. The dev deploy no longer waits for CI: it checks the pusher and that the commit is still the `dev` tip, then deploys and runs the live E2E. A commit whose CI fails can therefore reach `dev.bane.mx`, but never production.
-2. **Production.** Fast-forward `production` to a `dev` commit (`git push bane <sha>:production`). Authorize requires the commit to be reachable from `production` and `dev`, then runs `.github/scripts/dev-proof.sh`. That script requires a successful `deploy.yml` dev job named for exactly this SHA whose `Live dev E2E` step passed, and a successful `ci.yml` push run on `dev` for exactly this SHA. If that CI is still running, it waits up to 25 minutes and fails as soon as CI fails.
+1. **Dev.** A push to `dev` starts CI and `Deploy dev` in parallel. Once the dev job and its live E2E succeed, the workflow fast-forwards `production` to the same SHA, skipping a superseded dev tip. It does not wait for the support Worker.
+   `AUTO_SHIP` is a repository variable: unset or `on` enables promotion; `off` restores manual `git push bane <sha>:production`. Production authorization still runs either way.
+   Set `PRODUCTION_PUSH_TOKEN` in the branch-restricted **dev environment**: a fine-grained token for this repository only, owned by an allowed production pusher, with Contents and Workflows write. Without it, promotion warns and leaves production untouched. Never use a general-purpose CLI token.
+2. **Production.** Authorize requires the commit on both `production` and `dev`, then runs `.github/scripts/dev-proof.sh`: the named dev job and its live E2E must have passed for that SHA. CI must have passed on that exact dev push **or** on a `dev` merge group with the identical Git tree. If neither has passed but matching CI is running, wait up to 25 minutes.
 3. **No approval.** The `production` environment has no required reviewers (removed on Nov 12; before that, every production run waited for thdxr or R44VC0RP to approve). The deploy proceeds as soon as Authorize has the proof. These guards remain: the `production` ruleset (fast-forward only, no deletion), its branch protection (only thdxr and R44VC0RP push), the environment's branch policy (`production` only), the actor check, the stage-tip check in every job, and `PROD_DEPLOY_ENABLED`. To put an approval back, add a required-reviewers rule to the environment (Settings → Environments → `production`, or `PUT repos/anomalyco/bane/environments/production` with `reviewers` and the existing `deployment_branch_policy`).
 
 **Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the commit of the stage's newest successful Deploy job (read from the job's name, so a rollback counts as the commit it deployed). Pulumi runs when one of these changed in that range:
@@ -199,4 +197,3 @@ CLOUDFLARE_API_TOKEN=<Workers Observability read> NIGHTLY_AWS_PROFILE_DEV=bane-d
 ```
 
 **Why Workers Logs and not something new:** it already holds every Worker line at no extra cost, it is queryable over the API, and the Node processes write the same shape to CloudWatch. Workers Analytics Engine would give exact per-route counters for longer, but it needs a new binding on the production Worker and cannot take the gateway's or runner's events; Logpush to R2 adds a job, a bucket and a query engine for volumes this small; and Postgres has 25 connections in production to spend on mail, not logs. If traffic grows past what sampled lines can estimate, add an Analytics Engine data point in `logRequest` next to the line.
-

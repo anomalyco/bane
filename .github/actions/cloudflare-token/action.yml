@@ -50,15 +50,18 @@ runs:
         done
 
         # The response is captured, never streamed: it contains the token.
-        response=$(
+        # shellcheck source=/dev/null
+        source "$GITHUB_ACTION_PATH/../../scripts/cloudflare-retry.sh"
+        mint() {
           printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' \
             "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" |
             curl --config - \
               --proto '=https' --proto-redir '=https' \
               --aws-sigv4 "aws:amz:us-east-1:lambda" \
               --request POST --url "$url" \
-              --fail-with-body --silent --show-error --max-time 20
-        )
+              --fail --silent --show-error --max-time 20
+        }
+        response=$(cloudflare_retry mint)
         token=$(printf '%s' "$response" | jq -er '.token | strings')
         expires=$(printf '%s' "$response" | jq -er '.expires_on | strings')
         case "$token" in ""|*[[:space:]]*) echo "::error::invalid token"; exit 1 ;; esac
