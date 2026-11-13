@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
+import { productName } from '../../api/src/brand.ts';
 
 const publicDir = resolve(dirname(fileURLToPath(import.meta.url)), '../public');
 const svg = name => readFileSync(join(publicDir, 'brand', name), 'utf8');
@@ -21,7 +22,9 @@ const card = `<style>
   body { margin: 0; width: 1200px; height: 630px; background: ${canvas}; color: ${text}; box-sizing: border-box; padding: 96px 104px; display: flex; flex-direction: column; justify-content: space-between; -webkit-font-smoothing: antialiased; }
   h1 { margin: 0; font: 400 72px/1.1 'OpenTUI Mono', monospace; letter-spacing: -.02em; max-width: 21ch; text-wrap: balance; }
   p { margin: 20px 0 0; font: 440 28px/1.3 Inter, sans-serif; color: ${muted}; }
-</style><body><div style="height:72px">${svg('bane-lockup-light.svg').replace(/ width="[^"]*" height="[^"]*"/, ' height="72"')}</div>
+  .lockup { height: 72px; margin-top: -10px; display: flex; align-items: baseline; gap: 18px; font: 600 92px/1 Inter, sans-serif; letter-spacing: -.02em; }
+  .lockup svg { flex: none; width: 50px; height: 50px; }
+</style><body><div class="lockup">${inline('bane-mark.svg')}<span>${productName.toLowerCase()}</span></div>
   <div><h1>Email infrastructure done right.</h1><p>One API on Amazon SES.</p></div></body>`;
 
 // ICO with PNG entries (read by every current browser and Windows since Vista).

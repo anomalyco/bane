@@ -67,7 +67,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
-      <span className="wordmark"><BaneWordmark title="bane" /></span>
+      <span className="wordmark"><BaneWordmark title={productName.toLowerCase()} /></span>
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />

@@ -1,6 +1,6 @@
 # Brand
 
-The bane logo is the **Stamp** mark next to the word **bane**. The word is always lowercase.
+The logo is the **Stamp** mark next to the product name, **nightmail**. The word is always lowercase. Until the new lockup lands, the dashboard (`BaneWordmark`) and `og.png` set the word as text in the style below, and the lockup SVGs in `app/public/brand/` still spell bane.
 
 ## Files
 
