@@ -5525,10 +5525,12 @@ describe('Dashboard API capabilities', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId;
       const { refreshStanding } = await import('./src/standing.js');
-      // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
+      // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs, and never
+      // after now(): a row dated ahead (in the first minutes after midnight) would hide the late email below from the
+      // dashboard cache's revision, the newest created_at.
       const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; campaign?: boolean; daysAgo?: number; to?: string } = {}) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
-         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', jsonb_build_array($11::text), '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n)
+         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', jsonb_build_array($11::text), '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, least(now(), date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n))
          FROM generate_series(1, $8::int) n`,
         [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null, options.to ?? 'recipient@example.com']);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
@@ -5583,8 +5585,9 @@ describe('Dashboard API capabilities', () => {
       const changed = await local('GET', '/v1/sender-score');
       assert.deepEqual([changed.headers.get('x-bane-sender-score-cache'), changed.body.standing.step], ['miss', 'warn']);
       // A new email changes the workspace's activity, so the next dashboard read is computed again rather than served stale.
+      // clock_timestamp(), not now(): the fixture's transaction started before the rows above, so now() could equal theirs.
       await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
-        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', now())`, [unique('score-late-'), wid, REGION]);
+        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', clock_timestamp())`, [unique('score-late-'), wid, REGION]);
       const fresh = await local('GET', '/v1/sender-score');
       assert.deepEqual([fresh.status, fresh.headers.get('x-bane-sender-score-cache')], [200, 'miss']);
       // PR92 P2: only emails and email events move the key. A contact consent change, which a member can make as often as
