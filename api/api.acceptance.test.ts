@@ -7329,7 +7329,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Node has no DO host; provide only its base constructor, storage and waitUntil.
       const { registerHooks } = await import('node:module');
       const hook = registerHooks({ resolve(specifier, context, next) {
-        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
       } });
       const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
       const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
@@ -16798,7 +16798,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         registerHooks({ resolve(specifier, context, next) {
           if (faultResolver) faultResolver(specifier);
           if (specifier === 'cloudflare:workers') {
-            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
+            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
           }
           const resolved = next(specifier, context);
           loadedModules.add(resolved.url);
