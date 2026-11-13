@@ -36,6 +36,9 @@ export const listMcpConnections = <ThrowOnError extends boolean = false>(options
     ...options
 });
 
+/**
+ * Sets an MCP connection's default workspace, for tool calls that name none.
+ */
 export const bindMcpConnection = <ThrowOnError extends boolean = false>(options: Options<BindMcpConnectionData, ThrowOnError>): RequestResult<BindMcpConnectionResponses, BindMcpConnectionErrors, ThrowOnError> => (options.client ?? client).post<BindMcpConnectionResponses, BindMcpConnectionErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },

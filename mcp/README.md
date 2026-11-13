@@ -7,45 +7,55 @@ If you authorised your client against `https://opensend.mx/mcp`, reconnect it to
 ## Connect
 
 1. Add the HTTPS URL as a remote HTTP MCP server in your client.
-2. Start OAuth authorization at the issuer advertised by Bane’s protected resource metadata.
-3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or ID token.
+2. The client reads Bane's protected resource metadata and signs in at the account service it names (Anomaly account for hosted Bane). OpenCode identifies itself there with a client metadata document; other clients register.
+3. Review the client and the requested access at Anomaly account, then allow it. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or ID token. Nothing in Bane asks for a workspace: the connection can work in every workspace you belong to.
 
 Choose the catalog that fits your client:
 
 | Client | URL | What `tools/list` returns |
 |---|---|---|
-| Plain MCP | `/mcp` or `/mcp?codemode=false` | Resource tools such as `contacts` and `messages`, with compact schemas for each authorized action. `describe_tool` gives the full schema for one listed action. |
-| OpenCode Code Mode, Claude Code, Codex | `/mcp?codemode=true` (alias: `/mcp?toolsets=all`) | Each authorized operation as a separate tool with input and output schemas; use the client’s own tool search. |
+| Plain MCP | `/mcp` | Resource tools such as `contacts` and `messages`, with compact schemas for each authorized action. `describe_tool` gives the full schema for one listed action. |
+| OpenCode, Claude Code, Codex | `/mcp?codemode=false` (older names: `?codemode=true`, `?toolsets=all`) | Each authorized operation as a separate tool with input and output schemas, for clients that search or script tools themselves. OpenCode adds `?codemode=false` to a remote URL by itself. |
 
 To narrow either listing, add `toolsets=inboxes,routing` (or choose from `rituals`, `endpoints`, `sending`, `admin`). Toolsets filter the listing, not the grant. Inbox-only connections always list only their allowed inbox operations. Bane does not run arbitrary agent code. The [operation inventory](../docs/mcp-coverage.md) maps between the catalogs and identifies human-only steps.
 
-In OpenCode, run `opencode2 mcp add bane --global --url 'https://YOUR_BANE_DOMAIN/mcp?codemode=true'`, then select Bane in `/mcps` and sign in. In Claude Code or Codex, use the same Code Mode URL for the remote HTTP server.
+In OpenCode, run `opencode2 mcp add bane --global --url https://YOUR_BANE_DOMAIN/mcp`, then `opencode2 mcp auth bane` (or select Bane in `/mcps` and sign in). Use the plain URL: OpenCode signs in for the URL you configure and adds `?codemode=false` itself. In Claude Code or Codex, use `https://YOUR_BANE_DOMAIN/mcp?codemode=false` for the remote HTTP server.
 
-### Several accounts (profiles)
+### Workspaces
 
-One MCP connection is one Bane account: the account you choose at Anomaly account when the client signs in, acting in the workspace you pick in Bane. To use a personal and a work account from one agent, add the server twice under two names. Both entries use the same endpoint. `?profile=` is only a label: Bane shows it on the connection's approval page and in Settings → Account so the two entries are easy to tell apart. It never chooses an account, a workspace or any access.
+The access token names you, not a workspace. Every workspace tool takes an optional `workspace` argument (a workspace ID, slug or name) and acts there; without it, the connection's default is used. On every call Bane checks that you still belong to that workspace and acts with the token's scopes intersected with your role there: owners and admins get what the scopes allow, members read and send. A workspace you don't belong to gets `403 WORKSPACE_ACCESS_DENIED`, the same answer as one that doesn't exist.
+
+- `workspaces` lists your workspaces, your role and the connection's access in each, and the default. In plain MCP it is the `workspaces` tool with action `list`.
+- `setDefaultWorkspace({"workspace":"Acme"})` (plain MCP: `workspaces` with action `setDefault`) sets the default for this connection. You can also set it on the connection's page in **Settings → Account**.
+- With no default set, calls use your only workspace, else the workspace you used last in the dashboard. If neither applies they fail with `WORKSPACE_REQUIRED`; pass `workspace`.
+
+Credentials and objects a connection creates (API keys, agent tokens, endpoints, routes, inbox keys) belong to the workspace they were created in, and keep working only while you remain an owner or admin there and the connection is active.
+
+### Several accounts
+
+One MCP connection is one Anomaly account: the account you choose at Anomaly account when the client signs in. It reaches every workspace of that account, so one entry covers all of them. To use a personal and a work account from one agent, add the server twice under two names; both use the same endpoint.
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "servers": {
-      "bane-personal": { "type": "remote", "url": "https://bane.mx/mcp?codemode=true&profile=personal" },
-      "bane-work": { "type": "remote", "url": "https://bane.mx/mcp?codemode=true&profile=work" }
+      "bane-personal": { "type": "remote", "url": "https://bane.mx/mcp" },
+      "bane-work": { "type": "remote", "url": "https://bane.mx/mcp" }
     }
   }
 }
 ```
 
-OpenCode stores each entry's tokens under its own name, and Bane keeps one approval per account and client, so the two entries never share access. Sign each one in with its own account:
+OpenCode stores each entry's tokens under its own name, and Bane keeps one approval per account and client, so the two entries never share access. Sign each one in with its own account: run `opencode2 mcp auth bane-personal` and pick your personal account in Anomaly account's chooser, then `opencode2 mcp auth bane-work` and pick your work account. If it signs you straight in as the wrong account, add the other account in Bane first (**Add account** in the account menu, which signs it in at Anomaly account too), then `opencode2 mcp logout bane-work` and `opencode2 mcp auth bane-work` again. Optionally add `?profile=work` to an entry's URL: Bane only shows it as a label in Settings, to tell entries apart; it never chooses an account, a workspace or any access.
 
-1. Run `opencode2 mcp auth bane-personal` and pick your personal account in Anomaly account's chooser.
-2. Run `opencode2 mcp auth bane-work` and pick your work account.
-3. If that account belongs to several workspaces, the first request returns a link to the connection's page in Bane (`/settings/mcp/<id>`). It marks the account the connection signed in as and acts only as that account, never as whichever account the tab shows; choose the workspace there.
+### Signing in from a remote machine (SSH)
 
-Anomaly account shows its chooser when more than one account is signed in there. If it signs you straight in as the wrong account, add the other account in Bane first (**Add account** in the account menu, which signs it in at Anomaly account too). Then re-authorise the entry: `opencode2 mcp logout bane-work`, then `opencode2 mcp auth bane-work`, and pick the right account.
+The client's sign-in ends with a redirect to `http://127.0.0.1:<port>/callback` on the machine running the client. When your browser is on another machine:
 
-Two entries signed in as the same account share that account's one approval and workspace. Revoking an entry in Settings → Account, signed in as its account, leaves the other entry working.
+- **Paste back.** `opencode2 mcp auth bane` prints the sign-in URL. Open it on your laptop and approve; the browser then lands on a page that doesn't load. Copy that page's full address (`http://127.0.0.1:…/callback?code=…&state=…`) and paste it at OpenCode's prompt ("If the browser can't reach this machine, paste the URL it was redirected to"). The prompt needs an interactive terminal; the desktop and web apps have the same paste box in `/mcps`.
+- **Forward the port.** Fix the callback port in the server's config, `"oauth": { "callback_port": 19876 }`, and connect with `ssh -L 19876:127.0.0.1:19876 <host>`. The redirect then reaches OpenCode through the tunnel.
+- **No OAuth.** `"oauth": false` with `"headers": { "Authorization": "Bearer {env:BANE_INBOX_KEY}" }` works for [inbox keys](#agent-inboxes) (`bane_mbx_…`) only. `/mcp` doesn't accept API keys or agent tokens; use the stdio launcher below with an API key for workspace access without a browser.
 
 ## Permissions
 
@@ -60,7 +70,7 @@ OAuth scopes map to the existing API permissions:
 
 Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `bane:send` or `bane:manage`; supply literal `confirm: true` when the action schema requires it. Leave it out for read-only probes such as routing tests. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's OIDC approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
-Each person lists their own approvals at `GET /v1/mcp-connections` (Settings → Account), chooses an approval's workspace and receiving with `POST /v1/mcp-connections/{id}/workspace`, and revokes one with `POST /v1/mcp-connections/{id}/revoke`.
+Each person lists their own approvals at `GET /v1/mcp-connections` (Settings → Account), sets an approval's default workspace with `POST /v1/mcp-connections/{id}/workspace`, and revokes one in Bane with `POST /v1/mcp-connections/{id}/revoke`. Revoking in Bane ends that client's access here and revokes or holds what it set up; signing the client in again at Anomaly account (a new consent there) starts a new approval, without what the revoked one created. To disconnect a client from your account everywhere, use **Connected apps** at [Anomaly account](https://account.anoma.ly/apps).
 
 ## Arguments and results
 
@@ -85,7 +95,7 @@ After the required audience/content/time confirmation, use `sendCampaign` or `sc
 
 ### Inbound addresses and conversations
 
-Reading workspace-wide message content requires an unrestricted **manage** OAuth grant. Receiving configuration requires explicit receiving consent; managing it also requires manage permission. Inbox-scoped connections instead get only the operations and inboxes their key or consent allows. Refresh the client’s catalog after changing a grant.
+Reading workspace-wide message content requires an unrestricted **manage** OAuth grant. Receiving configuration requires an owner or admin of the workspace a call names; managing it also requires manage permission. Inbox-scoped connections instead get only the operations and inboxes their key or consent allows. Refresh the client’s catalog after changing a grant.
 
 | Task | Code Mode tool |
 | --- | --- |
@@ -126,7 +136,7 @@ The stdio launcher retains one tool per API operation, with nested `path`/`query
 An agent can get its own expiring address, wait for mail and read it, with nothing but an inbox key. On hosted Bane pass the key as the bearer token; no OAuth is needed. For OpenCode:
 
 ```json
-{"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp?codemode=true","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}
+{"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}
 ```
 
 Use a provisioning key (`POST /v1/inbound/keys` with `permissions: ["create","read","modify"]` and `addressIds: []`) to let the agent create inboxes, or the per-inbox key that `createInbox` returns to give it one inbox only. Either key sees only the inbox tools its permissions allow:
@@ -141,14 +151,14 @@ Use a provisioning key (`POST /v1/inbound/keys` with `permissions: ["create","re
 
 A typical run: `createInbox` → give the address to the sign-up form → `waitForMessage` until `data` is non-empty → use `extract.codes[0]` → `deleteInbox`. Writes need literal `confirm: true`. Every message result starts with a fixed notice naming the sender and its verdicts: mail and attachments are untrusted data, even when the sender passed authentication. Replies go through `replyToInboundThread` and need an inbox created with `send.enabled`. OAuth clients with unrestricted manage access see the same tools. The stdio launcher does not list inbox tools yet; use the hosted endpoint.
 
-### Receiving consent
+### Receiving tools
 
-To manage receiving, request `bane:manage`, then turn on **Receiving tools** for the approval in Settings → Account (owners and admins only). Old approvals do not silently acquire these tools. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Endpoint URLs are write-only, so a Slack, Discord or webhook destination held this way resumes only after its URL is sent again (`ENDPOINT_URL_REQUIRED` otherwise). Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
+Receiving tools (routing, rituals, endpoints, inbound addresses and domains) follow the role: an owner or admin of the workspace a call names, with an approval that has `bane:manage`. There is no separate consent checkbox. Approvals whose receiving consent was turned off before this change had their receiving objects held at the migration; they don't come back. Manage writes require `confirm:true`. The ritual plan is a single versioned bundle; revoking a contributing grant disables the bundle rather than guessing which remaining scripts still depend on it. It also disables owned destinations and routes and revokes owned inbox keys. Endpoint URLs are write-only, so a Slack, Discord or webhook destination held this way resumes only after its URL is sent again (`ENDPOINT_URL_REQUIRED` otherwise). Already delivered mail cannot be recalled. Select **Only selected inboxes** instead of workspace access to narrow OAuth discovery and API dispatch to those inbox IDs. See the [agent example](../docs/inboxes.md#agent-inbox-over-mcp) and [operation inventory](../docs/mcp-coverage.md).
 
 ## Account authorization and Bane approvals
 
 Set `ACCOUNT_ISSUER` to the HTTPS issuer that signs access tokens for this installation. Resource discovery is available at `${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp`. The resource indicator is the absolute `${PUBLIC_URL}/mcp` URI, including `/mcp`. Clients discover and request authorization at the issuer. During cutover each user authorizes their client again; existing Bane-issued grants cannot be exchanged at the new issuer.
 
-`bane:read`, `bane:send` and `bane:manage` request the corresponding Bane permissions. The resource verifies the JWT signature and audience, requires a matching Bane `(issuer, subject)` identity, and checks live workspace membership. Members cannot acquire `manage`. When the user belongs to several workspaces, the first token creates a pending approval and gets a 403 that names Settings → Account, where the user chooses its workspace; access starts on the next request. Hosted Bane also requires every access token to carry `acr=urn:anomaly:acr:google` (`ACCOUNT_REQUIRED_ACR`); other tokens get a 401 `insufficient_user_authentication` challenge. A sender-constrained access token requires its matching DPoP proof on every request.
+`bane:read`, `bane:send` and `bane:manage` request the corresponding Bane permissions; a 401 challenge names all three, and you narrow them when approving. The resource verifies the JWT signature and audience (`${PUBLIC_URL}/mcp`, with any query string such as `?codemode=false`), requires a matching Bane `(issuer, subject)` identity, and checks live workspace membership and role on every tool call. Members cannot use `manage`. Hosted Bane also requires every access token to carry `acr=urn:anomaly:acr:google` (`ACCOUNT_REQUIRED_ACR`); other tokens get a 401 `insufficient_user_authentication` challenge. A sender-constrained access token requires its matching DPoP proof on every request.
 
-For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. The account issuer supplies the same public subject on dashboard sign-in and on MCP access tokens. Bane maintains one approval per user and client ID, including across token refreshes. In **Settings → Account**, revoke a client to block subsequent tokens from that client in Bane. Use the **Manage connected apps** link to revoke the grant at the issuer. The cutover shows legacy approvals as expired and revokes their tokens and derived credentials. Reconnect through the account service to authorize again.
+For hosted Bane, the resource identifiers are `https://dev.bane.mx/mcp` and `https://bane.mx/mcp`. The account issuer supplies the same public subject on dashboard sign-in and on MCP access tokens. Bane maintains one approval per user and client ID, including across token refreshes. In **Settings → Account**, revoke a client to block the tokens of its current consent in Bane. Use the **Connected apps** link to revoke the grant at the issuer. The cutover shows legacy approvals as expired and revokes their tokens and derived credentials. Reconnect through the account service to authorize again.

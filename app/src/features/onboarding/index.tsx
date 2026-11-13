@@ -16,6 +16,7 @@ import { FirstSend } from '../docs/first-send'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
+import { BaneWordmark } from '../../components/BaneLogo'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Bring-your-own verification is resumable; keep retrying while AWS confirms the feedback subscription.
@@ -56,7 +57,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
-      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />bane</span>
+      <span className="wordmark"><BaneWordmark title="bane" /></span>
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />

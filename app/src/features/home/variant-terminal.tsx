@@ -4,6 +4,7 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import { CopyAction } from '../../components/motion'
 import type { HomeProps } from '.'
 import './variant-terminal.css'
+import { BaneWordmark } from '../../components/BaneLogo'
 
 // Direction 1: the page reads like a man page whose synopsis is a real request and its real response.
 const samples = {
@@ -69,7 +70,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
   const [sample, setSample] = useState<Sample>('curl')
   return <div className="vt-page">
     <header className="vt-header">
-      <a className="wordmark" href="/" aria-label="bane home"><span className="wordmark-square" aria-hidden="true" />bane</a>
+      <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
       <nav className="vt-nav" aria-label="Site">
         <a href="/docs">docs</a>
         <a className="vt-hide-narrow" href="/openapi.json">openapi.json</a>

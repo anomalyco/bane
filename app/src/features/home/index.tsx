@@ -9,6 +9,7 @@ import { SignInConsent } from '../../components/LegalLinks'
 import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
+import { BaneWordmark } from '../../components/BaneLogo'
 
 // GET /v1/public/stats: installation-wide aggregates over whole hours, rounded, computed every minute by the API.
 // `available` is false until enough workspaces send that the figures can't describe one customer; every figure is then null.
@@ -76,7 +77,7 @@ export function HomePage(props: HomeProps) {
 // Shared page chrome: navigation, sign-in and footer.
 export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
   return <header className="home-header">
-    <a className="wordmark" href="/" aria-label="bane home"><span className="wordmark-square" aria-hidden="true" />bane</a>
+    <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
     <nav className="home-nav" aria-label="Site">
       <a href="/docs">Docs</a>
       <ThemeToggle />

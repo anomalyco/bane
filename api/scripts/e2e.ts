@@ -334,13 +334,25 @@ async function regionalSend() {
 }
 
 async function mcpChallenge() {
-  const trace = ctx.getStore()!; trace.last='POST /mcp'; trace.requestId=null;
-  // /mcp accepts an OAuth access token (ES256 JWT), not the API's delegated agent tokens.
-  const res = await fetch(new URL('/mcp',base),{method:'POST',redirect:'error',signal:AbortSignal.timeout(12000),headers:{'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
-  trace.requestId=res.headers.get('x-request-id');
-  const challenge=res.headers.get('www-authenticate') ?? '';
-  const rpc = await res.json() as {jsonrpc?:string;error?:{code:number}};
-  check(res.status===401 && rpc.jsonrpc==='2.0' && rpc.error?.code===-32000 && challenge.includes(`${base.origin}/.well-known/oauth-protected-resource/mcp`) && /(?:bane|opensend):read/.test(challenge),'MCP OAuth discovery challenge changed');
+  const trace = ctx.getStore()!;
+  const get = async <T>(url: URL) => { trace.last = `GET ${url.href}`; trace.requestId = null; const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(12000) }); trace.requestId = res.headers.get('x-request-id'); check(res.ok, `${url.pathname} returned ${res.status}`); return await res.json() as T; };
+  // /mcp accepts an access token from the account service (ES256 JWT), not the API's keys or agent tokens. OpenCode adds
+  // ?codemode=false to the URL; both ask for every Bane scope, since clients request what the challenge names.
+  for (const [path, bearer] of [['/mcp', null], ['/mcp?codemode=false', null], ['/mcp', key]] as const) {
+    trace.last = `POST ${path}${bearer ? ' (API key)' : ''}`; trace.requestId = null;
+    const res = await fetch(new URL(path, base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(12000), headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
+    trace.requestId = res.headers.get('x-request-id');
+    const challenge = res.headers.get('www-authenticate') ?? '';
+    const rpc = await res.json() as { jsonrpc?: string; error?: { code: number } };
+    check(res.status === 401 && rpc.jsonrpc === '2.0' && rpc.error?.code === -32000 && challenge.includes(`resource_metadata="${base.origin}/.well-known/oauth-protected-resource/mcp"`)
+      && challenge.includes('scope="bane:read bane:send bane:manage"'), 'MCP OAuth discovery challenge changed');
+  }
+  const resource = await get<{ resource?: string; authorization_servers?: string[]; scopes_supported?: string[] }>(new URL('/.well-known/oauth-protected-resource/mcp', base));
+  check(resource.resource === `${base.origin}/mcp` && resource.authorization_servers?.length === 1 && ['bane:read', 'bane:send', 'bane:manage'].every(scope => resource.scopes_supported?.includes(scope)), 'MCP protected resource metadata changed');
+  // The account service is the authorization server. OpenCode signs in with a client metadata document as its client_id.
+  const issuer = resource.authorization_servers[0]!;
+  const server = await get<{ issuer?: string; client_id_metadata_document_supported?: boolean; code_challenge_methods_supported?: string[] }>(new URL('/.well-known/oauth-authorization-server', issuer));
+  check(server.issuer === issuer && server.client_id_metadata_document_supported === true && !!server.code_challenge_methods_supported?.includes('S256'), 'The MCP authorization server no longer accepts client metadata documents with PKCE');
 }
 const idKey = (name: string) => ({ 'Idempotency-Key': `${prefix}:${name}` });
 function message(to: string): SendEmailInput {
@@ -927,7 +939,7 @@ async function run() {
     if (!ready) return;
     if (!await step('Retire interrupted E2E fixtures older than 30 minutes',sweepStaleObjects)) return;
     await Promise.all([
-      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP HTTP authorization challenge',mcpChallenge)] : []),
+      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
       step('Single send, replay, delivery and email log', direct),
       step('Batch send', batch), step('Attachment upload, bytes and draft use', attachment),
       step('Temporary inbound addresses, self-loop, thread and reply', inbound),

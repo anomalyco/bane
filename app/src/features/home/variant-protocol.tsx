@@ -3,6 +3,7 @@ import { Button } from '../../components/ui'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import type { HomeProps } from '.'
 import './variant-protocol.css'
+import { BaneWordmark } from '../../components/BaneLogo'
 
 // Direction 3: one conversation as a sequence diagram. The four verbs are its legend; the brand square is the message.
 type Lane = 0 | 1 | 2
@@ -43,7 +44,7 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
   const verbState = (verb: Verb) => still || verb === activeVerb ? 'on' : 'off'
   return <div className="vp-page">
     <header className="vp-header">
-      <a className="wordmark" href="/" aria-label="bane home"><span className="wordmark-square" aria-hidden="true" />bane</a>
+      <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
       <nav className="vp-nav" aria-label="Site">
         <a href="/docs">Docs</a>
         <ThemeToggle />

@@ -17,6 +17,7 @@ import { StandingBanner } from './StandingBanner'
 import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
+import { BaneWordmark } from './BaneLogo'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
@@ -200,7 +201,7 @@ export function AppShell() {
   if (compact) return <div className="app-shell app-shell--compact">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="mobile-bar">
-      <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
+      <NavLink className="wordmark" to="/" aria-label="bane overview"><BaneWordmark /></NavLink>
       <div className="mobile-bar__context">{context}</div>
       {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
@@ -213,7 +214,7 @@ export function AppShell() {
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
+      <NavLink className="wordmark" to="/" aria-label="bane overview"><BaneWordmark /></NavLink>
       <ThemeToggle />
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}

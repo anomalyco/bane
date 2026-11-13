@@ -10,6 +10,7 @@ import { createSocketTransport, supportOrigin } from './socket'
 import { plural, supportStore, ticketTitle, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
 import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
 import './support.css'
+import { BaneMark } from '../../components/BaneLogo'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -81,7 +82,7 @@ function Header({ state, store, onClose }: { state: ChatState; store: SupportSto
     : ['success', `${hello.agent.ai ? 'AI support agent' : 'Support'} · ${hello.workspace.name}`]
   const ticketed = state.status === 'ticketed' || state.humanRequested
   return <header className="support-panel__header">
-    <span className="wordmark-square support-panel__mark" aria-hidden="true" />
+    <BaneMark className="support-panel__mark" size={16} />
     <div className="support-panel__heading">
       <h2 id="support-title">{hello?.agent.name ?? 'Bane support'}</h2>
       <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text">{subtitle}</span></p>

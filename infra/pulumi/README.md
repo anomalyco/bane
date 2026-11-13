@@ -102,3 +102,9 @@ For a new stack, dispatch on `dev` with `init: true`, `preview: true`. Init crea
   {"Effect":"Allow","Action":["ec2:AuthorizeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress"],"Resource":"arn:aws:ec2:us-east-2:ACCOUNT:security-group-rule/*"}
 ]}
 ```
+
+## Tenant status events
+
+EventBridge rules, targets (including their entire input), delivery roles and their grants are operator-owned. CI verifies the exact rule patterns and unchanged SNS envelopes; it cannot rewrite them. Signed SNS notifications are hints only: Bane checks workspace/topic ownership and reads `GetReputationEntity` for the exact tenant and origin before recording a transition. Stale notifications do nothing, lookup failures retry, and enables never resume a workspace.
+
+Before rollout, allow `ses:GetReputationEntity` alongside the existing status-update permission on the same tenant ARNs in the runtime boundary and identity policies. Provision/verify both regional routes (Virginia after signed enrollment). Do not enqueue until these prerequisites are verified. `python3 infra/pulumi/tenant-status/plan.py --plan --stage dev` (or `production`) simulates the proposed grants without writing AWS state.

@@ -50,7 +50,7 @@ export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAcces
     SELECT k.id,k.workspace_id,k.id AS key_id,g.grant_id,k.mailbox_ids AS scope_ids,CASE WHEN k.permissions ? 'create' THEN coalesce(k.mailbox_ids,'[]'::jsonb)||to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=k.workspace_id AND b.created_by=k.id AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000)) ELSE k.mailbox_ids END AS mailbox_ids,k.permissions,${c.env.config.apiRateLimitPerMinute}::int AS max_requests FROM mailbox_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='key' AND g.resource=k.id WHERE hash=${await digest(token)} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())`);
   if(!key)throw new ApiError(401,'AUTH_INVALID','The inbox key is invalid or expired.');
   if(key.grant_id){
-    const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+key.grant_id);
+    const grant=await (await import('./mcp-auth.js')).getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
     if(grant?.workspaceId!==key.workspace_id||!grant.receivingConsent||!grant.permissions.includes('manage'))throw new ApiError(401,'AUTH_INVALID','The originating receiving approval is no longer active.');
   }
   return {keyId:key.id,grantId:key.grant_id??undefined,workspaceId:key.workspace_id,admin:false,mailboxIds:key.mailbox_ids,scopeIds:key.scope_ids,permissions:key.permissions};
