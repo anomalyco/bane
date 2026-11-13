@@ -25,6 +25,8 @@
 .ov-spark { flex: none; width: 76px; height: 24px; }
 /* The series gives way to the figure beside it when a cell is narrow (a 1280px laptop), down to 24px. */
 .ov-facts dd > .ov-spark { flex: 0 1 auto; min-width: 24px; }
+.ov-facts dd > .ov-spark-stack { flex: 0 1 76px; min-width: 24px; }
+.ov-spark-stack .ov-spark { width: 100%; }
 .ov-spark rect { fill: var(--color-layer-3); }
 .ov-spark--sent rect { fill: color-mix(in srgb, var(--color-accent) 70%, transparent); }
 .ov-spark--delivered rect { fill: color-mix(in srgb, var(--color-text) 28%, transparent); }
