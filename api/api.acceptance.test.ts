@@ -3940,6 +3940,157 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
+      const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
+      const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      assert.deepEqual(both.workspaceIds.sort(), [wid, second].sort());
+
+      // Not configured (a Node installation, or no token yet): available false, and nothing is asked.
+      const unconfigured = await get('/v1/support/requests');
+      assert.deepEqual([unconfigured.available, unconfigured.reason, unconfigured.groups, unconfigured.totals, unconfigured.retention], [false, 'not_configured', [], { errors: 0, truncated: false }, '3 days']);
+      assert.deepEqual(Object.keys(unconfigured).sort(), ['available', 'computedAt', 'groups', 'reason', 'retention', 'totals', 'window']);
+      const untraced = await get(`/v1/support/requests/${rid()}`);
+      assert.deepEqual([untraced.found, untraced.logs, untraced.logsAvailable], [false, [], false]);
+
+      // Workers Logs, answered here: the grant's lines, and lines it must never see even when Cloudflare returns them.
+      runtime.config.observability = { token: 'cf-observability-fixture-token', accountId: 'f'.repeat(32), script: 'bane-fixture' };
+      const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid();
+      const line = (minutesAgo: number, source: Json, script = 'bane-fixture') => ({ dataset: 'cloudflare-workers', timestamp: minutes(minutesAgo),
+        $metadata: { id: randomUUID(), message: 'POST https://bane.mx/v1/emails?to=private@example.org', url: 'https://bane.mx/v1/emails?to=private@example.org', region: 'IAD' },
+        $workers: { scriptName: script, eventType: 'fetch', outcome: 'ok' },
+        source: { level: 'warn', timestamp: new Date(minutes(minutesAgo)).toISOString(), service: 'worker', deploy: 'abc1234', event: 'request', method: 'POST', route: '/v1/emails', status: 422,
+          code: 'VALIDATION_FAILED', field: 'to', durationMs: 12.345, principal: 'apiKey', workspace: wid, ...source } });
+      const events = [
+        ...ids.map((requestId, i) => line(i + 1, { requestId })),
+        line(20, { requestId: domainIds[0], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard',
+          message: 'secret message text from private@example.org', ip: '203.0.113.9', userAgent: 'curl/8.4.0', url: '/v1/domains/dom_1?token=abcdef', body: { html: 'private body words' } }),
+        line(25, { requestId: domainIds[1], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard' }),
+        line(30, { requestId: failed, status: 500, code: 'INTERNAL_ERROR', databaseCode: '57014', stack: 'at handler (src/emails.ts:1:1)' }),
+        line(35, { requestId: rid(), method: 'GET', route: '/v1/contacts/someone@example.org', status: 404, code: 'NOT_FOUND' }),
+        line(2, { requestId: shared, workspace: second, route: '/v1/campaigns', code: 'CAMPAIGN_NOT_READY' }),
+        // Never this grant's: another customer's workspace, the grant's own support reads, another Worker, a non-request line.
+        line(3, { requestId: ids[0], workspace: other, route: '/v1/other-secret', code: 'OTHER_WORKSPACE_CODE' }),
+        line(4, { requestId: rid(), workspace: other, status: 500, code: 'OTHER_WORKSPACE_CODE' }),
+        line(5, { requestId: rid(), route: '/v1/support/context', principal: 'support', code: 'WORKSPACE_REQUIRED' }),
+        line(6, { requestId: rid(), code: 'OTHER_SCRIPT' }, 'bane-support'),
+        line(7, { requestId: rid(), event: undefined, status: 500, code: 'NOT_A_REQUEST_LINE' }),
+        line(8, { requestId: rid(), workspace: undefined, status: 401, code: 'UNAUTHORIZED_NO_WORKSPACE' }),
+      ];
+      let outage: { status: number; body: Json } | null = null;
+      const asked: { url: string; authorization: string | null; body: Json }[] = [], warnings: string[] = [];
+      // Swapped in by hand and back in finally (see the deliverability test).
+      const previous = globalThis.fetch, warn = console.warn;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'api.cloudflare.com') return previous(input, init);
+        asked.push({ url: url.href, authorization: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+        if (outage) return Response.json(outage.body, { status: outage.status });
+        return Response.json({ success: true, errors: [], messages: [], result: { run: { id: 'run' }, events: { count: events.length, events } } });
+      };
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+      try {
+        const eq = (key: string, value: unknown, type = 'string') => ({ key, operation: 'eq', type, value });
+        const workspaceGroup = (list: string[]) => ({ kind: 'group', filterCombination: 'or', filters: list.map(id => eq('workspace', id)) });
+        const listed = await get('/v1/support/requests');
+        // The query: this account and Worker, the token, request lines of the grant's workspace only, errors only, 24 hours.
+        assert.equal(asked.length, 1);
+        const [query] = asked;
+        assert.equal(query!.url, `https://api.cloudflare.com/client/v4/accounts/${'f'.repeat(32)}/workers/observability/telemetry/query`);
+        assert.equal(query!.authorization, 'Bearer cf-observability-fixture-token');
+        assert.deepEqual([query!.body.view, query!.body.limit, query!.body.dry, query!.body.parameters.datasets, query!.body.timeframe.to - query!.body.timeframe.from], ['events', 1000, true, ['cloudflare-workers'], 86_400_000]);
+        assert.deepEqual(query!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), { key: 'status', operation: 'gte', type: 'number', value: 400 }]);
+        // Grouped, most frequent first; the samples are each group's latest five; never another workspace's or a non-customer line.
+        assert.deepEqual([listed.available, listed.reason, listed.retention, listed.totals], [true, undefined, '3 days', { errors: 11, truncated: false }]);
+        assert.deepEqual(listed.groups.map((g: Json) => [g.route, g.method, g.status, g.code, g.principal, g.count]), [
+          ['/v1/emails', 'POST', 422, 'VALIDATION_FAILED', 'apiKey', 7], ['/v1/domains/:id', 'GET', 404, 'NOT_FOUND', 'dashboard', 2],
+          ['/v1/emails', 'POST', 500, 'INTERNAL_ERROR', 'apiKey', 1], ['unmatched', 'GET', 404, 'NOT_FOUND', 'apiKey', 1]]);
+        const [emails, domains] = listed.groups;
+        assert.deepEqual([emails.sampleRequestIds, emails.firstSeen, emails.lastSeen], [ids.slice(0, 5), new Date(events[6]!.timestamp).toISOString(), new Date(events[0]!.timestamp).toISOString()]);
+        assert.deepEqual(domains.sampleRequestIds, domainIds);
+        assert.ok(listed.groups.every((g: Json) => Object.keys(g).sort().join() === 'code,count,firstSeen,lastSeen,method,principal,route,sampleRequestIds,status'));
+        const text = JSON.stringify(listed);
+        for (const leak of [other, second, 'OTHER_WORKSPACE_CODE', '/v1/other-secret', 'WORKSPACE_REQUIRED', '/v1/support/', 'OTHER_SCRIPT', 'NOT_A_REQUEST_LINE', 'UNAUTHORIZED_NO_WORKSPACE',
+          'secret message', '203.0.113', 'curl', 'token=', 'private', '@', 'IAD', '57014', 'src/emails.ts', 'abc1234', 'cf-observability'])
+          assert.ok(!text.includes(leak), `The answer must not carry ${leak}: ${text}`);
+        // Cached 60 seconds per workspaces and parameters.
+        assert.equal((await get('/v1/support/requests')).computedAt, listed.computedAt); assert.equal(asked.length, 1);
+        // The filters reach Cloudflare and are applied here again: the stub returns every line whatever was asked.
+        const fives = await get('/v1/support/requests?status=5xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 500 }]);
+        assert.deepEqual(fives.groups.map((g: Json) => [g.code, g.count, g.sampleRequestIds]), [['INTERNAL_ERROR', 1, [failed]]]);
+        const fours = await get('/v1/support/requests?status=4xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 400 }, { key: 'status', operation: 'lt', type: 'number', value: 500 }]);
+        assert.equal(fours.totals.errors, 10);
+        const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
+        assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
+        // A grant over two workspaces asks for both; workspaceId narrows to one.
+        const wide = await get('/v1/support/requests', bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
+        assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
+        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
+        assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
+        error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
+        // Windows: at most 3 days back, since before until.
+        error(await send('GET', `/v1/support/requests?since=${new Date(Date.now() - 4 * 86_400_000).toISOString()}`, support), 422, 'WINDOW_TOO_OLD');
+        error(await send('GET', `/v1/support/requests?since=${new Date().toISOString()}&until=${new Date(Date.now() - 60_000).toISOString()}`, support), 422, 'INVALID_DATE_RANGE');
+        const before = asked.length;
+        error(await send('GET', '/v1/support/requests?route=/v1/emails?to=x', support), 422);
+        assert.equal(asked.length, before, 'A refused read asks nothing.');
+
+        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID).
+        const traced = await get(`/v1/support/requests/${ids[0]}`);
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
+        assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
+        assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.']);
+        assert.deepEqual(traced.logs[0], { at: new Date(events[0]!.timestamp).toISOString(), route: '/v1/emails', method: 'POST', status: 422, code: 'VALIDATION_FAILED', durationMs: 12.3, principal: 'apiKey', workspaceId: wid });
+        assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
+        assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
+
+        // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
+        warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
+        const since = new Date(Date.now() - 3_600_000).toISOString();
+        const down = await get(`/v1/support/requests?since=${since}`);
+        assert.deepEqual([down.available, down.reason, down.groups, down.totals.errors], [false, 'unavailable', [], 0]);
+        const downTrace = await get(`/v1/support/requests/${ids[1]}`);
+        assert.deepEqual([downTrace.logsAvailable, downTrace.logs, downTrace.found], [false, [], false]);
+        outage = { status: 200, body: { success: false, errors: [{ message: 'Invalid filter' }] } };
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).reason, 'unavailable');
+        const logged = warnings.flatMap(w => { try { return [JSON.parse(w) as Json]; } catch { return []; } }).filter(w => w.code === 'SUPPORT_LOGS_UNAVAILABLE');
+        assert.deepEqual(logged.map(w => w.status), [500, 500, 200]);
+        assert.ok(!warnings.join().includes('Authentication error') && !warnings.join().includes('cf-observability'));
+        outage = null;
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).available, true, 'A failure is not cached.');
+
+        // Each request read costs 5 of the grant's 120 a minute.
+        const fresh = await mint({ userId: manager!.userId, ticketRef: 'L-3', workspaceIds: [wid] });
+        await get(`/v1/support/requests/${ids[2]}`, bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 5);
+        for (let i = 0; i < 23; i++) await get('/v1/support/requests', bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/requests', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+      } finally { globalThis.fetch = previous; console.warn = warn; }
+    });
+  });
+
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);

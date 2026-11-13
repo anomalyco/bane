@@ -61,7 +61,7 @@ Object.assign(SKIP, {
   contactSupport: 'Google dashboard only; creates a support handoff; covered by isolated acceptance.',
   getSupportContext: supportInternal, listSupportWorkspaces: supportInternal, listSupportDomains: supportInternal, listSupportEmails: supportInternal, getSupportEmail: supportInternal,
   listSupportEvents: supportInternal, listSupportWebhookDeliveries: supportInternal, getSupportStanding: supportInternal, getSupportBilling: supportInternal, listSupportAudit: supportInternal,
-  getSupportRequest: supportInternal, getSupportDeliveryMetrics: supportInternal, getSupportBounceReasons: supportInternal, getSupportDomainHealth: supportInternal, getSupportScreen: supportInternal,
+  getSupportRequest: supportInternal, listSupportRequests: supportInternal, getSupportDeliveryMetrics: supportInternal, getSupportBounceReasons: supportInternal, getSupportDomainHealth: supportInternal, getSupportScreen: supportInternal,
   listSupportCampaigns: supportInternal, getSupportCampaign: supportInternal, getSupportEmailLint: supportInternal, getSupportCampaignLint: supportInternal, getSupportAudienceHealth: supportInternal,
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
