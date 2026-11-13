@@ -341,6 +341,16 @@ export async function seed(fx) {
   await standing(db, 'ws_northwind', { score: 86.4, limit: 5000, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
     reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
+  // Dana's UI notes (features/ui-notes): one on Overview's title and one whose element is gone (a pin and the tray's
+  // moved entry in notes mode), and others for the notes list. No screenshots: there is no object store here.
+  const note = (id, body, kind, status, path, selector, minutes) => db.query(`INSERT INTO ui_notes(id,author_id,updated_by,body,kind,severity,status,url,path,route,context,element,created_at,resolved_at)
+    VALUES($1,'user_dana','user_dana',$2,$3,NULL,$4,$5,$6,$6,$7::jsonb,$8::jsonb,$9::timestamptz,CASE WHEN $4 IN ('fixed','wontfix') THEN now() END)`, [id, body, kind, status, `${fx.origin}${path}`, path,
+    JSON.stringify({ viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'light', device: 'desktop', pointer: 'fine', build: 'cls' }),
+    JSON.stringify({ selector, alternatives: [], testId: null, component: 'PageHeader', components: ['PageHeader'], tag: 'h1', role: 'heading', label: null, text: null, box: { x: 0, y: 0, width: 120, height: 24, scrollX: 0, scrollY: 0 }, styles: {} }), ago(minutes)]);
+  await note('uin_' + '1'.repeat(32), 'Title sits 2px below the period tabs.', 'alignment', 'open', '/', '#main-content > header.ui-page-header > div.cluster:nth-of-type(1) > h1', 50);
+  await note('uin_' + '2'.repeat(32), 'Empty state copy is too long.', 'copy', 'open', '/', '#main-content .cls-element-that-moved', 40);
+  await note('uin_' + '3'.repeat(32), 'Filters wrap at 1280 px.', 'spacing', 'in_progress', '/logs', '#main-content > header.ui-page-header > div.cluster:nth-of-type(1) > h1', 30);
+  await note('uin_' + '4'.repeat(32), 'Members table jumps on load.', 'bug', 'fixed', '/settings', '#main-content h2', 20);
 
   // Harbor Supply: restricted (marketing held) after complaints, with a quarantined campaign: the banner on every
   // page, Overview's standing card and the operator's workspace page.

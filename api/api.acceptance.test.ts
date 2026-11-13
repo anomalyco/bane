@@ -4133,6 +4133,152 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('UI notes: operators leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; customers get 403; every change is audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      // The attachments bucket, in memory: the screenshot objects are checked directly.
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      const env: import('./src/core.js').Runtime = { ...runtime, storage: { put: async (key, body, contentType) => { objects.set(key, { body: new Uint8Array(body), contentType }); }, get: async key => objects.get(key) ?? null, delete: async key => { objects.delete(key); } } };
+      const app = (await import('./src/app.js')).createApp(), { screenshotLink } = await import('./src/ui-notes.js');
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json | Uint8Array, type = 'application/json'): Promise<Reply> => {
+        const res = await app.fetch(new Request(path.startsWith('http') ? path : PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': type } : {}), ...headers }, body: body instanceof Uint8Array ? new Blob([body as Uint8Array<ArrayBuffer>]) : body ? JSON.stringify(body) : undefined }), env);
+        const bytes = new Uint8Array(await res.arrayBuffer()), text = new TextDecoder().decode(bytes); let parsed: unknown = bytes; try { parsed = JSON.parse(text); } catch { /* an image */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture')`, [operator.userId, reader.userId]);
+      const apiKey = `bane_${hex()}`; secrets.add(apiKey);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'UI notes fixture',$3,$4,'["read","send","manage"]','[]')`, [unique('key'), runtime.config.workspaceId, sha(apiKey), apiKey.slice(0, 14)]);
+      const context = { viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'dark', device: 'desktop', pointer: 'fine', build: 'abc123def456', title: 'Campaigns · bane' };
+      const element = { selector: '#main-content > header.ui-page-header > div.cluster > h1', alternatives: ['[data-component="PageHeader"] > div.cluster > h1'], testId: null, component: 'PageHeader', components: ['PageHeader'],
+        tag: 'h1', role: 'heading', label: 'Reply to ada@example.net', text: 'Sent to ada@example.net', box: { x: 24, y: 16, width: 180, height: 24, scrollX: 0, scrollY: 120 }, styles: { 'font-size': '18px', 'line-height': '24px' } };
+      const input = { body: 'Title sits 2px low next to the actions', kind: 'alignment', severity: 'high', url: `${PUBLIC_ORIGIN}/campaigns/cmp_${hex()}/edit?q=ada%40example.net`, route: '/campaigns/:id/edit', context, element };
+
+      // Customers, a forged notes key and no credential: the operator gate's 403 on every UI notes route. (The support
+      // test above also sends every customer credential type to every /v1/operator route, these included.)
+      const nid = `uin_${'0'.repeat(32)}`, routes = [['GET', '/v1/operator/ui-notes'], ['POST', '/v1/operator/ui-notes'], ['GET', `/v1/operator/ui-notes/${nid}`], ['PATCH', `/v1/operator/ui-notes/${nid}`],
+        ['DELETE', `/v1/operator/ui-notes/${nid}`], ['PUT', `/v1/operator/ui-notes/${nid}/screenshot`], ['GET', '/v1/operator/ui-note-keys'], ['POST', '/v1/operator/ui-note-keys'], ['POST', `/v1/operator/ui-note-keys/unk_${'0'.repeat(32)}/revoke`]] as const;
+      const refused: string[] = [];
+      for (const [name, headers] of [['owner session', session(owner)], ['manage API key', bearer(apiKey)], ['forged notes key', bearer(`bane_notes_${hex()}`)], ['no credential', {}]] as const)
+        for (const [method, path] of routes) { const reply = await send(method, path, headers, method === 'GET' || method === 'DELETE' ? undefined : {}); if (reply.status !== 403 || reply.body?.error?.code !== 'OPERATOR_REQUIRED') refused.push(`${name} ${method} ${path} → ${reply.status}`); }
+      assert.deepEqual(refused, []);
+
+      // An operator leaves a note; the API masks addresses again, and a read-only operator reads it but changes nothing.
+      const created = ok(await send('POST', '/v1/operator/ui-notes', session(operator), input), 201);
+      assert.match(created.id, /^uin_[0-9a-f]{32}$/);
+      assert.deepEqual([created.status, created.kind, created.severity, created.page.route, created.page.path.startsWith('/campaigns/cmp_'), created.screenshot, created.author.id, created.resolvedAt], ['open', 'alignment', 'high', '/campaigns/:id/edit', true, null, operator.userId, null]);
+      assert.deepEqual([created.element.text, created.element.label, created.context.build], ['Sent to ad•••', 'Reply to ad•••', 'abc123def456']);
+      assert.ok(!/ada(?:@|%40)example/.test(JSON.stringify(created)), 'No address in full anywhere in the note.');
+      error(await send('POST', '/v1/operator/ui-notes', session(reader), input), 403, 'OPERATOR_REQUIRED');
+      assert.equal(ok(await send('GET', `/v1/operator/ui-notes/${created.id}`, session(reader))).id, created.id);
+      error(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, selector: '' } }), 422);
+      error(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, url: 'javascript:alert(1)' }), 422);
+      const list = async (query: string, who: Record<string, string> = session(operator)) => ok(await send('GET', `/v1/operator/ui-notes${query}`, who)).data.map((note: Json) => note.id);
+      assert.deepEqual(await list('?status=open,in_progress'), [created.id]);
+      assert.deepEqual([await list('?status=fixed'), await list('?kind=bug'), await list('?route=/campaigns/:id/edit'), await list('?q=2px', session(reader))], [[], [], [created.id], [created.id]]);
+      error(await send('GET', '/v1/operator/ui-notes?status=closed', session(operator)), 422);
+
+      // Status and the fixing PR: resolvedAt follows the status; a PR link must be https.
+      error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { prUrl: 'javascript:alert(1)' }), 422);
+      error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(reader), { status: 'fixed' }), 403, 'OPERATOR_REQUIRED');
+      const fixed = ok(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { status: 'fixed', prUrl: 'https://github.com/anomalyco/bane/pull/1' }));
+      assert.ok(fixed.resolvedAt && fixed.prUrl === 'https://github.com/anomalyco/bane/pull/1');
+      assert.equal(ok(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { status: 'open', body: 'Title sits 2px low' })).resolvedAt, null);
+
+      // The screenshot: a real image of the type it says, at most 2 MiB, stored privately under the note's ID.
+      const png = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+      const shot = (body: Uint8Array, type = 'image/png', who = session(operator)) => send('PUT', `/v1/operator/ui-notes/${created.id}/screenshot?width=1&height=1`, who, body, type);
+      error(await shot(png, 'image/gif'), 415);
+      error(await shot(new TextEncoder().encode('<svg onload=alert(1)>'), 'image/png'), 422, 'INVALID_IMAGE');
+      const large = new Uint8Array(2 * 1024 * 1024 + 1); large.set(png);
+      error(await shot(large), 413);
+      error(await shot(png, 'image/png', session(reader)), 403, 'OPERATOR_REQUIRED');
+      const withShot = ok(await shot(png));
+      assert.deepEqual([withShot.screenshot.contentType, withShot.screenshot.bytes, withShot.screenshot.width, objects.get(`ui-notes/${created.id}`)?.body.length], ['image/png', png.length, 1, png.length]);
+      // Its link needs no credential, answers the bytes with locked-down headers, and lasts five minutes.
+      const link = new URL(withShot.screenshot.url), expires = Date.parse(withShot.screenshot.expiresAt) - Date.now();
+      assert.ok(link.origin === PUBLIC_ORIGIN && link.pathname.startsWith('/v1/ui-notes/screenshots/') && expires > 290_000 && expires <= 300_000, withShot.screenshot.url);
+      const image = await send('GET', withShot.screenshot.url);
+      assert.deepEqual([image.status, image.headers.get('content-type'), image.headers.get('content-security-policy'), image.headers.get('x-content-type-options'), /no-store/.test(image.headers.get('cache-control') ?? '')], [200, 'image/png', "sandbox; default-src 'none'", 'nosniff', true]);
+      assert.deepEqual([...image.body as Uint8Array], [...png]);
+      // Expired, tampered, signed for another note or with another secret: 404, the same as a link that never existed.
+      const [data] = link.pathname.split('/').pop()!.split('.') as [string];
+      const later = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(data, 'base64url').toString()), e: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url');
+      const stale = [screenshotLink(runtime, created.id, `ui-notes/${created.id}`, Date.now() - 301_000).url, withShot.screenshot.url.replace(data, later), screenshotLink(runtime, nid, `ui-notes/${created.id}`).url,
+        screenshotLink({ config: { ...runtime.config, authSecret: hex() } }, created.id, `ui-notes/${created.id}`).url, `${PUBLIC_ORIGIN}/v1/ui-notes/screenshots/${data}`];
+      for (const url of stale) error(await send('GET', url), 404, 'NOT_FOUND');
+      assert.equal((await send('GET', screenshotLink(runtime, created.id, `ui-notes/${created.id}`, Date.now() - 299_000).url)).status, 200, 'Still inside its five minutes.');
+
+      // A notes key: made by an operator for themself, shown once, at most 90 days.
+      error(await send('POST', '/v1/operator/ui-note-keys', session(reader), { name: 'Reader agent' }), 403, 'OPERATOR_REQUIRED');
+      error(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 91 }), 422);
+      const key = ok(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 7 }), 201); secrets.add(key.secret);
+      assert.match(key.secret, /^bane_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
+      const listed = ok(await send('GET', '/v1/operator/ui-note-keys', session(operator))).data;
+      assert.deepEqual(listed.map((k: Json) => [k.id, k.name, 'secret' in k || 'hash' in k]), [[key.id, 'Fix agent', false]]);
+      error(await send('GET', '/v1/operator/ui-note-keys', session(reader)), 403, 'OPERATOR_REQUIRED');
+      // It reads notes and sets status, PR link and resolution, as its operator; nothing else, here or anywhere.
+      const agent = bearer(key.secret);
+      assert.deepEqual(await list('?status=open', agent), [created.id]);
+      assert.equal(ok(await send('GET', `/v1/operator/ui-notes/${created.id}`, agent)).screenshot.contentType, 'image/png');
+      const resolved = ok(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, agent, { status: 'in_progress', resolution: 'Fixing in the header component' }));
+      assert.deepEqual([resolved.status, resolved.updatedBy.id, resolved.resolution], ['in_progress', operator.userId, 'Fixing in the header component']);
+      error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, agent, { body: 'rewritten' }), 403, 'UI_NOTES_KEY_SCOPE');
+      for (const [method, path, body] of [['DELETE', `/v1/operator/ui-notes/${created.id}`], ['POST', '/v1/operator/ui-notes', input], ['PUT', `/v1/operator/ui-notes/${created.id}/screenshot`, {}], ['GET', '/v1/operator/ui-note-keys'],
+        ['POST', '/v1/operator/ui-note-keys', { name: 'more' }], ['POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, {}], ['GET', '/v1/operator/workspaces'], ['GET', '/v1/operator/actions']] as const)
+        error(await send(method, path, agent, body), 403, 'OPERATOR_REQUIRED');
+      assert.equal((await send('HEAD', '/v1/operator/ui-notes', agent)).status, 403);
+      for (const path of ['/v1/me', '/v1/emails', '/v1/api-keys']) error(await send('GET', path, agent), 401, 'AUTH_INVALID');
+      // The agent's script, end to end through the same key: list with screenshots, read one, set its status and PR.
+      const { mkdtempSync, readFileSync, rmSync } = await import('node:fs'), { tmpdir } = await import('node:os'), { join } = await import('node:path');
+      const dir = mkdtempSync(join(tmpdir(), 'bane-ui-notes-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+      // The script's requests go to this app in process. Swapped by hand and put back: a second mock of fetch would
+      // restore the fixture's network guard over the real fetch when the test ends.
+      const guarded = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => app.fetch(new Request(input, init), env);
+      try {
+        const { uiNotes } = await import('./scripts/ui-notes.js'), scriptEnv = { BANE_URL: PUBLIC_ORIGIN, BANE_UI_NOTES_KEY: key.secret }, out: string[] = [];
+        const open = await uiNotes(['list', '--status', 'in_progress', '--json', '--screenshots', dir], scriptEnv, line => out.push(line)) as Json[];
+        assert.deepEqual([open.map(note => note.id), JSON.parse(out[0]!)[0].screenshotPath, [...readFileSync(join(dir, `${created.id}.png`))]], [[created.id], join(dir, `${created.id}.png`), [...png]]);
+        await uiNotes(['get', created.id, '--screenshot', join(dir, 'one.png')], scriptEnv, () => {});
+        assert.deepEqual([...readFileSync(join(dir, 'one.png'))], [...png]);
+        const done = await uiNotes(['set-status', created.id, 'fixed', '--pr', 'https://github.com/anomalyco/bane/pull/2'], scriptEnv, () => {}) as Json;
+        assert.deepEqual([done.status, done.prUrl], ['fixed', 'https://github.com/anomalyco/bane/pull/2']);
+        await assert.rejects(uiNotes(['set-status', created.id, 'closed'], scriptEnv, () => {}), /Usage/);
+        await assert.rejects(uiNotes(['list'], { ...scriptEnv, BANE_UI_NOTES_KEY: `bane_notes_${hex()}` }, () => {}), /403 OPERATOR_REQUIRED/);
+      } finally { globalThis.fetch = guarded; }
+      // It stops when its operator loses the operator role, when it expires and when it is revoked.
+      await db.query(`UPDATE platform_operators SET role = 'operator:read' WHERE user_id = $1`, [operator.userId]);
+      error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
+      await db.query(`UPDATE platform_operators SET role = 'operator' WHERE user_id = $1`, [operator.userId]);
+      await db.query(`UPDATE ui_note_keys SET expires_at = now() - interval '1 second' WHERE id = $1`, [key.id]);
+      error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
+      await db.query(`UPDATE ui_note_keys SET expires_at = now() + interval '1 day' WHERE id = $1`, [key.id]);
+      ok(await send('GET', '/v1/operator/ui-notes', agent));
+      error(await send('POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, session(reader), {}), 403, 'OPERATOR_REQUIRED');
+      assert.deepEqual(ok(await send('POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, session(operator), {})), { id: key.id, revoked: true });
+      error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
+
+      // Deleting a note removes its screenshot, and its links stop working.
+      error(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(reader)), 403, 'OPERATOR_REQUIRED');
+      assert.deepEqual(ok(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(operator))), { id: created.id, deleted: true });
+      assert.equal(objects.has(`ui-notes/${created.id}`), false);
+      error(await send('GET', `/v1/operator/ui-notes/${created.id}`, session(operator)), 404);
+      error(await send('GET', withShot.screenshot.url), 404, 'NOT_FOUND');
+      error(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(operator)), 404);
+
+      // Every change is an internal audit row of the operator (no workspace), the key's as a script.
+      const trail = (await db.query(`SELECT action, actor_type, actor_id, actor_label, user_id, workspace_id, via, internal, target_id FROM audit_events WHERE target_type IN ('ui_note', 'ui_note_key') ORDER BY id`)).rows;
+      assert.deepEqual(trail.map(r => `${r.action}:${r.via}`), ['ui_note.create:console', 'ui_note.update:console', 'ui_note.update:console', 'ui_note.screenshot:console', 'ui_note_key.create:console',
+        'ui_note.update:script', 'ui_note.update:script', 'ui_note_key.revoke:console', 'ui_note.delete:console']);
+      assert.ok(trail.every(r => r.actor_type === 'operator' && r.actor_id === operator.userId && r.user_id === operator.userId && r.workspace_id === null && r.internal), JSON.stringify(trail));
+      assert.deepEqual([...new Set(trail.filter(r => r.via === 'script').map(r => r.actor_label))], [`UI notes key ${key.id}`]);
+      assert.deepEqual(new Set(trail.map(r => r.target_id)), new Set([created.id, key.id]));
+    });
+  });
+
   test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -13,6 +13,8 @@ import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs,
 // The operator console (lazy, /operator): Bane staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
+// UI notes (/operator/notes) live in ./notes and load with this chunk.
+export { OperatorNotesPage } from './notes'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
@@ -32,11 +34,12 @@ export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
   const view = params.get('view') === 'actions' ? 'actions' : 'queue'
+  const navigate = useNavigate()
   if (!role) return <NotFound />
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={operatorTabs} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
+      <Tabs value={view} label="Operator views" items={operatorTabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
       {view === 'queue' ? <Queue /> : <Actions />}
     </div>
   </>

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate, useNavigationType } from 'react-router'
 import { BookOpen, Ellipsis, Globe, Inbox, KeyRound, LayoutGrid, Lock, ScrollText, Send, Settings, ShieldCheck, Users } from 'lucide-react'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
@@ -8,7 +8,7 @@ import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
 import { useScoreAbout } from '../lib/score-about'
-import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, SkeletonText } from './ui'
+import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, SkeletonText, useToast } from './ui'
 import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
@@ -17,12 +17,15 @@ import { StandingBanner } from './StandingBanner'
 import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
+import { notesModifierLabel, useUiNotesMode, useUiNotesShortcut } from '../lib/ui-notes-mode'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
 // The sender score explainer: one dialog for every place the score appears, loaded when first opened.
 const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
+// UI notes mode (Bane staff with the operator role): its code loads only while the mode is on, as a fixed overlay.
+const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => module.UiNotesLayer)
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -47,6 +50,10 @@ export function AppShell() {
   // the whole visit that stays open across pages.
   const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
+  const toast = useToast()
+  const canNote = api.mode === 'live' && session?.identity?.operator === 'operator'
+  const notesOn = useUiNotesMode() && canNote
+  useUiNotesShortcut(canNote, useCallback((on: boolean) => toast(on ? `UI notes on. ${notesModifierLabel}-click anything to leave a note.` : 'UI notes off.'), [toast]))
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
   const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
@@ -186,7 +193,7 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     <LegalFooterLinks />
   </>
-  const supportHost = support.mode && <SupportHost chat={support} />
+  const overlays = <>{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}</>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <StandingBanner />
     <BillingBanner />
@@ -208,7 +215,7 @@ export function AppShell() {
     {scoreHost}
     {main}
     <TabBar links={links} intent={intent} footer={footer} locked={locked} />
-    {supportHost}
+    {overlays}
   </div>
   return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -223,7 +230,7 @@ export function AppShell() {
     {scoreHost}
     {main}
     {support.mode && <SupportTrigger chat={support} floating />}
-    {supportHost}
+    {overlays}
   </div>
 }
 

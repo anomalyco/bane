@@ -13,7 +13,9 @@ export const SuppressionEventData = z.object({suppressionReason:SuppressionReaso
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
-  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support'; email?: string; name?: string;
+  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken' | 'operatorService' | 'support' | 'uiNotesKey'; email?: string; name?: string;
+  /** A UI notes key (src/ui-notes.ts): the operator who made it. It has no workspace and no permissions. */
+  userId?: string;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;

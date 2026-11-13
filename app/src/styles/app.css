@@ -293,6 +293,10 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .account-menu__workspace { padding-left: calc(var(--space-8) * 2 + 28px); }
 .account-menu__workspace-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-menu__check { flex: none; margin-left: auto; color: var(--color-accent); }
+.account-menu__toggle { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; }
+.account-menu__toggle-state { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); }
+.account-menu__toggle-state kbd { font-family: var(--font-mono); font-size: var(--text-xs); }
+.account-sheet .ui-action-sheet__label:has(> .account-menu__toggle) { flex: 1; }
 .account-sheet .ui-action-sheet__items + .ui-action-sheet__items { margin-top: var(--space-8); }
 .account-sheet__account { min-height: 60px; }
 .account-sheet__account[aria-current] { cursor: default; }

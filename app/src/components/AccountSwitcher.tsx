@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, LifeBuoy, LogOut, Plus, UserPlus } from 'lucide-react'
+import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
@@ -10,6 +10,7 @@ import { usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
 import { Button, Dialog, Field, Input, Sheet, useToast } from './ui'
 import { ContactSupportDialog } from './ContactSupport'
+import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
 
 // One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account,
 // Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
@@ -33,6 +34,7 @@ export function AccountSwitcher() {
   const [creating, setCreating] = useState(false)
   const [support, setSupport] = useState(false)
   const list = useAccounts(open)
+  const notesOn = useUiNotesMode()
   const load = () => client.fetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 })
   const intent = () => { void load().catch(() => {}) }
   // The phone's sheet is anchored to the bottom of the screen and would grow upwards when the list arrived, so it opens
@@ -67,6 +69,9 @@ export function AccountSwitcher() {
   })
   const full = accounts.length >= limit
   sections.push([
+    // Bane staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
+    ...identity.operator === 'operator' ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
+      label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
     { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, disabled: full, hint: full ? `Up to ${limit} accounts. Sign out of one to add another.` : undefined, onSelect: () => { setOpen(false); session!.addAccount() } },
     { key: 'sign-out', text: 'Sign out of this account', label: 'Sign out of this account', icon: <LogOut />, onSelect: () => void run(() => session!.signOutAccount(self.id), 'Couldn’t sign out.') },

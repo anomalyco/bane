@@ -1,4 +1,4 @@
-import { forwardRef } from 'react'
+import { forwardRef, type ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { Button, type ButtonProps, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
@@ -56,7 +56,39 @@ export const timelineColumnDefs: SkeletonColumn[] = [
   { key: 'at', label: 'When', width: 160, card: 'line' },
 ]
 
-export const operatorTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }]
+// UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot and selection columns are
+// for the table; a phone's card shows the note, its status, page, type and age.
+export const noteColumnDefs: SkeletonColumn[] = [
+  { key: 'select', label: '', width: 40, card: 'hide' },
+  { key: 'shot', label: 'Screenshot', width: 96, card: 'hide' },
+  { key: 'note', label: 'Note', card: 'title' },
+  { key: 'status', label: 'Status', width: 124, card: 'aside' },
+  { key: 'page', label: 'Page', width: '20%', card: 'line' },
+  { key: 'kind', label: 'Type', width: 104, card: 'inline' },
+  { key: 'created', label: 'Left', width: 168, card: 'inline' },
+  { key: 'actions', label: '', width: 48, align: 'right', card: 'end' },
+]
+export const noteStatusOptions = [{ value: '', label: 'Open and in progress' }, { value: 'open', label: 'Open' }, { value: 'in_progress', label: 'In progress' }, { value: 'fixed', label: 'Fixed' }, { value: 'wontfix', label: 'Won’t fix' }, { value: 'all', label: 'All notes' }]
+export const noteKindOptions = [{ value: '', label: 'All types' }, ...['alignment', 'spacing', 'copy', 'bug', 'motion', 'mobile', 'other'].map(kind => ({ value: kind, label: kind[0]!.toUpperCase() + kind.slice(1) }))]
+export function NotesToolbar({ search = '', status = '', kind = '', onSearch, onStatus, onKind, actions, disabled = false }: { search?: string; status?: string; kind?: string; onSearch?: (value: string) => void; onStatus?: (value: string) => void; onKind?: (value: string) => void; actions?: ReactNode; disabled?: boolean }) {
+  return <div className="data-toolbar"><div className="cluster">
+    <SearchField className="search-box--list" aria-label="Search notes and pages" placeholder="Search notes and pages" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} />
+    <Select aria-label="Filter by status" value={status} onValueChange={value => onStatus?.(value)} disabled={disabled} options={noteStatusOptions} />
+    <Select aria-label="Filter by type" value={kind} onValueChange={value => onKind?.(value)} disabled={disabled} options={noteKindOptions} />
+  </div>{actions ?? <Button className="op-bulk" disabled>Select notes <ChevronDown size={14} aria-hidden="true" /></Button>}</div>
+}
+export function OperatorNotesSkeleton() {
+  return <>
+    <PageHeader title="Operator" actions={<Button disabled>Agent keys</Button>} />
+    <LoadingRegion label="Loading UI notes"><div className="op-page">
+      <Tabs value="notes" onValueChange={() => {}} disabled items={operatorTabs} label="Operator views" />
+      <NotesToolbar disabled />
+      <TableSkeleton className="op-notes" columns={noteColumnDefs} rows={6} />
+    </div></LoadingRegion>
+  </>
+}
+
+export const operatorTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }, { value: 'notes', label: 'UI notes' }]
 export const facts = ['Step', 'Score', 'Daily limit', 'Since', 'Strikes', 'Connection'] as const
 
 export const stepOptions = [{ value: '', label: 'Needs review' }, { value: 'pause', label: 'Paused' }, { value: 'restrict', label: 'Restricted' }, { value: 'warn', label: 'Warned' }, { value: 'notice', label: 'Notice' }]
@@ -98,5 +130,6 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
 export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'operator:read' | null | undefined }) {
   const { pathname, search } = useLocation()
   if (!operator) return null
+  if (pathname === '/operator/notes') return <OperatorNotesSkeleton />
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={new URLSearchParams(search).get('view') === 'actions' ? 'actions' : 'queue'} />
 }
