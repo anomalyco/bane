@@ -12,7 +12,7 @@
 /* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways. */
 @media (max-width: 1100px) { .keys-table .ui-table { min-width: 0; } .keys-table [data-col='prefix'] { width: 15% !important; } }
 .keys-cell { min-width: 0; }
-.keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.keys-cell > span { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Create key dialog: plain choices up front, exact scope under Advanced. */
 .keys-purpose { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; margin: 0; padding: 0; border: 0; }
