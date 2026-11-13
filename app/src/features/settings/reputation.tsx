@@ -12,7 +12,7 @@ export function ReputationSection({ report }: { report: SesDiscovery }) {
       <div className="reputation-title"><h3 className="cluster">Reputation <StatusBadge status={status.label} tone={status.tone} /></h3>{reputation?.available && <span className="reputation-legend"><span><i className="reputation-key--warning" />Warning</span><span><i className="reputation-key--risk" />At risk</span></span>}</div>
       <p className="muted">Historic rates SES calculates from a representative volume of your mail.</p>
     </div>
-    {reputation == null ? <p className="muted">Reputation rates load on the next check. Select Refresh to check now.</p>
+    {reputation == null ? <p className="muted">Rates load on the next check, or select Refresh.</p>
       : !reputation.available ? <p className="muted">{reputation.reason ?? 'Reputation rates are unavailable.'}</p>
       : <div className="reputation-panels">
         <RatePanel metric="bounceRate" title="Bounce rate" reputation={reputation} />

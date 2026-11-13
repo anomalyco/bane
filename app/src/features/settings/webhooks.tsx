@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
@@ -44,7 +44,7 @@ function EndpointFields({ input, urlHint, onChange, regions, errors, apiError, d
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
-      <Field label="Endpoint URL" htmlFor="endpoint-url" hint={urlHint && 'Leave blank to keep the saved URL, or enter a replacement.'} error={errors.url || fieldError(apiError, 'url')}><Input id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={urlHint ?? 'https://support.acme.com/hooks/email'} /></Field>
+      <Field label="Endpoint URL" htmlFor="endpoint-url" hint={urlHint && 'Leave blank to keep the saved URL, or enter a replacement.'} error={errors.url || fieldError(apiError, 'url')}><SecretInput id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required={!input.id} disabled={disabled} placeholder={urlHint ?? 'https://support.acme.com/hooks/email'} /></Field>
     </div>
     {scope !== undefined && <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={scope === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={scope === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {scope !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = scope.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => onChange({ ...input, regionIds: next ? [...scope, region.region] : scope.filter(id => id !== region.region) })} /> })}</div>}</div>}
@@ -62,7 +62,7 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note">Bane calls your URL when something happens to email you send: delivered, bounced, marked as spam and more. Each call is signed so you can <Link to="/docs#guide-webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
+    <p className="muted settings-section-note">Bane calls your URL when email you send is delivered, bounces, is marked as spam and more. Each call is signed so you can <Link to="/docs#guide-webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },

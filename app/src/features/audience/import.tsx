@@ -82,7 +82,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
     return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review Unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack">
       <Alert tone="success">{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed` : ''}.</Alert>
       {consent ? subscribed < imported && <p className="muted">{plural(imported - subscribed, 'contact')} already had a consent decision, which was kept: opt-outs and suppressions never change on import.</p>
-        : imported > 0 && <Alert tone="info">They can’t receive campaigns yet because they have no recorded consent. Once you have their agreement, choose Review Unknown contacts, then Mark as subscribed.</Alert>}
+        : imported > 0 && <Alert tone="info">They can’t receive campaigns until they have consent. Once they agree, choose Review Unknown contacts, then Mark as subscribed.</Alert>}
       {result.errors.length > 0 && <RejectedRows errors={result.errors} skipped />}
     </div></Dialog>
   }
@@ -95,8 +95,8 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       </Field>)}</div>}
       <div className="audience-consent">
         <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="These people agreed to receive marketing email" />
-        <p className="ui-field__hint">{consent ? 'Everyone imported without a consent decision is marked subscribed. People who opted out or are suppressed stay that way.' : 'Without this, imported contacts can’t receive campaigns until they’re marked subscribed.'}</p>
-        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? 'Say how they agreed, for example “Signed up on our website”.' : fieldError(commit.error, 'consent.evidence')} hint="Saved with each person’s consent record, for example “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
+        <p className="ui-field__hint">{consent ? 'Contacts without a consent decision are marked subscribed. Opt-outs and suppressed addresses stay as they are.' : 'Without this, imported contacts can’t receive campaigns until they’re marked subscribed.'}</p>
+        {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? 'Say how they agreed, for example “Signed up on our website”.' : fieldError(commit.error, 'consent.evidence')} hint="Saved in each consent record, like “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
       {preview && <>
         <div className="cluster audience-review-bar"><span className="muted">Fields are locked while you review. Change mapping to edit them.</span><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>

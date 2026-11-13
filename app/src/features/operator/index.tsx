@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -8,11 +8,13 @@ import { ApiError, type SenderScoreFactor, type StandingStep } from '../../data/
 import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorTabs, OperatorQueueSkeleton, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, WorkspaceBodySkeleton } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, useOperatorTabs, OperatorQueueSkeleton, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, WorkspaceBodySkeleton } from './skeletons'
 
 // The operator console (lazy, /operator): Bane staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
+// UI notes (/operator/notes) live in ./notes and load with this chunk.
+export { OperatorNotesPage } from './notes'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = () => <EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
@@ -32,11 +34,12 @@ export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
   const view = params.get('view') === 'actions' ? 'actions' : 'queue'
+  const navigate = useNavigate(), tabs = useOperatorTabs()
   if (!role) return <NotFound />
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={operatorTabs} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
+      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
       {view === 'queue' ? <Queue /> : <Actions />}
     </div>
   </>
@@ -250,7 +253,7 @@ const actionCopy: Record<ActionKind, { title: string; description: string; confi
   resume: { title: 'Resume sending?', description: 'Sending resumes at the restore share you choose; a strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
   hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused; transactional mail keeps sending.', confirm: 'Hold marketing', done: 'Marketing held' },
   release: { title: 'Release marketing?', description: 'Campaigns can send again; the workspace stays at Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
-  limit: { title: 'Set the daily limit', description: 'An override replaces the score’s limit until it expires. Clear it to return to the score’s limit.', confirm: 'Save limit', done: 'Limit saved' },
+  limit: { title: 'Set the daily limit', description: 'Replaces the score’s limit until it expires; clear it to go back to the score’s limit.', confirm: 'Save limit', done: 'Limit saved' },
   campaign: { title: 'Release this campaign?', description: 'The quarantined campaign resumes where it stopped.', confirm: 'Release campaign', done: 'Campaign released' },
 }
 // Each opening has its own Idempotency-Key, and every submit sends If-Match with the standing version it was decided on.

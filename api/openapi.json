@@ -18803,6 +18803,10 @@
                       ],
                       "description": "Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else."
                     },
+                    "uiNotes": {
+                      "type": "boolean",
+                      "description": "Bane staff only: this session may use staff UI notes. False for everyone else."
+                    },
                     "billing": {
                       "type": [
                         "object",

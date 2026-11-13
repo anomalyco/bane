@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
+import { ChevronDown } from 'lucide-react'
 import { Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -15,8 +16,6 @@ import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton } from '../docs/connect-agent'
 import { guides } from '../inbound/concepts'
-import { Link } from 'react-router'
-
 import { credentials } from '../docs/credentials'
 
 type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
@@ -74,10 +73,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
 
   return <div className="stack">
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><ConnectAgentButton initiallyOpen={connectLink} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
-    <section className="keys-guide" aria-labelledby="keys-guide">
-      <h2 id="keys-guide">Which key do I need? <Link className="guide-link" to={guides.keys}>Guide</Link></h2>
-      <dl>{credentials.map(kind => <div key={kind.name}><dt>{kind.name}</dt><dd>{kind.line} <span className="keys-guide__where">{kind.where}</span></dd></div>)}</dl>
-    </section>
+    <KeysGuide />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
@@ -130,6 +126,25 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <ConfirmDialog open={revokeToken !== null} onOpenChange={next => { if (!next) setRevokeToken(null) }} title={`Revoke ${revokeToken?.purpose ?? 'agent token'}?`} description="This temporary token will stop working immediately. Revoking it cannot be undone." confirmLabel="Revoke token" danger pending={revokeAgentToken.isPending} onConfirm={async () => { if (revokeToken) await revokeAgentToken.mutateAsync(revokeToken.id) }} />
     <ConfirmDialog open={revokeConnection !== null} onOpenChange={next => { if (!next) setRevokeConnection(null) }} title={`Revoke ${revokeConnection?.name || 'MCP connection'}?`} description="This connection and every agent token created from it will stop working immediately." confirmLabel="Revoke connection" danger pending={revokeMcpConnection.isPending} onConfirm={async () => { if (revokeConnection) await revokeMcpConnection.mutateAsync(revokeConnection.id) }} />
   </div>
+}
+
+// Which key do I need: one quiet line, closed until asked for, and left the way it was last time in this browser.
+const guideKey = 'bane.keys-guide'
+function KeysGuide() {
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(guideKey) === 'open' } catch { return false } })
+  const toggle = () => {
+    setOpen(!open)
+    try { if (open) localStorage.removeItem(guideKey); else localStorage.setItem(guideKey, 'open') } catch { /* Stays as chosen for this visit. */ }
+  }
+  return <section className="keys-guide" aria-label="Which key do I need?" data-open={open || undefined}>
+    <div className="keys-guide__line">
+      <button type="button" className="keys-guide__toggle" aria-expanded={open} aria-controls="keys-guide-panel" onClick={toggle}>Which key do I need?<ChevronDown size={14} aria-hidden="true" /></button>
+      <Link className="guide-link" to={guides.keys}>Guide</Link>
+    </div>
+    <div id="keys-guide-panel" className="keys-guide__panel" aria-hidden={!open} inert={!open}>
+      <div><dl>{credentials.map(kind => <div key={kind.name}><dt>{kind.name}</dt><dd>{kind.line} <span className="keys-guide__where">{kind.where}</span></dd></div>)}</dl></div>
+    </div>
+  </section>
 }
 
 function TwoLines({ first, second }: { first: ReactNode; second: ReactNode }) {

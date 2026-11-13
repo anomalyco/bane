@@ -12,10 +12,10 @@ export const factorFormats: Record<SenderScoreFactor['key'], (value: number) => 
 // One plain line per part, where the score shows it; the API's `basis` gives the exact rule underneath.
 export const factorPlain: Record<SenderScoreFactor['key'], string> = {
   complaints: 'How often recipients mark your mail as spam.',
-  bounces: 'How often mail can’t be delivered, such as to addresses that don’t exist.',
+  bounces: 'How often mail can’t be delivered, like to addresses that don’t exist.',
   content: 'How often Bane’s content check stops a message as spam.',
   auth: 'Whether your domains sign mail (DKIM), align the sender (SPF) and publish DMARC.',
-  hygiene: 'How often new contacts bounce, and how often you send to addresses already on the suppression list.',
+  hygiene: 'How often new contacts bounce, and how often you mail suppressed addresses.',
   engagement: 'How often marketing recipients unsubscribe; tracked clicks help.',
 }
 const grades = 'A+ from 95, A from 90, B from 80, C from 70, D from 60, F below 60.'
@@ -29,7 +29,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   useEffect(() => { if (open && focus) requestAnimationFrame(() => list.current?.querySelector(`[data-key="${focus}"]`)?.scrollIntoView({ block: 'nearest' })) }, [open, focus])
   const graded = report?.state === 'graded'
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"
-    description="A 0–100 grade for how healthy your sending looks, weighted towards your most recent email. Mailbox providers watch the same signals, so a high score helps your mail reach the inbox. On Hosted it also sets your daily limit."
+    description="A 0–100 grade of how healthy your sending is, weighted to recent email. A high score helps your mail reach the inbox, and on Hosted it sets your daily limit."
     footer={<><Link className="ui-button ui-button--ghost ui-button--md" to="/docs#getSenderScore" onClick={closeScoreAbout}>API reference</Link><Button variant="primary" onClick={closeScoreAbout}>Done</Button></>}>
     {!report ? error ? <ErrorState error={error} onRetry={onRetry} /> : <div className="score-about__status"><SkeletonText width="60%" /></div> : <>
       <div className="score-about__status" data-grade={graded && report.grade ? gradeKey(report.grade) : undefined}>
@@ -42,11 +42,11 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
       </div>
       <section className="score-about__section" aria-labelledby="score-about-counts">
         <h3 id="score-about-counts">What counts</h3>
-        <p>Every email you send, except simulated sends and emails only to the SES mailbox simulator (<code>…@simulator.amazonses.com</code>). Simulator sends still use your daily limit, but they never change your score.</p>
+        <p>Every email you send, except simulated sends and mail only to the SES simulator (<code>…@simulator.amazonses.com</code>). Simulator sends use your daily limit but never change your score.</p>
       </section>
       <section className="score-about__section" aria-labelledby="score-about-graded">
         <h3 id="score-about-graded">How it’s graded</h3>
-        <p>Each part below scores 0–100 between a healthy and a risky rate; a part with no data yet is left out and the rest count for more. Recent days count most (a 30-day half-life). The score starts at 65, or lower if your mail already scores lower, and moves towards your result by at most 5 points up or 10 down a day, so a bad day shows quickly and recovery is gradual. With little mail it stays close to 60.</p>
+        <p>Each part below scores 0–100, from a risky rate to a healthy one; parts with no data are left out and the rest count more. Recent days count most (30-day half-life). The score starts at 65, or lower if your mail scores lower, and moves at most 5 points up or 10 down a day. With little mail it stays near 60.</p>
         <p className="muted">{grades}</p>
       </section>
       <ul ref={list} className="score-about__factors" aria-label="The six parts">{report.factors.map(factor => <li key={factor.key} data-key={factor.key} data-focus={focus === factor.key || undefined}>

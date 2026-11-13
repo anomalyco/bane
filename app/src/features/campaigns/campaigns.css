@@ -29,7 +29,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 /* In dark mode only the email paper stays light: the desk around it follows the theme instead of a bright grey field. */
 :root[data-theme='dark'] .campaign-compose-workspace { background: #0D0D0D; }
 :root[data-theme='dark'] .campaign-compose-sheet { border-color: transparent; box-shadow: 0 0 0 1px rgb(255 255 255 / 8%); }
-.campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; padding-block: var(--space-24) var(--space-40); overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; padding-block: var(--space-24) var(--space-40); overscroll-behavior: contain; }
 .campaign-compose-sheet { display: flex; flex-direction: column; width: calc(100% - 32px); max-width: 680px; min-height: calc(100% - 48px); margin-inline: auto; padding: var(--space-24); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-email-surface); box-shadow: 0 2px 8px rgb(24 24 24 / 6%); }
 .campaign-compose-metadata { flex-shrink: 0; }
 .campaign-compose-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); align-items: center; min-height: 44px; gap: var(--space-12); border-bottom: 1px solid var(--color-border); }

@@ -1,4 +1,19 @@
-* { box-sizing: border-box; }
+* { box-sizing: border-box; scrollbar-width: none; }
+/* No scrollbars anywhere: every area still scrolls by wheel, trackpad, touch, keys and focus, and takes no width for a
+   scrollbar, so its insets stay even. Where an area clips content mid-view, the clipped edge fades into the surface
+   instead (scroll-fade.tsx names those areas and sets data-more-above/below/left/right); the page scroll has no fade. */
+::-webkit-scrollbar { display: none; }
+@property --fade-above { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-below { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-left { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-right { syntax: '<length>'; inherits: false; initial-value: 0px; }
+[data-scroll-fade] { mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-above), #000 calc(100% - var(--fade-below)), transparent), linear-gradient(to right, transparent, #000 var(--fade-left), #000 calc(100% - var(--fade-right)), transparent); mask-composite: intersect; }
+[data-scroll-fade] { scroll-padding: 24px 24px 32px; }
+[data-scroll-fade][data-settled] { transition: --fade-above 160ms ease-out, --fade-below 160ms ease-out, --fade-left 160ms ease-out, --fade-right 160ms ease-out; }
+[data-scroll-fade][data-more-above] { --fade-above: 24px; }
+[data-scroll-fade][data-more-below] { --fade-below: 32px; }
+[data-scroll-fade][data-more-left] { --fade-left: 24px; }
+[data-scroll-fade][data-more-right] { --fade-right: 24px; }
 html, body, #root { min-height: 100%; }
 body { margin: 0; background: var(--color-deep); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-regular); font-synthesis: none; letter-spacing: -.04px; -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; }
 button, input, textarea, select { font: inherit; color: inherit; }
@@ -39,6 +54,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-select-trigger > span:last-child { display: flex; flex-shrink: 0; }
 .ui-select-trigger[data-placeholder] { color: var(--color-muted); }
 .ui-popover { z-index: 90; background: var(--color-layer-1); border: 0; border-radius: var(--radius-sm); padding: var(--space-4); box-shadow: var(--shadow-popover); font-family: var(--font-body); font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-text); animation: ui-appear var(--motion-duration) ease-out; }
+.ui-popover-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .ui-select-content { min-width: var(--radix-select-trigger-width); max-height: min(320px, var(--radix-select-content-available-height)); overflow: hidden; }
 .ui-select-item, .ui-menu-item { display: flex; align-items: center; gap: var(--space-8); min-height: var(--control-height); padding: var(--space-4) var(--space-8); border-radius: 4px; outline: none; cursor: pointer; user-select: none; }
 .ui-select-item[data-disabled], .ui-menu-item[data-disabled] { cursor: not-allowed; }
@@ -61,8 +77,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-switch[data-state='checked'] { background: var(--color-accent); }
 .ui-switch__thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); transform: translateX(0); transition: transform var(--motion-duration); }
 .ui-switch__thumb[data-state='checked'] { transform: translateX(12px); }
-.ui-tabs { display: flex; align-items: center; gap: var(--space-6); min-height: 32px; overflow-x: auto; border-bottom: 1px solid var(--color-border); scrollbar-width: none; }
-.ui-tabs::-webkit-scrollbar { display: none; }
+.ui-tabs { display: flex; align-items: center; gap: var(--space-6); min-height: 32px; overflow-x: auto; border-bottom: 1px solid var(--color-border); }
 .ui-tabs + .data-toolbar { margin-top: var(--page-gap); }
 .ui-tab { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: 31px; padding: 0 var(--space-6); border: 0; border-radius: 0; background: var(--color-transparent); color: var(--color-muted); white-space: nowrap; }
 .ui-tab:focus-visible { outline-offset: -3px; }
@@ -115,6 +130,14 @@ a.ui-tab { text-decoration: none; }
 .ui-tone--info { --tone-ink: var(--color-info); --tone-marker: var(--color-info-marker); --tone-bg: var(--color-info-bg); --tone-border: var(--color-info-border); }
 .ui-status { display: inline-flex; align-items: center; gap: var(--space-6); min-height: 20px; padding: 1px var(--space-6); border: 1px solid var(--tone-border); border-radius: 4px; background: var(--tone-bg); color: var(--tone-ink); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
 .ui-status__dot { width: 4px; height: 4px; flex-shrink: 0; background: var(--tone-marker); border-radius: 50%; }
+.ui-status-dot { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; white-space: nowrap; }
+.ui-status-dot > .ui-status__dot { width: 6px; height: 6px; }
+.ui-status-dot__value, .ui-status-dot__note { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The value keeps its whole width (up to the cell, less the dot); only the note gives way. */
+.ui-status-dot__value { flex: none; max-width: calc(100% - 14px); }
+.ui-status-dot__note { flex: 0 1 auto; color: var(--color-muted); }
+.ui-status-dot__note::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+.ui-status-dot--muted > .ui-status-dot__value { color: var(--color-muted); }
 .ui-alert { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-12) var(--space-16); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); color: var(--tone-ink); font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
 .ui-alert__title { font-weight: var(--font-weight-bold); margin-bottom: var(--space-4); }
 .ui-error-reference { display: block; margin-top: var(--space-4); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }

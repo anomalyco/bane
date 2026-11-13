@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
-import { Alert, Button, ErrorState, ErrorText, Field, Input, SectionHeader, Tabs, useToast } from '../../components/ui'
+import { Alert, Button, ErrorState, ErrorText, Field, Input, SecretCode, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
@@ -221,7 +221,7 @@ function AdminSetupRequired() {
   return <div className="onboarding onboarding--narrow onboarding--center">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Sending isn’t set up yet</h1>
-      <p className="onboarding-lead">An admin needs to finish setup for this workspace before you can use it.</p>
+      <p className="onboarding-lead">An admin must finish setting up this workspace first.</p>
     </div>
     <div className="onb-rise" style={rise(1)}><Button loading={checking} onClick={() => void check()}>Check again</Button></div>
   </div>
@@ -229,7 +229,7 @@ function AdminSetupRequired() {
 
 function connectionError(error: unknown) {
   if (code(error) === 'AWS_NOT_CONFIGURED') return 'Hosted mail isn’t available on this installation.'
-  if (code(error) === 'BYO_NOT_CONFIGURED') return 'Bring your own AWS isn’t available on this installation.'
+  if (code(error) === 'BYO_NOT_CONFIGURED') return 'Sending through your own AWS account isn’t available on this installation.'
   if (code(error) === 'CONNECTION_EXISTS') return 'Another setup is already started. Reload to continue it.'
   return message(error)
 }
@@ -239,19 +239,19 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
   return <div className="onboarding onboarding--choice">
     <div className="onboarding-intro onboarding-intro--center onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Where should your email send from?</h1>
-      <p className="onboarding-lead">Either way, it goes out from your own domain.</p>
+      <p className="onboarding-lead">Either way, mail comes from your own domain.</p>
     </div>
     <div className="onboarding-options">
       <button type="button" className="onboarding-option onb-rise" style={rise(1)} onClick={() => onChoose('shared')}>
         <span className="onboarding-option-icon" aria-hidden="true"><Send size={18} /></span>
         <span className="onboarding-option-title">Hosted mail</span>
-        <span className="onboarding-option-body">Send through Bane’s account on Amazon SES, Amazon’s email-sending service. No AWS account needed; you add a few DNS records. It starts with a small daily limit that rises on its own as your mail proves healthy.</span>
+        <span className="onboarding-option-body">Send through Bane’s Amazon SES account. No AWS account needed, just a few DNS records. The daily limit rises as your mail proves healthy.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">Small daily limit to start</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account. A guided setup creates one CloudFormation stack there.</span>
+        <span className="onboarding-option-body">Send through Amazon SES in your own AWS account. Setup creates one CloudFormation stack.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
@@ -269,8 +269,8 @@ function AwsLogo() {
 
 function verifyError(error: unknown, region: string) {
   switch (code(error)) {
-    case 'AWS_ACCESS_DENIED': return `Bane can’t use the role yet. Check the stack shows CREATE_COMPLETE in ${region} in this account, then try again.`
-    case 'EXTERNAL_ID_REQUIRED': return 'The role doesn’t require this setup’s external ID. Delete the stack in AWS and open it again.'
+    case 'AWS_ACCESS_DENIED': return `Bane can’t use the role yet. Wait for the stack to show CREATE_COMPLETE in ${region}, then try again.`
+    case 'EXTERNAL_ID_REQUIRED': return 'The role is missing this setup’s external ID. Delete the stack in AWS, then open the link again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
     default: return message(error)
@@ -280,7 +280,7 @@ function verifyError(error: unknown, region: string) {
 const connectStates: { key: ConnectionState | 'creating'; title: string; detail: string }[] = [
   { key: 'creating', title: 'Preparing…', detail: 'Getting your AWS link ready.' },
   { key: 'awaiting_role', title: 'Waiting for AWS…', detail: 'Create the stack in the AWS tab. This page updates on its own.' },
-  { key: 'provisioning', title: 'Setting up…', detail: 'AWS confirmed the stack. Creating the sending resources in your account.' },
+  { key: 'provisioning', title: 'Setting up…', detail: 'Stack confirmed. Creating sending resources in your account.' },
   { key: 'ready', title: 'Connected', detail: 'Your AWS account is ready. Taking you to the next step…' },
   { key: 'failed', title: 'Setup didn’t finish', detail: 'Check the stack in AWS, then try again or enter your account ID below.' },
 ]
@@ -295,7 +295,7 @@ function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: Connec
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
       <h1 className="onboarding-title">Connect your AWS account</h1>
-      <p className="onboarding-lead">A CloudFormation stack gives Bane a role in your account. It takes about two minutes, and this page continues on its own.</p>
+      <p className="onboarding-lead">A CloudFormation stack gives Bane a role in your account. It takes about two minutes; this page continues on its own.</p>
     </div>
     <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
       {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></a>
@@ -331,7 +331,7 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
   }
   return <form className="onboarding-inline-form" onSubmit={submit} noValidate>
     <div className="onboarding-field onboarding-field--aws">
-      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="Once the stack shows CREATE_COMPLETE. It’s the 12 digits in the AWS console’s account menu.">
+      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="After CREATE_COMPLETE. The 12 digits in the AWS console’s account menu.">
         <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" autoFocus value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
       </Field>
     </div>
@@ -349,7 +349,7 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Your domains are ready</h1>
-      <p className="onboarding-lead">We imported {shown} verified {shown === 1 ? 'domain' : 'domains'} from your AWS account. You can send from {shown === 1 ? 'it' : 'them'} now.</p>
+      <p className="onboarding-lead">Imported {shown} verified {shown === 1 ? 'domain' : 'domains'} from your AWS account, ready to send.</p>
     </div>
     <ul className="onboarding-imported onb-rise" style={rise(1)}>
       {verified.map(domain => <li key={domain.id}><code>{domain.name}</code><LiveStatus state="verified" plain /></li>)}
@@ -417,11 +417,11 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
       <h1 className="onboarding-title onboarding-domain-title"><span>{current.name}</span><LiveStatus state={verified ? 'verified' : current.status === 'issue' ? 'failed' : 'pending'} /></h1>
       {/* One slot for the lead, the failure note and the verified moment: each replaces the other in place. */}
       <div className="onboarding-slot">
-        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS provider. We’ll check automatically, and you can continue while it verifies.</p>
-        <div data-active={(!verified && current.status === 'issue') || undefined} inert={verified || current.status !== 'issue'}><Alert tone="danger">Verification stopped. Check the records below, then use Check now on the domain’s page in Domains.</Alert></div>
+        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS provider. You can continue while we verify them.</p>
+        <div data-active={(!verified && current.status === 'issue') || undefined} inert={verified || current.status !== 'issue'}><Alert tone="danger">Verification stopped. Fix the records below, then press Check now on the domain’s page.</Alert></div>
         <div className="onboarding-verified" data-active={verified || undefined} aria-hidden={!verified || undefined}>
           <span className="onboarding-verified-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
-          <p><strong>{current.name} is verified.</strong> You can send email now. Taking you to the last step…</p>
+          <p><strong>{current.name} is verified.</strong> You can send now. Taking you to the last step…</p>
           <span className="onboarding-verified-timer" aria-hidden="true" />
         </div>
       </div>
@@ -464,11 +464,11 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
     { value: 'manage', label: 'Full access' },
   ]
-  const scopeHint = scope === 'send' ? `Sends email and campaigns from ${current?.name ?? 'your domains'} only, and uploads their attachments. It can’t read logs or contacts, or change keys, domains or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs this to set up receiving for you.'
+  const scopeHint = scope === 'send' ? `Sends email and campaigns, with attachments, from ${current?.name ?? 'your domains'} only. Can’t read logs or contacts, or change keys, domains or settings. Best for an app.` : 'Sends, reads logs and manages domains, receiving, keys and settings. A coding agent needs it to set up receiving.'
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Send your first email</h1>
-      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent. You can find all of this again in Docs.</p>
+      <p className="onboarding-lead">Create a key, then send with cURL, the SDK or your coding agent. All of this is also in Docs.</p>
     </div>
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
@@ -481,7 +481,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
-          <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><code>{secret ?? keyPlaceholder}</code><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
+          <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><SecretCode>{secret ?? keyPlaceholder}</SecretCode><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
         </div>
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>

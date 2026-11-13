@@ -9,7 +9,7 @@ export function AdminOnly({ title, action }: { title: string; action: string }) 
     <span className="admin-only__icon" aria-hidden="true"><Lock size={16} /></span>
     <div className="admin-only__text">
       <h2>{title}: owners and admins only</h2>
-      <p className="muted">Only workspace owners and admins can {action}. Ask one of them to do it for you, or to make you an admin in Settings → Members.</p>
+      <p className="muted">Only workspace owners and admins can {action}. Ask one to do it, or to make you an admin in Settings → Members.</p>
     </div>
   </section>
 }

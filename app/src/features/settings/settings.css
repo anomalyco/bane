@@ -50,6 +50,11 @@
 .settings-facts dd > .ui-status { vertical-align: top; }
 .settings-group { scroll-margin-top: var(--space-24); }
 .ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }
+/* Domains: one line per cell at the shared row height; a long name or host ends in an ellipsis, whole in its title. */
+.ui-table-scroll.domains-table { --table-row-height: 53px; }
+.domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
+@media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
@@ -179,13 +184,15 @@
 .settings-ses .settings-report > * + * { border-top: 1px solid var(--color-border-muted); padding-top: var(--space-24); }
 .settings-ses .settings-report > .settings-aws-details { padding-top: var(--space-16); }
 
-/* Settings → Activity: one line per cell (From is client over network), ending in an ellipsis, so every row stays 53px. */
+/* Settings → Activity: one line per cell (From is client · network), ending in an ellipsis, so every row stays 53px. */
 .ui-table-scroll.activity-table { --table-row-height: 53px; }
 .activity-filter.ui-select-trigger { width: 200px; max-width: 100%; }
 .activity-cell { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-table td[data-col='when'] { color: var(--color-muted); white-space: nowrap; }
-.activity-from { min-width: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.activity-from > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* From gives up the network before the client when it runs out of room. */
+.activity-from { display: flex; color: var(--color-muted); }
+.activity-from > span { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.activity-from > span + span { flex: 0 1 auto; min-width: 0; }
 .activity-more { display: flex; justify-content: center; }
 .activity-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .activity-summary h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
