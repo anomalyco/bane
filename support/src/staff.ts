@@ -3,6 +3,7 @@ import type { Env } from './env.js';
 import { purposeKey, sign, verify } from './tokens.js';
 import { TICKET_TYPES } from './agent/tools.js';
 import { TYPE_LABEL } from './tickets.js';
+import { log } from './log.js';
 
 // The internal ticket list (support.<host>/staff). Staff identity is Bane's operator check, never a password here:
 // "Sign in" sends an operator to Bane's GET /v1/operator/support/staff-sign-in (their dashboard session, operators
@@ -60,7 +61,7 @@ export async function staff(request: Request, env: Env): Promise<Response> {
     if (!resolve) return new Response(null, { status: 404 });
     const done = await env.DB.prepare("UPDATE tickets SET status = 'resolved', resolved_at = ?, resolved_by = ?, resolution = ?, updated_at = ? WHERE id = ? AND status <> 'resolved'")
       .bind(Date.now(), who.userId, String(form.get('resolution') ?? '').slice(0, 1000) || null, Date.now(), resolve[1]!).run();
-    console.log(JSON.stringify({ level: 'info', code: 'TICKET_RESOLVED', ticket: resolve[1], staff: who.userId, changed: done.meta.changes }));
+    log('info', { event: 'staff', code: 'TICKET_RESOLVED', ticket: resolve[1], staff: who.userId, changed: done.meta.changes });
     return new Response(null, { status: 303, headers: { location: `/staff/tickets${url.search}` } });
   }
   if (path === '/staff' || path === '/staff/') return new Response(null, { status: 303, headers: { location: '/staff/tickets' } });
@@ -78,7 +79,7 @@ async function callback(env: Env, token: string | null): Promise<Response> {
   const exp = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
   const payload = b64url(JSON.stringify({ userId: checked.staff.userId, email: checked.staff.email, role: checked.staff.role, exp, checked: Math.floor(Date.now() / 1000) } satisfies Staff));
   const cookie = `s1.${payload}.${await sign(await key(env), `s1.${payload}`)}`;
-  console.log(JSON.stringify({ level: 'info', code: 'STAFF_SIGNED_IN', staff: checked.staff.userId }));
+  log('info', { event: 'staff', code: 'STAFF_SIGNED_IN', staff: checked.staff.userId });
   return new Response(null, { status: 303, headers: { location: '/staff/tickets', 'set-cookie': `${COOKIE}=${cookie}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=${SESSION_SECONDS}` } });
 }
 

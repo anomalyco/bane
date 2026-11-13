@@ -7,6 +7,7 @@ import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js
 import { fileTicket, notifyTeam, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, newId } from './tokens.js';
+import { log, logError } from './log.js';
 
 // abuse@, privacy@ and legal@ (owner decision): straight into the ticket system, never to the AI agent and never
 // forwarded. One SupportIntake object per Bane thread at those addresses; there is no OpenCode here and no model call.
@@ -41,7 +42,7 @@ export class SupportIntake extends DurableObject<Env> {
       this.sql.exec('UPDATE intake_inbox SET attempts = attempts + 1 WHERE message_id = ?', next.message_id);
       try { await this.process(next); }
       catch (error) {
-        console.error(JSON.stringify({ level: 'error', code: 'INTAKE_FAILED', mailbox: next.mailbox, message: String(error).slice(0, 300) }));
+        logError(error, { event: 'intake', code: 'INTAKE_FAILED', mailbox: next.mailbox, messageId: next.message_id });
         if (next.attempts >= 5) this.sql.exec("UPDATE intake_inbox SET state = 'failed' WHERE message_id = ?", next.message_id);
         await this.ctx.storage.setAlarm(Date.now() + 60_000);
         return;
@@ -61,7 +62,10 @@ export class SupportIntake extends DurableObject<Env> {
   }
 
   private async process(next: { message_id: string; thread_id: string; mailbox: Mailbox }) {
-    const api = baneApi(this.env, 'intake'), set = (state: string) => this.sql.exec('UPDATE intake_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
+    const api = baneApi(this.env, 'intake'), set = (state: string) => {
+      this.sql.exec('UPDATE intake_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
+      log('info', { event: 'email', channel: next.mailbox, state, messageId: next.message_id });
+    };
     const message: InboundMessage = await api.message(next.message_id);
     const sender = senderOf(message) ?? 'unknown', hash = await addressHash(sender);
     const dmarc = String(message.authentication?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
