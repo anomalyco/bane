@@ -37,6 +37,8 @@
     "HOSTED_SEND_CAP_MATURE": "10000",
     // BYO_TEMPLATE_URL stays unset until a template is published in the dedicated account.
     "DEFAULT_SES_REGION": "us-east-2",
+    // Stripe Tax stays off until its registrations exist (api/README.md, Stripe setup). The keys are Worker secrets.
+    "STRIPE_AUTOMATIC_TAX": "false",
     // Live SES uses the shared-account key (infra/aws-shared). Sends stay denied by its IAM policy
     // until every send carries an SES TenantName.
     "ENABLE_LIVE_SES": "true",

@@ -418,6 +418,8 @@ jobs:
             BANE_ROOT_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
             ACCOUNT_CLIENT_PRIVATE_KEY,bane/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
+            STRIPE_SECRET_KEY,bane/${{ env.STAGE }}/STRIPE_SECRET_KEY
+            STRIPE_WEBHOOK_SECRET,bane/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
           parse-json-secrets: false
 
       # Only dev runs a live E2E, so only dev has an E2E key to read.
