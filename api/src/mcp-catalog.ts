@@ -42,7 +42,7 @@ export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge
 // getRitualVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRituals.
 const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
-const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail']);
+const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
 // REST permission below, never by the HTTP method; confirm=true marks only state changes.
 const NO_CONFIRM = new Set(['planAudienceMutation']);

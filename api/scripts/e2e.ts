@@ -956,6 +956,8 @@ async function run() {
       ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
       step('Single send, replay, delivery and email log', direct),
       step('Preview run-owned HTML without sending', async () => {
+        const report = await api('checkEmail', { body: { from, subject:prefix, text:'Confirm your shipping address.', stream:'transactional' } });
+        check(Number.isInteger(report.score) && report.findings.some((f:{ruleId:string})=>f.ruleId==='screen-bytes'),'missing sendability score or byte measurement');
         const { previews } = await api('previewEmail', { body: { html: `<p style="display:flex">${prefix}</p>`, clients: ['gmail-web', 'outlook-classic-windows'], theme: 'dark', device: 'mobile' } });
         check(previews.length === 2 && previews[0].client === 'gmail-web' && previews[0].html.includes(prefix) && /Content-Security-Policy/i.test(previews[0].html), 'missing offline HTML preview');
         check(previews[1].client === 'outlook-classic-windows' && previews[1].html === '' && previews[1].issues.length > 0, 'missing lint-only classic Outlook result');

@@ -545,6 +545,57 @@ export type TemplateImageImport = {
     contentId?: string;
 };
 
+export type EmailCheckResult = {
+    score: number;
+    grade: 'A+' | 'A' | 'B' | 'C' | 'D' | 'F';
+    categories: Array<{
+        id: 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation';
+        score: number;
+        weight: number;
+    }>;
+    findings: Array<{
+        ruleId: string;
+        category: 'authentication' | 'content' | 'headers' | 'size' | 'rendering' | 'reputation';
+        severity: 'info' | 'warning' | 'error';
+        title: string;
+        detail: string;
+        fix: string;
+        evidence?: {
+            [key: string]: number | string;
+        };
+    }>;
+};
+
+export type EmailCheckInput = SendabilityDraft | {
+    emailId: string;
+} | {
+    campaignId: string;
+};
+
+export type SendabilityDraft = {
+    from: string;
+    fromName?: string;
+    to?: string | Array<string>;
+    subject: string;
+    html?: string;
+    text?: string;
+    stream: 'transactional' | 'marketing';
+    /**
+     * Header name to value. May include observed or planned transport headers; not trusted as authentication evidence.
+     */
+    headers?: {
+        [key: string]: string;
+    };
+    /**
+     * Optional metadata only: decoded byte size, never attachment bytes or fetch URLs.
+     */
+    attachments?: Array<{
+        filename: string;
+        contentType: string;
+        size: number;
+    }>;
+};
+
 /**
  * For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.
  */
@@ -9285,6 +9336,67 @@ export type GetTemplateAssetContentResponses = {
 };
 
 export type GetTemplateAssetContentResponse = GetTemplateAssetContentResponses[keyof GetTemplateAssetContentResponses];
+
+export type CheckEmailData = {
+    body: EmailCheckInput;
+    path?: never;
+    query?: never;
+    url: '/v1/emails/check';
+};
+
+export type CheckEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CheckEmailError = CheckEmailErrors[keyof CheckEmailErrors];
+
+export type CheckEmailResponses = {
+    /**
+     * Success
+     */
+    200: EmailCheckResult;
+};
+
+export type CheckEmailResponse = CheckEmailResponses[keyof CheckEmailResponses];
 
 export type SendEmailData = {
     body: SendEmailInput;

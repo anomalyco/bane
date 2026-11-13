@@ -9,7 +9,7 @@ const RESPONSE_LIMIT = 16 * 1024 * 1024;
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // POST operations that change nothing: listed without allowWrites and without confirm.
-const READ_ONLY_POSTS = new Set(['testRouting','testRituals','previewEmail']);
+const READ_ONLY_POSTS = new Set(['testRouting','testRituals','previewEmail','checkEmail']);
 // Unlike the legacy outbound catalog, inbound discovery is opt-in per operation.
 const INBOUND = new Map([
   ['getRituals','get /v1/rituals'], ['testRituals','post /v1/rituals/test'],

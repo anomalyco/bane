@@ -500,7 +500,7 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
 }
 
 // ---------- 6. lint ----------
-const SHORTENERS = ['bit.ly', 'bitly.com', 'tinyurl.com', 't.co', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly', 'rebrand.ly', 'cutt.ly', 'shorturl.at', 'tiny.cc', 'rb.gy', 'bl.ink', 's.id', 't.ly', 'lnkd.in', 'shorte.st', 'adf.ly'];
+export const SHORTENERS = ['bit.ly', 'bitly.com', 'tinyurl.com', 't.co', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly', 'rebrand.ly', 'cutt.ly', 'shorturl.at', 'tiny.cc', 'rb.gy', 'bl.ink', 's.id', 't.ly', 'lnkd.in', 'shorte.st', 'adf.ly'];
 const SPAM_PHRASES = ['act now', 'click here', 'limited time', '100% free', 'risk-free', 'risk free', 'you are a winner', 'you have been selected', 'cash bonus', 'double your', 'earn money', 'guaranteed',
   'no credit check', 'urgent', 'congratulations', 'free gift', 'lowest price', 'once in a lifetime', 'this is not spam', 'dear friend', 'call now', 'order now', 'apply now', 'buy now', 'miracle'];
 const STAGING = /^(?:localhost|127(?:\.\d{1,3}){3}|\[?::1\]?|0\.0\.0\.0)$|\.(?:local|localhost|test|internal|invalid|example)$|(?:^|[.-])(?:staging|stage|dev|preview|sandbox)[.-]|ngrok|\.vercel\.app$|\.pages\.dev$|\.workers\.dev$/i;
