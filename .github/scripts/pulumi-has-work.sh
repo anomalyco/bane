@@ -27,7 +27,7 @@ fi
 
 changed=$(git diff --name-only "$base" "$sha")
 tenant_status=false
-if grep -Eq "^(infra/pulumi/(tenant-status/|Pulumi\.$stage\.yaml$|package\.json$|bun\.lock$)|\.github/scripts/(tenant-status-deploy|pulumi-has-work)\.sh$)" <<< "$changed"; then
+if grep -Eq "^(infra/pulumi/(tenant-status/|Pulumi\.$stage\.yaml$|package\.json$|bun\.lock$)|\.github/scripts/(tenant-status-verify|pulumi-has-work)\.sh$)" <<< "$changed"; then
   tenant_status=true
 fi
 # What the Pulumi program reads: infra/pulumi and infra/aws-shared (not their docs), the shared mail-control

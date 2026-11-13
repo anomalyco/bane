@@ -18,7 +18,7 @@ profile = 'bane-'+stage
 def aws(region,*args):
     return json.loads(run('aws','--profile',profile,'--region',region,'--no-cli-pager','--output','json',*args))
 assert aws('us-east-2','sts','get-caller-identity')['Account']==account
-action = 'ses:UpdateReputationEntityCustomerManagedStatus'
+actions = ['ses:UpdateReputationEntityCustomerManagedStatus','ses:GetReputationEntity']
 origin = 'https://dev.bane.mx' if stage=='dev' else 'https://bane.mx'
 def live(name):
     arn = f'arn:aws:iam::{account}:policy/{name}'
@@ -31,15 +31,17 @@ for name in ['bane-runtime','bane-runtime-ohio','bane-runtime-trusted']:
     desired = json.loads(run('node',str(shared/'runtime-policies.mjs'),'--fresh',name,account,origin)); identity.append(desired)
     actual=live(name); stripped=json.loads(json.dumps(desired)); keep=[]
     for st in stripped['Statement']:
-        if st.get('Action')==action: continue
-        if isinstance(st.get('Action'),list) and action in st['Action']: st['Action'].remove(action)
+        if st.get('Action') in actions: continue
+        if isinstance(st.get('Action'),list):
+            st['Action']=[a for a in st['Action'] if a not in actions]
+            if not st['Action']: continue
         keep.append(st)
     stripped['Statement']=keep
     if actual==desired: print(f'  = {name}')
-    elif actual==stripped: print(f'  ~ {name}: add {action} only')
+    elif actual==stripped: print(f'  ~ {name}: add tenant status read/update only')
     else: raise SystemExit('Unexpected live drift in '+name+'; inspect privately before planning changes')
 boundary=json.loads((shared/'runtime-boundary-policy.json').read_text().replace('YOUR_AWS_ACCOUNT_ID',account).replace('YOUR_STAGE_ORIGIN',origin))
-print(f'  ~ boundary: after #76 only, add {action} (tenant resource type); size {len(json.dumps(boundary,separators=(",",":")))}/6144')
+print(f'  ~ boundary: after #76 only, allow tenant status read/update; size {len(json.dumps(boundary,separators=(",",":")))}/6144')
 assert len(json.dumps(boundary,separators=(',',':')))<=6144
 
 with tempfile.TemporaryDirectory(prefix='bane-tenant-plan-') as tmp:
@@ -55,9 +57,9 @@ with tempfile.TemporaryDirectory(prefix='bane-tenant-plan-') as tmp:
         ctx={'aws:RequestedRegion':region,'aws:ResourceTag/bane:owner':'bane','aws:ResourceTag/bane:installation-id':'bane:pool','aws:ResourceTag/bane:purpose':'workspace-tenant'}
         for name,allowed in names:
             request={'PolicyInputList':[json.dumps(doc) for doc in identity], 'PermissionsBoundaryPolicyInputList':[json.dumps(boundary)],
-                     'ActionNames':[action], 'ResourceArns':[f'arn:aws:ses:{region}:{account}:tenant/{name}/fixture'],
+                     'ActionNames':actions, 'ResourceArns':[f'arn:aws:ses:{region}:{account}:tenant/{name}/fixture'],
                      'ContextEntries':[{'ContextKeyName':k,'ContextKeyValues':[v],'ContextKeyType':'string'} for k,v in ctx.items()]}
             (root/'request.json').write_text(json.dumps(request))
             result=aws(region,'iam','simulate-custom-policy','--cli-input-json',f'file://{root}/request.json')['EvaluationResults']
-            assert len(result)==1 and (result[0]['EvalDecision']=='allowed')==allowed, 'unexpected simulation decision'
-        print(f'  {region}: {topic} → confirmed HTTPS; proposed IAM simulations pass. CI previews the rule and target.')
+            assert len(result)==len(actions) and all((x['EvalDecision']=='allowed')==allowed for x in result), 'unexpected simulation decision'
+        print(f'  {region}: {topic} → confirmed HTTPS; proposed IAM simulations pass. CI verifies the operator-owned rule and target.')

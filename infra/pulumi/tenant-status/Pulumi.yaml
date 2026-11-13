@@ -1,4 +1,0 @@
-name: bane-tenant-status
-description: Regional SES tenant-status event intake, deployed by Bane CI
-runtime: bun
-main: index.ts

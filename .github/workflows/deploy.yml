@@ -352,13 +352,9 @@ jobs:
 
       - *stage-tip
 
-      - name: Preview and deploy SES tenant status rules
+      - name: Verify operator-owned SES tenant status routing
         if: steps.guard.outputs.skip != 'true' && needs.authorize.outputs.tenant_status == 'true'
-        working-directory: infra/pulumi/tenant-status
-        env:
-          PREVIEW_ONLY: ${{ inputs.preview || false }}
-          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
-        run: bash ../../../.github/scripts/tenant-status-deploy.sh
+        run: bash .github/scripts/tenant-status-verify.sh
 
   deploy:
     name: Deploy ${{ needs.authorize.outputs.stage }} ${{ needs.authorize.outputs.sha }}

@@ -35,7 +35,7 @@
       }
     },
     {
-      "Effect": "Allow", "Action": ["ses:GetTenant", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:PutTenantSuppressionAttributes", "ses:UpdateReputationEntityPolicy", "ses:UpdateReputationEntityCustomerManagedStatus"],
+      "Effect": "Allow", "Action": ["ses:GetTenant", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:PutTenantSuppressionAttributes", "ses:UpdateReputationEntityPolicy", "ses:GetReputationEntity", "ses:UpdateReputationEntityCustomerManagedStatus"],
       "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:tenant/bane-trusted-ws_????????????????????????????????/*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/bane-probation-ws_????????????????????????????????/*"],
       "Condition": {"StringEquals": {"aws:ResourceTag/bane:owner": "bane", "aws:ResourceTag/bane:installation-id": "bane:pool", "aws:ResourceTag/bane:purpose": "workspace-tenant"}}
     },
