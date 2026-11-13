@@ -9,6 +9,7 @@ import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-gui
 import { concepts } from '../inbound/concepts'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
+import { apiKeyEnv } from '../../../../api/src/brand'
 
 export type Guide = { id: string; title: string; summary: string; body: () => ReactNode }
 
@@ -141,7 +142,7 @@ export const guides: Guide[] = [
       </Section>
       <Section title="Create one">
         <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
-        <Code label="create inbox example">{`curl --request POST "$BANE/v1/inboxes" \\\n  --header "Authorization: Bearer $BANE_API_KEY" \\\n  --header 'Content-Type: application/json' \\\n  --data '{"name":"Sign-up test","ttlSeconds":3600,"credential":{"name":"Sign-up test key","permissions":["read"]}}'`}</Code>
+        <Code label="create inbox example">{`curl --request POST "$BANE/v1/inboxes" \\\n  --header "Authorization: Bearer $${apiKeyEnv}" \\\n  --header 'Content-Type: application/json' \\\n  --data '{"name":"Sign-up test","ttlSeconds":3600,"credential":{"name":"Sign-up test key","permissions":["read"]}}'`}</Code>
         <p>Then wait for mail with <Link to="/docs/api/listInboxMessages">listInboxMessages</Link> (or the MCP tool <code>waitForMessage</code>), and delete the inbox with <Link to="/docs/api/deleteInbox">deleteInbox</Link> when you’re done.</p>
       </Section>
     </>,

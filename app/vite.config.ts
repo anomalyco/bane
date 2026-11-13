@@ -6,6 +6,7 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
 import { renderLegal } from './legal-markdown.ts'
+import { publicOrigin as hostedOrigin } from '../api/src/brand.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
 // explains why); everything else, the shim included, gets the real package.
@@ -57,10 +58,10 @@ const buildSha = (() => {
   try { return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return 'unknown' }
 })()
 
-// Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name bane.mx.
+// Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name the hosted origin.
 const publicOrigin: Plugin = {
   name: 'bane:public-origin',
-  transformIndexHtml: html => html.replaceAll('%BANE_ORIGIN%', (process.env.VITE_PUBLIC_URL || 'https://bane.mx').replace(/\/$/, '')),
+  transformIndexHtml: html => html.replaceAll('%BANE_ORIGIN%', (process.env.VITE_PUBLIC_URL || hostedOrigin).replace(/\/$/, '')),
 }
 
 export default defineConfig({

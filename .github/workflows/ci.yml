@@ -70,8 +70,8 @@ jobs:
       - name: Regenerate and verify public docs, spec and SDK
         run: |
           (cd api && bun run docs:check)
-          git diff --exit-code -- api/openapi.json sdk/src
-          test -z "$(git ls-files --others --exclude-standard -- sdk/src)"
+          git diff --exit-code -- api/openapi.json sdk/src mcp/src/brand.ts
+          test -z "$(git ls-files --others --exclude-standard -- sdk/src mcp/src/brand.ts)"
       - name: Public API compatibility
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}

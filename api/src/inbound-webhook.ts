@@ -6,6 +6,7 @@ import { safeForwardHtml } from './mailbox-send.js';
 import { readableMailboxKey } from './mailbox-setup.js';
 import { withMailObjects } from './mail-objects.js';
 import { decrypt, hmac, postWebhook, webhookSecret, webhookUrl } from './operations.js';
+import { webhookUserAgent } from './brand.js';
 
 const s3commands = lazyModule(() => import('@aws-sdk/client-s3'));
 const POST_LIMIT=512*1024, RAW_INLINE_LIMIT = POST_LIMIT,
@@ -189,7 +190,7 @@ async function send(runtime: Runtime, w: string, h: ClaimedWebhook, secret: stri
   const event = h.payload as Event,
     format = h.format ?? 'bane',
     include = h.include ?? [];
-  const headers: Record<string, string> = { 'User-Agent': 'Bane-Webhooks/1.0' };
+  const headers: Record<string, string> = { 'User-Agent': webhookUserAgent };
   let payload: unknown = event;
   if(Object.hasOwn(event,'ritualBody'))payload=(event as Event&{ritualBody:unknown}).ritualBody;
   else if ((format === 'inbound' || include.length) && event.messageId) {

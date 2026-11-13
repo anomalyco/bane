@@ -1,5 +1,6 @@
 import { webhookSignatureGuide } from './webhook-signature-guide.js';
 import type { App } from './core.js';
+import { apiKeyEnv, publicOrigin, sdkPackage } from './brand.js';
 
 type Json = Record<string, any>;
 const METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
@@ -79,8 +80,8 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
   const renderedOptions = Object.entries(options).map(([key, value]) => `  ${key}: ${JSON.stringify(value, null, 2).replaceAll('\n', '\n  ')},`).join('\n');
-  if (operation.tags?.includes('Workspaces')) return `import { createClient } from '@banemx/sdk/client';\nimport { ${operation.operationId} } from '@banemx/sdk';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
-  return `import { createClient } from '@banemx/sdk/client';\nimport { ${operation.operationId} } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
+  if (operation.tags?.includes('Workspaces')) return `import { createClient } from '${sdkPackage}/client';\nimport { ${operation.operationId} } from '${sdkPackage}';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
+  return `import { createClient } from '${sdkPackage}/client';\nimport { ${operation.operationId} } from '${sdkPackage}';\n\nconst client = createClient({\n  baseUrl: '${publicOrigin}',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.${apiKeyEnv}\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
 }
 
 function curlSample(document: Json, path: string, method: string, pathItem: Json, operation: Json): string {
@@ -93,8 +94,7 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   const completeEmail = (email: Json) => ({ ...email, subject: email.subject ?? 'Hello from Bane', text: email.text ?? 'Your message is ready.' });
   if (operation.operationId === 'sendEmail') body = completeEmail(body);
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
-  const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url 'https://bane.mx${target}' \\`, `  --header 'Authorization: Bearer $BANE_API_KEY'`];
-  lines[2] = `  --header "Authorization: Bearer $BANE_API_KEY"`;
+  const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url '${publicOrigin}${target}' \\`, `  --header "Authorization: Bearer $${apiKeyEnv}"`];
   if (operation.tags?.includes('Workspaces')) {
     lines[1] = `  --url "\${BANE_ORIGIN}${target}" \\`;
     lines[2] = `  --header "Origin: $BANE_ORIGIN" \\\n  --cookie "$BANE_COOKIE_JAR"`;
@@ -105,14 +105,14 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
 
 // The first five minutes, shared by /docs (x-quickstart), /docs.md and /llms.txt.
 const quickstartCurl = `curl --request POST \\
-  --url 'https://bane.mx/v1/emails/send' \\
-  --header "Authorization: Bearer $BANE_API_KEY" \\
+  --url '${publicOrigin}/v1/emails/send' \\
+  --header "Authorization: Bearer $${apiKeyEnv}" \\
   --header 'Content-Type: application/json' \\
   --header "Idempotency-Key: $(uuidgen)" \\
   --data '{"from":"hello@acme.com","to":"you@acme.com","subject":"Hello from Bane","text":"It works."}'`;
 export const quickstart: { title: string; text: string; code?: string }[] = [
   { title: 'Add and verify your domain', text: 'In the dashboard, open Domains and add it, or call POST /v1/domains with {"name":"acme.com"}. Publish the DNS records it returns at your DNS provider. Sending works once GET /v1/domains/{id} reports sending: "verified", usually within minutes of the records resolving. A domain whose records are still unproven after 72 hours is released.' },
-  { title: 'Create an API key', text: 'In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as BANE_API_KEY on your server and never ship it to a browser.' },
+  { title: 'Create an API key', text: `In the dashboard, open API keys in the sidebar and choose Create key. A Send only key restricted to your domain is enough to send; it can’t read logs, so add Read permission if your code should look up outcomes. Store it as ${apiKeyEnv} on your server and never ship it to a browser.` },
   { title: 'Send', text: '202 means queued, not delivered. Follow the outcome in the dashboard’s Logs, or with GET /v1/emails/{id} and a key that has Read permission (a Send only key gets 403). Leave out region: the sender domain decides it. To test without reaching a real inbox, send to success@simulator.amazonses.com (or bounce@, complaint@, ooto@ and suppressionlist@ the same domain). Simulator sends use your daily sending limit like any other send, but never count towards your sender score.', code: quickstartCurl },
   { title: 'Receive (optional)', text: 'Publish the receiving MX record from the domain page. Hosted Bane receives on a free subdomain such as reply.<your domain>, so the domain’s existing mailboxes keep working; it uses the domain itself only when its MX already points to Bane, or when you choose it. Create an address with POST /v1/inbound/addresses and subscribe to message.received with POST /v1/inbound/webhooks.' },
   { title: 'Reply', text: 'POST /v1/inbound/threads/{threadId}/reply answers the newest message from its receiving address and sets In-Reply-To and References.' },
@@ -194,7 +194,7 @@ function guidesMarkdown() {
 // /docs/tags/<slug>.md and each operation at /docs/operations/<id>.md, so an agent loads only the part it needs
 // and no single file outgrows an agent's context as operations are added (scripts/check-agent-docs.ts caps each).
 export const tagSlug = (tag: string) => tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const intro = (document: Json) => `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`@banemx/sdk\`\n\n`;
+const intro = (document: Json) => `# Bane API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`${sdkPackage}\`\n\n`;
 
 /** What customers read: everything but internal operations (x-internal). */
 const publicEntries = (document: Json) => operationEntries(document).filter(entry => !entry.operation['x-internal']);
@@ -218,5 +218,5 @@ export function createTagMarkdownDocs(document: Json, slug: string): string | nu
 
 export function createLlmsText(document: Json): string {
   const groups = grouped(document, publicEntries(document));
-  return `# Bane\n\nBane is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/@banemx/sdk\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+  return `# Bane\n\nBane is an email API on Amazon SES: send, receive and reply on your own domains.\n\n${quickstartMarkdown()}## Canonical documentation\n\n- Markdown API reference index: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/${sdkPackage}\n- MCP endpoint: /mcp\n\n## Markdown API reference by tag\n\n${groups.map(({ tag }) => `- ${tag}: /docs/tags/${tagSlug(tag)}.md`).join('\n')}\n\n## Focused operation documentation\n\n${groups.flatMap(group => group.entries).map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
 }

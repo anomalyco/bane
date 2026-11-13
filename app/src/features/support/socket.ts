@@ -1,5 +1,6 @@
 import { supportApi } from '../../data/support'
 import { ApiError } from '../../data/types'
+import { hostedHosts, supportHost } from '../../../../api/src/brand'
 import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
 
 // The live transport (support/PROTOCOL.md §1–2, §5): a handoff from Bane, then /chat/start or /chat/resume on the support
@@ -185,10 +186,10 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
   }
 }
 
-/** The support Worker for this dashboard: VITE_SUPPORT_ORIGIN, else support.<host> for bane.mx and dev.bane.mx. */
+/** The support Worker for this dashboard: VITE_SUPPORT_ORIGIN, else support.<host> on the hosted service's hosts. */
 export function supportOrigin(): string | null {
   const configured = import.meta.env.VITE_SUPPORT_ORIGIN as string | undefined
   if (configured) return configured.replace(/\/$/, '')
   const host = window.location.hostname
-  return host === 'bane.mx' || host === 'dev.bane.mx' ? `https://support.${host}` : null
+  return hostedHosts.includes(host) ? `https://${supportHost(host)}` : null
 }

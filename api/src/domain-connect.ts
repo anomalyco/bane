@@ -1,8 +1,9 @@
 import { createHmac, hkdfSync, sign, timingSafeEqual } from 'node:crypto';
 import { z } from '@hono/zod-openapi';
 import type { Config } from './core.js';
+import { domainConnectProviderId } from './brand.js';
 
-const template = '/v2/domainTemplates/providers/bane.mx/services/mail';
+const template = `/v2/domainTemplates/providers/${domainConnectProviderId}/services/mail`;
 export const groupIds = ['sending', 'ownership', 'receiving', 'receivingReply', 'mailfrom'] as const;
 type Group = typeof groupIds[number];
 type Discovery = { zone: string; name: string; id: string; sync: string; version?: number };

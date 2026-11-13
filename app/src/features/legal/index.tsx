@@ -9,6 +9,7 @@ import privacy from './content/privacy.md'
 import subprocessors from './content/subprocessors.md'
 import './legal.css'
 import { BaneWordmark } from '../../components/BaneLogo'
+import { addresses } from '../../../../api/src/brand'
 
 // Public pages, no sign-in: /legal and one page per document. The documents are Markdown in ./content, rendered to HTML
 // when the dashboard builds (app/legal-markdown.ts).
@@ -18,7 +19,7 @@ const isSlug = (value: string | undefined): value is Slug => value !== undefined
 
 const ENTITY = 'Anomaly Innovations, Inc.'
 const ADDRESS = '2443 Fillmore St #380-6343, San Francisco, CA 94115, United States'
-const contacts = [['Support and billing', 'support@bane.mx'], ['Abuse reports', 'abuse@bane.mx'], ['Privacy and data requests', 'privacy@bane.mx'], ['Legal notices', 'legal@bane.mx']] as const
+const contacts = [['Support and billing', addresses.support], ['Abuse reports', addresses.abuse], ['Privacy and data requests', addresses.privacy], ['Legal notices', addresses.legal]] as const
 
 export function LegalPage() {
   const { doc } = useParams()
@@ -70,7 +71,7 @@ function LegalIndex() {
     </ul>
     <section className="legal-index-section" aria-labelledby="legal-dpa">
       <h2 id="legal-dpa">Data Processing Addendum</h2>
-      <p>Available to business customers on request: email <a href="mailto:privacy@bane.mx">privacy@bane.mx</a>.</p>
+      <p>Available to business customers on request: email <a href={`mailto:${addresses.privacy}`}>{addresses.privacy}</a>.</p>
     </section>
     <section className="legal-index-section" aria-labelledby="legal-contact">
       <h2 id="legal-contact">Contact</h2>

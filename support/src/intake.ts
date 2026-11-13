@@ -4,6 +4,7 @@ import type { Env } from './env.js';
 import { attachmentLink, safeName, storeImage } from './attachments.js';
 import { cleanImage, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js';
+import { hostedDomain } from '../../api/src/brand.js';
 import { fileTicket, notifyTeam, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, newId } from './tokens.js';
@@ -119,8 +120,8 @@ export class SupportIntake extends DurableObject<Env> {
     if (filed?.created) await notifyTeam(this.env, ctx, filed as Awaited<ReturnType<typeof fileTicket>>, input);
     // One fixed acknowledgement per sender per mailbox per day; never to automatic mail.
     if (!automatic && (await countToday(this.env, `sender:${hash}:ack:${next.mailbox}`, 1)).ok) {
-      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@bane.mx. We've received your message${filed ? ` and logged it as ${filed.id}` : ''}. A person at Bane will reply by email.\n\nBane`;
-      await api.reply(message.threadId ?? next.thread_id, { replyToMessageId: next.message_id, text, to: sender, subject: `Re: your message to ${next.mailbox}@bane.mx`, addressId: null }, `ack-${next.message_id}`);
+      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@${hostedDomain}. We've received your message${filed ? ` and logged it as ${filed.id}` : ''}. A person at Bane will reply by email.\n\nBane`;
+      await api.reply(message.threadId ?? next.thread_id, { replyToMessageId: next.message_id, text, to: sender, subject: `Re: your message to ${next.mailbox}@${hostedDomain}`, addressId: null }, `ack-${next.message_id}`);
     }
     set(filed ? 'done' : 'held');
   }

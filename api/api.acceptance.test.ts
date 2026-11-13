@@ -9765,6 +9765,24 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
 });
+test('Brand: the hosted support hosts, docs examples and stdio MCP identity come from src/brand.ts, old names still accepted',async()=>{
+  const brand=await import('./src/brand.js'),{spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
+  for(const copy of ['../sdk/src/brand.ts','../mcp/src/brand.ts']) assert.equal(await readFile(copy,'utf8'),await readFile('./src/brand.ts','utf8'),`${copy} is bun run sdk's copy of src/brand.ts`);
+  const csp=(await fetch(BASE+'/health')).headers.get('content-security-policy')??'';
+  for(const host of brand.hostedHosts) assert.ok(csp.includes(` https://support.${host} wss://support.${host}`),`connect-src names support.${host}`);
+  const llms=await (await fetch(BASE+'/llms.txt')).text();
+  assert.ok(llms.includes(`${brand.publicOrigin}/v1/emails/send`) && llms.includes(`$${brand.apiKeyEnv}`) && llms.includes(brand.sdkPackage));
+  const connect=(service:string,title:string)=>{
+    const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
+    const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
+    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:'bane_'+'1'.repeat(64)} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
+  };
+  for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
+    const result=connect(service,title);
+    assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+  }
+  assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
+});
 
 // PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
 test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {

@@ -3,6 +3,8 @@
 // outside the grant, credentials, internal hosts, staff names or pieces of the system prompt. A tripped chat message is
 // replaced and a ticket filed; a tripped email reply is held and a ticket filed.
 
+import { addresses, hostedHosts, repositoryUrl, supportHost } from '../../api/src/brand.js';
+
 export type GateScope = {
   /** The customer's own address(es); the support address is always allowed. */
   emails: string[];
@@ -29,7 +31,7 @@ const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>/i;
 
 export function gate(text: string, scope: GateScope): GateResult {
   const reasons: string[] = [];
-  const allowedEmails = new Set([...scope.emails, scope.supportAddress, 'abuse@bane.mx', 'support@bane.mx'].map(e => e.toLowerCase()));
+  const allowedEmails = new Set([...scope.emails, scope.supportAddress, addresses.abuse, addresses.support].map(e => e.toLowerCase()));
   for (const email of text.match(EMAIL) ?? []) if (!allowedEmails.has(email.toLowerCase()) && !/^(?:dmarc|postmaster|bounces?)@/i.test(email) && !isExample(email)) reasons.push('email address outside the conversation');
   if (SECRET_PREFIX.test(text)) reasons.push('credential-shaped string');
   if (LONG_HEX.test(text) || LONG_B64.test(text.replace(/v=DKIM1[^`\n]*/g, ''))) reasons.push('long opaque string');
@@ -53,7 +55,7 @@ export function gate(text: string, scope: GateScope): GateResult {
 function isExample(email: string) { return /@(?:example\.(?:com|org|net)|your-?domain\.com|yourdomain\.com)$/i.test(email); }
 
 /** Links the panel may render; others are shown as text. The panel enforces this too (support/PROTOCOL.md §4.2). */
-export const LINK_ORIGINS = ['https://bane.mx', 'https://dev.bane.mx', 'https://support.bane.mx', 'https://support.dev.bane.mx', 'https://github.com/anomalyco/bane'];
+export const LINK_ORIGINS = [...hostedHosts.flatMap(host => [`https://${host}`, `https://${supportHost(host)}`]), repositoryUrl];
 
 /** Plain text for email: Markdown emphasis and code fences removed, links kept as bare URLs. */
 export function plainText(markdown: string) {
