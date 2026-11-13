@@ -1,0 +1,128 @@
+/* Legal pages: OpenTUI Mono headings over Inter body text at reading size, a contents column beside the text on wide
+   screens, a collapsible contents list on phones, and plain black-on-white print. Measures are in em, not ch: a ch is
+   the current font's 0, which differs between the local fallback and Inter (see docs.css). 40em is about 64 Inter ch. */
+/* Proportional figures: the body's tabular ones also widen Inter's hyphen, which reads as a gap in prose ("top - up"). */
+.legal-page { --legal-header: 58px; display: flex; flex-direction: column; min-height: 100dvh; background: var(--color-surface); color: var(--color-text); font-variant-numeric: normal; }
+.legal-header { position: sticky; z-index: 5; top: 0; display: flex; align-items: center; gap: var(--space-24); height: var(--legal-header); padding-inline: var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.legal-header .wordmark, .legal-header .theme-toggle { position: static; }
+.legal-header .theme-toggle { margin-inline-start: auto; }
+.legal-switcher { display: flex; gap: var(--space-4); min-width: 0; font-size: var(--text-sm); }
+.legal-switcher a { display: flex; align-items: center; height: var(--control-height); padding-inline: var(--space-8); border-radius: var(--radius-sm); color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.legal-switcher a:hover { color: var(--color-text); }
+.legal-switcher a[aria-current='page'] { background: var(--color-active-bg); color: var(--color-text); }
+
+.legal-layout { display: grid; flex: 1; grid-template-columns: 248px minmax(0, 1fr); gap: var(--space-40); width: min(100%, 1120px); margin-inline: auto; padding-inline: var(--space-24); }
+.legal-main { flex: 1; min-width: 0; padding-block: var(--space-40) 72px; }
+.legal-index { width: min(100%, 52em); margin-inline: auto; padding-inline: var(--space-24); }
+.legal-toc { position: sticky; top: var(--legal-header); align-self: start; max-height: calc(100dvh - var(--legal-header)); overflow: auto; padding-block: var(--space-40) var(--space-24); }
+.legal-eyebrow { margin-bottom: var(--space-8); padding-inline: var(--space-8); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.legal-toc-list { display: flex; flex-direction: column; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.legal-toc-list a { display: block; padding: var(--space-4) var(--space-8); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-decoration: none; text-wrap: pretty; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.legal-toc-list a:hover { color: var(--color-text); }
+.legal-toc-list a[aria-current='location'] { background: var(--color-active-bg); color: var(--color-text); }
+.legal-toc-inline { display: none; }
+
+.legal-article { width: min(100%, 52em); }
+.legal-intro { display: flex; flex-direction: column; gap: var(--space-8); margin-bottom: var(--space-32); }
+.legal-intro h1 { font-family: var(--font-mono); font-size: var(--text-xl); line-height: 1.2; letter-spacing: -.02em; text-wrap: balance; }
+.legal-intro > p:not(.legal-dates) { max-width: 40em; color: var(--color-muted); font-size: 16px; line-height: 1.6; text-wrap: pretty; }
+.legal-dates { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+
+/* The document: 16 px Inter at 1.6, prose capped at 40em, tables free to use the column's full width. */
+.legal-body { font-size: 16px; line-height: 1.6; overflow-wrap: break-word; }
+.legal-body > :is(p, ul, ol, blockquote, h2, h3, h4) { max-width: 40em; }
+.legal-body p { margin: 0 0 1em; }
+.legal-body :is(ul, ol) { margin: 0 0 1em; padding-inline-start: 1.25em; }
+.legal-body li { margin-block: .35em; padding-inline-start: .15em; }
+.legal-body li > :is(ul, ol) { margin-block: .35em 0; }
+.legal-body strong { font-weight: 600; }
+.legal-body a { color: var(--color-accent); text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: color-mix(in srgb, var(--color-accent) 45%, transparent); transition: text-decoration-color var(--motion-duration); }
+.legal-body a:hover { text-decoration-color: currentColor; }
+.legal-body code { padding: .1em .3em; border-radius: 4px; background: var(--color-layer-2); font-family: var(--font-mono); font-size: .85em; }
+.legal-body :is(h2, h3, h4) { position: relative; scroll-margin-top: calc(var(--legal-header) + var(--space-16)); text-wrap: balance; }
+.legal-body h2 { margin: 2.25em 0 .75em; padding-top: 1.25em; border-top: 1px solid var(--color-border-muted); font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; line-height: 1.3; }
+.legal-body > h2:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.legal-body h3 { margin: 1.75em 0 .6em; font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1.4; }
+.legal-body h4 { margin: 1.5em 0 .5em; font-size: 16px; font-weight: 600; line-height: 1.5; }
+.legal-body .legal-anchor { margin-inline-start: .4em; color: var(--color-faint); font-family: var(--font-mono); font-weight: 400; text-decoration: none; opacity: 0; transition: opacity var(--motion-duration), color var(--motion-duration); }
+.legal-body .legal-anchor:hover { color: var(--color-accent); }
+.legal-body :is(h2, h3, h4):hover > .legal-anchor, .legal-body .legal-anchor:focus-visible { opacity: 1; }
+@media (hover: none) { .legal-body .legal-anchor { opacity: .6; } }
+.legal-body blockquote { margin: 0 0 1.5em; padding: var(--space-16) var(--space-20); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-layer-1); font-size: var(--text-md); line-height: 1.6; }
+.legal-body blockquote p:last-child { margin-bottom: 0; }
+.legal-table { max-width: 100%; margin: 0 0 1.5em; overflow-x: auto; }
+.legal-table table { width: 100%; border-collapse: collapse; font-size: var(--text-md); line-height: 1.5; }
+.legal-table th { padding: var(--space-8) var(--space-16) var(--space-8) 0; border-bottom: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-sm); font-weight: var(--font-weight-bold); text-align: start; vertical-align: bottom; }
+.legal-table td { padding: var(--space-12) var(--space-16) var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); vertical-align: top; text-wrap: pretty; }
+.legal-table :is(th, td):last-child { padding-inline-end: 0; }
+.legal-table td:first-child { min-width: 9em; }
+
+/* The overview: one row per document, then the addendum and contacts. */
+.legal-documents { margin: 0 0 var(--space-40); padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.legal-documents li { border-bottom: 1px solid var(--color-border-muted); }
+.legal-documents a { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-16) var(--space-8); color: inherit; text-decoration: none; transition: background-color var(--motion-duration); }
+.legal-documents a:hover { background: var(--color-active-bg); }
+.legal-documents strong { font-family: var(--font-mono); font-size: 15px; font-weight: 700; line-height: 1.4; }
+.legal-documents span:not(.legal-dates) { max-width: 40em; color: var(--color-muted); font-size: var(--text-md); line-height: 1.5; text-wrap: pretty; }
+.legal-index-section { display: flex; flex-direction: column; gap: var(--space-8); margin-bottom: var(--space-32); font-size: var(--text-md); line-height: 1.6; }
+.legal-index-section h2 { font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
+.legal-index-section a, .legal-contacts a { color: var(--color-accent); text-underline-offset: .18em; }
+.legal-contacts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-4) var(--space-24); margin: var(--space-8) 0 0; }
+.legal-contacts > div { display: contents; }
+.legal-contacts dt { color: var(--color-muted); }
+.legal-contacts dd { margin: 0; }
+
+.legal-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-8) var(--space-24); padding: var(--space-20) var(--space-24); border-top: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.legal-footer nav { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); }
+.legal-footer a { color: inherit; text-decoration: none; }
+.legal-footer a:hover { color: var(--color-text); }
+
+/* Tablets and phones: one column, the header scrolls away, the document list becomes a strip that scrolls sideways,
+   and the contents list folds into a disclosure above the text. */
+@media (max-width: 900px) {
+  .legal-page { --legal-header: 0px; }
+  .legal-header { position: static; flex-wrap: wrap; row-gap: 0; height: auto; padding: var(--space-8) var(--space-16) 0; }
+  .legal-header .wordmark { height: 44px; }
+  .legal-switcher { order: 3; flex-basis: 100%; margin-inline: calc(-1 * var(--space-16)); padding: 0 var(--space-16) var(--space-8); overflow-x: auto; scrollbar-width: none; }
+  .legal-switcher::-webkit-scrollbar { display: none; }
+  .legal-switcher a { height: 36px; }
+  .legal-header .theme-toggle { width: 44px; height: 44px; }
+  .legal-layout { display: block; padding-inline: var(--space-16); }
+  .legal-index { padding-inline: var(--space-16); }
+  .legal-toc { display: none; }
+  .legal-main { padding-block: var(--space-28) var(--space-40); }
+  .legal-intro { margin-bottom: var(--space-20); }
+  .legal-intro h1 { font-size: 26px; }
+  .legal-toc-inline { display: block; margin-bottom: var(--space-28); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
+  .legal-toc-inline summary { display: flex; align-items: center; min-height: 44px; padding-inline: var(--space-16); cursor: pointer; font-family: var(--font-mono); font-size: var(--text-sm); }
+  .legal-toc-inline .legal-toc-list { padding: 0 var(--space-8) var(--space-8); }
+  .legal-toc-inline .legal-toc-list a { padding-block: var(--space-8); }
+  .legal-body { font-size: 16px; }
+  .legal-body h2 { margin-top: 2em; }
+  .legal-table table { font-size: var(--text-sm); }
+  .legal-footer { padding: var(--space-16); }
+  .legal-contacts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .legal-contacts dd { margin-bottom: var(--space-8); }
+}
+
+/* Print: the document alone, black on white, with web addresses written out. */
+@media print {
+  @page { margin: 18mm 16mm; }
+  :root:has(.legal-page), :root[data-theme='dark']:has(.legal-page) { color-scheme: light; --color-surface: #fff; --color-deep: #fff; --color-text: #000; --color-muted: #333; --color-faint: #555; --color-accent: #000; --color-layer-1: #fff; --color-border: rgb(0 0 0 / 30%); --color-border-muted: rgb(0 0 0 / 15%); }
+  .legal-page { --legal-header: 0px; display: block; }
+  .legal-header { position: static; height: auto; padding: 0 0 12pt; }
+  .legal-switcher, .legal-header .theme-toggle, .legal-toc, .legal-toc-inline, .legal-anchor, .legal-footer nav { display: none !important; }
+  .legal-layout, .legal-index { display: block; width: auto; padding: 0; }
+  .legal-main { padding: 0; }
+  .legal-article, .legal-body > :is(p, ul, ol, blockquote, h2, h3, h4), .legal-intro > p:not(.legal-dates) { width: auto; max-width: none; }
+  .legal-intro h1 { font-size: 20pt; }
+  .legal-body { font-size: 10.5pt; line-height: 1.45; }
+  .legal-body h2 { font-size: 13pt; margin-top: 18pt; padding-top: 0; border-top: 0; }
+  .legal-body :is(h2, h3, h4) { break-after: avoid; }
+  .legal-body :is(tr, blockquote, li) { break-inside: avoid; }
+  .legal-body a { color: inherit; text-decoration-color: currentColor; }
+  .legal-body a[href^='http']::after { content: ' (' attr(href) ')'; font-size: .9em; }
+  .legal-table { overflow: visible; }
+  .legal-table table { font-size: 9.5pt; }
+  .legal-footer { padding: 12pt 0 0; }
+}
