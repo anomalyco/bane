@@ -497,7 +497,7 @@ export function registerSupport(app: App) {
     ledger: z.array(z.record(z.string(), z.unknown())).describe('The latest 50 ledger entries: top-ups, usage, refunds, disputes, credits.') })) }).openapi('SupportBilling');
   app.openapi(createRoute({ ...meta('getSupportBilling', 'Balance, payments and the billing ledger of the workspaces the customer owns or administers.'), path: '/v1/support/billing', request: { query: WorkspaceFilter }, responses: { 200: response(Billing), ...errors } }), async c => {
     const list = scoped(c, ['owner', 'admin']).ids, db = c.env.db;
-    // The billing tables (migrations 279–290), read through to_jsonb; Stripe's customer and card IDs stay out.
+    // The billing tables (migrations 291–302), read through to_jsonb; Stripe's customer and card IDs stay out.
     const { rows: [tables] } = await db.execute<{ accounts: boolean; ledger: boolean }>(sql`SELECT to_regclass('billing_accounts') IS NOT NULL AS accounts, to_regclass('billing_ledger') IS NOT NULL AS ledger`);
     if (!tables?.ledger || !list.length) return c.json({ available: !!tables?.ledger, data: [] }, 200);
     const { rows } = await db.execute<{ workspaceId: string; account: Record<string, unknown> | null; ledger: Record<string, unknown>[] }>(sql`SELECT w.id AS "workspaceId",

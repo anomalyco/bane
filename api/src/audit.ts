@@ -291,7 +291,7 @@ async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { worksp
   if (wid && include.includes('enforcement') && available.standing) parts.push(extra(sql`'enf_' || x.id`, sql`x.at`, sql`'standing.' || coalesce(x.kind, 'event')`, sql`coalesce(x.detail #>> '{actor,kind}', 'system')`,
     sql`(SELECT s.id::text AS id, s.at, s.kind, to_jsonb(s) - 'workspace_id' AS detail FROM standing_events s WHERE s.workspace_id = ${wid}) x`));
   // Operator actions (hosted_operator_audit) are already in audit_events: migration 262 mirrors and backfilled them.
-  // Billing's money movements are already audit rows (the billing_ledger_audit trigger, migration 290); this adds the
+  // Billing's money movements are already audit rows (the billing_ledger_audit trigger, migration 302); this adds the
   // hourly usage rows, which are not events.
   if (wid && include.includes('billing') && available.billing) parts.push(extra(sql`'bill_' || x.id`, sql`x.at`, sql`'billing.' || coalesce(x.kind, 'entry')`, sql`'system'`,
     sql`(SELECT b.id::text AS id, b.created_at AS at, b.kind, to_jsonb(b) - 'workspace_id' AS detail FROM billing_ledger b WHERE b.workspace_id = ${wid} AND b.kind = 'usage') x`));

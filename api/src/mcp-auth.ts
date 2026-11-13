@@ -5,7 +5,8 @@ import {protectedResourceMetadata} from './oidc-resource.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
 import {auditContext,auditInsert} from './audit.js';
 
-const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean()}).openapi('McpConnection');
+const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean(),
+  profile:z.string().nullable().openapi({description:'The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.'})}).openapi('McpConnection');
 const Binding=z.object({workspaceId:z.string().min(1).max(200),receiving:z.boolean()}).strict().openapi('McpConnectionBinding');
 // How a client's self-chosen name is shown in the connections list (ported from #90):
 // - Every space, line break and control character, and the blank cells U+2800, U+FFFC and U+1D159, become one space.
@@ -43,15 +44,18 @@ export function registerMcpAuth(app:App) {
     c.header('Access-Control-Allow-Origin','*');
     return c.req.method==='OPTIONS'?c.body(null,204):c.json(protectedResourceMetadata(c.env));
   });
+  type Row={id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired';workspace_id:string|null;receiving:boolean;profile:string|null};
+  const approvals=(user:string,where:ReturnType<typeof sql>)=>sql`
+      WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT 'bane:'||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
+        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,g.receiving,g.profile
+        FROM bane_resource_grants g WHERE g.user_id=${user}
+        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false,NULL FROM bane_expired_approvals WHERE user_id=${user})
+      SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${where}`;
+  const view=(r:Row)=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving,profile:r.profile});
   app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
     const user=owner(c),{limit,cursor}=c.req.valid('query');
-    const {rows}=await c.env.db.execute<{id:string;client_id:string;name:string|null;email:string;scopes:string[];created_at:string;updated_at:string;status:'active'|'revoked'|'expired';workspace_id:string|null;receiving:boolean}>(sql`
-      WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT 'bane:'||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
-        CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,g.receiving
-        FROM bane_resource_grants g WHERE g.user_id=${user}
-        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false FROM bane_expired_approvals WHERE user_id=${user})
-      SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${cursor?sql`WHERE a.id>${cursor}`:sql``} ORDER BY a.id LIMIT ${limit+1}`);
-    return c.json({data:rows.slice(0,limit).map(r=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving})),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
+    const {rows}=await c.env.db.execute<Row>(sql`${approvals(user,cursor?sql`WHERE a.id>${cursor}`:sql``)} ORDER BY a.id LIMIT ${limit+1}`);
+    return c.json({data:rows.slice(0,limit).map(view),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
   });
   // Chooses (or changes) the workspace an approval acts in. Credentials it created elsewhere stop at their next
   // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.

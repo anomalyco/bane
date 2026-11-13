@@ -1,19 +1,31 @@
 import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
+import type { McpConnection } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
-// The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
-const workspaceStorageKey = 'bane.workspace'
-let workspaceSelection: string | null = (() => { try { return localStorage.getItem(workspaceStorageKey) } catch { return null } })()
+// The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Bane-Account. It is per tab
+// (sessionStorage), so two tabs can show two accounts; unknown in a new tab until /v1/me answers as the browser default.
+const accountStorageKey = 'bane.account'
+let accountSelection: string | null = (() => { try { return sessionStorage.getItem(accountStorageKey) } catch { return null } })()
+export const selectedAccount = () => accountSelection
+// The dashboard's selected workspace (multi-tenant installations only). Sent with every request. Remembered per account.
+const workspaceKey = (account: string | null) => account ? `bane.workspace:${account}` : 'bane.workspace'
+export const rememberedWorkspace = (account: string | null) => { try { return localStorage.getItem(workspaceKey(account)) } catch { return null } }
+let workspaceSelection: string | null = accountSelection ? rememberedWorkspace(accountSelection) : null
 export const selectedWorkspace = () => workspaceSelection
 export function selectWorkspace(id: string | null) {
   workspaceSelection = id
-  try { if (id) localStorage.setItem(workspaceStorageKey, id); else localStorage.removeItem(workspaceStorageKey) } catch { /* Selection can remain session-only. */ }
+  try { if (id) localStorage.setItem(workspaceKey(accountSelection), id); else localStorage.removeItem(workspaceKey(accountSelection)) } catch { /* Selection can remain session-only. */ }
+}
+/** Act as another account in this tab, in the workspace last used with it. Responses to earlier requests are dropped. */
+export function selectAccount(id: string | null) {
+  if (id !== accountSelection) { accountSelection = id; workspaceSelection = id ? rememberedWorkspace(id) : null }
+  try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
 // Responses public/theme.js started before the app loaded. Each is used once, and only while fresh
-// and for the workspace the app would have asked about.
-type EarlyRequests = { workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
+// and for the account and workspace the app would have asked about.
+type EarlyRequests = { account?: string | null; workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
 const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
 // A request that is aborted before it reads the response (React StrictMode's first mount) puts it back for the next one.
 async function takeEarly(path: string, signal?: AbortSignal) {
@@ -21,7 +33,7 @@ async function takeEarly(path: string, signal?: AbortSignal) {
   const pending = early?.responses[path]
   if (!early || !pending) return null
   delete early.responses[path]
-  if (early.workspace !== workspaceSelection || Date.now() - early.at >= 10_000) return null
+  if ((early.account ?? null) !== accountSelection || early.workspace !== workspaceSelection || Date.now() - early.at >= 10_000) return null
   const restore = () => { early.responses[path] ??= pending }
   if (signal?.aborted) { restore(); throw aborted() }
   signal?.addEventListener('abort', restore, { once: true })
@@ -41,17 +53,21 @@ function rememberFailedRequest(id: string) {
 export const recentFailedRequestIds = () => [...failedRequests]
 export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number } = {}): Promise<T> {
   const started = performance.now()
+  // Every request acts as the account selected when it was sent, never one chosen later.
+  const account = accountSelection
   let response: Response
   try {
     const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { 'X-Bane-Account': account } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     throw new ApiError('Cannot reach Bane. Check the API service and try again.', 'NETWORK_UNAVAILABLE')
   }
   const data = await response.json().catch(() => null)
+  // The tab switched accounts while this was in flight: its answer belongs to the other account and is never shown.
+  if (account !== accountSelection && !path.startsWith('/api/auth/')) throw aborted()
   const durationMs = Number((performance.now() - started).toFixed(1))
   if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info('[Bane timing] request', {
     path: new URL(path, window.location.origin).pathname,
@@ -64,7 +80,7 @@ export async function request<T = Json>(path: string, options: { method?: string
     const error = data?.error
     const code = typeof error?.code === 'string' ? error.code : `HTTP_${response.status}`
     const message = typeof error?.message === 'string' ? error.message : 'Couldn’t complete the request.'
-    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event('bane:unauthorized'))
+    if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event(code === 'ACCOUNT_SIGNED_OUT' ? 'bane:account-signed-out' : 'bane:unauthorized'))
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
     if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
@@ -260,6 +276,12 @@ export function createLiveApi(): BaneApi {
       agentTokens: async (includeInactive = false, signal) => (await call(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
       revokeAgentToken: async (id, signal) => { await call(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       mcpConnections: async signal => (await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
+      // One approval of this tab's account, from its list (another account's is not in it).
+      mcpConnection: async (id, signal) => {
+        const found = ((await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data as McpConnection[]).find(connection => connection.id === id)
+        if (!found) throw new ApiError('MCP connection was not found.', 'NOT_FOUND', {}, undefined, 404)
+        return found
+      },
       revokeMcpConnection: async (id, signal) => { await call(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       bindMcpConnection: async (id, input, signal) => { await call(`/mcp-connections/${idPath(id)}/workspace`, 'POST', input, signal) },
     },

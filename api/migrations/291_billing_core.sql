@@ -4,7 +4,7 @@ SET LOCAL lock_timeout='2s';
 CREATE TABLE billing_config (
   singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
   mode text NOT NULL DEFAULT 'off' CHECK (mode IN ('off','shadow','enforce')),
-  receive_hold boolean NOT NULL DEFAULT false,      -- receive holds (284) merged + IAM ready; only matters in 'enforce'
+  receive_hold boolean NOT NULL DEFAULT false,      -- receive holds (296) merged + IAM ready; only matters in 'enforce'
   bill_simulated boolean NOT NULL DEFAULT false,    -- dev/E2E: meter installation-simulated sends
   storage_billing_from date,                         -- NULL: storage rows are priced at $0 (90 days' notice)
   storage_aged_through date,                         -- daily storage job cursor

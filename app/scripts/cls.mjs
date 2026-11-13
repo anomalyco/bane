@@ -39,11 +39,13 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row }]. The in-app navigation starts on `from` and clicks the control whose text
-// starts with `click`, the table row containing `row`, or else a link to `path`; with none of those (pages reached
-// from a dropdown menu) it pushes `path` through the router's history. It must land on `path`.
+// [name, path, { user, from, click, row, switchTo }]. The in-app navigation starts on `from` and clicks the control whose
+// text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account switcher, or
+// else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through the router's
+// history. It must land on `path`.
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
+// A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
   ['Overview', '/', { from: '/logs' }],
   ['Overview · setup', '/', { user: 'nia' }],
@@ -87,6 +89,7 @@ const pages = ids => [
   ['Settings · billing · owed', '/settings#billing', { user: 'rae', from: '/' }],
   ['Settings · billing · free', '/settings#billing', { user: 'nia', from: '/' }],
   ['Settings · webhook', `/settings/webhooks/${ids.webhook}`, { from: '/settings#webhooks', row: 'Delivery events' }],
+  ['Settings · MCP connection', `/settings/mcp/${ids.mcp}`, { from: '/settings#account' }],
   ['Docs', '/docs', { from: '/' }],
   ['Operator', '/operator', { from: '/' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
@@ -95,6 +98,8 @@ const pages = ids => [
   ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
   ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
+  // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
+  ['Two accounts · switch', '/', { user: ['dana', 'nia'], from: '/', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
@@ -106,7 +111,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -244,7 +249,7 @@ async function measure(browser, job, fx) {
   let page, net;
   const problems = [];
   const work = (async () => {
-    if (job.user) await context.addCookies([{ name: 'bane.session_token', value: encodeURIComponent(fx.sessions[job.user].cookie), url: origin, httpOnly: true }]);
+    if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `bane.session_token.${slot}` : 'bane.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
     await context.addInitScript(probe);
     // In-app jobs run with Data Saver on, which turns off the app's idle warm-up of the other sidebar pages: the click
     // then loads the next page's code and data cold, the case with the most loading states to get wrong.
@@ -274,7 +279,13 @@ async function measure(browser, job, fx) {
     await settle(page, net);
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
-      result.via = await page.evaluate(({ path, click, row }) => {
+      if (job.switchTo) {
+        // Open the switcher (a dropdown opens on pointer down, the phone's sheet on click) and pick the other account's workspace.
+        await page.evaluate(() => { const trigger = document.querySelector('#sidebar-workspace'); trigger?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); trigger?.click(); });
+        const item = await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .account-sheet button')].find(el => el.textContent.includes(text)), job.switchTo, { timeout: 10_000 }).catch(() => null);
+        result.via = item ? 'switch' : `no workspace “${job.switchTo}” in the switcher`;
+        if (item) await item.evaluate(el => el.click());
+      } else result.via = await page.evaluate(({ path, click, row }) => {
         const shown = el => el.getClientRects().length > 0, text = el => el.textContent.replace(/\s+/g, ' ').trim();
         // A table row, or on a phone its card (whose link covers it).
         if (row) { const tr = [...document.querySelectorAll('tbody tr, .ui-card')].find(tr => shown(tr) && text(tr).includes(row)); (tr?.querySelector('.ui-card__link') ?? tr)?.click(); return tr ? 'row' : `no row with “${row}”`; }
@@ -359,11 +370,11 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     jobs.push({ name, path, user, scheme, device, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
