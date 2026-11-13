@@ -7,11 +7,13 @@ sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_P
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <sha>" >&2; exit 2; }
 
 # The dev deploy job's name comes from the same pinned output as its checkout, so its E2E step proves this commit.
+# Only that job and its E2E count, not the run's conclusion: a later job in the run (the support Worker's deploy) can
+# fail without saying anything about Bane, and must not hold back a Bane release.
 e2e=
 for ((page=1; ; page++)); do
-  runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?status=success&branch=dev&per_page=100&page=$page")
+  runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?status=completed&branch=dev&per_page=100&page=$page")
   [[ $(jq '.workflow_runs | length' <<< "$runs") != 0 ]] || break
-  ids=$(jq -r --arg title "Deploy dev $sha" --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.display_title == $title and .conclusion == "success" and .head_branch == "dev" and .head_repository.full_name == $repo and (.event == "push" or .event == "workflow_run" or .event == "workflow_dispatch")) | .id' <<< "$runs")
+  ids=$(jq -r --arg title "Deploy dev $sha" --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.display_title == $title and .head_branch == "dev" and .head_repository.full_name == $repo and (.event == "push" or .event == "workflow_run" or .event == "workflow_dispatch")) | .id' <<< "$runs")
   for id in $ids; do
     if gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100" |
       jq -e --arg job "Deploy dev $sha" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' >/dev/null; then
