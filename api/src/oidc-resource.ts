@@ -198,7 +198,12 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
         excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))
     RETURNING (xmax=0) AS created`);
   if (upserted?.created) log('info', { code: 'MCP_APPROVAL_CREATED', userId, client: String(claims.client_id).slice(0, 200) });
-  const { rows: [approval] } = await runtime.db.execute<{ id: string; blocked: boolean }>(sql`SELECT id, revoked OR coalesce(${consent}::text=ANY(revoked_issuer_grants), false) AS blocked
+  // The same statement notes when the agent was last used (the API keys page shows it), at most once a minute and
+  // never waiting: a row another transaction holds (a revoke, a receiving write) is skipped this time.
+  const { rows: [approval] } = await runtime.db.execute<{ id: string; blocked: boolean }>(sql`WITH used AS (UPDATE bane_resource_grants SET last_used_at=now()
+      WHERE id IN (SELECT id FROM bane_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id} AND NOT revoked
+        AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute') FOR NO KEY UPDATE SKIP LOCKED))
+    SELECT id, revoked OR coalesce(${consent}::text=ANY(revoked_issuer_grants), false) AS blocked
     FROM bane_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id}`);
   if (!approval || approval.blocked) return denied(403);
   const keyId = approval.id;

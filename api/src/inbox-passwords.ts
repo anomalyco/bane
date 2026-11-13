@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { auditContext, auditInsert } from './audit.js';
-import { ApiError, errors, id, json, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
+import { actorMailAccess, ApiError, errors, id, isoTime, json, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
 
 export function passwordDigest(pepper: string, value: string) {
   return createHmac('sha256', hkdfSync('sha256', pepper, '', 'bane:protocol-password:v1', 32))
@@ -88,6 +88,27 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
         sql`SELECT p.id,name,protocols,created_at::text AS "createdAt" FROM inbox_app_passwords p JOIN inbox_state s USING(inbox_id) WHERE s.workspace_id=${wid} AND inbox_id=${bid} AND revoked_at IS NULL ORDER BY created_at`,
       );
       return c.json({ data: r.rows }, 200);
+    },
+  );
+  // Every inbox's passwords in one list, for the API keys page. Same guard as a single inbox's list; it is not a
+  // mailbox route, so the workspace credential is checked directly (receiving consent and member refusal: core.ts).
+  app.openapi(
+    createRoute({
+      ...meta,
+      method: 'get',
+      path: '/v1/app-passwords',
+      operationId: 'listAppPasswords',
+      summary: 'List the active app passwords of every inbox, without their secrets',
+      responses: { 200: response(z.object({ data: z.array(item.extend({ inboxId: z.string(), inboxAddress: z.string() })) }).openapi('AppPasswordList')), ...errors },
+    }),
+    async (c) => {
+      const a = c.get('actor');
+      if (!actorMailAccess(a)?.admin || a.role === 'member')
+        throw new ApiError(403, 'ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.');
+      const r = await c.env.db.execute<z.infer<typeof item> & { inboxId: string; inboxAddress: string }>(
+        sql`SELECT p.id,p.name,p.protocols,p.created_at::text AS "createdAt",s.inbox_id AS "inboxId",b.address AS "inboxAddress" FROM inbox_app_passwords p JOIN inbox_state s USING(inbox_id) JOIN mailboxes b ON b.workspace_id=s.workspace_id AND b.id=s.inbox_id WHERE s.workspace_id=${a.workspaceId} AND p.revoked_at IS NULL ORDER BY p.created_at DESC,p.id LIMIT 500`,
+      );
+      return c.json({ data: r.rows.map(row => ({ ...row, createdAt: isoTime(row.createdAt)! })) }, 200);
     },
   );
   app.openapi(

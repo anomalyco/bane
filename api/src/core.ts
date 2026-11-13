@@ -188,6 +188,8 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+/** A timestamp as the API returns it (ISO 8601, UTC), from Postgres text ("2026-11-13 10:00:00.123+00") or ISO. */
+export const isoTime = (value: string | null | undefined) => value ? new Date(value.includes('T') ? value : value.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')).toISOString() : null;
 /** A (created_at, id) page cursor, bound to its resource and filters; microseconds survive the round trip. */
 export function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
   if (!value) return null;
@@ -220,7 +222,7 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
 // enforces a guard and the MCP listing that must agree with it call the same predicate.
 /** mailboxAuth: inbox keys, or a workspace credential through actorMailAccess. */
 export const mailboxRoute = (path: string) => /^\/v1\/(?:inbound|inboxes)(?:\/|$)/.test(path);
-const appPasswordRoute = (path: string) => /^\/v1\/inboxes\/[^/]+\/app-passwords(?:\/|$)/.test(path);
+const appPasswordRoute = (path: string) => /^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/.test(path);
 /** requireReceivingConsent: an MCP grant without explicit receiving consent is refused. */
 export const receivingConsentRoute = (path: string) =>
   appPasswordRoute(path) || /^\/v1\/(?:routing|rituals|endpoints|inbound\/(?:retired|domains|addresses|keys|webhooks|overview))(?:\/|$)|^\/v1\/(?:inbox-connections|inbound\/policy|domains\/[^/]+\/receiving-host|inbound\/messages\/[^/]+\/redeliver)$/.test(path);
