@@ -42,7 +42,7 @@ export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge
 // getRitualVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRituals.
 const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
-const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment']);
+const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment', 'previewEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
 // REST permission below, never by the HTTP method; confirm=true marks only state changes.
 const NO_CONFIRM = new Set(['planAudienceMutation']);
@@ -198,7 +198,7 @@ const TAG_TOOLSET: Record<string, Toolset> = {
   Emails: 'sending', Campaigns: 'sending', Templates: 'sending', Audience: 'sending', Consent: 'sending', Attachments: 'admin', Metrics: 'sending',
   Auth: 'admin', ApiKeys: 'admin', Settings: 'admin', Billing: 'admin', Domains: 'admin', Regions: 'admin', Webhooks: 'admin', 'Inbound domains': 'admin', 'Inbound keys': 'admin',
 };
-const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'listLogs', 'testRouting', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
+const UNTRUSTED_READS = new Set(['listEmails', 'getEmail', 'getEmailDetail', 'getEmailContent', 'previewEmail', 'listLogs', 'testRouting', 'testRituals', 'getInboxMessage', 'listInboxMessages', 'getInboxAttachment', 'getInboundMessage', 'listInboundMessages', 'getInboundThread', 'listInboundThreads', 'getInboundAttachment', 'listInboundEvents']);
 const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
   createInboxFolder:'modify',updateInboxFolder:'modify',deleteInboxFolder:'modify',
   listInboxFolders:'read',getInboxChanges:'read',moveInboxMessage:'modify',copyInboxMessage:'modify',deleteInboxMessage:'modify',expungeInboxFolder:'modify',
