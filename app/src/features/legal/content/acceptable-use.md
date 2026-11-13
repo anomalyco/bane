@@ -1,11 +1,11 @@
 ---
 title: Acceptable Use Policy
-description: What you may and may not do with Bane, the published sending limits and enforcement thresholds, and how to report abuse.
+description: What you may and may not do with Nightmail, the published sending limits and enforcement thresholds, and how to report abuse.
 updated: 13 November 2026
 effective: 13 November 2026
 ---
 
-Bane shares sending infrastructure and reputation among its customers, so one sender's spam hurts everyone's delivery. This policy says what you may and may not do with Bane. It's part of the [Terms of Service](/legal/terms), and it applies to you, everyone in your workspaces, and every Agent (API key, MCP client, AI agent, inbox key or app password) that acts for you.
+Nightmail shares sending infrastructure and reputation among its customers, so one sender's spam hurts everyone's delivery. This policy says what you may and may not do with Nightmail. It's part of the [Terms of Service](/legal/terms), and it applies to you, everyone in your workspaces, and every Agent (API key, MCP client, AI agent, inbox key or app password) that acts for you.
 
 This policy isn't legal advice. You're responsible for knowing and following the laws that apply to your mail.
 
@@ -13,14 +13,14 @@ This policy isn't legal advice. You're responsible for knowing and following the
 
 - **Get permission first.** Send marketing only to people who opted in to hear from you, or where the law clearly allows it without opt-in. Keep a record of when and how each person agreed.
 - **No bought, rented, shared, scraped or appended lists.** Don't use lists from list brokers, lead sellers, co-registration you can't trace, or addresses harvested from websites, directories or other services.
-- **No address guessing.** Don't send to guessed or generated addresses, or use Bane to check whether addresses exist.
+- **No address guessing.** Don't send to guessed or generated addresses, or use Nightmail to check whether addresses exist.
 - **Label mail honestly.** Mark marketing as marketing. Don't send promotions as "transactional" mail to avoid marketing rules, limits or screening.
-- **Keep lists clean.** Remove addresses that bounce or complain. Bane suppresses hard bounces and complaints; don't try to get around that.
-- **Watch your rates.** Keep complaints under 0.05% and hard bounces under 2%. Above that, Bane starts warning you ([section 9](#how-we-enforce-this-policy)).
+- **Keep lists clean.** Remove addresses that bounce or complain. Nightmail suppresses hard bounces and complaints; don't try to get around that.
+- **Watch your rates.** Keep complaints under 0.05% and hard bounces under 2%. Above that, Nightmail starts warning you ([section 9](#how-we-enforce-this-policy)).
 
 ## 2. Unsubscribes
 
-- Every marketing message must have a clear, working way to unsubscribe. Bane adds an unsubscribe link and one-click unsubscribe headers (`List-Unsubscribe` and `List-Unsubscribe-Post`) to every marketing message it sends.
+- Every marketing message must have a clear, working way to unsubscribe. Nightmail adds an unsubscribe link and one-click unsubscribe headers (`List-Unsubscribe` and `List-Unsubscribe-Post`) to every marketing message it sends.
 - Honor an unsubscribe as soon as possible, and always within **10 business days** (the CAN-SPAM and CASL limit).
 - Don't ask for more than an email address to unsubscribe, don't charge for it, and don't re-add someone who unsubscribed unless they opt in again.
 
@@ -35,7 +35,7 @@ These are short summaries, not the full rules.
 | **GDPR, ePrivacy and UK PECR (EU and UK)** | Marketing email to individuals generally needs prior consent (a narrow "soft opt-in" exists for existing customers); you need a lawful basis for all personal data; tell people how you use their data; tracking pixels and click tracking may need consent. |
 | **Other laws** | Follow the anti-spam and privacy laws of every country you send to, such as Australia's Spam Act. |
 
-**Tracking.** Today, Bane turns open and click tracking on by default for marketing mail and campaigns, and off for transactional mail and replies. You can turn tracking off for any message or campaign. If the law where your recipients live requires consent for tracking, get it or turn tracking off.
+**Tracking.** Today, Nightmail turns open and click tracking on by default for marketing mail and campaigns, and off for transactional mail and replies. You can turn tracking off for any message or campaign. If the law where your recipients live requires consent for tracking, get it or turn tracking off.
 
 ## 4. Honest messages and headers
 
@@ -46,7 +46,7 @@ These are short summaries, not the full rules.
 
 ## 5. Prohibited content and uses
 
-Don't use Bane to send, receive, store or link to:
+Don't use Nightmail to send, receive, store or link to:
 
 - **Malware**, viruses, or links to them.
 - **Phishing**, credential harvesting, or fake login, payment or account-recovery pages.
@@ -73,12 +73,12 @@ Don't:
 ## 7. Receiving, inboxes and forwarding
 
 - **Your addresses only.** Receive mail only for domains and addresses you control.
-- **No bulk sign-ups elsewhere.** Don't use Bane inboxes (including short-lived agent inboxes and catch-all addresses) to mass-create accounts on other services, collect verification codes or free trials at scale, or get around another service's limits or terms.
+- **No bulk sign-ups elsewhere.** Don't use Nightmail inboxes (including short-lived agent inboxes and catch-all addresses) to mass-create accounts on other services, collect verification codes or free trials at scale, or get around another service's limits or terms.
 - **No mail bombing.** Don't sign other people up to lists, or use your addresses to flood someone else.
 - **Forwarding.** Forward only to people who agreed. A new outside forwarding address must confirm by email first. Don't create forwarding loops.
-- **Storage.** Don't use Bane to store files or data unrelated to email.
+- **Storage.** Don't use Nightmail to store files or data unrelated to email.
 - **IMAP and SMTP fair use.** Normal mail-client use is free. Downloads above 5 GB a day or 30 GB a month per inbox are slowed down. SMTP submission follows the same sending rules and limits as the API.
-- **Other people's mail.** Don't read or keep someone else's mail through Bane without the right to do so, for example by pointing a domain you don't own at Bane.
+- **Other people's mail.** Don't read or keep someone else's mail through Nightmail without the right to do so, for example by pointing a domain you don't own at Nightmail.
 
 ## 8. AI agents, MCP and Omens
 
@@ -90,7 +90,7 @@ Don't:
 
 ## 9. How we enforce this policy
 
-Most problems are handled by Bane's automatic sender score. It moves through steps, from least to most serious:
+Most problems are handled by Nightmail's automatic sender score. It moves through steps, from least to most serious:
 
 1. **Notice.** A note on your score card, for a first complaint or a few bounces. Nothing changes.
 2. **Warn.** We email owners and admins. Your daily limit stops growing. It clears by itself after a day of good sending.
@@ -140,7 +140,7 @@ Evidence fades with a 30-day half-life. Opens are ignored, because mail privacy 
 
 ### When each step happens
 
-Bane checks every 10 minutes. Each line needs a count and a rate together.
+Nightmail checks every 10 minutes. Each line needs a count and a rate together.
 
 | Signal | Warn | Restrict | Pause |
 | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ A Hosted campaign with more than 100 recipients first sends to a sample: 10% of 
 
 ## 11. Reporting abuse
 
-Report spam, phishing or other abuse sent through Bane to [abuse@bane.mx](mailto:abuse@bane.mx). Include the full message headers. We'll investigate and act.
+Report spam, phishing or other abuse sent through Nightmail to [abuse@bane.mx](mailto:abuse@bane.mx). Include the full message headers. We'll investigate and act.
 
 ## 12. Changes
 

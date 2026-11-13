@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util';
 // /operator/notes (Agent keys) for themself: it reads notes and sets status, PR link and resolution, nothing else, and
 // stops working when it expires (at most 90 days), is revoked, or its operator loses the operator role.
 //
-//   BANE_URL=https://bane.mx BANE_UI_NOTES_KEY=bane_notes_… node --import tsx scripts/ui-notes.ts <command>
+//   BANE_URL=https://bane.mx BANE_UI_NOTES_KEY=nm_notes_… node --import tsx scripts/ui-notes.ts <command>
 //
 //   list [--status open,in_progress] [--kind bug,spacing] [--route /campaigns/:id/edit] [--json] [--screenshots DIR]
 //       Every matching note, newest first. --screenshots saves each note's screenshot as DIR/<id>.<ext> and adds its
@@ -24,7 +24,7 @@ const usage = 'Usage: ui-notes.ts list [--status S,…] [--kind K,…] [--route 
 
 export async function uiNotes(args: string[], env: Record<string, string | undefined> = process.env, out: (line: string) => void = line => console.log(line)) {
   const base = (env.BANE_URL ?? 'https://bane.mx').replace(/\/$/, ''), key = env.BANE_UI_NOTES_KEY;
-  if (!key || !/^bane_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set BANE_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
+  if (!key || !/^(?:nm|bane)_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set BANE_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('Set BANE_URL to the deployment origin, such as https://bane.mx.');
   const api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${key}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, redirect: 'error' });

@@ -1,4 +1,5 @@
 import { toolResult } from './projection.js';
+import { productName } from '../../../api/src/brand.js';
 
 // The agent's tools (design §4.1). Every account tool is a closure over the conversation's grant: the model never
 // passes, sees or chooses identity, and can only narrow to a workspace already in the grant. Each tool has a label
@@ -93,7 +94,7 @@ export const TOOLS: ToolSpec[] = [
   { name: 'list_webhook_deliveries', description: 'Webhook deliveries with attempts, last HTTP status and error (never payloads or URLs).',
     params: { workspaceId: workspaceParam, status: { type: 'enum', values: ['pending', 'delivered', 'failed', 'paused'], description: 'Filter by status', optional: true }, days: sinceParam },
     label: fixed('Checking your webhook deliveries…', 'Checked your webhook deliveries'), execute: read((a, h) => `/v1/support/webhook-deliveries${query(a, h)}`) },
-  { name: 'api_errors', description: 'The customer’s own failed API and dashboard requests (their apps, SDK, MCP or agents included) from Bane’s request logs, which keep about 3 days: grouped by route, status and error code, with counts, first and last seen and sample request IDs to open with explain_request. Use it for "I get 500s", "my integration fails", or to find the request behind an error.',
+  { name: 'api_errors', description: `The customer’s own failed API and dashboard requests (their apps, SDK, MCP or agents included) from ${productName}’s request logs, which keep about 3 days: grouped by route, status and error code, with counts, first and last seen and sample request IDs to open with explain_request. Use it for "I get 500s", "my integration fails", or to find the request behind an error.`,
     params: { workspaceId: workspaceParam, status: { type: 'enum', values: ['error', '5xx', '4xx'], description: 'Default error (any 4xx or 5xx)', optional: true },
       hours: { type: 'number', description: 'How many hours back (1–72). Default 24.', optional: true, min: 1, max: 72 },
       route: { type: 'string', description: 'Only this route template, e.g. "/v1/emails/send"', optional: true, max: 200 }, code: { type: 'string', description: 'Only this error code, e.g. INTERNAL_ERROR', optional: true, max: 80 } },
@@ -115,7 +116,7 @@ export const TOOLS: ToolSpec[] = [
   { name: 'domain_health', description: 'One sending domain in depth: verification, live SPF/DMARC/BIMI records, DKIM and SPF alignment, sending volume and warm-up age, marketing vs transactional mix. Includes findings[].',
     params: { domainId: { type: 'string', description: 'The domain ID from list_domains', max: 120, pattern: ID }, workspaceId: workspaceParam },
     label: fixed('Checking your domain’s DNS and authentication…', 'Checked your domain’s DNS and authentication'), execute: read((a, h) => `/v1/support/domains/${seg(a.domainId)}/health${query({ workspaceId: a.workspaceId }, h)}`) },
-  { name: 'screen_rejections', description: 'Bane’s content screen over the last days: hourly screened and rejected counts and the last 50 rejections with subject, error code and spam score.',
+  { name: 'screen_rejections', description: `${productName}’s content screen over the last days: hourly screened and rejected counts and the last 50 rejections with subject, error code and spam score.`,
     params: { workspaceId: workspaceParam, days: { type: 'number', description: '1–7, default 7', optional: true, min: 1, max: 7 } },
     label: fixed('Checking content screen rejections…', 'Checked content screen rejections'), execute: read((a, h) => `/v1/support/screen${query(a, h)}`) },
   { name: 'list_campaigns', description: 'Recent campaigns: state, audience and size, tracking, From, subject, stats and pacing.',
@@ -139,9 +140,9 @@ export const TOOLS: ToolSpec[] = [
   { name: 'request_content_access', description: 'Ask the customer to let you read the content (bodies, HTML) of their emails and campaigns in one workspace, for this conversation only. Use only when the content is the likely cause. Say why in one sentence.',
     params: { workspaceId: workspaceParam, why: { type: 'string', description: 'One sentence the customer will see, e.g. "To check why the screen rejected your Nov 3 promo, I need to read its HTML."', max: 240 } },
     label: fixed('Asking for content access…', 'Asked for content access'), execute: (a, h) => h.requestContentAccess(String(a.workspaceId ?? h.workspaceId() ?? ''), String(a.why ?? '')) },
-  { name: 'file_ticket', description: 'Pass this conversation to the Bane team. One per conversation; calling again adds facts to the same ticket. Pick the type that fits and fill its fields: a bug needs reproSteps and affected (plus the request IDs and error codes you saw).',
+  { name: 'file_ticket', description: `Pass this conversation to the ${productName} team. One per conversation; calling again adds facts to the same ticket. Pick the type that fits and fill its fields: a bug needs reproSteps and affected (plus the request IDs and error codes you saw).`,
     params: {
-      type: { type: 'enum', values: TICKET_TYPES, description: 'billing (refunds, disputes, charges, credit), bug (Bane software misbehaving), deliverability (inboxing, bounces, reputation, limits from sending quality), account (access, closure, limits, enforcement, security), abuse_report, privacy (GDPR/CCPA requests, data deletion or export), legal (DPA, subpoenas, law enforcement, sanctions), feature_request, other' },
+      type: { type: 'enum', values: TICKET_TYPES, description: `billing (refunds, disputes, charges, credit), bug (${productName} software misbehaving), deliverability (inboxing, bounces, reputation, limits from sending quality), account (access, closure, limits, enforcement, security), abuse_report, privacy (GDPR/CCPA requests, data deletion or export), legal (DPA, subpoenas, law enforcement, sanctions), feature_request, other` },
       title: { type: 'string', description: 'A short subject line for the team, ≤ 80 characters, e.g. "Webhook test returns 500 for every endpoint"', max: 80 },
       severity: { type: 'enum', values: ['P1', 'P2', 'P3'], description: 'P1: security or sending fully down; P2: legal, pause review, degraded sending, a bug blocking work; P3: everything else' },
       topic: { type: 'enum', values: TICKET_TOPICS, description: 'The specific ask within the type, e.g. refund, limit_increase, enforcement_review, human_requested', optional: true },
@@ -158,7 +159,7 @@ export const TOOLS: ToolSpec[] = [
       actual: { type: 'string', description: 'bug: what happened instead', optional: true, max: 400 },
       useCase: { type: 'string', description: 'feature_request: what they are trying to do and why', optional: true, max: 600 },
     },
-    label: fixed('Passing this to the Bane team…', 'Passed this to the Bane team'),
+    label: fixed(`Passing this to the ${productName} team…`, `Passed this to the ${productName} team`),
     execute: (a, h) => h.fileTicket(ticketInput(a)) },
 ];
 export const TOOL_NAMES = TOOLS.map(t => t.name);

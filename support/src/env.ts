@@ -8,14 +8,14 @@ export interface Env {
   /** abuse@, privacy@, legal@: one object per thread, tickets only, no agent (intake.ts). */
   INTAKE: DurableObjectNamespace<SupportIntake>;
   DB: D1Database;
-  /** Bane's SupportPlatform entrypoint (RPC). */
+  /** Nightmail's SupportPlatform entrypoint (RPC). */
   BANE: Service & SupportPlatform;
-  /** Bane's default entrypoint: its public API, called with the support address's API key (limited to that address). */
+  /** Nightmail's default entrypoint: its public API, called with the support address's API key (limited to that address). */
   BANE_API: Fetcher;
   /** Per-person conversation starts and per-sender inbound mail (Workers rate limiting). */
   CHAT_START?: RateLimit;
   EMAIL_IN?: RateLimit;
-  /** One key across all inbound mail, at a higher rate (the Worker answers 503 so Bane retries later). */
+  /** One key across all inbound mail, at a higher rate (the Worker answers 503 so Nightmail retries later). */
   EMAIL_IN_GLOBAL?: RateLimit;
   /** Screenshots: the stage's private uploads bucket (bane-support[-dev]-uploads, 90-day lifecycle). */
   UPLOADS: R2Bucket;
@@ -25,11 +25,11 @@ export interface Env {
   MODEL_FAKE?: Fetcher;
 
   STAGE: 'dev' | 'production';
-  /** https://support.bane.mx: links in emails (confirm, continue in Bane). */
+  /** https://support.bane.mx: links in emails (confirm, continue in Nightmail). */
   PUBLIC_URL: string;
   /** The dashboard origin allowed to start chats and open sockets (https://bane.mx). Comma-separated for dev. */
   DASHBOARD_ORIGINS: string;
-  /** Bane's own origin, for API paths over BANE_API and dashboard links (https://bane.mx). */
+  /** Nightmail's own origin, for API paths over BANE_API and dashboard links (https://bane.mx). */
   BANE_ORIGIN: string;
   /** support@bane.mx and its inbound address ID in the platform workspace. */
   SUPPORT_ADDRESS: string;

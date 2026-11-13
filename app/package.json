@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
-    "cls": "bun run build && node scripts/cls.mjs"
+    "cls": "bun run build && node scripts/cls.mjs",
+    "copy-lint": "node scripts/copy-lint.mjs",
+    "density": "bun run build && node scripts/density.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.4",
@@ -35,6 +37,7 @@
     "react-router": "8.3.1"
   },
   "devDependencies": {
+    "@babel/parser": "7.29.2",
     "@types/node": "26.5.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",

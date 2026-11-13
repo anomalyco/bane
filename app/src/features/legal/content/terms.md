@@ -1,34 +1,34 @@
 ---
 title: Terms of Service
-description: The agreement between you and Anomaly for using Bane: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
+description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
 updated: 13 November 2026
 effective: 13 November 2026
 ---
 
-These Terms of Service (the "Terms") are a binding agreement between you and **Anomaly Innovations, Inc.** ("Anomaly", "we", "us"). They cover Bane: the hosted email service at bane.mx, its API, dashboard, SDK, MCP server, and IMAP and SMTP access (together, the "Service").
+These Terms of Service (the "Terms") are a binding agreement between you and **Anomaly Innovations, Inc.** ("Anomaly", "we", "us"). They cover Nightmail: the hosted email service at bane.mx, its API, dashboard, SDK, MCP server, and IMAP and SMTP access (together, the "Service").
 
 By creating an account, joining a workspace or using the Service, you accept these Terms, the [Acceptable Use Policy](/legal/acceptable-use) and the [Privacy Policy](/legal/privacy). If you use the Service for an organization, you accept these Terms on its behalf and confirm that you're authorized to do so. "You" then means that organization.
 
 > **ARBITRATION NOTICE AND CLASS ACTION WAIVER:** EXCEPT FOR CERTAIN TYPES OF DISPUTES DESCRIBED IN THE [ARBITRATION AGREEMENT](#arbitration-agreement), YOU AGREE THAT DISPUTES BETWEEN YOU AND US WILL BE RESOLVED BY BINDING, INDIVIDUAL ARBITRATION AND YOU WAIVE YOUR RIGHT TO PARTICIPATE IN A CLASS ACTION LAWSUIT OR CLASS-WIDE ARBITRATION. You can opt out by mail within 30 days of first accepting these Terms ([section 20](#governing-law-and-disputes)).
 
-## 1. Who can use Bane
+## 1. Who can use Nightmail
 
 - You must be at least **18** and able to form a binding contract.
-- **Bane is for business use only.** You may use it only for your trade, business, craft or profession, and not as a consumer. By accepting these Terms you confirm that you're using Bane for business purposes.
-- You can't use Bane if you're barred by sanctions or export laws, or if we closed an earlier account of yours for breaking these Terms.
+- **Nightmail is for business use only.** You may use it only for your trade, business, craft or profession, and not as a consumer. By accepting these Terms you confirm that you're using Nightmail for business purposes.
+- You can't use Nightmail if you're barred by sanctions or export laws, or if we closed an earlier account of yours for breaking these Terms.
 
 ## 2. Key words
 
 | Term | Meaning |
 | --- | --- |
-| **Account** | Your personal sign-in to Bane. |
+| **Account** | Your personal sign-in to Nightmail. |
 | **Workspace** | A shared space that holds domains, inboxes, contacts, keys, settings and its own **prepaid balance**. A person can belong to several workspaces. |
 | **Owner, admin, member** | Workspace roles. Owners and admins manage billing, members and keys. |
-| **Customer Data** | Everything you or your users put into Bane or receive through it: messages, attachments, contacts, lists, templates, rituals, settings and the data in them. |
+| **Customer Data** | Everything you or your users put into Nightmail or receive through it: messages, attachments, contacts, lists, templates, rituals, settings and the data in them. |
 | **Recipients and correspondents** | The people you email, and the people who email your addresses. |
 | **Credit** | Money you add to a workspace's prepaid balance. |
-| **Hosted** | Bane sends and receives mail through Anomaly's own Amazon SES accounts. |
-| **BYO AWS** | Bane works with your own Amazon Web Services account; AWS bills you directly for it. |
+| **Hosted** | Nightmail sends and receives mail through Anomaly's own Amazon SES accounts. |
+| **BYO AWS** | Nightmail works with your own Amazon Web Services account; AWS bills you directly for it. |
 | **Agent** | Any software that acts for you through an API key, MCP connection, agent token, inbox key or app password, including AI agents. |
 
 ## 3. Accounts and workspaces
@@ -41,7 +41,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 ## 4. The Service
 
-- **What Bane does.** Transactional and marketing sending, receiving mail for your domains, inboxes (including short-lived agent inboxes), IMAP and SMTP access, webhooks, routing and **Rituals** (scripts that act on received mail), **Omens** (questions an AI classifier answers about a received message), sender reputation tools and an MCP server.
+- **What Nightmail does.** Transactional and marketing sending, receiving mail for your domains, inboxes (including short-lived agent inboxes), IMAP and SMTP access, webhooks, routing and **Rituals** (scripts that act on received mail), **Omens** (questions an AI classifier answers about a received message), sender reputation tools and an MCP server.
 - **Your domains.** You may only send from, or receive for, domains and addresses you own or are authorized to use. You set up DNS records to prove it. If you lose control of a domain, we may stop sending and receiving for it.
 - **Delivery isn't guaranteed.** We hand your mail to receiving servers. We can't control whether they accept it, file it as spam, or how fast they deliver it. Receiving depends on senders and their providers.
 - **Changes.** We may add, change or remove features. If we remove a material paid feature, we'll give at least 30 days' notice. Beta or preview features are provided as they are and may change or end.
@@ -51,7 +51,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 
 ### 5.1 Prepaid balance
 
-- Bane is **prepaid**. Each workspace has its own balance in **US dollars**. Usage is taken from the balance about once an hour.
+- Nightmail is **prepaid**. Each workspace has its own balance in **US dollars**. Usage is taken from the balance about once an hour.
 - You add credit with a card through Stripe. One top-up is **$20 to $10,000**, before tax. Credit is added only once Stripe confirms the payment. Stripe emails a receipt.
 - **Credit expires 12 months after purchase** and isn't refundable except as described in [section 5.7](#refunds-and-credit-expiry).
 - Prices exclude taxes. Where the law requires us to collect sales tax, VAT, GST or a similar tax, we add it to the charge. Otherwise, you're responsible for any taxes on your purchases.
@@ -67,7 +67,7 @@ By creating an account, joining a workspace or using the Service, you accept the
 | IMAP and SMTP access | Free | Fair use: downloads up to 5 GB a day and 30 GB a month per inbox; above that, downloads slow down. |
 | BYO AWS | Free | Fair use: about 10 million emails a month. |
 
-- **Not charged:** mail Bane suppresses or cancels before it goes out, and mail rejected before sending for reasons other than the spam screen.
+- **Not charged:** mail Nightmail suppresses or cancels before it goes out, and mail rejected before sending for reasons other than the spam screen.
 - **Charged:** a message the spam screen rejects is charged as a send.
 - **Free:** received mail that Amazon's spam scan flags as spam. Omens asked about it are still charged.
 - **Storage starts later.** Storage charges start **90 days after we notify you** that they apply. Until then, stored mail is free.
@@ -140,7 +140,7 @@ You must follow the [Acceptable Use Policy](/legal/acceptable-use). In short: se
 
 ## 7. Automated screening and sender score
 
-- **Automated content screening.** To prevent fraud and abuse, Bane scans the content of email sent through, or received into, your workspace with an automated classifier. This covers mail sent through Bane's shared (Hosted) sending pool, mail your rituals forward to outside addresses, and received mail only where you turn on Omens. We use the results only to (a) prevent fraud, spam and other abuse of the Service, which may include holding, rejecting or reviewing messages, and (b) compute your workspace's sender score. We don't sell scanned content or results and don't use them for advertising.
+- **Automated content screening.** To prevent fraud and abuse, Nightmail scans the content of email sent through, or received into, your workspace with an automated classifier. This covers mail sent through Nightmail's shared (Hosted) sending pool, mail your rituals forward to outside addresses, and received mail only where you turn on Omens. We use the results only to (a) prevent fraud, spam and other abuse of the Service, which may include holding, rejecting or reviewing messages, and (b) compute your workspace's sender score. We don't sell scanned content or results and don't use them for advertising.
 - **Sender score.** Your sender score (0–100) is calculated from your workspace's own activity: complaints, spam-screen rejections, bounces, list quality, domain authentication and unsubscribes. It sets your **daily sending limit** and can lead to warnings, a hold on marketing mail, or a pause, as described in [section 8](#sending-limits-enforcement-and-suspension) and in the [published thresholds](/legal/acceptable-use#sending-limits-and-thresholds).
 - **Screening can be wrong.** A classifier can block a legitimate message or miss a bad one. If you think a decision is wrong, ask for a review ([section 8.4](#getting-back-and-appeals)).
 
@@ -152,7 +152,7 @@ Hosted sending has daily and per-minute limits that grow as your sender score ri
 
 ### 8.2 The enforcement ladder
 
-Bane checks sending quality about every 10 minutes. Each step needs both a count and a rate, so a few events don't trip a small sender.
+Nightmail checks sending quality about every 10 minutes. Each step needs both a count and a rate, so a few events don't trip a small sender.
 
 | Step | What happens | Your mail |
 | --- | --- | --- |
@@ -191,17 +191,17 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 - **Aggregated data.** We may use data about how the Service is used (volumes, delivery and bounce rates, performance) to run and improve it, and to publish aggregate statistics that don't identify you, your recipients or your content.
 - **People at Anomaly.** Support can't read your message content unless you allow it for a specific support request ([section 10](#support-access)). Staff who review abuse see message metadata, such as recipient domains and the subject line of a message the screen rejected, but not message bodies. Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair the Service.
 - **Personal data.** For personal data in Customer Data, you're the controller and we're your processor (a "service provider" under US state privacy laws), as described in the [Privacy Policy](/legal/privacy). A Data Processing Addendum is available to business customers on request at [privacy@bane.mx](mailto:privacy@bane.mx).
-- **Your responsibilities.** You must have a lawful basis to send and receive the personal data you put into Bane, give the notices your recipients need, and not send us special-category data you don't need.
+- **Your responsibilities.** You must have a lawful basis to send and receive the personal data you put into Nightmail, give the notices your recipients need, and not send us special-category data you don't need.
 
 ## 10. Support access
 
 - When you choose **Contact support** in the dashboard, you can tick a box to let support read message content **for that one request**. It's off by default.
 - Support then gets short-lived (at most 2 hours), read-only access tied to your request and the workspaces you belong to. Without your tick, support sees settings, delivery events and error codes, but no message bodies. A request made by email never includes message content.
-- Your workspace's **Activity** page shows "Bane support viewed this workspace" with the request. Every support read is logged and kept for 90 days.
+- Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept for 90 days.
 
 ## 11. Third-party services you connect
 
-Bane can send your data where you tell it to: webhooks, Slack and Discord endpoints, forwarding addresses, MCP clients and AI agents, IMAP and SMTP mail clients, and your own AWS account. You choose those services, and we aren't responsible for what they do with the data. Forwarding to an outside address requires that address to confirm first.
+Nightmail can send your data where you tell it to: webhooks, Slack and Discord endpoints, forwarding addresses, MCP clients and AI agents, IMAP and SMTP mail clients, and your own AWS account. You choose those services, and we aren't responsible for what they do with the data. Forwarding to an outside address requires that address to confirm first.
 
 ## 12. AI features
 
@@ -214,7 +214,7 @@ We use reasonable technical and organizational measures to protect Customer Data
 
 ## 14. Availability and support
 
-- We work to keep Bane available, but we don't offer a service level agreement unless we agree one with you in writing.
+- We work to keep Nightmail available, but we don't offer a service level agreement unless we agree one with you in writing.
 - We may do maintenance, and may limit request rates to protect the Service.
 
 ## 15. Disclaimers
@@ -233,7 +233,7 @@ You'll defend and indemnify Anomaly against third-party claims, fines and costs 
 
 ## 18. Ending the agreement
 
-- **You** can stop using Bane at any time. To close a workspace, email [support@bane.mx](mailto:support@bane.mx) from a workspace owner's address; to close your account, email us from your account's address.
+- **You** can stop using Nightmail at any time. To close a workspace, email [support@bane.mx](mailto:support@bane.mx) from a workspace owner's address; to close your account, email us from your account's address.
 - **We** can end these Terms or close a workspace:
   - for a serious or repeated breach, at once;
   - otherwise with **30 days'** notice. If we close a workspace without cause, we refund its unused, unexpired paid balance ([section 5.7](#refunds-and-credit-expiry)).
@@ -249,7 +249,7 @@ You'll defend and indemnify Anomaly against third-party claims, fines and costs 
 
 ## 19. Changes to these Terms
 
-We may update these Terms. For material changes we'll give at least **30 days'** notice by email to workspace owners and in the dashboard. If you keep using Bane after a change takes effect, the new Terms apply. If you don't agree, stop using Bane before then. [Section 5.7](#refunds-and-credit-expiry) governs any prepaid balance.
+We may update these Terms. For material changes we'll give at least **30 days'** notice by email to workspace owners and in the dashboard. If you keep using Nightmail after a change takes effect, the new Terms apply. If you don't agree, stop using Nightmail before then. [Section 5.7](#refunds-and-credit-expiry) governs any prepaid balance.
 
 ## 20. Governing law and disputes
 
@@ -296,7 +296,7 @@ If the prohibition against class actions and other claims brought on behalf of t
 ## 21. General
 
 - **Assignment.** You can't transfer these Terms without our prior written consent. We can transfer them in a merger, acquisition or sale of assets, or to an affiliate.
-- **Force majeure.** Neither side is liable for delays caused by events beyond its reasonable control, including outages of the providers Bane depends on.
+- **Force majeure.** Neither side is liable for delays caused by events beyond its reasonable control, including outages of the providers Nightmail depends on.
 - **Notices.** We send notices to workspace owners' email addresses and in the dashboard. You send legal notices to [legal@bane.mx](mailto:legal@bane.mx), or by mail to the address in [section 22](#contact).
 - **Entire agreement.** These Terms, the Acceptable Use Policy, the Privacy Policy, any signed Data Processing Addendum and any order form are the whole agreement between you and Anomaly about the Service. If they conflict, a signed agreement wins, then the Data Processing Addendum for personal data, then these Terms.
 - **Severability and waiver.** If a part of these Terms is unenforceable, it's limited or removed to the minimum extent necessary and the rest stays in force. Not enforcing a term isn't a waiver.

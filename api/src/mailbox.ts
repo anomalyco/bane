@@ -58,8 +58,8 @@ export async function authorizeInboxKey(c:Ctx,token:string):Promise<MailboxAcces
 async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const delegated=delegatedInbox(c.env);if(delegated){c.set('mailboxAccess',delegated);return next();}
   const token = c.req.header('authorization')?.match(/^Bearer (.+)$/i)?.[1];
-  if (token && /^(?:bane|os)_mbx_/.test(token)) {
-    if (!/^(?:bane|os)_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
+  if (token && /^(?:nm|bane|os)_mbx_/.test(token)) { // bane_/os_: remove after rename cleanup
+    if (!/^(?:nm|bane|os)_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
     c.set('mailboxAccess', await authorizeInboxKey(c,token));
     return next();
   }

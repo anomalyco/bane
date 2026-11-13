@@ -17,7 +17,7 @@ import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { apiKeyEnv, productName } from '../../../../api/src/brand'
+import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Bring-your-own verification is resumable; keep retrying while AWS confirms the feedback subscription.
@@ -456,8 +456,8 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
   </div>
 }
 
-// Same length as a real key (bane_ and 64 hex digits), so the reveal takes exactly the reserved space.
-const keyPlaceholder = `bane_${'0'.repeat(64)}`
+// Same length as a real key (its prefix and 64 hex digits), so the reveal takes exactly the reserved space.
+const keyPlaceholder = `${secretPrefixes.apiKey}${'0'.repeat(64)}`
 
 // Last step: a key, the first send (curl, SDK or a test button), then everything a coding agent needs.
 // Domain verification keeps running in the background. The key is least-privilege by default.

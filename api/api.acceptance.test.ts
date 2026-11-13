@@ -386,7 +386,7 @@ test('UI notes capture text: an address split across inline elements is masked i
   assert.deepEqual(maskRuns(['Key: ', key.slice(0, 20), key.slice(20)]), ['Key: ', '•'.repeat(20), '•'.repeat(key.length - 20)]);
   const kept = [`cmp_${hex(32)}`, 'ui-table__clickable private-address__value', 'Section title sits 4px closer', 'abc123def456'];
   for (const text of kept) { assert.equal(redactSecrets(text), text); assert.deepEqual(maskRuns([text]), [text]); }
-  const secrets = [key, `bane_notes_${hex(64)}`, `bane_agent_${random}.${random}`, `whsec_${random}`, `sk_live_${random}`, `rk_${random}`, `cus_${random.slice(0, 16)}`,
+  const secrets = [key, `nm_${hex(64)}`, `nm_mbx_${hex(64)}`, `nm_notes_${hex(64)}`, `nm_agent_${random}.${random}`, `bane_notes_${hex(64)}`, `bane_agent_${random}.${random}`, `whsec_${random}`, `sk_live_${random}`, `rk_${random}`, `cus_${random.slice(0, 16)}`,
     Array.from({ length: 8 }, () => 'a1b2').join('-'), `eyJhbGciOiJIUzI1NiJ9.${random}.${random}`, 'AKIAIOSFODNN7EXAMPLE', `Bearer ${random}`, random, hex(40)];
   for (const secret of secrets) {
     assert.equal(redactSecrets(`before ${secret} after`).includes(secret), false, secret);
@@ -1574,7 +1574,7 @@ async function keyFixture(t: TestContext, options: { permissions?: string[]; dom
   }), 201);
   assert.equal(typeof body.id, 'string');
   assert.equal(typeof body.secret, 'string', 'API-key creation must return the secret exactly once.');
-  assert.match(body.secret, /^bane_[0-9a-f]{64}$/);
+  assert.match(body.secret, /^nm_[0-9a-f]{64}$/);
   secrets.add(body.secret);
   cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, MANAGER), [200, 204]); });
   return body;
@@ -1807,9 +1807,10 @@ describe('Public contract and authentication', () => {
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
-    // Even with a matching stored hash, the retired test key format cannot authenticate.
-    for (const prefix of ['os_', 'os_live_', 'os_test_', 'bane_test_']) {
-      const old = prefix + key.secret.slice('bane_'.length), id = unique('legacy-key');
+    // Keys from before the Nightmail rename (bane_) and OpenSend (os_) still authenticate; even with a matching stored
+    // hash, the retired test key format cannot.
+    for (const prefix of ['bane_', 'os_', 'os_live_', 'os_test_', 'bane_test_', 'nm_test_']) {
+      const old = prefix + key.secret.slice('nm_'.length), id = unique('legacy-key');
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,$3,'["read"]','[]')`, [id, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
       cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
       const me = await http('GET','/v1/me',old);
@@ -1820,6 +1821,7 @@ describe('Public contract and authentication', () => {
     const rows = await allPages('/v1/api-keys', MANAGER);
     const saved = rows.find(row => row.id === key.id);
     assert.ok(saved, 'Newly created API key must be visible in the key list.');
+    assert.equal(saved.prefix, key.secret.slice(0, 'nm_'.length + 8), 'A key list shows the prefix and 8 characters.');
     for (const row of rows) {
       assert.equal(row.secret, undefined, 'API-key listing must never return a secret.');
       assert.equal(row.hash, undefined, 'API-key listing must never return credential hashes.');
@@ -2157,7 +2159,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             if(url.origin==='https://cloudflare-dns.com') {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
-              if(q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
+              if(q===`_nightmail.${name}` || q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
               if(type==='NS') return Response.json({Status:3}); // Receiving hosts here are not delegated zones.
@@ -2221,7 +2223,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
             const type=record.type==='SPFM'?'TXT':record.type, value=record.type==='SPFM'?`v=spf1 ${record.spfRules} ~all`:expand(record.pointsTo ?? record.data);
-            assert.ok(manual.dns.some((r:Json)=>r.name===target && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
+            // The registered template publishes the ownership token as _bane, which proves a claim shown as _nightmail.
+            const same=(shown:string)=>record.groupId==='ownership' ? shown.replace(/^_(?:nightmail|bane|opensend)\./,'')===target.replace(/^_bane\./,'') : shown===target;
+            assert.ok(manual.dns.some((r:Json)=>same(r.name) && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
           }
           assert.deepEqual((await getSetup('?groups=ownership')).groups,['ownership']); assert.equal(requests.length,before,'Cached consent URL generation makes no outbound calls.');
           const ret=new URL(params.get('redirect_uri')!); assert.equal(ret.origin,origin); const token=params.get('state')!; assert.equal(ret.pathname.split('/').at(-1),token);
@@ -2340,7 +2344,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
           assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
-          assert.equal(proof.name,`_bane.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
+          assert.equal(proof.name,`_nightmail.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
           // Receiving defaults to reply.<domain>: a pasted root MX would take the domain's existing mail.
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
@@ -2381,8 +2385,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
 
           identity.DkimAttributes=dkim; answer=''; await pace();
           await assert.rejects(check(40),e=>e instanceof JobDeferred && Date.parse(e.availableAt)<=Date.now()+16_000 && e.payload?.poll===1);
-          assert.equal(lookups,2,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
-          await assert.rejects(check(),JobDeferred); assert.equal(lookups,2,'Account pacing must prevent a second SES read.');
+          assert.equal(lookups,3,'The first DKIM success checks TXT (each label); NXDOMAIN restarts at the short delay even after 40 polls.');
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,3,'Account pacing must prevent a second SES read.');
           await pace();
           // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
           await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
@@ -2396,7 +2400,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`GET verified domain: 1 domain statement; ${verifiedQueries} pg round trips including dashboard auth; no wake.`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
-          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,6,"Three checks of both ownership labels; the legacy TXT proves the claim.");
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,9,"Three checks of the three ownership labels; the legacy _opensend TXT proves the claim.");
           assert.ok(associations.has(`bane-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
           // A verified sender on a connection whose tenant is not ready is refused at admission, never queued silently.
           await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
@@ -2606,7 +2610,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               const {cleanup}=await import('./src/maintenance.js');
               const create=async()=>ok(await add(b.cookie,unique('expiry')+'.invalid'),201);
               const expired=await create(),foreignTag=await create(),recent=await create();
-              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_bane.'+x.name).value;
+              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_nightmail.'+x.name).value;
               const token=getToken(expired);
               identities.get(`${platform}:${foreignTag.name}`)!.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];
               await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=ANY($1)",[[expired.name,foreignTag.name,domain]]);
@@ -2807,6 +2811,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             }),e=>e===rollback);
           }); } finally { runtime.db=original; }
           assert.ok(calls.slice(start).every(n=>/^(Get|List)/.test(n)),'No writes to customer AWS resources during verification or import.');
+          // A claim made before the Nightmail rename keeps showing (and is proven by) the _bane record its owner published.
+          await pool.query("UPDATE domain_claims SET proof_label='bane' WHERE workspace_id=$1 AND name=$2",[a.org.id,reserved]);
           const list:Json[]=ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;assert.equal(list.length,3);
           const signedDomain=list.find(x=>x.name===imported)!;
           assert.deepEqual([signedDomain.sending,signedDomain.verificationStatus,signedDomain.dkimStatus,signedDomain.mailFromDomain,signedDomain.mailFromStatus],['verified','SUCCESS','SUCCESS','bounce.'+imported,'SUCCESS']);
@@ -2823,15 +2829,15 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             }),e=>e===rollback);
           }
           await canReserve(true);
-          async function check(item:Json,correct:boolean){
-            const proof=item.dns.find((r:Json)=>r.name==='_bane.'+item.name);assert.equal(proof.status,'pending');
+          async function check(item:Json,correct:boolean,label='nightmail'){
+            const proof=item.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT');assert.equal(proof.name,`_${label}.${item.name}`);assert.equal(proof.status,'pending');
             dns.set(proof.name,correct?proof.value:'wrong');await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
             return operationJobs['domain.verify']!(runtime,{domainId:item.id,token:proof.value},{id:'domain.verify:'+proof.value,attempts:1,workspaceId:a.org.id});
           }
           await check(signedDomain,false);await canReserve(true);
           assert.equal((await pool.query('SELECT 1 FROM mailbox_domains WHERE workspace_id=$1 AND domain_id=$2',[a.org.id,signedDomain.id])).rowCount,0,'An unproven import is authorized only for sending.');
           await check(signedDomain,true);await canReserve(false);
-          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true),JobDeferred);
+          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true,'bane'),JobDeferred);
           await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
           const scopes=(await pool.query('SELECT name,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,reserved]])).rows;
           assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'txt'},'A pending foreign reservation does not block either valid DNS proof');
@@ -3263,7 +3269,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, undefined);
-    const [encoded, signature] = temporary.token.slice('bane_agent_'.length).split('.');
+    assert.match(temporary.token, /^nm_agent_/);
+    const [encoded, signature] = temporary.token.slice('nm_agent_'.length).split('.');
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
     const derived = Buffer.from(hkdfSync('sha256', AUTH_SECRET!, 'opensend:keys:v1', 'agent-token:v1', 32));
     const mac = (body: string, key: string | Buffer) => createHmac('sha256', key).update(`opensend-agent-token-v1:${body}`).digest('base64url');
@@ -4224,7 +4231,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const { token: mcpToken } = await oauthGrant(t, db, 'bane:read bane:manage offline_access', request);
       const rpc = async (method: string, params: Json) => ok(await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken) }, { jsonrpc: '2.0', id: 1, method, params })).result;
       const agentToken = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'audit trail fixture' }, confirm: true } })).structuredContent.token as string;
-      assert.match(agentToken, /^(?:bane|os)_agent_/); secrets.add(agentToken);
+      assert.match(agentToken, /^nm_agent_/); secrets.add(agentToken);
       const tools = (await rpc('tools/list', {})).tools.map((tool: Json) => tool.name as string);
       assert.ok(tools.length > 10 && !tools.some((name: string) => /support|operator|activity/i.test(name)), 'Internal routes are never MCP tools.');
       const appPassword = hex().slice(0, 32).match(/.{4}/g)!.join('-'); secrets.add(appPassword);
@@ -4322,7 +4329,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
       const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
-      assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
+      assert.match(grant.token, /^nm_support_[0-9a-f]{64}$/); secrets.add(grant.token);
       assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
       error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
       assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
@@ -4474,12 +4481,12 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.ok(!/ada(?:@|%40)example/.test(JSON.stringify(created)), 'No address in full anywhere in the note.');
       assert.equal(created.page.path, `/campaigns/${campaign}/edit?q=ad•••`, 'Resource IDs are not secrets.');
       // PR #175 review M1: credentials in what was captured (text, label, locator, URL) never reach the table, whatever the dashboard sent.
-      const leaked = { apiKey: `bane_${hex()}`, notesKey: `bane_notes_${hex()}`, signing: `whsec_${hex().slice(0, 24)}Zq`, stripe: `sk_live_${hex().slice(0, 20)}Zq`, appPassword: hex().slice(0, 32).match(/.{4}/g)!.join('-'), token: `Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae${hex().slice(0, 8)}` };
+      const leaked = { apiKey: `bane_${hex()}`, newKey: `nm_${hex()}`, notesKey: `bane_notes_${hex()}`, newNotesKey: `nm_notes_${hex()}`, signing: `whsec_${hex().slice(0, 24)}Zq`, stripe: `sk_live_${hex().slice(0, 20)}Zq`, appPassword: hex().slice(0, 32).match(/.{4}/g)!.join('-'), token: `Zx9Qw2Lp7Rt4Vb8Nm3Kc6Hj1Fg5Ds0Ae${hex().slice(0, 8)}` };
       const exposed = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, url: `${PUBLIC_ORIGIN}/api-keys?token=${leaked.token}`,
-        element: { ...element, text: `Key ${leaked.apiKey} · ${leaked.signing} · ${leaked.stripe} · ${leaked.appPassword}`, label: `Copy ${leaked.notesKey}`, selector: `code[title="${leaked.apiKey}"]`, alternatives: [`#k-${leaked.token}`] } }), 201);
+        element: { ...element, text: `Key ${leaked.apiKey} · ${leaked.signing} · ${leaked.stripe} · ${leaked.appPassword} · ${leaked.newKey}`, label: `Copy ${leaked.notesKey} ${leaked.newNotesKey}`, selector: `code[title="${leaked.apiKey}"]`, alternatives: [`#k-${leaked.token}`] } }), 201);
       const stored = JSON.stringify((await db.query('SELECT url, path, element FROM ui_notes WHERE id = $1', [exposed.id])).rows[0]);
       for (const [name, secret] of Object.entries(leaked)) assert.equal(stored.includes(secret) || JSON.stringify(exposed).includes(secret), false, name);
-      assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
+      assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
       // Recheck M2: an invisible character doesn't hide an address from the API's own pass either.
       const hidden = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, text: 'carol\uFEFF@example.net', label: 'To carol\u200B@exam\u00ADple.net' } }), 201);
       assert.deepEqual([hidden.element.text, hidden.element.label], ['ca•••', 'To ca•••']);
@@ -4538,7 +4545,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await send('POST', '/v1/operator/ui-note-keys', session(other), { name: 'Other agent' }), 404, 'NOT_FOUND');
       error(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 91 }), 422);
       const key = ok(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 7 }), 201); secrets.add(key.secret);
-      assert.match(key.secret, /^bane_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
+      assert.match(key.secret, /^nm_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
       const listed = ok(await send('GET', '/v1/operator/ui-note-keys', session(operator))).data;
       assert.deepEqual(listed.map((k: Json) => [k.id, k.name, 'secret' in k || 'hash' in k]), [[key.id, 'Fix agent', false]]);
       error(await send('GET', '/v1/operator/ui-note-keys', session(other)), 404, 'NOT_FOUND');
@@ -8755,8 +8762,8 @@ describe('Billing: API, MCP and notices', () => {
       await run(low!); await run(low!);
       assert.equal(await status(low!), 'sent');
       const [email] = await sent();
-      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Bane: Northwind Inc balance is low ($4.80)']);
-      for (const part of ['What happened', 'about 27,000 more emails', 'What Bane did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
+      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Nightmail: Northwind Inc balance is low ($4.80)']);
+      for (const part of ['What happened', 'about 27,000 more emails', 'What Nightmail did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
       assert.equal((await sent()).length, 1);
 
       // A send that crashed mid-lease is retried once the lease runs out, under the same idempotency key.
@@ -8767,7 +8774,7 @@ describe('Billing: API, MCP and notices', () => {
       await db.query(`UPDATE billing_notices SET lease_until=now()-interval '1 second' WHERE id=$1`, [failed]);
       await run(failed!);
       assert.equal(await status(failed!), 'sent');
-      const declined = (await sent()).find(r => r.subject === 'Bane couldn\'t add credit to Northwind Inc');
+      const declined = (await sent()).find(r => r.subject === 'Nightmail couldn\'t add credit to Northwind Inc');
       assert.match(declined.text, /card ending 4242 and the charge failed: the card has insufficient funds\./);
 
       // Exempt accounts are never emailed, even when a job is already queued.
@@ -9772,16 +9779,18 @@ test('Brand: the hosted support hosts, docs examples and stdio MCP identity come
   for(const host of brand.hostedHosts) assert.ok(csp.includes(` https://support.${host} wss://support.${host}`),`connect-src names support.${host}`);
   const llms=await (await fetch(BASE+'/llms.txt')).text();
   assert.ok(llms.includes(`${brand.publicOrigin}/v1/emails/send`) && llms.includes(`$${brand.apiKeyEnv}`) && llms.includes(brand.sdkPackage));
-  const connect=(service:string,title:string)=>{
+  const connect=(service:string,title:string,key='bane_'+'1'.repeat(64))=>{
     const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
     const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
-    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:'bane_'+'1'.repeat(64)} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
+    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   };
   for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
     const result=connect(service,title);
     assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
   }
   assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
+  for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
+  assert.notEqual(connect(brand.productSlug,`${brand.productName} API`,'nm_live_'+'1'.repeat(64)).status,0);
 });
 
 // PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
@@ -11036,7 +11045,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     domain=await read();assert.deepEqual([domain.receiving,domain.dns[0].status],['verified','verified']);
     for (const local of ['abuse','postmaster','security','dmarc']) assert.equal(await probe(`${local}@${host}`),1);
     assert.equal(await probe(`fixture@e2e.${host}`),0,'The root never receives for the platform’s own hosts.');
-    assert.ok(!queried.some(q=>q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
+    assert.ok(!queried.some(q=>q.endsWith(`_nightmail.${host}`) || q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
     // Ingest: an inbox created on purpose receives; nothing else becomes an address, and the validation mailboxes
     // a certificate authority could use never do, even after someone switches the catch-all back to creating addresses.
     const stored=async(recipients:string[],catchAll:'store'|'create_mailbox')=>{let result:Json={};const mid=unique('platform-ingest'),message=unique('msg');
@@ -11636,7 +11645,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
       // DNS stub (cloudflare-dns.com JSON): exact names first, then a *.domain wildcard for names without records of their own.
       const zone = new Map<string, { mx?: string[]; cname?: string; ns?: string[] }>();
-      // Each claim publishes its _bane ownership TXT: the hourly recheck requires a fresh proof before a claim may receive.
+      // Each claim publishes the legacy _bane ownership TXT, which proves a new (_nightmail) claim too: the hourly recheck
+      // requires a fresh proof before a claim may receive.
       const proofs = new Map<string, string>();
       // Lookups in flight, their abort signals, and an optional resolver delay: how parallel one check is and what bounds it.
       let inFlight = 0, maxInFlight = 0, delayMs = 0; const signals: (AbortSignal | null | undefined)[] = [];
@@ -11710,7 +11720,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(reserved.message, new RegExp(`MAIL FROM subdomain, so its MX must point to feedback-smtp\\.${REGION}`)); assert.match(reserved.message, /Use inbound\./);
         error(await choose(d, `tokena._domainkey.${d.name}`), 422); // Underscore names (DKIM, _bane) are never valid receiving hosts.
         const ses = { DkimAttributes: { Tokens: tokens }, MailFromAttributes: { MailFromDomain: `reply.${d.name}` } } as Json;
-        assert.deepEqual([`tokena._domainkey.${d.name}`, `_bane.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
+        assert.deepEqual([`tokena._domainkey.${d.name}`, `_nightmail.${d.name}`, `_bane.${d.name}`, `_opensend.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'ownership TXT record', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
         assert.deepEqual(receivingCandidates('acme.example').slice(0, 3), ['reply.acme.example', 'inbound.acme.example', 'mail.acme.example']);
         // The other direction: MAIL FROM can't take the suggested receiving host either (refused before any SES call).
         error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `inbound.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT');
@@ -14071,7 +14081,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === 'email_forged_notice' ? 'forged' : 'notice', [r.status, r.error_code]]));
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
-      for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Bane did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
+      for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Nightmail did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
       // No second email for the same step within a day.
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'ok', reasons: [] }));
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
@@ -14352,8 +14362,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
       error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
       const scoped = ok(await local('POST', '/v1/inbound/keys', { name: 'support fixture', addressIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
-      assert.match(scoped.secret,/^bane_mbx_[0-9a-f]{64}$/);
-      const old=scoped.secret.replace('bane_mbx_','os_mbx_');
+      assert.match(scoped.secret,/^nm_mbx_[0-9a-f]{64}$/);
+      const old=scoped.secret.replace('nm_mbx_','os_mbx_');
       await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) SELECT 'legacy-fixture',workspace_id,name,$1,$2,mailbox_ids,permissions FROM mailbox_keys WHERE id=$3`,[createHash('sha256').update(old).digest('hex'),old.slice(0,14),scoped.id]);
       assert.equal(ok(await local('GET',`${root}/${support.id}`,undefined,'live',{authorization:`Bearer ${old}`})).id,support.id);
       const agent = { authorization: `Bearer ${scoped.secret}` };
@@ -15615,7 +15625,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // The same keys through createApiKey: an address key, and an inbox key that ends with its inbox and its lease.
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Support agent', access: { type: 'addresses', addressIds: [a.id], mail: ['read', 'send'] } }), 201);
-      assert.match(reader.secret, /^bane_mbx_[0-9a-f]{64}$/);
+      assert.match(reader.secret, /^nm_mbx_[0-9a-f]{64}$/);
       assert.deepEqual([reader.access, reader.permissions, reader.domains, reader.expiresAt], [access('addresses', [a.id], null, ['read', 'send']), [], [], null]);
       ok(await read(reader.secret, a.id)); error(await read(reader.secret, b.id), 404, 'NOT_FOUND');
       error(await thread(reader.secret, { addressId: a.id, from: `beta@${host}` }), 403, 'FROM_NOT_ALLOWED');
@@ -15892,11 +15902,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);
         // One config builder (mcp-clients.ts) for the API, the dashboard and Docs: plain /mcp, the key as a bearer header, and keys
         // named for the inbox and client so several connections stay apart. OpenCode gets its V2 shape (mcp.servers).
-        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer bane_mbx_/);
+        assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer nm_mbx_/);
         assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
         const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
         assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
-        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer bane_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);
@@ -16822,8 +16832,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.match(error(await post('/v1/endpoints',{type:'webhook',name:'replay-hook',url:'https://hooks.example.org/replay'},'ep-1'),409,'IDEMPOTENT_SECRET_WITHHELD').message,/shown once/);
         assert.equal((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='ep-1'")).rows[0].r.includes('whsec_'),false);
         // A nested credential (createInbox's credential.secret) is withheld too.
-        const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/bane_mbx_/);
-        error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/bane_mbx_/);
+        const inbox=await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1');assert.equal(inbox.status,201,JSON.stringify(inbox.body));assert.match(JSON.stringify(inbox.body),/nm_mbx_/);
+        error(await post('/v1/inboxes',{type:'sandbox',credential:{name:'replay',permissions:['read']}},'inbox-1'),409,'IDEMPOTENT_SECRET_WITHHELD');assert.doesNotMatch((await db.query("SELECT result::text AS r FROM sending_idempotency WHERE request_key='inbox-1'")).rows[0].r,/(?:nm|bane)_mbx_/);
         assert.deepEqual(await call('DELETE','/v1/endpoints/replay-hook'),{name:'replay-hook',deleted:true});await call('DELETE',`/v1/routing/routes/${route.body.id}`);
       });
       // tear witness (api/tear): mint key, lost list key k1 b1, create list key k1 b1 created a second list.

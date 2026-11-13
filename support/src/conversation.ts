@@ -11,7 +11,7 @@ import { customerBlock, firstName, greetingBundle, type Customer } from './agent
 import type { Harness, HarnessEvent, TurnResult } from './agent/harness.js';
 import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { ToolFailure, type TicketInput, type ToolHost } from './agent/tools.js';
-import { addresses } from '../../api/src/brand.js';
+import { addresses, productName } from '../../api/src/brand.js';
 
 // One support conversation (chat or email) per Durable Object (design §1). It holds:
 // - the support grant, in a private SQLite table: never in a message, a tool argument or result, a log or the socket;
@@ -27,7 +27,7 @@ const CHAT_IDLE_MS = 24 * 3_600_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_
 const EMAIL_BURST = 5, EMAIL_BURST_MS = 10 * 60_000;
 const MAX_FRAME = 16_384, MAX_TEXT = 8000;
 const MODEL_LABEL = `${MODEL.model}#${MODEL.variant}`;
-const REDACTED = 'I’ve sent this one to the Bane team to check before I answer. Someone will follow up by email.';
+const REDACTED = `I’ve sent this one to the ${productName} team to check before I answer. Someone will follow up by email.`;
 
 type Meta = {
   conversationId: string; channel: 'chat' | 'email'; status: 'open' | 'ticketed' | 'closed';
@@ -90,7 +90,7 @@ export class SupportConversation extends DurableObject<Env> {
     return { channel: meta.channel, userId: meta.userId, name: meta.name, email: meta.email, role: meta.role, workspace: meta.workspace, workspaces: meta.workspaces, verified: meta.verified, contentAccess: meta.contentAccess, page: meta.page };
   }
 
-  // ---------- the grant (private table; never leaves this object except as the Authorization of a Bane read) ----------
+  // ---------- the grant (private table; never leaves this object except as the Authorization of a Nightmail read) ----------
 
   private grant(): GrantRow | null {
     const row = this.sql.exec<GrantRow>('SELECT grant_id, token, expires_at, workspace_ids, content_workspace_id FROM support_grant WHERE id = 1').toArray()[0];
@@ -123,7 +123,7 @@ export class SupportConversation extends DurableObject<Env> {
     Object.assign(meta, { userId: handoff.userId, email: handoff.email || null, role: handoff.role, workspace: handoff.workspace, workspaces: [{ ...handoff.workspace, role: handoff.role }], verified: 'handoff' as const,
       page: handoff.page, handoffMessage: handoff.message, requestIds: handoff.requestIds });
     this.save(meta);
-    const minted = await this.mint(meta, { verification: 'handoff', handoffId: handoff.id, reason: 'Answering the customer’s support chat from the Bane dashboard' });
+    const minted = await this.mint(meta, { verification: 'handoff', handoffId: handoff.id, reason: `Answering the customer’s support chat from the ${productName} dashboard` });
     if (minted.status !== 201) return { ok: false, code: minted.status === 409 ? 'HANDOFF_USED' : 'MINT_FAILED' };
     await this.ctx.storage.setAlarm(Date.now() + CHAT_IDLE_MS);
     return { ok: true };
@@ -235,7 +235,7 @@ export class SupportConversation extends DurableObject<Env> {
   override async webSocketClose(ws: WebSocket, code: number) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch { /* already closed */ } }
 
   private hello(meta: Meta): Outgoing {
-    return { type: 'hello', conversationId: meta.conversationId, channel: meta.channel, status: meta.status, agent: { name: 'Bane support', ai: true }, customer: { firstName: firstName(meta.name) },
+    return { type: 'hello', conversationId: meta.conversationId, channel: meta.channel, status: meta.status, agent: { name: `${productName} support`, ai: true }, customer: { firstName: firstName(meta.name) },
       workspace: meta.workspace, contentAccess: meta.contentAccess, busy: this.abort !== null };
   }
   private history() {
@@ -295,14 +295,14 @@ export class SupportConversation extends DurableObject<Env> {
     const refused = this.admit(meta);
     if (refused) {
       if (refused === 'closed') return;
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: 'This conversation has reached its limit. I’ve passed it to the Bane team, who will follow up by email.', retryable: false });
+      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
       await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
       return;
     }
     // Daily caps (review M5): this person's turns and everyone's, before any model call.
     const allowed = await this.turnAllowed(meta);
     if (!allowed.ok) {
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `Bane support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
+      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `${productName} support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
       return;
     }
     // Fail closed before any model call: without the gateway key there is no agent, and the panel says so.
@@ -387,10 +387,10 @@ export class SupportConversation extends DurableObject<Env> {
         const reply = await this.env.BANE.read(path, grant.token);
         if (reply.status === 200) return reply.body;
         const code = (reply.body as { error?: { code?: string } } | null)?.error?.code ?? `HTTP_${reply.status}`;
-        if (reply.status === 429) throw new ToolFailure('Bane’s support read budget is spent for this minute. Wait and try fewer, narrower calls.');
+        if (reply.status === 429) throw new ToolFailure(`${productName}’s support read budget is spent for this minute. Wait and try fewer, narrower calls.`);
         if (reply.status === 404) throw new ToolFailure(`Not found (${code}). Check the ID came from an earlier tool result for this customer.`);
         if (reply.status === 403) throw new ToolFailure('Access to this account ended. Answer without account data, or ask the customer to press Help again.');
-        throw new ToolFailure(`Bane answered ${reply.status} (${code}).${reply.requestId ? ` Request ${reply.requestId}.` : ''}`);
+        throw new ToolFailure(`${productName} answered ${reply.status} (${code}).${reply.requestId ? ` Request ${reply.requestId}.` : ''}`);
       },
       workspaceId: () => this.meta()?.workspace?.id ?? null,
       chooseWorkspace: async (workspaceId: string) => {
@@ -418,10 +418,10 @@ export class SupportConversation extends DurableObject<Env> {
       },
       fileTicket: async (input: TicketInput) => {
         const meta = this.meta()!, filed = await this.harnessTicket(meta, input, this.currentDmarc);
-        if (filed.refused === 'person') throw new ToolFailure('This customer already filed today’s maximum of tickets, so this couldn’t be filed. Tell them the Bane team already has their earlier tickets today and can be reached by replying to one of those emails; answer what you can yourself.');
-        if (filed.refused) throw new ToolFailure(`Bane support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email ${addresses.support}; answer what you can yourself.`);
+        if (filed.refused === 'person') throw new ToolFailure(`This customer already filed today’s maximum of tickets, so this couldn’t be filed. Tell them the ${productName} team already has their earlier tickets today and can be reached by replying to one of those emails; answer what you can yourself.`);
+        if (filed.refused) throw new ToolFailure(`${productName} support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email ${addresses.support}; answer what you can yourself.`);
         return filed.created
-          ? `Filed ${filed.id}. Tell the customer: you've passed it to the Bane team as ${filed.id}; someone will reply by email to ${filed.replyTo ?? 'their account address'}, usually within one business day; you can't promise an outcome, but you've included what you found.`
+          ? `Filed ${filed.id}. Tell the customer: you've passed it to the ${productName} team as ${filed.id}; someone will reply by email to ${filed.replyTo ?? 'their account address'}, usually within one business day; you can't promise an outcome, but you've included what you found.`
           : `Added to the existing ticket ${filed.id}. Tell the customer you've added this to ${filed.id}.`;
       },
     };
@@ -495,7 +495,7 @@ export class SupportConversation extends DurableObject<Env> {
     try { message = await api.message(next.message_id); }
     catch (error) { if (next.attempts >= 5) set('failed'); throw error; }
     const sender = senderOf(message);
-    // Never answer automatic mail or ourselves (loops). Bane flags auto-replies, bounces, reports, bulk and list mail.
+    // Never answer automatic mail or ourselves (loops). Nightmail flags auto-replies, bounces, reports, bulk and list mail.
     const automatic = !sender || message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || sender === this.env.SUPPORT_ADDRESS.toLowerCase();
     if (automatic) { set('dropped'); return true; }
     const dmarc = String(message.authentication?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
@@ -593,11 +593,11 @@ export class SupportConversation extends DurableObject<Env> {
   /** The fixed replies (no model text, no link but our confirm link, nothing echoed from the email): review M4. */
   private async template(message: InboundMessage, messageId: string, sender: string, kind: 'confirm' | 'no_account' | 'busy', link?: string) {
     const text = {
-      confirm: `Hi,\n\nThanks for writing to Bane support. Before I can look at a Bane account, I need to confirm that this email came from you. Open this link and press Confirm (it works once, within 24 hours):\n\n${link}\n\nOr sign in to Bane and press Help.\n\nIf you didn't write to Bane support, ignore this email.\n\nBane support (AI)`,
-      no_account: 'Hi,\n\nThanks for writing to Bane support. I couldn’t find a Bane account for this email address, so I can’t look anything up. Please write from the address you sign in to Bane with, or sign in and press Help.\n\nBane support (AI)',
-      busy: 'Hi,\n\nThanks for writing to Bane support. I can’t answer automatically right now. The Bane team has your message and will reply here.\n\nBane support (AI)',
+      confirm: `Hi,\n\nThanks for writing to ${productName} support. Before I can look at a ${productName} account, I need to confirm that this email came from you. Open this link and press Confirm (it works once, within 24 hours):\n\n${link}\n\nOr sign in to ${productName} and press Help.\n\nIf you didn't write to ${productName} support, ignore this email.\n\n${productName} support (AI)`,
+      no_account: `Hi,\n\nThanks for writing to ${productName} support. I couldn’t find a ${productName} account for this email address, so I can’t look anything up. Please write from the address you sign in to ${productName} with, or sign in and press Help.\n\n${productName} support (AI)`,
+      busy: `Hi,\n\nThanks for writing to ${productName} support. I can’t answer automatically right now. The ${productName} team has your message and will reply here.\n\n${productName} support (AI)`,
     }[kind];
-    await baneApi(this.env).reply(message.threadId ?? this.meta()!.threadId!, { replyToMessageId: messageId, text, to: sender, subject: 'Re: your message to Bane support' }, `reply-${messageId}`);
+    await baneApi(this.env).reply(message.threadId ?? this.meta()!.threadId!, { replyToMessageId: messageId, text, to: sender, subject: `Re: your message to ${productName} support` }, `reply-${messageId}`);
     this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: `[fixed reply: ${kind}]`, at: new Date().toISOString(), tools: [] });
   }
 
@@ -690,12 +690,12 @@ export class SupportConversation extends DurableObject<Env> {
     const result = await (await this.agent()).turn({ text, images, context: customerBlock(this.customer(meta)) }, this.toolHost(), () => {}, new AbortController().signal);
     meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
     let reply = plainText(result.text.trim());
-    // Email gets the link rule too: any URL outside Bane's own sites holds the reply.
+    // Email gets the link rule too: any URL outside Nightmail's own sites holds the reply.
     const checked = gate(reply, { ...this.gateScope(meta), emails: [sender], linkOrigins: LINK_ORIGINS });
     if (!checked.ok || !reply) {
       log('warn', { event: 'email', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.ok ? ['empty'] : checked.reasons });
       await this.harnessTicket(meta, internal('Email reply held by the output gate', `The output gate held an email reply (${checked.ok ? 'empty' : checked.reasons.join(', ')}).`, body.slice(0, 600), 'Read the thread and reply to the customer.', 'guardrail', [messageId]), dmarc);
-      reply = 'Thanks for writing. I’ve passed this to the Bane team to check, and someone will reply here, usually within one business day.\n\nBane support (AI)';
+      reply = `Thanks for writing. I’ve passed this to the ${productName} team to check, and someone will reply here, usually within one business day.\n\n${productName} support (AI)`;
     }
     // Only ever to the verified address that wrote; Reply-To and Cc are ignored.
     await baneApi(this.env).reply(message.threadId ?? meta.threadId!, { replyToMessageId: messageId, text: reply, to: sender }, `reply-${messageId}`);

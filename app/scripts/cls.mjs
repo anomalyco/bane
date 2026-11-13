@@ -14,6 +14,8 @@
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
 //   CLS_PHONE=0        skip the phone pass
 //   CLS_FONTS=late     deliver web fonts 1.8 s late, to measure the fallback-to-web-font swap
+//   CLS_DENSITY=1      also read each page's text density in the same run (density.mjs) into .cls/density.json;
+//                      =only measures density alone (cold loads, no throttling, no CLS gate): node scripts/density.mjs
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
@@ -142,10 +144,19 @@ const pages = ids => [
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   ['Support chat', '/logs', { from: '/', support: true }],
   ['Overview · sending limits dialog', '/', { dialog: 'How limits work' }],
+  ['Overview · sender score dialog', '/', { dialog: 'Sender score' }],
+  ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
+  ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
+  ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
+  ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
+  ['Settings · invite dialog', '/settings#members', { dialog: 'Invite teammate' }],
+  ['Settings · new webhook', '/settings/webhooks/new', {}],
+  ['Settings · add credit dialog', '/settings#billing', { dialog: 'Add credit' }],
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Sent email · junk-like', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'API keys · create key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · add credit dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -161,6 +172,7 @@ const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 
 // webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
 // late, after the slowest API response, so text first paints in its local fallback (tokens.css).
 const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800;
+const density = process.env.CLS_DENSITY ? await import('./density.mjs') : null, densityOnly = process.env.CLS_DENSITY === 'only';
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -331,7 +343,7 @@ async function measure(browser, job, fx) {
       offline: false,
       matchedNetworkConditions: [
         ...(lateFonts ? [] : [{ urlPattern: `${origin}/fonts/*`, offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }]),
-        { urlPattern: `${origin}/*`, ...throttle },
+        ...(densityOnly ? [] : [{ urlPattern: `${origin}/*`, ...throttle }]),
         { urlPattern: 'http*://*', offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
       ],
     });
@@ -423,6 +435,7 @@ async function measure(browser, job, fx) {
       result.screenshot = `${job.slug}.png`;
       await page.screenshot({ path: join(out, result.screenshot) });
     }
+    if (density?.wanted(job)) result.density = await density.collect(page, job).catch(error => { result.densityError = error.message.split('\n')[0]; return null; });
   })();
   work.catch(() => {}); // After a timeout the context closes under it.
   let timer;
@@ -470,7 +483,7 @@ rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 const browserPromise = chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
 browserPromise.catch(() => {});
-const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: densityOnly ? null : apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
   await browserPromise.then(b => b.close(), () => {});
   throw error;
 });
@@ -481,11 +494,13 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes, dialog }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, device, support, live, notes, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    const load = { name, path, user, scheme, device, support, live, notes, dialog, mode: 'load', slug: slug + '-load' };
+    if (densityOnly && !density.wanted(load)) continue;
+    jobs.push(load);
+    if (from && !densityOnly) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   // Multi-step jobs (Support chat, live rituals, Overview's full warm-up) start first so none trails alone at the end.
@@ -508,6 +523,8 @@ try {
   await fx.stop();
 }
 results = results.filter(Boolean);
+if (density) writeFileSync(join(out, 'density.json'), JSON.stringify(results.map(({ page, path, scheme, device, mode, error, density, densityError }) => ({ page, path, scheme, device, mode, error: error ?? densityError, density }))));
+if (densityOnly) process.exit(results.some(r => r.error) || !results.length ? 1 : 0);
 const { markdown, failed } = summarize(results, ((Date.now() - began) / 1000).toFixed(0));
 writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
 writeFileSync(join(out, 'summary.md'), markdown);

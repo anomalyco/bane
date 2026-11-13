@@ -1,9 +1,9 @@
+import { addresses, hostedHosts, productName, repositoryUrl, supportHost } from '../../api/src/brand.js'
 // The output gate (design §4.4.4): every final chat message and every email reply passes it before it is stored or
 // sent. It trips on anything the customer must never receive from support: other people's addresses, IDs or names
 // outside the grant, credentials, internal hosts, staff names or pieces of the system prompt. A tripped chat message is
 // replaced and a ticket filed; a tripped email reply is held and a ticket filed.
 
-import { addresses, hostedHosts, repositoryUrl, supportHost } from '../../api/src/brand.js';
 
 export type GateScope = {
   /** The customer's own address(es); the support address is always allowed. */
@@ -20,12 +20,12 @@ export type GateScope = {
 export type GateResult = { ok: true } | { ok: false; reasons: string[] };
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const SECRET_PREFIX = /\b(?:bane_support_|bane_ops_|bane_mbx_|bane_agent_|os_agent_|whsec_|sk-ant-|bane_)[A-Za-z0-9_-]{8,}/;
+const SECRET_PREFIX = /\b(?:nm_support_|nm_mbx_|nm_agent_|nm_notes_|nm_|bane_support_|bane_ops_|bane_mbx_|bane_agent_|os_agent_|whsec_|sk-ant-|bane_)[A-Za-z0-9_-]{8,}/; // bane_/os_: remove after rename cleanup
 const LONG_HEX = /\b[0-9a-f]{40,}\b/i;
 const LONG_B64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{60,}={0,2}(?![A-Za-z0-9+/])/;
 const INTERNAL_HOST = /\b(?:[a-z0-9-]+\.)*(?:internal|invalid|local|svc\.cluster\.local|workers\.dev|psdb\.cloud|amazonaws\.com|hyperdrive\.local)\b/i;
 const INTERNAL_ID = /\b(?:ws|sgr|sho|dom|wh|key|mbk|usr|conv|tkt)_[0-9a-z]{16,}\b/g;
-/** People and systems the agent never names: Bane staff, internal tools. */
+/** People and systems the agent never names: Nightmail staff, internal tools. */
 const STAFF = /\b(?:Ryan Vogel|thdxr|R44VC0RP|Dax Raad|PlanetScale|Hyperdrive|platform_operators|support_grants|supportGate|operatorGate|SupportPlatform)\b/i;
 const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>/i;
 
@@ -43,7 +43,7 @@ export function gate(text: string, scope: GateScope): GateResult {
   if (scope.linkOrigins) {
     for (const url of text.match(/\b(?:https?:\/\/|www\.)[^\s<>()"']+/gi) ?? []) {
       const ok = /^https:\/\//i.test(url) && scope.linkOrigins.some(origin => url === origin || url.startsWith(`${origin}/`) || url.startsWith(`${origin}?`));
-      if (!ok) { reasons.push('link outside Bane'); break; }
+      if (!ok) { reasons.push(`link outside ${productName}`); break; }
     }
   }
   const lower = text.toLowerCase();

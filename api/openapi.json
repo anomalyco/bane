@@ -20705,7 +20705,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer bane_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.",
+        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.",
         "requestBody": {
           "required": true,
           "content": {

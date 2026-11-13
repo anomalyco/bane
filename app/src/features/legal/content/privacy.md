@@ -1,15 +1,15 @@
 ---
 title: Privacy Policy
-description: How Anomaly handles personal data in Bane: what we collect about customers, how we process the mail customers send and receive, screening and AI, retention, and your rights.
+description: How Anomaly handles personal data in Nightmail: what we collect about customers, how we process the mail customers send and receive, screening and AI, retention, and your rights.
 updated: 13 November 2026
 effective: 13 November 2026
 ---
 
-This policy explains how **Anomaly Innovations, Inc.** ("Anomaly", "we", "us") handles personal data in **Bane**, the email service at bane.mx: its website, API, dashboard, SDK, MCP server, and IMAP and SMTP access.
+This policy explains how **Anomaly Innovations, Inc.** ("Anomaly", "we", "us") handles personal data in **Nightmail**, the email service at bane.mx: its website, API, dashboard, SDK, MCP server, and IMAP and SMTP access.
 
 ## 1. Two roles: controller and processor
 
-Bane handles personal data in two different roles.
+Nightmail handles personal data in two different roles.
 
 | Data | Whose decision | Our role |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ Bane handles personal data in two different roles.
 | **In our customers' mail:** the people our customers email, the people who email them, contacts and lists, and message content | The customer's | **Processor** (a "service provider" under US state privacy laws). The customer's own privacy policy applies. We process this data on the customer's instructions, under our [Terms of Service](/legal/terms) and, where one is signed, our Data Processing Addendum. |
 | **Customer mail we screen to prevent abuse and to compute sender scores** | Ours, for this purpose only | **Controller**, only to keep the service safe for recipients and customers ([section 5](#automated-screening-and-ai)). We don't use it for anything else. |
 
-**If you got an email sent through Bane, or sent mail to an address that uses Bane,** the business that uses Bane decides what happens to your data. Contact them first. If you contact us, we'll pass your request to them where we can identify them ([section 12](#rights-of-people-in-our-customers-mail)).
+**If you got an email sent through Nightmail, or sent mail to an address that uses Nightmail,** the business that uses Nightmail decides what happens to your data. Contact them first. If you contact us, we'll pass your request to them where we can identify them ([section 12](#rights-of-people-in-our-customers-mail)).
 
 ## 2. Data about our customers
 
@@ -35,7 +35,7 @@ Bane handles personal data in two different roles.
 | **Notices** | Emails we send you about billing, limits, standing and these policies | Our systems |
 | **Technical logs** | Request logs (method, path, status, timing and error codes), and connection logs from the IMAP and SMTP gateway, which may include the connecting IP address. Request logs are kept about 3 days; gateway logs 30 days. | Our systems |
 
-**Cookies.** Bane uses a session cookie (up to 7 days) and a short-lived sign-in cookie (10 minutes). The Bane website and dashboard use **no analytics or advertising cookies**.
+**Cookies.** Nightmail uses a session cookie (up to 7 days) and a short-lived sign-in cookie (10 minutes). The Nightmail website and dashboard use **no analytics or advertising cookies**.
 
 ## 3. Data in our customers' mail
 
@@ -78,7 +78,7 @@ We **don't sell** personal data, don't "share" it for cross-context behavioral a
 
 | What | When | What the classifier receives |
 | --- | --- | --- |
-| **Spam screen on sending** | Messages sent through Bane's shared (Hosted) sending pool, before they reach Amazon. Repeated identical content may reuse a recent result. | The sender name and address, subject, visible text from the HTML and text parts, and the domains of links, up to about 24 KB per message |
+| **Spam screen on sending** | Messages sent through Nightmail's shared (Hosted) sending pool, before they reach Amazon. Repeated identical content may reuse a recent result. | The sender name and address, subject, visible text from the HTML and text parts, and the domains of links, up to about 24 KB per message |
 | **Forwarded mail** | When a ritual forwards a received message to an outside address | The same parts of the forwarded message |
 | **Omens** | Only for receiving domains or routes the customer opted in | The subject, sender, authentication results and up to 8,000 characters of visible text, plus the customer's questions |
 
@@ -86,7 +86,7 @@ Received mail isn't sent to the classifier unless the customer turns on Omens or
 
 ### 5.2 Who runs it
 
-The classifier is **Jev**, from **TypeSafe AI**. Bane calls TypeSafe's API directly.
+The classifier is **Jev**, from **TypeSafe AI**. Nightmail calls TypeSafe's API directly.
 
 ### 5.3 What the results are used for
 
@@ -103,7 +103,7 @@ The classifier is **Jev**, from **TypeSafe AI**. Bane calls TypeSafe's API direc
 ### 5.5 Training
 
 - **Anomaly doesn't use customer mail or Omen questions to train AI models.**
-- **TypeSafe has confirmed to us in writing that it doesn't retain or train on** the content Bane sends to it.
+- **TypeSafe has confirmed to us in writing that it doesn't retain or train on** the content Nightmail sends to it.
 
 ## 6. Support access
 
@@ -111,18 +111,18 @@ The classifier is **Jev**, from **TypeSafe AI**. Bane calls TypeSafe's API direc
 - Access is **read-only**, expires within **2 hours**, and is limited to the workspaces you belong to.
 - **Message content only with your permission.** When you use "Contact support" in the dashboard, a checkbox (off by default) lets support read message content for that one request, in that one workspace. A request by email never includes message content.
 - Without your permission, support sees settings, domains, delivery events, error codes, webhook delivery status (not payloads or URLs), standing, billing and your workspace's activity trail. Never keys, passwords or webhook secrets.
-- Your workspace's **Activity** page shows "Bane support viewed this workspace" with the request. Every support read is logged and kept 90 days.
-- Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair Bane.
+- Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept 90 days.
+- Any other access to systems that hold message content is limited to Anomaly personnel who need it to run, secure or repair Nightmail.
 
 ## 7. Subprocessors and other recipients
 
-The providers that process personal data for Bane, what each does and where, are listed on the [Subprocessors](/legal/subprocessors) page. We update that page before a new subprocessor starts processing personal data.
+The providers that process personal data for Nightmail, what each does and where, are listed on the [Subprocessors](/legal/subprocessors) page. We update that page before a new subprocessor starts processing personal data.
 
 We also disclose data when the law requires it, to protect people or the service, or to a buyer or successor in a merger or sale, under this policy.
 
 ## 8. International transfers
 
-Bane stores and processes data mainly in the **United States**. Cloudflare may process requests in data centers close to the user anywhere in the world. When we transfer personal data from the EU, the UK or Switzerland, we rely on the European Commission's Standard Contractual Clauses (with the UK Addendum for UK data) or another transfer mechanism the law allows. There's no EU data-residency option today.
+Nightmail stores and processes data mainly in the **United States**. Cloudflare may process requests in data centers close to the user anywhere in the world. When we transfer personal data from the EU, the UK or Switzerland, we rely on the European Commission's Standard Contractual Clauses (with the UK Addendum for UK data) or another transfer mechanism the law allows. There's no EU data-residency option today.
 
 ## 9. How long we keep data
 
@@ -170,7 +170,7 @@ To use these rights, email [privacy@bane.mx](mailto:privacy@bane.mx). We'll veri
 
 ## 12. Rights of people in our customers' mail
 
-If you received mail sent through Bane, or sent mail to an address hosted on Bane:
+If you received mail sent through Nightmail, or sent mail to an address hosted on Nightmail:
 
 - **To unsubscribe,** use the link in the email. It works without contacting us.
 - **To access or delete your data,** contact the business that sent you the mail or owns the address you wrote to. They control your data.
@@ -179,7 +179,7 @@ If you received mail sent through Bane, or sent mail to an address hosted on Ban
 
 ## 13. Children
 
-Bane is a business service and isn't for children. You must be at least **18** to create an account. We don't knowingly collect personal data from children; if we learn we have, we'll delete it.
+Nightmail is a business service and isn't for children. You must be at least **18** to create an account. We don't knowingly collect personal data from children; if we learn we have, we'll delete it.
 
 ## 14. Changes
 

@@ -49,8 +49,8 @@ function configuration() {
     fail('CONFIGURATION_ERROR', 'BANE_API_URL must be an HTTPS origin without credentials, query, fragment, or path. HTTP is allowed only on loopback.');
   }
   const key = env('API_KEY') ?? '';
-  const addressKey = /^(?:bane|os)_mbx_[0-9a-f]{64}$/.test(key);
-  if (!addressKey && !/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/.test(key)) {
+  const addressKey = /^(?:nm|bane|os)_mbx_[0-9a-f]{64}$/.test(key); // bane_/os_: remove after rename cleanup
+  if (!addressKey && !/^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/.test(key)) {
     fail('CONFIGURATION_ERROR', 'Set BANE_API_KEY to a scoped Bane API key or address key.');
   }
   const writes = env('MCP_ALLOW_WRITES') ?? 'false';

@@ -176,7 +176,8 @@ function featureName(feature: string): ReactNode {
   const [kind, ...parts] = feature.split('-'), rest = parts.join('-')
   if (kind === 'css') return <>CSS <code>{rest.replace(/^at-media-?/, '@media ').trim()}</code></>
   if (kind === 'html') return htmlNames[rest] ? `HTML ${htmlNames[rest]}` : <>HTML <code>{`<${rest.replace(/^(input|button)-(.+)$/, '$1 type=$2')}>`}</code></>
-  return feature.replaceAll('-', ' ')
+  const words = feature.replaceAll('-', ' ')
+  return words.charAt(0).toUpperCase() + words.slice(1)
 }
 function IssueList({ issues }: { issues: PreviewIssue[] }) {
   if (!issues.length) return <p className="ei-clear ei-clear--issues"><Check size={16} aria-hidden="true" />No compatibility issues in this client.</p>
@@ -207,12 +208,15 @@ const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src '
 const frameDocument = (html: string) => /<head\b[^>]*>/i.test(html) ? html.replace(/<head\b[^>]*>/i, head => head + GUARD) : GUARD + html
 // Type selectors for the document's own root and body, renamed for the copy's stand-ins.
 const ROOTS = /(^|[\s,>+~(}{])(:root|html|body)(?=[\s,.#:[>+~{)]|$)/gi
+// Nothing in the copy may fetch: imports, image sets and url() go, in style sheets and style attributes alike.
+const withoutUrls = (css: string) => css.replace(/@import[^;]*;?/gi, '').replace(/(?:-webkit-)?image-set\([^)]*\)/gi, 'none').replace(/url\([^)]*\)/gi, 'none')
 function measureHeight(html: string, width: number): number {
   const clean = DOMPurify.sanitize(html, { WHOLE_DOCUMENT: true, ADD_TAGS: ['style'], FORBID_TAGS: ['script', 'iframe', 'frame', 'object', 'embed', 'link', 'meta', 'base', 'video', 'audio', 'source'], FORBID_ATTR: ['srcset', 'href', 'background', 'action', 'formaction', 'ping', 'xlink:href'] })
   const doc = new DOMParser().parseFromString(clean, 'text/html')
-  const css = [...doc.querySelectorAll('style')].map(style => { const text = style.textContent ?? ''; style.remove(); return text }).join('\n')
-    .replace(/url\([^)]*\)/gi, 'none').replace(ROOTS, (_, before: string, root: string) => `${before}.ei-m-${root === 'body' ? 'body' : 'html'}`)
+  const css = withoutUrls([...doc.querySelectorAll('style')].map(style => { const text = style.textContent ?? ''; style.remove(); return text }).join('\n'))
+    .replace(ROOTS, (_, before: string, root: string) => `${before}.ei-m-${root === 'body' ? 'body' : 'html'}`)
   // A blocked image keeps the frame's broken-image box; data: images load in both.
+  doc.querySelectorAll('[style]').forEach(element => element.setAttribute('style', withoutUrls(element.getAttribute('style') ?? '')))
   doc.querySelectorAll('[src]').forEach(element => { if (!/^data:image\//i.test(element.getAttribute('src') ?? '')) element.setAttribute('src', 'data:,') })
   const host = document.createElement('div')
   host.setAttribute('aria-hidden', 'true')

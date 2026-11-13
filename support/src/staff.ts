@@ -4,16 +4,17 @@ import { purposeKey, sign, verify } from './tokens.js';
 import { TICKET_TYPES } from './agent/tools.js';
 import { TYPE_LABEL } from './tickets.js';
 import { log } from './log.js';
+import { productName } from '../../api/src/brand.js';
 
-// The internal ticket list (support.<host>/staff). Staff identity is Bane's operator check, never a password here:
-// "Sign in" sends an operator to Bane's GET /v1/operator/support/staff-sign-in (their dashboard session, operators
-// only), which redirects back with a 2-minute signed token. This Worker has Bane verify it over the SupportPlatform
+// The internal ticket list (support.<host>/staff). Staff identity is Nightmail's operator check, never a password here:
+// "Sign in" sends an operator to Nightmail's GET /v1/operator/support/staff-sign-in (their dashboard session, operators
+// only), which redirects back with a 2-minute signed token. This Worker has Nightmail verify it over the SupportPlatform
 // binding (verifyStaff: signature, audience, still an active operator), uses it once, and sets its own 8-hour,
 // host-only, HttpOnly session cookie. Writes (marking a ticket done) also need the session's CSRF token and Origin.
 
 const COOKIE = '__Host-bane-support-staff';
 const SESSION_SECONDS = 8 * 3600;
-/** How long one operator check is trusted (review Low): after this, a page load goes back through Bane's sign-in. */
+/** How long one operator check is trusted (review Low): after this, a page load goes back through Nightmail's sign-in. */
 const recheckSeconds = (env: Env) => { const v = Number((env as unknown as Record<string, unknown>).STAFF_RECHECK_SECONDS); return Number.isInteger(v) && v > 0 ? v : 3600; };
 type Staff = { userId: string; email: string; role: string; exp: number; checked: number };
 
@@ -36,8 +37,8 @@ details pre{white-space:pre-wrap;background:#f6f6f6;padding:.6rem;border-radius:
 nav a{margin-right:.6rem}button,select,input{font:inherit}</style></head><body>${body}</body></html>`,
   { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff', ...headers } });
 
-const signIn = (env: Env, note = '') => page('Bane support staff', `<h1>Bane support tickets</h1>${note ? `<p>${esc(note)}</p>` : ''}<p>Staff only. Sign in with your Bane operator account.</p>
-<p><a href="${esc(signInUrl(env))}">Sign in with Bane</a></p>`, note ? 403 : 200);
+const signIn = (env: Env, note = '') => page(`${productName} support staff`, `<h1>${productName} support tickets</h1>${note ? `<p>${esc(note)}</p>` : ''}<p>Staff only. Sign in with your ${productName} operator account.</p>
+<p><a href="${esc(signInUrl(env))}">Sign in with ${productName}</a></p>`, note ? 403 : 200);
 const signInUrl = (env: Env) => `${env.BANE_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${env.PUBLIC_URL}/staff/callback`)}`;
 
 export async function staff(request: Request, env: Env): Promise<Response> {
@@ -45,7 +46,7 @@ export async function staff(request: Request, env: Env): Promise<Response> {
   if (path === '/staff/callback' && request.method === 'GET') return callback(env, url.searchParams.get('staff'));
   const who = await session(env, request);
   if (!who) return path === '/staff' || request.method === 'GET' ? signIn(env) : new Response(null, { status: 403 });
-  // Re-check the operator role hourly: a GET goes back through Bane's sign-in (silent while their Bane session lasts,
+  // Re-check the operator role hourly: a GET goes back through Nightmail's sign-in (silent while their Nightmail session lasts,
   // refused if they're no longer an operator); a write with a stale check is refused.
   if (Date.now() / 1000 - who.checked > recheckSeconds(env)) {
     if (request.method !== 'GET') return page('Check again', '<h1>Your staff session needs a fresh check</h1><p>Reload the ticket page, then try again.</p>', 403);
@@ -72,7 +73,7 @@ export async function staff(request: Request, env: Env): Promise<Response> {
 async function callback(env: Env, token: string | null): Promise<Response> {
   if (!token || token.length > 4096) return signIn(env, 'That sign-in link is not valid. Sign in again.');
   const checked = await env.BANE.verifyStaff(token);
-  if (!checked.ok) return signIn(env, checked.code === 'NOT_OPERATOR' ? 'Your account is not a Bane operator.' : 'That sign-in link expired or is not valid. Sign in again.');
+  if (!checked.ok) return signIn(env, checked.code === 'NOT_OPERATOR' ? `Your account is not a ${productName} operator.` : 'That sign-in link expired or is not valid. Sign in again.');
   // Single use: a sign-in link replayed from history or a log opens nothing.
   const fresh = await env.DB.prepare('INSERT INTO staff_tokens_used (jti, used_at) VALUES (?, ?) ON CONFLICT (jti) DO NOTHING').bind(checked.jti, Date.now()).run();
   if (!fresh.meta.changes) return signIn(env, 'That sign-in link was already used. Sign in again.');
@@ -110,6 +111,6 @@ async function list(env: Env, who: Staff, url: URL): Promise<Response> {
 <p><b>Asked</b> (untrusted)</p><pre>${esc(r.ask)}</pre><p><b>Checked</b></p><pre>${esc((JSON.parse(r.tried) as { tool: string; finding: string }[]).map(t => `${t.tool}: ${t.finding}`).join('\n') || '—')}</pre><p><b>Recommendation</b></p><pre>${esc(r.recommendation)}</pre>${shots.join('')}</details></td>
 <td>${customer.verified === false ? `<span class="pill P1">${customer.dmarc === 'PASS' ? 'not a customer' : 'UNVERIFIED'}</span><br>${esc(customer.sender ?? '')}<br>DMARC ${esc(customer.dmarc ?? 'none')}` : `${esc(customer.name ?? '')}<br>${esc(customer.email ?? '')}<br>${esc((customer.workspaces ?? []).map(w => w.name).join(', '))}`}</td><td>${r.due_at ? esc(new Date(r.due_at).toISOString().slice(0, 16).replace('T', ' ')) : '—'}</td><td>${resolve}</td></tr>`;
   }));
-  return page('Bane support tickets', `<nav><b>Bane support tickets</b> · ${esc(who.email)} <form class="inline" method="post" action="/staff/sign-out"><input type="hidden" name="csrf" value="${esc(token)}"><button>Sign out</button></form></nav>${filter}
+  return page(`${productName} support tickets`, `<nav><b>${productName} support tickets</b> · ${esc(who.email)} <form class="inline" method="post" action="/staff/sign-out"><input type="hidden" name="csrf" value="${esc(token)}"><button>Sign out</button></form></nav>${filter}
 <table><thead><tr><th>Ticket</th><th>Type</th><th>Title</th><th>Customer</th><th>Due (UTC)</th><th>Status</th></tr></thead><tbody>${body.join('') || '<tr><td colspan="6">No tickets.</td></tr>'}</tbody></table>`);
 }

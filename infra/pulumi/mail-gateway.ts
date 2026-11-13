@@ -84,7 +84,12 @@ export function mailGateway(stage: "dev" | "production", { account, cloudflareAc
       const devSuffix: Record<string, string> = { "db-url": "uZZQGO", "tls-cert": "fbtr0G", "tls-key": "bcrZ9j", "api-token": "lghuLa" };
       const secret = new aws.secretsmanager.Secret(`nightmail-mail-gateway-${key}`, {
         name: secretName, tags: stage === "dev" ? { "renamed-from": legacyName } : tags,
-      }, { ...opts, import: stage === "dev" ? `arn:aws:secretsmanager:us-east-2:${account}:secret:${secretName}-${devSuffix[key]}` : undefined });
+      }, {
+        ...opts,
+        import: stage === "dev" ? `arn:aws:secretsmanager:us-east-2:${account}:secret:${secretName}-${devSuffix[key]}` : undefined,
+        // AWS doesn't return these provider-only inputs on import. Preserve the imported state.
+        ignoreChanges: stage === "dev" ? ["forceOverwriteReplicaSecret", "recoveryWindowInDays"] : undefined,
+      });
       return { name: env, valueFrom: secret.arn };
     });
   const assumeRolePolicy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "sts:AssumeRole",
