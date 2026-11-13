@@ -20,8 +20,7 @@
 .vt-switch-option:hover { color: var(--color-text); }
 .vt-switch-option[aria-pressed='true'] { color: var(--color-text); text-decoration-color: var(--color-border-strong); }
 .vt-copy.ui-button { margin-right: -9px; font-weight: var(--font-weight-regular); }
-.vt-code { margin: 0; overflow-x: auto; color: var(--color-text); font-size: 15px; line-height: 24px; white-space: pre; scrollbar-width: none; }
-.vt-code::-webkit-scrollbar { display: none; }
+.vt-code { margin: 0; overflow-x: auto; color: var(--color-text); font-size: 15px; line-height: 24px; white-space: pre; }
 .vt-code code { font-size: inherit; }
 .vt-line { display: inline; }
 .vt-response { color: var(--color-muted); }

@@ -173,8 +173,7 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
    shows its rituals then where its mail goes. */
 @media (max-width: 640px) {
   .rcv-toolbar { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: var(--space-8); }
-  .rcv-filters { flex-wrap: nowrap; margin: 0 calc(-1 * var(--bleed, 0px)); padding-inline: calc(var(--bleed, 0px) - 8px) var(--bleed, 0px); overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent); }
-  .rcv-filters::-webkit-scrollbar { display: none; }
+  .rcv-filters { flex-wrap: nowrap; margin: 0 calc(-1 * var(--bleed, 0px)); padding-inline: calc(var(--bleed, 0px) - 8px) var(--bleed, 0px); overflow-x: auto; }
   .rcv-filter { flex: none; height: 36px; }
   .rcv-toolbar__end { flex-direction: column; align-items: stretch; }
   .rcv-domain { width: 100%; }

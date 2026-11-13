@@ -86,7 +86,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   </div>
   if (query.data && !campaignEditable(query.data)) return <div className="stack campaign-locked">
     <PageHeader title={query.data.name} backTo="/campaigns" />
-    <Alert tone="info">{campaignResumable(query.data) && query.data.status === 'failed' ? 'This campaign failed after releasing some recipients. Resume or cancel it from its review page; it cannot be edited or sent again from scratch.' : `This campaign is ${query.data.status} and cannot be edited.`}</Alert>
+    <Alert tone="info">{campaignResumable(query.data) && query.data.status === 'failed' ? 'This campaign failed partway through sending. Resume or cancel it from its review page; it can’t be edited or restarted.' : `This campaign is ${query.data.status} and cannot be edited.`}</Alert>
     <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
   </div>
   return null
@@ -331,14 +331,14 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
           <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} personalize attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
           {personalized.length > 0 && <section className="campaign-personalize" aria-labelledby="campaign-personalize-title">
-            <p className="campaign-personalize__lead"><strong id="campaign-personalize-title">Personalization</strong> <span className="muted">A fallback fills in when a contact has no value. Without one, a contact missing a value stops the send.</span></p>
+            <p className="campaign-personalize__lead"><strong id="campaign-personalize-title">Personalization</strong> <span className="muted">A fallback fills in for contacts without a value. Without one, a missing value stops the send.</span></p>
             {personalized.map(key => key === 'email' ? <div key={key} className="campaign-compose-row"><span>{'{{email}}'}</span><span className="muted">Always the contact’s email address</span></div>
               : <div key={key} className="campaign-compose-row"><label htmlFor={`campaign-fallback-${key}`}>{`{{${key}}}`}</label><Input id={`campaign-fallback-${key}`} placeholder={placeholderLabel[key] ? `Used when ${placeholderLabel[key]}, e.g. there` : `Used when a contact has no ${key}`} value={form.defaults?.[key] ?? ''} aria-invalid={!form.defaults?.[key]?.trim() || undefined} onChange={event => change('defaults', { ...formRef.current.defaults, [key]: event.target.value })} disabled={controlsDisabled} /></div>)}
           </section>}
         </div>
       </div>
     </section>
-    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title="Load the latest campaign?" description="This campaign changed outside this editor. Loading the latest version will discard your unsaved browser changes." confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
+    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title="Load the latest campaign?" description="This campaign changed elsewhere. Loading the latest version discards your unsaved changes." confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
     {accepted && testOpen && <TestEmailDialog campaign={accepted} open={testOpen} onOpenChange={setTestOpen} />}
     {templatesOpen && <TemplatePickerDialog onOpenChange={setTemplatesOpen} />}
   </div>
@@ -461,7 +461,7 @@ function ScheduledBanner({ campaign }: { campaign: Campaign }) {
         <div className="cluster"><Button size="sm" disabled={!canAdminister} title={blocked} onClick={() => setDialog('reschedule')}>Reschedule</Button><Button size="sm" disabled={!canAdminister} title={blocked ?? 'Unschedules it so you can edit; schedule it again afterwards'} onClick={() => setDialog('edit')}>Edit</Button><Button size="sm" variant="ghost" disabled={!canAdminister} title={blocked} onClick={() => setDialog('unschedule')}>Unschedule</Button></div>
       </div>
     </Alert>
-    <ConfirmDialog open={dialog === 'edit'} onOpenChange={open => setDialog(open ? 'edit' : null)} title="Edit this campaign?" description="Editing unschedules it and makes it a draft again. Nobody has been emailed. Schedule it again when you’re done." confirmLabel="Unschedule and edit" onConfirm={() => unschedule(true)} />
+    <ConfirmDialog open={dialog === 'edit'} onOpenChange={open => setDialog(open ? 'edit' : null)} title="Edit this campaign?" description="Editing turns it back into a draft. Nobody has been emailed. Schedule it again when you’re done." confirmLabel="Unschedule and edit" onConfirm={() => unschedule(true)} />
     <ConfirmDialog open={dialog === 'unschedule'} onOpenChange={open => setDialog(open ? 'unschedule' : null)} title="Unschedule this campaign?" description="It becomes a draft again and won’t send. Nobody has been emailed." confirmLabel="Unschedule" onConfirm={() => unschedule(false)} />
     {dialog === 'reschedule' && <RescheduleDialog campaign={campaign} onClose={() => setDialog(null)} />}
   </>
@@ -504,7 +504,7 @@ function CancelCampaignButton({ campaign }: { campaign: Campaign }) {
   const [open, setOpen] = useState(false)
   return <>
     <Button variant="ghost" disabled={!canAdminister} title={canAdminister ? 'Stop releasing recipients and cancel queued emails' : 'Only owners and admins can cancel campaigns.'} onClick={() => setOpen(true)}>Cancel campaign</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Recipients who haven’t been sent to yet won’t get it, and queued emails are canceled. Emails already sent stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }} />
+    <ConfirmDialog open={open} onOpenChange={setOpen} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" onConfirm={async () => { const result = await api.campaigns.cancel(campaign.id); toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success'); await cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaign', campaign.id] }); void cache.invalidateQueries({ queryKey: ['bane', api.mode, 'campaigns'], refetchType: 'none' }) }} />
   </>
 }
 
@@ -652,7 +652,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         <div id="campaign-pacing-label" className="ui-field__label">Pace sending</div>
         <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
         {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError} hint={paceDays ? `About ${paceDays} ${paceDays === 1 ? 'day' : 'days'} for ${number(audience.data!.eligible)} eligible recipients.` : undefined}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
-        <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError} hint="The share of your sending speed this campaign may use. The rest stays free for transactional email and other campaigns."><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
+        <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError} hint="Share of your sending speed this campaign may use; the rest stays free for transactional email and other campaigns."><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
         <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />
         <p className="muted">Sending also stays within your daily sending limit.</p>
       </div>

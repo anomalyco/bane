@@ -253,7 +253,7 @@ const actionCopy: Record<ActionKind, { title: string; description: string; confi
   resume: { title: 'Resume sending?', description: 'Sending resumes at the restore share you choose; a strike stays on record.', confirm: 'Resume sending', done: 'Sending resumed' },
   hold: { title: 'Hold marketing?', description: 'Campaigns pause and new marketing is refused; transactional mail keeps sending.', confirm: 'Hold marketing', done: 'Marketing held' },
   release: { title: 'Release marketing?', description: 'Campaigns can send again; the workspace stays at Warn until it clears.', confirm: 'Release marketing', done: 'Marketing released' },
-  limit: { title: 'Set the daily limit', description: 'An override replaces the score’s limit until it expires. Clear it to return to the score’s limit.', confirm: 'Save limit', done: 'Limit saved' },
+  limit: { title: 'Set the daily limit', description: 'Replaces the score’s limit until it expires; clear it to go back to the score’s limit.', confirm: 'Save limit', done: 'Limit saved' },
   campaign: { title: 'Release this campaign?', description: 'The quarantined campaign resumes where it stopped.', confirm: 'Release campaign', done: 'Campaign released' },
 }
 // Each opening has its own Idempotency-Key, and every submit sends If-Match with the standing version it was decided on.

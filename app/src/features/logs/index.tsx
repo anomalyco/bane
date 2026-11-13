@@ -128,7 +128,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
     <dl className="email-metadata"><div><dt>From</dt><dd><NamedAddress name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{email.envelopeTo?.length ? <AddressList values={email.envelopeTo} /> : <AddressList values={email.to.map(to => to.address)} />}</dd></div>{email.addresses && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
-    {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
+    {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store. Download the original for the full content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
       {view === 'preview' ? hasHtml ? <><ReceivedEmailPreview html={html} tooComplex={email.htmlTooComplex} title="Received message preview" inlineImages={inlineImages} />{email.htmlTooComplex && email.text && <pre className="plain-text-preview">{email.text}</pre>}</> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />
         : view === 'plain' ? <pre className="message-source">{email.text || 'No plain-text body.'}</pre>
@@ -139,7 +139,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
-        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</span><span className="muted received-checks-note">Whether the sender’s domain proved it sent this (SPF, DKIM, DMARC) and the spam and virus scans. None means there was no record to check, not a failure.</span></dd></div>}
+        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</span><span className="muted received-checks-note">Sender authentication (SPF, DKIM, DMARC) and spam and virus scans. None means no record to check, not a failure.</span></dd></div>}
         {email.cc.length > 0 && <div><dt>Cc</dt><dd><AddressList values={email.cc.map(cc => cc.address)} /></dd></div>}
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd><AddressList values={email.replyTo.map(r => r.address)} /></dd></div>}
         {email.sizeBytes != null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
@@ -203,7 +203,7 @@ const eventCopy: Record<string, [title: string, meaning: string]> = {
   delivery_delay: ['Delayed', 'The recipient’s server put it off; SES keeps retrying.'], delivery_delayed: ['Delayed', 'The recipient’s server put it off; SES keeps retrying.'],
   open: ['Opened', 'The recipient opened it with images on.'], opened: ['Opened', 'The recipient opened it with images on.'],
   click: ['Clicked', 'The recipient clicked a link in it.'], clicked: ['Clicked', 'The recipient clicked a link in it.'],
-  suppressed: ['Suppressed', 'Not sent: the address is on the suppression list after an earlier bounce or complaint.'],
+  suppressed: ['Suppressed', 'Not sent: the address is suppressed after an earlier bounce or complaint.'],
   canceled: ['Canceled', 'The email was canceled before it was sent.'],
   subscription: ['Subscription changed', 'The recipient changed their subscription from this email.'],
 }

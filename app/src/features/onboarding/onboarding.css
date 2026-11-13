@@ -4,7 +4,7 @@
 .onboarding-header .wordmark, .onboarding-header .theme-toggle { position: static; }
 .onboarding-header-actions { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .onboarding-workspace { width: 200px; min-width: 0; }
-.page-surface.onboarding-surface { flex: 1; height: auto; margin: 0 var(--page-inset) var(--page-inset); padding: var(--space-40) var(--space-32) 0; scrollbar-gutter: stable; }
+.page-surface.onboarding-surface { flex: 1; height: auto; margin: 0 var(--page-inset) var(--page-inset); padding: var(--space-40) var(--space-32) 0; }
 .onboarding-notice { width: 100%; max-width: 920px; margin: 0 auto var(--space-24); }
 
 /* Onboarding-only scale: a step above the dashboard, same tokens. */

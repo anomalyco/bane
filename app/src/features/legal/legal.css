@@ -83,8 +83,7 @@
   .legal-page { --legal-header: 0px; }
   .legal-header { position: static; flex-wrap: wrap; row-gap: 0; height: auto; padding: var(--space-8) var(--space-16) 0; }
   .legal-header .wordmark { height: 44px; }
-  .legal-switcher { order: 3; flex-basis: 100%; margin-inline: calc(-1 * var(--space-16)); padding: 0 var(--space-16) var(--space-8); overflow-x: auto; scrollbar-width: none; }
-  .legal-switcher::-webkit-scrollbar { display: none; }
+  .legal-switcher { order: 3; flex-basis: 100%; margin-inline: calc(-1 * var(--space-16)); padding: 0 var(--space-16) var(--space-8); overflow-x: auto; }
   .legal-switcher a { height: 36px; }
   .legal-header .theme-toggle { width: 44px; height: 44px; }
   .legal-layout { display: block; padding-inline: var(--space-16); }
