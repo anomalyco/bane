@@ -60,8 +60,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .campaign-compose-preview, .campaign-pacing-toggle svg { transition: none; } }
 .campaign-compose-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
-.campaign-review > *, .campaign-locked > * { flex-shrink: 0; }
-.campaign-locked > a { align-self: flex-start; }
+.campaign-review > * { flex-shrink: 0; }
 .campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); grid-template-rows: auto 1fr; grid-template-areas: 'recipients message' 'delivery message'; align-items: start; column-gap: var(--space-40); row-gap: var(--space-24); }
 .campaign-recipients { grid-area: recipients; }
 .campaign-message { grid-area: message; }

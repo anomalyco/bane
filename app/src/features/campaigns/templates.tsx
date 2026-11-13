@@ -169,12 +169,12 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const upToDate = template.publishedRevision === template.revision && !dirty
   return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>
-      <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} data-actionable={error ? true : undefined} role="status" title={error || 'Changes save automatically. Publish to use them in new campaigns.'}><span className="campaign-sync-dot" aria-hidden="true" />{error ? <Button variant="ghost" size="sm" disabled={saving} onClick={() => void save()}>Save failed · Retry</Button> : <span>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}</span>}</div>
+      <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} data-actionable={error ? true : undefined} role="status" title={error || 'Changes save automatically. Publish to use them in new campaigns.'}><span className="campaign-sync-dot" aria-hidden="true" />{error ? <Button variant="ghost" size="sm" disabled={saving} onClick={() => void save()}>Save failed · Retry</Button> : <span>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : archived ? 'Archived' : 'Saved'}</span>}</div>
       {phone ? <>
         <Button variant="primary" disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
         <DropdownMenu items={[
           { label: 'Preview', disabled: saving || dirty || !draft.html, onSelect: () => setPreviewOpen(true) },
-          { label: 'Use template', disabled: !published || starting !== null || unavailable, hint: published ? undefined : 'Publish this template first', onSelect: () => void start({ id: template.id, name: template.published?.name ?? template.draft.name }) },
+          { label: 'Use template', disabled: !published || starting !== null || unavailable, hint: published ? undefined : archived ? 'Restore it first' : 'Publish this template first', onSelect: () => void start({ id: template.id, name: template.published?.name ?? template.draft.name }) },
           { label: archived ? 'Restore' : 'Archive', disabled: saving, onSelect: () => void archive() },
           ...(archived ? [{ label: 'Delete', destructive: true, onSelect: () => setDeleteOpen(true) }] : []),
         ]} />

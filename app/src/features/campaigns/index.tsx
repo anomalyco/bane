@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { total, usd } from '../../data/billing'
@@ -81,16 +81,8 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  if (query.data?.archivedAt) return <div className="stack campaign-locked">
-    <PageHeader title={query.data.name} backTo="/campaigns?archived=true" actions={<CampaignArchiveButton campaign={query.data} />} />
-    <Alert tone="info">This campaign is archived. Restore it to edit or send it.</Alert>
-    <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
-  </div>
-  if (query.data && !campaignEditable(query.data)) return <div className="stack campaign-locked">
-    <PageHeader title={query.data.name} backTo="/campaigns" />
-    <Alert tone="info">{campaignResumable(query.data) && query.data.status === 'failed' ? 'This campaign failed partway through sending. Resume or cancel it from its review page; it can’t be edited or restarted.' : `This campaign is ${query.data.status} and cannot be edited.`}</Alert>
-    <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
-  </div>
+  // Archived and sent campaigns can't be edited: their review page is where to read, restore or follow them.
+  if (query.data) return <Navigate to={campaignRoute(query.data, 'review')} replace />
   return null
 }
 
