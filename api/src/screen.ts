@@ -60,57 +60,67 @@ function host(value: string) {
   try { return new URL(value.startsWith('//') ? 'https:'+value : value).hostname.toLowerCase(); } catch { return ''; }
 }
 const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del','dfn','em','font','i','ins','kbd','label','mark','q','s','samp','small','span','strike','strong','sub','sup','time','tt','u','var','wbr','img','input','button','select','textarea','output','meter','progress','picture','source','svg','text','tspan','math','mi','mo','mn','ruby','rt','rp','nobr']);
+/**
+ * An HTML body as the screen reads it: the text a client lays out, every host it links or loads, anchors whose text
+ * names another host than their href, and its links and images (for the support lint, src/deliverability.ts).
+ */
+export async function readHtml(html: string) {
+  const { boundedHtmlFragment } = await import('./bounded-html.js');
+  if (html.length>512*1024) throw tooLarge();
+  const fragment=boundedHtmlFragment(html,'fragment',{clients:true});
+  if (!fragment) throw tooLarge();
+  const hosts=new Set<string>(), mismatches=new Set<string>(), links:string[]=[], images:{ alt: boolean }[]=[];
+  // Text as a client lays it out: inline runs stay one word, block elements end the line, and text a client shows
+  // beside the flow (alt, title) follows on its own lines, as does a table row whose cells hold short pieces read
+  // glued, the way a recipient reads a word laid out across adjacent cells.
+  const lines:string[]=[], aside:string[]=[], rows:string[][]=[]; let line='';
+  const flush=()=>{ if(line.trim()) lines.push(line); line=''; };
+  const walk=(node:typeof fragment.childNodes[number], anchor:string)=>{
+    if ('value' in node) {
+      line+=node.value;
+      if(anchor) for(const word of normalize(node.value).split(/\s+/)) {
+        if(!word.includes('.') || word.length>2048)continue;
+        const label=host(word.includes('://')?word:'https://'+word);
+        if(label && label!==anchor) mismatches.add(`${label} → ${anchor}`);
+      }
+      return;
+    }
+    const children='childNodes' in node ? node.childNodes : [];
+    if (!('tagName' in node)) { for (const child of children) walk(child,anchor); return; }
+    const tag=node.tagName;
+    if (['style','script','template','head','title','xml'].includes(tag)) return;
+    let display='';
+    for (const a of node.attrs) {
+      if (['href','src','srcset','background','action','style'].includes(a.name)) {
+        for(const m of normalize(a.value).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
+        if(tag==='a' && a.name==='href') { anchor=host(normalize(a.value)); links.push(normalize(a.value)); }
+      }
+      if (a.name==='style') display=/(?:^|;)\s*display\s*:\s*([a-z-]+)/i.exec(a.value)?.[1]?.toLowerCase() ?? '';
+      if (['alt','title'].includes(a.name) && a.value.trim()) aside.push(a.value);
+    }
+    if (tag==='img') images.push({ alt: node.attrs.some(a=>a.name==='alt' && !!a.value.trim()) });
+    const inline=display ? display.startsWith('inline') : INLINE.has(tag);
+    if (!inline) flush();
+    const start=lines.length;
+    if (tag==='tr') rows.push([]);
+    for (const child of children) walk(child,anchor);
+    if (!inline) flush();
+    if (tag==='td' || tag==='th') rows[rows.length-1]?.push(lines.slice(start).join(' '));
+    if (tag==='tr') { const cells=rows.pop()!; if (cells.length>1 && cells.some(cell=>cell.trim() && cell.trim().length<=4)) aside.push(cells.join('')); }
+  };
+  for (const child of fragment.childNodes) walk(child,'');
+  flush();
+  return { text: [...lines,...aside].join('\n'), hosts, mismatches, links, images };
+}
 async function body(snapshot: EmailSnapshot) {
   // Preserve order and repetitions in mandatory input; deduplicating sentences
   // could change the meaning or make an over-limit message appear to fit.
   const project=(s='')=>normalize(s).replace(/\s+/g,' ').trim();
-  const plain=project(snapshot.text), raw=project(snapshot.raw), hosts=new Set<string>(), mismatches=new Set<string>();
-  let rendered='';
+  const plain=project(snapshot.text), raw=project(snapshot.raw);
+  let rendered='', hosts=new Set<string>(), mismatches=new Set<string>();
   if (snapshot.html) {
-    const { boundedHtmlFragment } = await import('./bounded-html.js');
-    if (snapshot.html.length>512*1024) throw tooLarge();
-    const fragment=boundedHtmlFragment(snapshot.html,'fragment',{clients:true});
-    if (!fragment) throw tooLarge();
-    // Text as a client lays it out: inline runs stay one word, block elements end the line, and text a client shows
-    // beside the flow (alt, title) follows on its own lines, as does a table row whose cells hold short pieces read
-    // glued, the way a recipient reads a word laid out across adjacent cells.
-    const lines:string[]=[], aside:string[]=[], rows:string[][]=[]; let line='';
-    const flush=()=>{ if(line.trim()) lines.push(line); line=''; };
-    const walk=(node:typeof fragment.childNodes[number], anchor:string)=>{
-      if ('value' in node) {
-        line+=node.value;
-        if(anchor) for(const word of normalize(node.value).split(/\s+/)) {
-          if(!word.includes('.') || word.length>2048)continue;
-          const label=host(word.includes('://')?word:'https://'+word);
-          if(label && label!==anchor) mismatches.add(`${label} → ${anchor}`);
-        }
-        return;
-      }
-      const children='childNodes' in node ? node.childNodes : [];
-      if (!('tagName' in node)) { for (const child of children) walk(child,anchor); return; }
-      const tag=node.tagName;
-      if (['style','script','template','head','title','xml'].includes(tag)) return;
-      let display='';
-      for (const a of node.attrs) {
-        if (['href','src','srcset','background','action','style'].includes(a.name)) {
-          for(const m of normalize(a.value).matchAll(/(?:https?:)?\/\/[^\s,)'"<>]+/gi)) { const h=host(m[0]); if(h) hosts.add(h); }
-          if(tag==='a' && a.name==='href') anchor=host(normalize(a.value));
-        }
-        if (a.name==='style') display=/(?:^|;)\s*display\s*:\s*([a-z-]+)/i.exec(a.value)?.[1]?.toLowerCase() ?? '';
-        if (['alt','title'].includes(a.name) && a.value.trim()) aside.push(a.value);
-      }
-      const inline=display ? display.startsWith('inline') : INLINE.has(tag);
-      if (!inline) flush();
-      const start=lines.length;
-      if (tag==='tr') rows.push([]);
-      for (const child of children) walk(child,anchor);
-      if (!inline) flush();
-      if (tag==='td' || tag==='th') rows[rows.length-1]?.push(lines.slice(start).join(' '));
-      if (tag==='tr') { const cells=rows.pop()!; if (cells.length>1 && cells.some(cell=>cell.trim() && cell.trim().length<=4)) aside.push(cells.join('')); }
-    };
-    for (const child of fragment.childNodes) walk(child,'');
-    flush();
-    rendered=project([...lines,...aside].join('\n'));
+    const read=await readHtml(snapshot.html);
+    rendered=project(read.text); hosts=read.hosts; mismatches=read.mismatches;
   }
   const signals=[...mismatches,...hosts];
   if(signals.length>60) throw tooLarge();
