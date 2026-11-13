@@ -132,7 +132,7 @@ export function registerSesRegions(app: App) {
 async function approvedOrigin(runtime: Runtime, keyId: string) {
   if (keyId.startsWith('user_')) return (await runtime.db.execute(approvedOriginUser(runtime, sql`${runtime.config.workspaceId}`, sql`${keyId.slice(5)}`))).rows.length > 0;
   if (keyId.startsWith('mcp_')) {
-    const grant = await getMcpGrantActor(runtime, keyId);
+    const grant = await getMcpGrantActor(runtime, keyId, runtime.config.workspaceId);
     return !!grant && (!runtime.config.multiTenant || grant.workspaceId === runtime.config.workspaceId) && grant.permissions.includes('manage') && !grant.domains.length;
   }
   const [key] = await runtime.db.select().from(apiKeys).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, runtime.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);

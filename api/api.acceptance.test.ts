@@ -1053,7 +1053,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
 });
 
 // MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
-// approvals, each acting only in its own account's workspace; `?profile=` is a label and never selects anything.
+// approvals, each acting only in its own account's workspaces; `?profile=` is a label and never selects anything.
 test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
@@ -1075,8 +1075,8 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
   };
   const mcp = async (subject: string, profile?: string) => {
-    const response = await authorizeResource(runtime,new Request(resource+(profile?`?profile=${encodeURIComponent(profile)}`:''),{method:'POST',headers:{authorization:`Bearer ${token(subject)}`}}),async a=>Response.json({workspaceId:a.workspaceId,keyId:a.keyId}));
-    return {status:response.status,body:await response.json() as {workspaceId:string;keyId:string}};
+    const response = await authorizeResource(runtime,new Request(resource+(profile?`?profile=${encodeURIComponent(profile)}`:''),{method:'POST',headers:{authorization:`Bearer ${token(subject)}`}}),async a=>Response.json({workspaceId:a.defaultWorkspace?.id,workspaces:a.workspaces.map(w=>w.id),keyId:a.keyId}));
+    return {status:response.status,body:await response.json() as {workspaceId:string;workspaces:string[];keyId:string}};
   };
   // Two accounts, each in its own workspace, both signed in to one browser.
   const jar: string[] = [], accounts: {user:string;subject:string;workspace:string}[] = [];
@@ -1096,6 +1096,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     // Each entry's token acts in its own account's workspace, whatever its label says.
     const first = await mcp(personal.subject,'personal'), second = await mcp(work.subject,'work');
     assert.deepEqual([first.status,first.body.workspaceId,second.status,second.body.workspaceId],[200,personal.workspace,200,work.workspace]);
+    assert.deepEqual([first.body.workspaces,second.body.workspaces],[[personal.workspace],[work.workspace]],'Each account sees only its own workspaces');
     assert.notEqual(first.body.keyId,second.body.keyId);
     const swapped = await mcp(personal.subject,'work');
     assert.deepEqual([swapped.status,swapped.body.workspaceId,swapped.body.keyId],[200,personal.workspace,first.body.keyId],'A label never selects another approval');
@@ -1106,8 +1107,9 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     await mcp(work.subject,'  Work <script>  laptop  ');
     const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
     const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
-    assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',work.workspace]]);
-    assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,personal.workspace]]);
+    // No default is set: each account's only workspace is the default.
+    assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',null]]);
+    assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,null]]);
     // The approval page learns which connected account owns a connection, so it acts as that account.
     const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
     assert.equal(owner.connection.account,work.user);
@@ -1119,10 +1121,10 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
   } finally { await db.query('ROLLBACK'); }
 });
 
-test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
+test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side revocation and single-use DPoP proof', async t => {
   const { drizzle } = await import('drizzle-orm/node-postgres');
   const { loadConfig } = await import('./src/config.js');
-  const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
+  const { authorizeResource, externalMcpGrant, protectedResourceMetadata } = await import('./src/oidc-resource.js');
   const db = await fixtureDatabase(t);
   const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
   const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_SUBJECTS:`subject,${AUTH_SUBJECT}`, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
@@ -1181,32 +1183,53 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
     assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
     assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
-    assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A new JWT cannot restore a revoked client');
+    assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A token that names no consent cannot restore a revoked client');
     const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);
     // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
     const deniedBody=await denied.json() as {jsonrpc:string;id:null;error:{code:number;message:string}};
     assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
     const bind=(id:string,body:object,cookie?:string,env?:typeof dashboard)=>call(`/v1/mcp-connections/${id}/workspace`,'POST',body,cookie,env);
-    assert.equal((await bind(grants.rows[0].id,{workspaceId:'default',receiving:false})).status,409,'A revoked approval cannot be rebound');
-    // With several workspaces, a new client's approval waits unbound until the user chooses one in Bane.
+    assert.equal((await bind(grants.rows[0].id,{workspaceId:'default'})).status,409,'A revoked approval has no default to set');
+    // The account service's tokens name their consent (jti <consent>.<random>). After a revocation in Bane, a new consent
+    // (the person connected the client again) starts the approval again under a new key, so nothing tied to the revoked
+    // one comes back; the revoked consent's tokens, refreshed ones included, stay refused.
+    let tick=2;
+    const consented=(consent:string)=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat:now+tick++});
+    const keyOf=async(access:string)=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.keyId));return r.status===200?await r.json() as string:r.status;};
+    const firstKey=await keyOf(consented('consent-first'));
+    assert.equal(typeof firstKey,'string');
+    assert.equal((await call(`/v1/mcp-connections/${firstKey}/revoke`,'POST')).status,200);
+    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent stays refused');
+    const secondKey=await keyOf(consented('consent-second'));
+    assert.equal(typeof secondKey,'string');assert.notEqual(secondKey,firstKey,'A new consent starts the approval under a new key');
+    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent never takes over the new approval');
+    assert.equal(await keyOf(consented('consent-second')),secondKey);
+    assert.deepEqual((await db.query('SELECT id,revoked,revoked_issuer_grants FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,[{id:secondKey,revoked:false,revoked_issuer_grants:['consent-first']}]);
+    // Several workspaces: the connection works at once. A call acts in the workspace it names (or the default), with the
+    // token's scopes intersected with the person's role there: members read and send, owners and admins also manage and
+    // reach the receiving tools. Members count on hosted installations.
+    runtime.config.multiTenant=true;
     const suffix=randomUUID().slice(0,8);
     for(const [workspace,role] of [['mcp-admin','admin'],['mcp-member','member']]) {
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$2)',[workspace+suffix,workspace+suffix]);
       await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),manager.userId,workspace+suffix,role]);
     }
-    let tick=2;const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++});
-    const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
-    const pending=await run(multi());
-    assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
-    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:`Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/mcp/${(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id}`},id:null});
-    const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
-    assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
-    const multiId=unbound.rows[0].id as string;
+    await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
+    type Seen={default:{id:string;source:string}|null;workspaces:[string,string,string[]][]};
+    const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'bane:read bane:manage'});
+    const connection=async()=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({default:a.defaultWorkspace,workspaces:a.workspaces.map(w=>[w.id,w.role,w.permissions])}));
+      assert.equal(r.status,200);const seen=await r.json() as Seen;return {...seen,workspaces:seen.workspaces.filter(w=>w[0].endsWith(suffix))};};
+    assert.deepEqual(await connection(),{default:{id:'mcp-admin'+suffix,source:'last-used'},workspaces:[['mcp-admin'+suffix,'admin',['read','manage']],['mcp-member'+suffix,'member',['read']]]});
+    const multiId=(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id as string;
+    const acting=async(workspace:string)=>{const a=await externalMcpGrant(runtime,multiId,workspace);return a&&[a.workspaceId,a.role,a.permissions,a.receivingConsent];};
+    assert.deepEqual(await acting('mcp-admin'+suffix),['mcp-admin'+suffix,'admin',['read','manage'],true]);
+    assert.deepEqual(await acting('mcp-member'+suffix),['mcp-member'+suffix,'member',['read'],false],'A member reads; manage and receiving need an owner or admin');
+    assert.equal(await acting('missing'+suffix),null,'No membership, no access');
     const listed=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
     assert.deepEqual([listed?.workspaceId,listed?.receiving],[null,false]);
-    assert.equal((await bind(multiId,{workspaceId:'mcp-member'+suffix,receiving:true})).status,403,'Receiving needs an owner or admin');
-    assert.equal((await bind(multiId,{workspaceId:'missing'+suffix,receiving:false})).status,403);
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:false,extra:true})).status,422);
+    // The default can be set in Bane (or with the setDefaultWorkspace tool): only to one of the person's own workspaces.
+    assert.equal((await bind(multiId,{workspaceId:'missing'+suffix})).status,403);
+    assert.equal((await bind(multiId,{workspaceId:'default',extra:true})).status,422);
     const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
     await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
@@ -1214,20 +1237,22 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
     const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
     assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can bind it');
-    assert.equal((await run(multi())).status,403);
-    const chosen=await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:false});
-    assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-admin'+suffix,receiving:false});
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
-    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true})).status,200);
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'default',receivingConsent:true});
+    assert.equal((await bind(multiId,{workspaceId:'default'},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can set it');
+    const chosen=await bind(multiId,{workspaceId:'mcp-member'+suffix});
+    assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-member'+suffix,receiving:false});
+    assert.deepEqual((await connection()).default,{id:'mcp-member'+suffix,source:'set'});
+    assert.equal((await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:true})).status,200,'The old receiving flag is accepted and ignored');
+    assert.deepEqual((await connection()).default,{id:'mcp-admin'+suffix,source:'set'});
     const after=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
-    assert.deepEqual([after?.workspaceId,after?.receiving],['default',true]);
-    // Once a single membership remains, an unbound approval (here: its workspace was deleted) binds by itself,
-    // without the receiving consent given for the old workspace.
-    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-admin'+suffix]);
-    await db.query("UPDATE bane_resource_grants SET workspace_id=NULL WHERE id=$1",[multiId]);
-    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
+    assert.deepEqual([after?.workspaceId,after?.receiving],['mcp-admin'+suffix,false]);
+    assert.equal((await bind(multiId,{workspaceId:null})).status,422,'A default is one of your workspaces');
+    // A default the person no longer belongs to falls back: to the last-used workspace, then to the only one left.
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id=$2',[manager.userId,'mcp-admin'+suffix]);
+    await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-member'+suffix]);
+    assert.deepEqual((await connection()).default,{id:'mcp-member'+suffix,source:'last-used'});
+    assert.equal(await acting('mcp-admin'+suffix),null,'Removed from a workspace, the approval no longer acts there');
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-member'+suffix]);
+    assert.deepEqual(await connection(),{default:{id:'mcp-member'+suffix,source:'only'},workspaces:[['mcp-member'+suffix,'member',['read']]]});
   } finally { await db.query('ROLLBACK'); }
 });
 
@@ -2989,14 +3014,20 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.serverInfo.name, 'bane');
     const catalog = await rpc(token, 'tools/list');
     const defaults=ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:17,method:'tools/list',params:{}},rpcHeaders)).result.tools;
-    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, defaults);
+    // OpenCode adds ?codemode=false to a remote URL: one tool per operation, the same catalog as the legacy ?codemode=true.
+    assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
-    assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool'));
-    assert.ok(defaults.every((tool:Json)=>(tool.name==='describe_tool' || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
+    assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool') && defaults.some((tool:Json)=>tool.name==='workspaces'));
+    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
+    // Every workspace tool takes the workspace it acts in; the account service's token names a person, not a workspace.
+    assert.ok(defaults.every((tool:Json)=>tool.name==='describe_tool' || tool.inputSchema.properties.workspace?.type==='string'));
+    assert.ok(catalog.tools.every((tool:Json)=>tool.name==='workspaces' || tool.inputSchema.properties.workspace?.type==='string'));
     const listContactsBranch = defaults.find((tool:Json)=>tool.name==='contacts').inputSchema.oneOf.find((b:Json)=>b.properties.action.const==='list');
     assert.equal(listContactsBranch.properties.email, undefined);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
-    for (const name of ['search_tools', 'describe_tool', 'applyRituals', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(!tools.has(name), name);
+    for (const name of ['search_tools', 'describe_tool']) assert.ok(!tools.has(name), name);
+    // Receiving follows the role: the person owns the workspace and approved bane:manage, so the receiving tools are listed.
+    for (const name of ['workspaces', 'setDefaultWorkspace', 'applyRituals', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(tools.has(name), name);
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
@@ -3007,7 +3038,7 @@ describe('Hosted MCP OAuth and tools', () => {
     for (const name of ['sendEmail', 'sendEmailBatch', 'createInbox', 'waitForMessage', 'getInboxMessage', 'listInboundThreads', 'createInboundThread', 'replyToInboundThread', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'createApiKey', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState', 'rotateWebhookSecret']) assert.ok(tools.has(name), name);
     assert.ok(!tools.has('revealWebhookSecret'), 'A signing secret is never read back through MCP.');
     assert.doesNotMatch(JSON.stringify(tools.get('sendCampaign')!.inputSchema), /reviewId/);
-    assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['campaignId']);
+    assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['campaignId', 'workspace']);
     const context = await callTool(token, 'getCurrentIdentity');
     assert.equal(context.environment, undefined);
     const contentGuide = await callTool(token, 'getCampaignContentGuide');
@@ -3222,20 +3253,21 @@ describe('Hosted MCP OAuth and tools', () => {
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     const grantKeys:string[]=[];
-    await t.test('receiving MCP: inbox grant cannot discover workspace tools; receiving writes bind to consent',async t=>{
+    await t.test('receiving MCP: receiving follows the role and scope; receiving writes bind to the approval',async t=>{
       const passwords=['listInboxAppPasswords','createInboxAppPassword','revokeInboxAppPassword'];
       const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
-      let tools=await listing();assert.ok(passwords.every(op=>!tools.has(op)));
-      error(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token),403,'ADMIN_REQUIRED');
-      await db.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1',[consentId]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
-      tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
+      // No consent checkbox: an owner or admin of the workspace reaches the receiving tools, and changes them with bane:manage.
+      const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      const tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // A mail client password outlives the token that asks for it, so a temporary token cannot issue one. It can still list them.
       error(await http('POST','/v1/inboxes/fixture/app-passwords',managed.token,{name:'fixture',protocols:['imap']}),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
       ok(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token));
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      assert.equal(fullListing.result.tools.length, 30); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
+      // 30 resource tools, describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
+      // tool takes (a bare string there; the workspaces tool and describe_tool explain it).
+      assert.equal(fullListing.result.tools.length, 31); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -3260,18 +3292,20 @@ describe('Hosted MCP OAuth and tools', () => {
         ['DELETE','/v1/routing/routes/billing',undefined],['DELETE','/v1/routing/routes/test',undefined],['POST','/v1/routing/versions/1/restore',undefined]] as const)
         error(await http(method,path,child.secret,body,{'if-match':'1'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
-      await db.query('UPDATE bane_resource_grants SET receiving=false WHERE grant_key=$1',[consentId]);
-      assert.equal(await live(),false);
+      // Without bane:manage (here the newest token asked for less) the approval no longer changes receiving, and nothing it
+      // created does: a key it made, and a key that key made, stop working until the scope is back.
       const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
+      await db.query("UPDATE bane_resource_grants SET permissions='{read}' WHERE grant_key=$1",[consentId]);
+      assert.equal(await live(),false);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
-      for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/inbound/domains','/v1/inbound/keys','/v1/inbound/webhooks','/v1/routing/routes','/v1/rituals','/v1/endpoints'])error(await http('GET',path,derived.secret),403,'ADMIN_REQUIRED');
-      error(await http('PATCH','/v1/inbound/policy',derived.secret,{spam:'quarantine'}),403,'ADMIN_REQUIRED');
-      error(await http('POST','/v1/inbound/addresses',derived.secret,{address:'fixture@example.invalid'}),403,'ADMIN_REQUIRED');
-      error(await http('DELETE','/v1/inbound/addresses/fixture',derived.secret),403,'ADMIN_REQUIRED');
-      error(await http('POST','/v1/inbound/domains/fixture/disable',derived.secret),403,'ADMIN_REQUIRED');
-      error(await http('POST','/v1/domains/fixture/receiving-host',derived.secret,{host:null}),403,'ADMIN_REQUIRED');
+      for(const secret of [parent.secret,derived.secret]){
+        for(const path of ['/v1/inbound/policy','/v1/inbound/addresses','/v1/routing/routes','/v1/rituals','/v1/endpoints'])error(await http('GET',path,secret),401,'AUTH_INVALID');
+        error(await http('PATCH','/v1/inbound/policy',secret,{spam:'quarantine'}),401,'AUTH_INVALID');
+        error(await http('POST','/v1/inbound/addresses',secret,{address:'fixture@example.invalid'}),401,'AUTH_INVALID');
+      }
       assert.deepEqual(ok(await http('GET','/v1/inbound/policy',MANAGER)),policy);
-      error(await http('POST','/v1/inbound/keys',parent.secret,{name:'receiving fixture'}),403,'ADMIN_REQUIRED');
+      await db.query("UPDATE bane_resource_grants SET permissions='{read,manage}' WHERE grant_key=$1",[consentId]);
+      assert.equal(await live(),true);
       error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
     ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
@@ -3285,7 +3319,6 @@ describe('Hosted MCP OAuth and tools', () => {
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const box=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
       const rituals=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
       const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
@@ -3313,7 +3346,7 @@ describe('Hosted MCP OAuth and tools', () => {
       runtime.config.multiTenant=true;
       try{
         const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
-        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
+        const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
           return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
         for(const codemode of [true,false]){
           const ops=await listed(codemode);
@@ -3322,15 +3355,14 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         const hidden=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,body:{name:'hidden',permissions:['read']}}}},rpcHeaders)).result;
         assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
-        // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
+        // tear witness (recheck of #51): with receiving (an owner) but no manage, mailbox administration was listed although
         // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
-        await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
         const receiving=await listed(true);
         for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
         assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
         const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
         const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
-        const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId))!;assert.ok(grantActor);
+        const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId,runtime.config.workspaceId))!;assert.ok(grantActor);
         const dummy=(schema:Json|undefined)=>schema?.enum?.[0]??(schema?.format==='email'?'tear@example.com':[schema?.type].flat().includes('integer')?'1':String(schema?.pattern??'').includes('\\d')?'us-east-1':'tear-missing');
         let gets=0;
         for(const [name,op] of buildMcpCatalog(api)){
@@ -3353,11 +3385,11 @@ describe('Hosted MCP OAuth and tools', () => {
   // PR #55 review P2 (both): the overview was missing from receivingConsentRoute, so credentials minted by a management
   // approval without receiving consent could read it over REST; and a read grant with consent was offered a tool REST
   // refuses. It is now gated by core.ts's shared predicates (mailboxRoute, receivingConsentRoute), which REST and both MCP
-  // listings use.
-  test('inbound overview: REST and both MCP listings require manage and explicit receiving consent', async t => {
+  // listings use. Receiving now follows the role (an owner or admin) instead of a consent checkbox.
+  test('inbound overview: REST and both MCP listings require manage and an owner or admin', async t => {
     await simulatedSesFixture(t, async ({ db, request, runtime }) => {
       const { resourceInventory } = await import('./src/mcp-resources.js'); const actions = new Map(resourceInventory().map(x => [`${x.name}.${x.action}`, x.operation]));
-      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', `/mcp?codemode=${codemode}`, token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
+      const listed = async (token: string, codemode: boolean) => { const tools = ok(await request('POST', codemode ? '/mcp?codemode=false' : '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[];
         return new Set(codemode ? tools.map(x => x.name as string) : tools.flatMap(x => ((x.inputSchema?.properties?.action?.enum ?? []) as string[]).map(a => actions.get(`${x.name}.${a}`)!).filter(Boolean))); };
       const offered = async (token: string) => [await listed(token, true), await listed(token, false)].map(set => set.has('getInboundOverview'));
       const mint = async (token: string, name: 'createApiKey' | 'createAgentToken') => {
@@ -3365,24 +3397,17 @@ describe('Hosted MCP OAuth and tools', () => {
         const out = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, rpcHeaders)).result.structuredContent;
         const secret = out.secret ?? out.token; assert.ok(secret, JSON.stringify(Object.keys(out))); secrets.add(secret); return secret as string;
       };
-      // A management approval without receiving consent: neither catalog offers it, and what it mints is refused like the other receiving reads.
+      // A management approval of an owner: both catalogs offer it, and what it mints reads it.
       const manage = await oauthGrant(t, db, writableScope, request);
-      assert.deepEqual(await offered(manage.token), [false, false]);
-      const minted = [await mint(manage.token, 'createApiKey'), await mint(manage.token, 'createAgentToken')];
-      for (const secret of minted) {
-        error(await request('GET', '/v1/inbound/overview', secret), 403, 'ADMIN_REQUIRED');
-        error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
-      }
-      // With receiving consent the same credentials read it, and both catalogs offer it.
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [manage.consentId]);
       assert.deepEqual(await offered(manage.token), [true, true]);
+      const minted = [await mint(manage.token, 'createApiKey'), await mint(manage.token, 'createAgentToken')];
       for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
-      // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
+      // A read approval of the same owner reaches receiving, but REST refuses it the overview (mailboxAuth needs a manage
+      // credential), so it is not offered.
       const read = await oauthGrant(t, db, 'bane:read offline_access', request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [read.consentId]);
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
-      const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
+      const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId, runtime.config.workspaceId))!; assert.ok(reader?.receivingConsent);
       const refused = await dispatchAsActor(createApp(), new Request(`${PUBLIC_ORIGIN}/v1/inbound/overview`, { headers: { accept: 'application/json' } }), runtime, reader);
       assert.equal(refused.status, 403);
     });
@@ -3393,12 +3418,98 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t,async({db,request})=>{
       const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
       const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
-      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',`/mcp?codemode=${codemode}`,token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
+      const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
       const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
       const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
       for(const ops of [code,plain]){assert.ok(ops.has('getCurrentIdentity'));assert.ok(ops.has('sendEmail'));assert.ok(!ops.has('listContacts'),'read-level reads need read');}
       const me=ok(await rpc(true,'tools/call',{name:'getCurrentIdentity',arguments:{}})).result;
       assert.equal(me.isError,false,redact(me));assert.equal(me._meta.status,200);assert.deepEqual(me.structuredContent.permissions,['send']);
+    });
+  });
+
+  // The account service's token names a person, not a workspace: each MCP tool call names the workspace it acts in (or
+  // uses the connection's default), and Bane checks the person's membership and role there on that call.
+  test('MCP tools act in the workspace each call names: every tool refuses a non-member workspace, defaults, role intersection', async t => {
+    await simulatedSesFixture(t, async ({ db, request, runtime }) => {
+      runtime.config.multiTenant = true;
+      try {
+        const { token, consentId } = await oauthGrant(t, db, 'bane:read bane:send bane:manage offline_access', request);
+        const own = runtime.config.workspaceId, suffix = randomUUID().slice(0, 8);
+        const { rows: [{ user_id: userId }] } = await db.query('SELECT user_id FROM bane_resource_grants WHERE grant_key=$1', [consentId]);
+        // The person owns `own`, is a member of `shared`, and doesn't belong to `foreign` (another person's).
+        const [shared, foreign] = [`mcp-shared-${suffix}`, `mcp-foreign-${suffix}`];
+        for (const id of [shared, foreign]) await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)', [id, id === shared ? `Shared ${suffix}` : `Foreign ${suffix}`]);
+        await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'member')", [randomUUID(), userId, shared]);
+        const stranger = unique('mcp-stranger');
+        await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [stranger, `${stranger}@example.org`]);
+        await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), stranger, foreign]);
+        await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1', [userId, own]);
+        const send = async (method: string, params: Json, path = '/mcp?codemode=false') => ok(await request('POST', path, token, { jsonrpc: '2.0', id: 1, method, params }, rpcHeaders)).result;
+        const call = (name: string, args: Json = {}, path?: string) => send('tools/call', { name, arguments: args }, path);
+        const failure = (result: Json) => [result.isError, result.structuredContent?.error?.code, result._meta?.status];
+
+        // The workspaces tool: each workspace with the role and what this connection may do there, and the default.
+        const listed = await call('workspaces');
+        assert.equal(listed.isError, false, redact(listed));
+        const mine = (rows: Json[]) => rows.filter((w: Json) => [own, shared].includes(w.id)).map((w: Json) => [w.id, w.role, w.permissions, w.default]);
+        assert.deepEqual(mine(listed.structuredContent.data).sort(), [[own, 'owner', ['bane:read', 'bane:send', 'bane:manage'], true], [shared, 'member', ['bane:read', 'bane:send'], false]].sort());
+        assert.ok(!listed.structuredContent.data.some((w: Json) => w.id === foreign), 'Only the person\'s own workspaces');
+        assert.deepEqual([listed.structuredContent.default, listed.structuredContent.defaultSource], [own, 'last-used']);
+
+        // Cross-workspace isolation on every tool, in both catalogs: a workspace the person doesn't belong to (or one that
+        // doesn't exist, which reads the same) is refused with 403 before anything is dispatched or validated.
+        const catalog = (await send('tools/list', {})).tools as Json[];
+        const grouped = (await send('tools/list', {}, '/mcp')).tools as Json[];
+        assert.ok(catalog.length > 100, String(catalog.length));
+        for (const tool of catalog) {
+          if (tool.name === 'workspaces') continue;
+          for (const workspace of [foreign, `missing-${suffix}`]) {
+            const refused = await call(tool.name, { workspace });
+            assert.deepEqual(failure(refused), [true, 'WORKSPACE_ACCESS_DENIED', 403], `${tool.name} in ${workspace}: ${redact(refused)}`);
+          }
+        }
+        for (const tool of grouped) {
+          if (tool.name === 'describe_tool') continue;
+          const action = tool.inputSchema.properties?.action?.enum?.[0] ?? tool.inputSchema.oneOf?.[0]?.properties?.action?.const;
+          const refused = await call(tool.name, { action: tool.name === 'workspaces' ? 'setDefault' : action, workspace: foreign }, '/mcp');
+          assert.deepEqual(failure(refused), [true, 'WORKSPACE_ACCESS_DENIED', 403], `${tool.name}.${action}: ${redact(refused)}`);
+        }
+
+        // Role intersection: the same connection is an owner in one workspace and a member in the other.
+        const identity = async (workspace?: string) => { const r = await call('getCurrentIdentity', workspace === undefined ? {} : { workspace }); assert.equal(r.isError, false, redact(r)); return [r.structuredContent.workspaceId, r.structuredContent.role, r.structuredContent.permissions]; };
+        assert.deepEqual(await identity(), [own, 'owner', ['read', 'send', 'manage']]);
+        assert.deepEqual(await identity(shared), [shared, 'member', ['read', 'send']]);
+        assert.deepEqual(await identity(`Shared ${suffix}`), [shared, 'member', ['read', 'send']], 'A workspace by its name');
+        for (const [name, args] of [['createContact', { body: { email: address() }, confirm: true }], ['createApiKey', { body: { name: 'member fixture', permissions: ['read'] }, confirm: true }], ['getRituals', {}]] as const)
+          assert.deepEqual(failure(await call(name, { ...args, workspace: shared })), [true, 'PERMISSION_DENIED', 403], `${name} as a member`);
+        // Data stays in its workspace: a contact created in one is not listed in the other.
+        const label = unique('mcp-workspace-contact');
+        const created = await call('createContact', { body: { email: address(), name: label }, confirm: true });
+        assert.equal(created.isError, false, redact(created));
+        const contacts = async (workspace?: string) => ((await call('listContacts', { search: label, ...(workspace ? { workspace } : {}) })).structuredContent.data as Json[]).map(c => c.id);
+        assert.deepEqual([await contacts(), await contacts(own), await contacts(shared)], [[created.structuredContent.id], [created.structuredContent.id], []]);
+        assert.equal((await db.query('SELECT workspace_id FROM audience_contacts WHERE id=$1', [created.structuredContent.id])).rows[0].workspace_id, own);
+
+        // The default: set by name, used by calls that name none; never one of another person's workspaces.
+        const chosen = await call('setDefaultWorkspace', { workspace: `Shared ${suffix}` });
+        assert.deepEqual([chosen.structuredContent.default, chosen.structuredContent.defaultSource], [shared, 'set']);
+        assert.deepEqual(await identity(), [shared, 'member', ['read', 'send']]);
+        assert.equal((await db.query('SELECT workspace_id FROM bane_resource_grants WHERE grant_key=$1', [consentId])).rows[0].workspace_id, shared);
+        assert.deepEqual(failure(await call('setDefaultWorkspace', { workspace: foreign })), [true, 'WORKSPACE_ACCESS_DENIED', 403]);
+        const groupedList = await call('workspaces', { action: 'list' }, '/mcp');
+        assert.equal(groupedList.structuredContent.default, shared);
+        for (const args of [{ workspace: '' }, { workspace: 42 }]) assert.deepEqual(failure(await call('getCurrentIdentity', args)).slice(0, 2), [true, 'INVALID_ARGUMENTS']);
+        // With no default to fall back on, a call must name its workspace.
+        await db.query('UPDATE bane_resource_grants SET workspace_id=NULL WHERE grant_key=$1', [consentId]);
+        await db.query('UPDATE bane_users SET selected_workspace_id=NULL WHERE id=$1', [userId]);
+        assert.deepEqual(failure(await call('getCurrentIdentity')), [true, 'WORKSPACE_REQUIRED', 400]);
+        assert.deepEqual(await identity(own), [own, 'owner', ['read', 'send', 'manage']]);
+        // Removed from a workspace, the connection can't act there on its next call; with one workspace left, it is the default.
+        await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id=$2', [userId, shared]);
+        assert.deepEqual(failure(await call('getCurrentIdentity', { workspace: shared })), [true, 'WORKSPACE_ACCESS_DENIED', 403]);
+        const others = (await db.query('SELECT count(*)::int AS n FROM workspace_members WHERE user_id=$1', [userId])).rows[0].n;
+        if (others === 1) assert.deepEqual(await identity(), [own, 'owner', ['read', 'send', 'manage']]);
+      } finally { runtime.config.multiTenant = false; }
     });
   });
 
@@ -3422,7 +3533,6 @@ describe('Hosted MCP OAuth and tools', () => {
   test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const boxes:string[]=[];for(let n=0;n<3;n++)boxes.push(ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201).address);
       const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
       const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
@@ -3449,7 +3559,6 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Refund agent',$3,$4,'["read","send","manage"]','[]'),($5,$2,'Sender',$6,$7,'["read","send","manage"]','["mail.example.com"]')`,
         [agent.id, w, sha(agent.secret), agent.secret.slice(0, 14), unique('key'), sha(restricted), restricted.slice(0, 14)]);
       const { token, consentId, clientId } = await oauthGrant(t, db, writableScope, request);
-      await db.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1', [consentId]);
       const sources = ['export default function route(email){if(/refund/i.test(email.subject)) label("refund")}', 'export default function route(email){if(/refund/i.test(email.subject)){label("refund");block()}}', 'export default function route(email){label("mine")}'];
       const seen: Json[] = [];
       // Each answer is the version, the endpoints marker, whether it changed and who made it: no IDs, sources or addresses.
@@ -3541,7 +3650,6 @@ describe('Hosted MCP OAuth and tools', () => {
   test('an endpoint held when its approval is removed resumes only with its URL', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { token, consentId } = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [consentId]);
       const toolAs = async (bearer: string, name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); };
       const tool = (name: string, args: Json) => toolAs(token, name, args);
       const slack = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/fixturefixturefixture';
@@ -3596,7 +3704,6 @@ describe('Hosted MCP OAuth and tools', () => {
       // A resume decides on the endpoint as it is when the update runs. Here a second approval that changed the
       // endpoint is removed after the resume has read the endpoint and before it writes.
       const second = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [second.consentId]);
       await toolAs(second.token, 'updateEndpoint', { name: 'untouched', body: { perMinute: 30 } });
       ok(await local('PATCH', '/v1/endpoints/untouched', { paused: true }));
       const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
@@ -3623,7 +3730,6 @@ describe('Hosted MCP OAuth and tools', () => {
       // A write by a key an approval created reads the approval again inside its transaction, not only when the request
       // was authenticated. Here the approval is removed between the two reads: the write is refused and nothing changes.
       const third = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [third.consentId]);
       const key = ok(await request('POST', '/mcp?codemode=true', third.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'held fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
       secrets.add(key);
       ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'Events, again' }));
@@ -3654,7 +3760,6 @@ describe('Hosted MCP OAuth and tools', () => {
     const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
     const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
     const { token, consentId } = await oauthGrant(t, db, writableScope, request);
-    await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [consentId]);
     const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
     secrets.add(key);
     const hook = ok(await request('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/hooks/race-events', eventTypes: ['message.received'] }, live), 201);
@@ -3706,7 +3811,6 @@ describe('Hosted MCP OAuth and tools', () => {
       const first=await queue(child.secret);await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[first])).rows[0].status,'accepted');
       const second=await queue(child.secret),control=await queue(independent.secret);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'receive.example',$3,'active')",[domain,wid,REGION]);
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')",[wid,REGION]);
       const box=ok(await local('POST','/v1/inbound/addresses',{address:'support@receive.example'}),201);
@@ -4576,7 +4680,6 @@ describe('Hosted MCP OAuth and tools', () => {
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[manager.consentId]);
       const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
@@ -4633,7 +4736,6 @@ describe('Hosted MCP OAuth and tools', () => {
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -4789,7 +4891,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     // The one state change a read grant may make is read-only delegation, which REST allows too.
-    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['createAgentToken']);
+    // Choosing the connection's default workspace changes no workspace data.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['setDefaultWorkspace', 'createAgentToken']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));

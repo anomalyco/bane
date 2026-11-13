@@ -10,13 +10,14 @@ function fixture() {
   const key=createPrivateKey(readFileSync(process.env.BANE_TEST_SIGNING_KEY!));
   return {issuer:issuer.origin,key};
 }
-// Mirrors the account service: access tokens carry the sign-in's authentication context.
-export function mintResourceToken(resource:string,subject:string,scope:string) {
-  const {issuer,key}=fixture(), clientId='fixture-'+randomUUID(), jti=randomUUID(), now=Math.floor(Date.now()/1000);
+// Mirrors the account service: access tokens carry the sign-in's authentication context, and their jti names the
+// consent (grant) they were issued under: <consent>.<random>. A new consent is a new sign-in of the client.
+export function mintResourceToken(resource:string,subject:string,scope:string,{clientId='fixture-'+randomUUID(),consent=randomUUID()}:{clientId?:string;consent?:string}={}) {
+  const {issuer,key}=fixture(), jti=consent+'.'+randomUUID(), now=Math.floor(Date.now()/1000);
   const parts=[{typ:'at+jwt',alg:'ES256',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:clientId,jti,scope,iat:now,exp:now+300,acr:'urn:anomaly:acr:google'}];
   const body=parts.map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
   const token=body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
-  return {token,clientId,consentId:'at_'+createHash('sha256').update(JSON.stringify([subject,clientId])).digest('hex')};
+  return {token,clientId,consent,consentId:'at_'+createHash('sha256').update(JSON.stringify([subject,clientId])).digest('hex')};
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
   const {issuer,key}=fixture();

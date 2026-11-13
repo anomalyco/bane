@@ -95,7 +95,7 @@ function webhookManager(c: Ctx) {
 // write and then holds the webhook. It is taken before the webhook row, the order a removal takes the two in.
 async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
   if (!a.grantId) return;
-  const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, tx);
+  const grant = await (await wrapModuleLoad(() => import('./mcp-auth.js'))).getMcpGrantActor(c.env, 'mcp_' + a.grantId, a.workspaceId, tx);
   if (grant?.workspaceId !== a.workspaceId || !grant.permissions.includes('manage')) throw new ApiError(401, 'AUTH_INVALID', 'The MCP approval behind this request was revoked while it ran. Nothing was changed.');
   await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${a.grantId},${a.workspaceId},'webhook',${webhookId}) ON CONFLICT DO NOTHING`);
 }

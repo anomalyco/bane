@@ -13,7 +13,13 @@ export type McpConnection = {
     createdAt: string;
     updatedAt: string;
     status: 'active' | 'revoked' | 'expired';
+    /**
+     * The default workspace: where the connection's tool calls act when they name none. Null: the person's only workspace, else their last-used one. Each call can name another workspace of theirs.
+     */
     workspaceId: string | null;
+    /**
+     * Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the bane:manage scope.
+     */
     receiving: boolean;
     /**
      * The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.
@@ -42,8 +48,14 @@ export type ApiError = {
 };
 
 export type McpConnectionBinding = {
+    /**
+     * One of your workspaces. Until one is set, calls use your only workspace, else the one you used last.
+     */
     workspaceId: string;
-    receiving: boolean;
+    /**
+     * Deprecated and ignored: receiving follows the role.
+     */
+    receiving?: boolean;
 };
 
 /**
