@@ -6,6 +6,7 @@ import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
+import { secretPrefixes, shownPrefix } from './brand.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
@@ -78,7 +79,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
-    if (/^(?:bane|os)_agent_/.test(token)) {
+    if (/^(?:nm|bane|os)_agent_/.test(token)) { // bane_/os_: remove after rename cleanup
       const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
       const temporary = await verifyAgentToken(c.env.config, token);
       // The approval acts in the workspace the token was minted in (a call names it; the token keeps it).
@@ -95,7 +96,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       if (!tracked) throw invalid();
       c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken',tokenId:temporary.id });
     } else {
-      if (!/^(?:bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+      if (!/^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.'); // bane_/os_: remove after rename cleanup
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
       const credential = sql`
@@ -204,7 +205,7 @@ export function registerAuth(app: App) {
     return c.json({ id: row.id, revoked: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security,
-    description: 'One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer bane_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.',
+    description: 'One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer nm_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.',
     request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json'), access = input.access ?? { type: 'workspace' as const };
     if (access.type !== 'workspace') {
@@ -214,9 +215,9 @@ export function registerAuth(app: App) {
       return c.json({ ...limitedKeyView(row), secret }, 201);
     }
     const permissions = input.permissions ?? ['send'], domains = input.domains ?? [];
-    const secret = randomSecret('bane_');
+    const secret = randomSecret(secretPrefixes.apiKey);
     const [key] = await c.env.db.transaction(async tx => {
-      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, name: input.name, permissions, domains, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, name: input.name, permissions, domains, hash: await digest(secret), prefix: shownPrefix(secret) }).returning();
       // A key created by an MCP agent lives only as long as the approval that created it.
       if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
       await recordAudit(tx, c, { action: 'api_key.create', workspaceId: auth.workspaceId, target: { type: 'api_key', id: rows[0]!.id },

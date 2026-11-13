@@ -20,7 +20,7 @@ export type GateScope = {
 export type GateResult = { ok: true } | { ok: false; reasons: string[] };
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const SECRET_PREFIX = /\b(?:bane_support_|bane_ops_|bane_mbx_|bane_agent_|os_agent_|whsec_|sk-ant-|bane_)[A-Za-z0-9_-]{8,}/;
+const SECRET_PREFIX = /\b(?:nm_support_|nm_mbx_|nm_agent_|nm_notes_|nm_|bane_support_|bane_ops_|bane_mbx_|bane_agent_|os_agent_|whsec_|sk-ant-|bane_)[A-Za-z0-9_-]{8,}/; // bane_/os_: remove after rename cleanup
 const LONG_HEX = /\b[0-9a-f]{40,}\b/i;
 const LONG_B64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{60,}={0,2}(?![A-Za-z0-9+/])/;
 const INTERNAL_HOST = /\b(?:[a-z0-9-]+\.)*(?:internal|invalid|local|svc\.cluster\.local|workers\.dev|psdb\.cloud|amazonaws\.com|hyperdrive\.local)\b/i;

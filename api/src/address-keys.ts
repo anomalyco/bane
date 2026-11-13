@@ -3,9 +3,10 @@ import { ApiError, digest, id, isoTime, randomSecret, type Ctx } from './core.js
 import { mailboxKeys, type MailboxPermission } from './db/mailbox.js';
 import { recordAudit } from './audit.js';
 import { ownReceiving } from './rituals.js';
+import { secretPrefixes, shownPrefix } from './brand.js';
 
 // An API key limited to receiving addresses or to one agent inbox. These keep their own table and bearer prefix
-// (bane_mbx_…): only mailboxAuth accepts them, so they never reach a workspace route. The public API lists, creates and
+// (nm_mbx_…): only mailboxAuth accepts them, so they never reach a workspace route. The public API lists, creates and
 // revokes them as API keys (auth.ts), with the access below in place of workspace permissions.
 export type LimitedAccess =
   | { type: 'addresses'; addressIds?: string[] | null; mail: MailboxPermission[] }
@@ -39,7 +40,7 @@ export async function createLimitedKey(c: Ctx, workspaceId: string, name: string
     if (mail.includes('create') && mailboxIds === null || mailboxIds?.length === 0 && !mail.includes('create'))
       throw new ApiError(422, 'ADDRESS_SCOPE_REQUIRED', 'Provisioning keys need an explicit addressIds scope.', field.addresses);
   }
-  const secret = randomSecret('bane_mbx_');
+  const secret = randomSecret(secretPrefixes.addressKey);
   const row = await c.env.db.transaction(async tx => {
     let expiresAt: string | null = null;
     if (mailboxIds?.length) {
@@ -52,7 +53,7 @@ export async function createLimitedKey(c: Ctx, workspaceId: string, name: string
         expiresAt = found[0].delete_after;
       } else if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', field.addresses);
     }
-    const [created] = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId, name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, inboxId, permissions: mail, expiresAt }).returning();
+    const [created] = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId, name, hash: await digest(secret), prefix: shownPrefix(secret), mailboxIds, inboxId, permissions: mail, expiresAt }).returning();
     await ownReceiving(tx, c, 'key', created!.id);
     await recordAudit(tx, c, { action: 'api_key.create', workspaceId, target: { type: 'api_key', id: created!.id },
       after: { name, access: limitedAccess(created!), mcpGrant: c.get('actor')?.grantId } });

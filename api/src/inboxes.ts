@@ -15,6 +15,7 @@ import { displayText, visibleMail } from './inbox-content.js';
 import {registerInboxFolders,LegacyRole,isLegacyRole,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
 import {registerInboxPasswords} from './inbox-passwords.js';
 import { replyText } from './mailbox-store.js';
+import { secretPrefixes, shownPrefix } from './brand.js';
 
 // Agent inboxes: `mailboxes` rows with kind='inbox'. One SQL function creates them; ingest and the
 // hourly sweep share the store and retention functions in migration 107.
@@ -188,7 +189,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     if (!v.admin && missing.length) throw new ApiError(403, 'PERMISSION_DENIED', `This key cannot grant ${[...new Set(missing)].join(', ')} permission it does not have.`);
     if (input.credential?.permissions.includes('send') && !input.send.enabled) throw new ApiError(422, 'VALIDATION_FAILED', 'A key with send permission needs send.enabled: true.', 'credential.permissions');
     if (input.type === 'sandbox' && (input.domain || input.localPart || input.send.enabled)) throw new ApiError(422, 'SANDBOX_ONLY', 'Sandbox inboxes get a generated .invalid address and cannot send: omit domain, localPart and send.');
-    const secret = input.credential ? randomSecret('bane_mbx_') : null, credential = secret ? { id: id('mbk'), hash: await digest(secret), prefix: secret.slice(0, 14) } : undefined;
+    const secret = input.credential ? randomSecret(secretPrefixes.addressKey) : null, credential = secret ? { id: id('mbk'), hash: await digest(secret), prefix: shownPrefix(secret) } : undefined;
     const p = {
       wid: v.workspaceId, actor: v.keyId, admin: v.admin, manageAddress, hosted: c.env.config.multiTenant, id: id('mbx'), input:{...input,limits:input.limits??(input.type==='persistent'?undefined:{messages:MAX_MESSAGES,bytes:MAX_BYTES})}, key: credential,
       sandboxHost: input.type === 'sandbox' ? `${(await digest(v.workspaceId)).slice(0, 24)}.sandbox.invalid` : undefined,

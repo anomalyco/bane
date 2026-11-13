@@ -148,7 +148,7 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
-export BANE_TOKEN='bane_agent_…'   # read from the environment, never from the command line
+export BANE_TOKEN='nm_agent_…'   # read from the environment, never from the command line
 npx --yes @banemx/sdk upload ./invite.ics \
   --api https://bane.mx \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
