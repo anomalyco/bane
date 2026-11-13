@@ -6,7 +6,7 @@ import { request } from '../../data/live'
 import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, SecretCode, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain, MailboxKey } from '../../data/types'
+import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError } from '../settings/shared'
@@ -62,8 +62,8 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
       <div className="stack">
         <Field label="Address" hint={`Receives until ${date(created.expiresAt)}. ${created.type === 'sandbox' ? 'A sandbox address only gets test mail: use Send test mail on its page, or POST /v1/inboxes/{id}/simulate.' : 'Mail sent to it shows up on its page and through the API.'}`}><div className="settings-copy-cell"><code><PrivateAddress value={created.address} /></code><CopyButton value={created.address} label="Copy address" /></div></Field>
         {created.credential && <>
-          <Field label="Inbox key" hint="Copy it now; it won’t be shown again. It reads and manages only this inbox, over the API or MCP, and stops working when the inbox is deleted.">
-            <div className="settings-copy-cell"><SecretCode>{created.credential.secret}</SecretCode><CopyButton value={created.credential.secret} label="Copy inbox key" /></div>
+          <Field label="API key" hint="Copy it now; it won’t be shown again. It reads and manages only this inbox, over the API or MCP, and stops working when the inbox is deleted.">
+            <div className="settings-copy-cell"><SecretCode>{created.credential.secret}</SecretCode><CopyButton value={created.credential.secret} label="Copy API key" /></div>
           </Field>
           <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={url} auth={{ bearer: created.credential.secret }} label="Agent" /></div>
         </>}
@@ -85,7 +85,7 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
       <Field label="Receives mail for" htmlFor="agent-inbox-lifetime" hint="Then it holds new mail for 1 more day without delivering it, and the inbox and its mail are deleted. You can extend it from its page.">
         <Select id="agent-inbox-lifetime" value={lifetime} onValueChange={setLifetime} disabled={create.isPending} options={lifetimes} />
       </Field>
-      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an inbox key: lets an agent or test read this inbox, and nothing else, over the API or MCP" />
+      <Checkbox checked={withKey} onCheckedChange={setWithKey} disabled={create.isPending} label="Create an API key for this inbox: lets an agent or test read it, and nothing else, over the API or MCP" />
       {type === 'ephemeral' && <Checkbox checked={replies} onCheckedChange={setReplies} disabled={create.isPending} label="Allow replies: up to 20 a day, only to people who wrote to it" />}
     </form>
   </Dialog>
@@ -106,7 +106,7 @@ export function AgentInboxesPage() {
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
       <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
-        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an inbox key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
+        empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an API key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
         columns={[
           // An inbox's card: its address and status, its name or type, then expiry and mail counts.
           { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div>, cardRender: row => <PrivateAddress value={row.address} /> },
@@ -148,6 +148,8 @@ function MessageDialog({ inboxId, messageId, onClose }: { inboxId: string; messa
 
 const factTerms = ['Status', 'Expires', 'Deleted after', 'Delivered', 'Stored', 'Replies', 'Name']
 const permissionWords: Record<string, string> = { read: 'Read mail', modify: 'Mark read, delete', send: 'Reply' }
+/** A key limited to this inbox: an inbox key, or one for these addresses that names only this inbox. */
+const keyFor = (key: ApiKey, inboxId: string) => key.access.inboxId === inboxId || key.access.type !== 'workspace' && key.access.addressIds?.length === 1 && key.access.addressIds[0] === inboxId
 const extensions = [{ value: '86400', label: '1 more day' }, { value: '604800', label: '7 more days' }, { value: 'max', label: 'As long as allowed (30 days from creation)' }]
 export function AgentInboxPage() {
   const { id = '' } = useParams()
@@ -183,16 +185,17 @@ function InboxDetail({ id }: { id: string }) {
   const { canAdminister } = useWorkspaceAccess()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [editing, setEditing] = useState(false)
-  const [revoking, setRevoking] = useState<MailboxKey | null>(null)
+  const [revoking, setRevoking] = useState<ApiKey | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const pagination = useCursorPagination()
   const inbox = useApiQuery(['agent-inbox', id], (api, signal) => api.inboxes.get(id, signal), { interval: 15_000 })
   const [folder,setFolder]=useState('')
   const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
   const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
-  const keys = useApiQuery(['agent-inbox-keys', id], async (api, signal) => (await api.mailboxes.keys(false, signal)).filter(key => key.addressIds?.length === 1 && key.addressIds[0] === id), { enabled: canAdminister })
+  // The inbox's keys from the one API key list (its first 100 active keys).
+  const keys = useApiQuery(['keys', 'inbox', id], async (api, signal) => (await api.keys.list(signal, undefined, false)).filter(key => keyFor(key, id)), { enabled: canAdminister })
   const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, true, id)
-  const revoke = useApiMutation((api, keyId: string) => api.mailboxes.revokeKey(keyId), 'Inbox key revoked')
+  const revoke = useApiMutation((api, keyId: string) => api.keys.revoke(keyId), 'API key revoked')
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
   const next = messages.data?.hasMore ? messages.data.cursor : null
@@ -243,15 +246,15 @@ function InboxDetail({ id }: { id: string }) {
       </>}
     </section>
     {canAdminister && settled && <section className="section stack" aria-labelledby="agent-inbox-keys">
-      <SectionHeader title={<span id="agent-inbox-keys">Keys for this inbox</span>} actions={b?.status === 'active' && <ConnectAgentButton inboxId={id} size="sm" />} />
-      <p className="muted inbox-facts-note">Inbox keys read only this inbox, over the API or MCP. They stop working when it is deleted.</p>
+      <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} actions={b?.status === 'active' && <ConnectAgentButton inboxId={id} size="sm" />} />
+      <p className="muted inbox-facts-note">These API keys read only this inbox, over the API or MCP. They stop working when it is deleted.</p>
       {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data ?? []} rowKey={key => key.id}
         empty={<EmptyState title="No keys" description="Create one with Connect an agent. It comes with a ready setup for OpenCode, Claude Code or Cursor." />}
         columns={[
           // A key's card: its name and when it was last used, what it can do, and Revoke in the row menu.
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: key => key.name },
           { key: 'prefix', label: 'Key', width: '18%', card: 'line', render: key => <code>{key.prefix}…</code> },
-          { key: 'permissions', label: 'Can', card: 'field', render: key => key.permissions.map(p => permissionWords[p] ?? p).join(' · ') },
+          { key: 'permissions', label: 'Can', card: 'field', render: key => key.access.mail.map(p => permissionWords[p] ?? p).join(' · ') },
           { key: 'used', label: 'Last used', align: 'right', card: 'aside', render: key => key.lastUsedAt ? date(key.lastUsedAt) : <span className="muted">Never</span> },
           { key: 'revoke', label: '', align: 'right', width: 100, card: 'end', render: key => <Button variant="danger" size="sm" aria-label={`Revoke ${key.name}`} onClick={() => setRevoking(key)}>Revoke</Button>,
             cardRender: key => <DropdownMenu label={`Actions for ${key.name}`} title={key.name} items={[{ label: 'Revoke key', destructive: true, onSelect: () => setRevoking(key) }]} /> },

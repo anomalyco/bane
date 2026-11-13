@@ -186,6 +186,171 @@
         ],
         "additionalProperties": false
       },
+      "AgentList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Agent"
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
+      "Agent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The sign-in (mcp_…)."
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The label of the client entry that connected (?profile= on its MCP URL). Display only."
+          },
+          "userEmail": {
+            "type": "string",
+            "description": "Who signed the agent in."
+          },
+          "own": {
+            "type": "boolean",
+            "description": "Your own sign-in. Otherwise another member's agent that made agent tokens in this workspace (owners and admins see these)."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "revoked",
+              "expired"
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "send",
+                "manage"
+              ]
+            },
+            "description": "What the sign-in was approved for, before your role in each workspace narrows it."
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Your sign-ins: the default workspace for calls that name none. Null otherwise."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The latest use of the sign-in or of one of its agent tokens here."
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentTokenRecord"
+            },
+            "description": "Short-lived agent tokens it made in this workspace, newest first (at most 20). Revoking the agent revokes them."
+          }
+        },
+        "required": [
+          "id",
+          "clientId",
+          "name",
+          "profile",
+          "userEmail",
+          "own",
+          "status",
+          "permissions",
+          "workspaceId",
+          "createdAt",
+          "lastUsedAt",
+          "tokens"
+        ]
+      },
+      "AgentTokenRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "grantId": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "read",
+                "send",
+                "manage"
+              ]
+            }
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revokedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "grantId",
+          "permissions",
+          "domains",
+          "purpose",
+          "expiresAt",
+          "createdAt",
+          "lastUsedAt",
+          "revokedAt"
+        ]
+      },
       "ConnectionSummary": {
         "type": [
           "object",
@@ -416,64 +581,54 @@
           "purpose"
         ]
       },
-      "AgentTokenRecord": {
+      "ApiKeyAccess": {
         "type": "object",
         "properties": {
-          "id": {
-            "type": "string"
+          "type": {
+            "type": "string",
+            "enum": [
+              "workspace",
+              "addresses",
+              "inbox"
+            ],
+            "description": "workspace: the whole workspace, with permissions and domains. addresses: only mail at receiving addresses. inbox: only one agent inbox; the key stops working when the inbox is deleted."
           },
-          "grantId": {
-            "type": "string"
+          "addressIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "addresses: the receiving addresses it may use, or null for every address including ones added later. inbox: the inbox. Null for workspace keys."
           },
-          "permissions": {
+          "inboxId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "inbox: the agent inbox the key belongs to."
+          },
+          "mail": {
             "type": "array",
             "items": {
               "type": "string",
               "enum": [
                 "read",
                 "send",
-                "manage"
+                "modify",
+                "create"
               ]
-            }
-          },
-          "domains": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "purpose": {
-            "type": "string"
-          },
-          "expiresAt": {
-            "type": "string"
-          },
-          "createdAt": {
-            "type": "string"
-          },
-          "lastUsedAt": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "revokedAt": {
-            "type": [
-              "string",
-              "null"
-            ]
+            },
+            "description": "addresses and inbox: read (mail, events, attachments), send (reply and start conversations from those addresses only), modify (mark read, archive, star, label, delete an inbox), create (create agent inboxes and use the ones it created). Empty for workspace keys."
           }
         },
         "required": [
-          "id",
-          "grantId",
-          "permissions",
-          "domains",
-          "purpose",
-          "expiresAt",
-          "createdAt",
-          "lastUsedAt",
-          "revokedAt"
+          "type",
+          "addressIds",
+          "inboxId",
+          "mail"
         ]
       },
       "ApiKey": {
@@ -494,7 +649,8 @@
                 "send",
                 "manage"
               ]
-            }
+            },
+            "description": "Workspace permissions. Empty for a key limited to addresses or an inbox: see access."
           },
           "domains": {
             "type": "array",
@@ -519,6 +675,16 @@
               "string",
               "null"
             ]
+          },
+          "access": {
+            "$ref": "#/components/schemas/ApiKeyAccess"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise."
           }
         },
         "required": [
@@ -529,7 +695,9 @@
           "prefix",
           "createdAt",
           "lastUsedAt",
-          "revokedAt"
+          "revokedAt",
+          "access",
+          "expiresAt"
         ]
       },
       "CreateApiKey": {
@@ -552,9 +720,7 @@
             },
             "minItems": 1,
             "maxItems": 3,
-            "default": [
-              "send"
-            ]
+            "description": "Workspace keys: read, send and manage. Defaults to send."
           },
           "domains": {
             "type": "array",
@@ -563,13 +729,116 @@
               "pattern": "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$"
             },
             "maxItems": 50,
-            "default": []
+            "description": "Workspace keys: sender domains it is limited to, including their subdomains. Defaults to all."
+          },
+          "access": {
+            "$ref": "#/components/schemas/CreateApiKeyAccess"
           }
         },
         "required": [
           "name"
         ],
         "additionalProperties": false
+      },
+      "CreateApiKeyAccess": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "addresses"
+                ]
+              },
+              "addressIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "maxItems": 500,
+                "description": "Receiving address IDs. Omit for every address, including ones added later. [] with create: only the inboxes the key creates."
+              },
+              "mail": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "send",
+                    "modify",
+                    "create"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 4,
+                "default": [
+                  "read"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "inbox"
+                ]
+              },
+              "inboxId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "An active agent inbox. The key stops working when the inbox is deleted, and when an expiring inbox ends."
+              },
+              "mail": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "send",
+                    "modify"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 3,
+                "default": [
+                  "read"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "inboxId"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "What the key is limited to. Defaults to the workspace. A key for addresses or an inbox takes its permissions in access.mail and can never send from other addresses, read other mail or manage the workspace."
       },
       "ContactRead": {
         "allOf": [
@@ -8880,6 +9149,55 @@
               "line"
             ]
           }
+        ]
+      },
+      "AppPasswordList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "protocols": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "imap",
+                      "smtp"
+                    ]
+                  }
+                },
+                "createdAt": {
+                  "type": "string"
+                },
+                "inboxId": {
+                  "type": "string"
+                },
+                "inboxAddress": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "protocols",
+                "createdAt",
+                "inboxId",
+                "inboxAddress"
+              ]
+            }
+          }
+        },
+        "required": [
+          "data"
         ]
       },
       "Inbox": {
@@ -18228,6 +18546,8 @@
             "secureDashboardSession": []
           }
         ],
+        "deprecated": true,
+        "description": "Deprecated: listAgents lists your connected agents with their last use and the agent tokens they made.",
         "parameters": [
           {
             "schema": {
@@ -18593,6 +18913,8 @@
             "secureDashboardSession": []
           }
         ],
+        "deprecated": true,
+        "description": "Deprecated: revokeAgent.",
         "parameters": [
           {
             "schema": {
@@ -18742,6 +19064,349 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections/resource_123/revoke' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "List connected agents and their agent tokens",
+        "description": "Agent tokens are how agents use Bane: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false",
+              "description": "Also list revoked and expired sign-ins and tokens."
+            },
+            "required": false,
+            "description": "Also list revoked and expired sign-ins and tokens.",
+            "name": "includeInactive",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listAgents } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listAgents({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/agents' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/agents/{id}/revoke": {
+      "post": {
+        "operationId": "revokeAgent",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Revoke a connected agent and its agent tokens",
+        "description": "Your own agent: its sign-in, every agent token it made and everything it created stop working at once (it can sign in again as a new connection). Another member's agent (owners and admins): the agent tokens it made in this workspace are revoked; the sign-in belongs to that person. Dashboard session only.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "revoked": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "tokens"
+                      ],
+                      "description": "agent: the sign-in and everything it made. tokens: its agent tokens in this workspace."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "revoked",
+                    "scope"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { revokeAgent } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await revokeAgent({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/agents/resource_123/revoke' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }
@@ -19624,6 +20289,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer bane_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -19765,12 +20431,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createApiKey } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createApiKey({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"permissions\": [\n      \"send\"\n    ],\n    \"domains\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { createApiKey } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await createApiKey({\n  client,\n  body: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/api-keys' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"permissions\": [\n    \"send\"\n  ],\n  \"domains\": []\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/api-keys' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
           }
         ]
       },
@@ -19790,6 +20456,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox. includeRevoked=false also leaves out keys whose inbox was deleted or whose lease ended.",
         "parameters": [
           {
             "schema": {
@@ -19986,6 +20653,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Revokes any API key, including one limited to addresses or an inbox. Requests with it fail at once, and mail it queued is not sent.",
         "parameters": [
           {
             "schema": {
@@ -48710,6 +49378,150 @@
         ]
       }
     },
+    "/v1/app-passwords": {
+      "get": {
+        "tags": [
+          "Agent inboxes"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "operationId": "listAppPasswords",
+        "summary": "List the active app passwords of every inbox, without their secrets",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppPasswordList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { listAppPasswords } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await listAppPasswords({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/app-passwords' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/inboxes/{id}/app-passwords/{passwordId}": {
       "delete": {
         "tags": [
@@ -55941,8 +56753,9 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Create a key for an agent",
-        "description": "Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.",
+        "deprecated": true,
+        "summary": "Create a key for an agent (deprecated: createApiKey with access)",
+        "description": "Deprecated: use createApiKey with access {type: \"addresses\"} or {type: \"inbox\"}. Scopes a key to specific receiving addresses; omit the filter for every address, including future ones. The secret is returned once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -56094,6 +56907,8 @@
             "secureDashboardSession": []
           }
         ],
+        "deprecated": true,
+        "description": "Deprecated: listApiKeys lists these with every other API key.",
         "parameters": [
           {
             "schema": {
@@ -56272,6 +57087,8 @@
             "secureDashboardSession": []
           }
         ],
+        "deprecated": true,
+        "description": "Deprecated: revokeApiKey revokes any API key.",
         "parameters": [
           {
             "schema": {

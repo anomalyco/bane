@@ -1,18 +1,24 @@
-import { ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Skeleton, SkeletonText, TableSkeleton, type SkeletonColumn } from '../../components/ui'
+import { Button, Checkbox, ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
 import './api-keys.css'
 import { HEADERS_HINT } from './webhook-headers'
+import { KeysGuide } from './keys-guide'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
+/** The API keys page's type filter: every credential, or one of its three types. */
+export const keyTypes = [{ value: 'all', label: 'All' }, { value: 'api', label: 'API keys' }, { value: 'agent', label: 'Agent tokens' }, { value: 'app', label: 'App passwords' }] as const
+export type KeyTypeFilter = typeof keyTypes[number]['value']
 export const settingsColumns = {
-  // A key's card: its name, what it can do, then its prefix and last use; Revoke is in the row's menu.
+  // A credential's card: its name and type, what it can do, then its prefix and last use (or when it expires); Revoke
+  // is in the row's menu.
   keys: [
-    { key: 'name', label: 'Name', width: '26%', skeleton: twoLines, card: 'title' },
-    { key: 'access', label: 'Access', width: '32%', skeleton: twoLines, card: 'line' },
-    { key: 'prefix', label: 'Key prefix', width: '18%', card: 'line' },
-    { key: 'last', label: 'Last used', card: 'inline' },
+    { key: 'name', label: 'Name', width: '24%', skeleton: twoLines, card: 'title' },
+    { key: 'type', label: 'Type', width: '12%', card: 'aside' },
+    { key: 'access', label: 'Access', width: '30%', skeleton: twoLines, card: 'line' },
+    { key: 'prefix', label: 'Key prefix', width: '13%', card: 'hide' },
+    { key: 'last', label: 'Last used', card: 'line' },
     { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} />, card: 'end' },
   ],
   // A domain's card: its name and sending status, then the host it receives at (or Off). Every cell is one line.
@@ -129,12 +135,17 @@ export function DomainDetailSkeleton() {
   </LoadingRegion>
 }
 
+// The API keys header, inert while the page loads: the same controls, so nothing in it moves when they come alive.
+function KeysHeaderActions() {
+  return <><Checkbox label="Show inactive" checked={false} onCheckedChange={() => {}} disabled /><Button variant="primary" disabled>Create key</Button></>
+}
+
 export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 'domains' | 'domain' | 'settings' | 'webhook'; isNew?: boolean }) {
   const { regionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={89} /></>} /><div className="keys-sections"><section className="section stack"><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><KeysGuide /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
   return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

@@ -137,7 +137,7 @@ export const guides: Guide[] = [
         <p>Past its limit (200 messages or 25 MiB by default) new mail is held the same way. Bane pulls one-time codes and links out of each message. An inbox can reply only to people who wrote to it, if replies were allowed when it was created.</p>
       </Section>
       <Section title="Create one">
-        <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an inbox key</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
+        <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
         <Code label="create inbox example">{`curl --request POST "$BANE/v1/inboxes" \\\n  --header "Authorization: Bearer $BANE_API_KEY" \\\n  --header 'Content-Type: application/json' \\\n  --data '{"name":"Sign-up test","ttlSeconds":3600,"credential":{"name":"Sign-up test key","permissions":["read"]}}'`}</Code>
         <p>Then wait for mail with <Link to="/docs/api/listInboxMessages">listInboxMessages</Link> (or the MCP tool <code>waitForMessage</code>), and delete the inbox with <Link to="/docs/api/deleteInbox">deleteInbox</Link> when you’re done.</p>
       </Section>
@@ -149,15 +149,15 @@ export const guides: Guide[] = [
       <Section title="Two ways to connect">
         <Table head={['', 'What the agent can reach', 'Set up']} rows={[
           [<strong key="a">Sign in as you</strong>, 'What you approve in the browser: read, send or full access. It signs in with your Anomaly account (Google); choose its workspace and receiving tools in Settings → Account.', 'The config below, then sign in from your client.'],
-          [<strong key="b">One agent inbox</strong>, 'Only that inbox: read its mail and, if allowed, reply. Nothing else in the workspace.', <Link key="c" to="/api-keys?connect=1">Connect an agent</Link>],
+          [<strong key="b">One agent inbox</strong>, 'Only that inbox, with an API key for it: read its mail and, if allowed, reply. Nothing else in the workspace.', <Link key="c" to="/api-keys?connect=1">Connect an agent</Link>],
         ]} />
-        <p>Every connection is listed in <Link to="/api-keys">API keys</Link>: sign-ins under <strong>Connected agents</strong>, inbox keys with the other keys. Revoke one there, or an inbox key from its inbox’s page.</p>
+        <p>Both are listed in <Link to="/api-keys">API keys</Link>: an agent signed in as you as an <strong>agent token</strong>, with the short-lived tokens it made, and an inbox’s key as an <strong>API key</strong>. Revoke either there, or an inbox’s key from its page.</p>
       </Section>
       <McpSetup chooseAccess />
     </>,
   },
   {
-    id: 'keys', title: 'Keys and tokens', summary: 'API keys, inbound keys, inbox keys, agent sign-ins, agent tokens and app passwords.',
+    id: 'keys', title: 'Keys and tokens', summary: 'API keys, agent tokens and app passwords.',
     body: () => <>
       <Section title="Which one do I need?">
         <Table head={['Credential', 'What it does', 'Where']} rows={credentials.map(c => [<strong key="n">{c.name}</strong>, c.line, c.where])} />

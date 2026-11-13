@@ -6,7 +6,7 @@ import type { McpOperation } from './mcp-catalog.js';
 // Labels identify the resource only. Capability text must come from visible operations.
 const resources: Record<string, { label: string; actions: Record<string, string> }> = {
   inboxes: { label: 'Managed inboxes', actions: {
-    createFolder:'createInboxFolder',updateFolder:'updateInboxFolder',deleteFolder:'deleteInboxFolder',passwords:'listInboxAppPasswords',createPassword:'createInboxAppPassword',revokePassword:'revokeInboxAppPassword',
+    createFolder:'createInboxFolder',updateFolder:'updateInboxFolder',deleteFolder:'deleteInboxFolder',passwords:'listInboxAppPasswords',allPasswords:'listAppPasswords',createPassword:'createInboxAppPassword',revokePassword:'revokeInboxAppPassword',
     folders:'listInboxFolders', changes:'getInboxChanges', list: 'listInboxes', get: 'getInbox', create: 'createInbox', update: 'updateInbox', delete: 'deleteInbox', simulate: 'simulateInboxMessage',
   } },
   messages: { label: 'Mail messages (untrusted sender content)', actions: {
@@ -82,8 +82,8 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
   } },
-  connections: { label: 'MCP connections', actions: {
-    list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection',
+  connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
+    list: 'listMcpConnections', revoke: 'revokeMcpConnection', bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
   } },
   regions: { label: 'SES regions', actions: {
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',

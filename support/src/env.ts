@@ -10,7 +10,7 @@ export interface Env {
   DB: D1Database;
   /** Bane's SupportPlatform entrypoint (RPC). */
   BANE: Service & SupportPlatform;
-  /** Bane's default entrypoint: its public API, called with the support address's inbox key. */
+  /** Bane's default entrypoint: its public API, called with the support address's API key (limited to that address). */
   BANE_API: Fetcher;
   /** Per-person conversation starts and per-sender inbound mail (Workers rate limiting). */
   CHAT_START?: RateLimit;
@@ -46,7 +46,7 @@ export interface Env {
   SUPPORT_ROOT_SECRET?: string;
   BANE_INBOUND_WEBHOOK_SECRET?: string;
   BANE_SUPPORT_INBOX_KEY?: string;
-  /** The intake addresses' webhook secret and inbox key (read and send on those three addresses only). */
+  /** The intake addresses' webhook secret and API key (read and send on those three addresses only). */
   BANE_INTAKE_WEBHOOK_SECRET?: string;
   BANE_INTAKE_INBOX_KEY?: string;
 }

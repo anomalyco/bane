@@ -27,7 +27,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
     // Self-hosted domain reads call SES for every identity (the list refreshes by default), so only hosted workspaces warm it.
     case '/domains': return multiTenant && canAdminister ? [queries.domains(regionId, 1)] : []
-    case '/api-keys': return canAdminister ? [queries.keys(undefined, false), queries.agentTokens(false), queries.mcpConnections(), queries.mailboxKeys(false), queries.inboundAddressOptions()] : []
+    case '/api-keys': return canAdminister ? [queries.keys(undefined, false), queries.agents(false), queries.appPasswords(), queries.inboundAddressOptions()] : []
     // Self-hosted settings load their own region and workspace data; hosted memberships come with the session (/v1/me).
     case '/settings': return !multiTenant || !canAdminister ? [] : [queries.connection(), queries.webhooks(), queries.workspaceMembers(), queries.workspaceInvitations()]
     default: return []

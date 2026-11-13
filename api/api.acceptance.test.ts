@@ -3361,6 +3361,46 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(revokedConnection.status, 403, diagnostic(revokedConnection));
   });
 
+  test('agents: a sign-in and the agent tokens it made are one entry; revoking it ends them all; others see and revoke only what they may', async t => {
+    const db = await fixtureDatabase(t);
+    const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;
+    const minted = await callTool(issued.token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 300, domains: [], purpose: 'Agent list fixture' }, confirm: true }, 201);
+    secrets.add(minted.token);
+    ok(await http('GET', '/v1/me', minted.token));
+    const agents = async (query = '') => ok(await http('GET', `/v1/agents${query}`, MANAGER)).data as Json[];
+    const mine = (await agents()).find(a => a.id === agentId);
+    assert.ok(mine, 'The signed-in agent is listed.');
+    assert.deepEqual([mine.own, mine.status, mine.userEmail, mine.tokens.map((x: Json) => [x.id, x.purpose, x.revokedAt])], [true, 'active', AUTH_EMAIL, [[minted.id, 'Agent list fixture', null]]]);
+    assert.ok(mine.permissions.includes('manage') && mine.lastUsedAt, 'Its access and last use are shown.');
+    // Another member's agent with a token in this workspace (self-hosted MCP admits only allowlisted owners, so its rows
+    // are written directly): owners and admins see it and its tokens here; a member sees only their own.
+    const member = await sessionFixture(t);
+    await db.query("UPDATE workspace_members SET role = 'member' WHERE user_id = $1 AND workspace_id = 'default'", [member.userId]);
+    const otherAgent = `mcp_at_${randomUUID().replaceAll('-', '')}`, otherToken = `agt_${randomUUID().replaceAll('-', '')}`;
+    await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at) VALUES($1,$2,$3,$3,'fixture-member-client','{read,send}',now()+interval '1 hour',0)", [otherAgent, process.env.ACCOUNT_ISSUER, member.userId]);
+    await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES($1,'default',$2,'["read"]','[]','Member script',now()+interval '1 hour')`, [otherToken, otherAgent]);
+    cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id = $1', [otherToken]); });
+    const theirs = (await agents()).find(a => a.id === otherAgent);
+    assert.deepEqual([theirs?.own, theirs?.userEmail, theirs?.workspaceId, theirs?.tokens.map((x: Json) => x.id)], [false, member.email, null, [otherToken]]);
+    // An owner revokes another member's agent tokens here; the sign-in stays theirs, and so do its tokens in another workspace.
+    const elsewhere = unique('agents-ws'), farToken = `agt_${randomUUID().replaceAll('-', '')}`;
+    await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [elsewhere]);
+    await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES($1,$2,$3,'["read"]','[]','Elsewhere',now()+interval '1 hour')`, [farToken, elsewhere, otherAgent]);
+    cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id = $1', [farToken]); await db.query('DELETE FROM workspaces WHERE id = $1', [elsewhere]); });
+    assert.deepEqual((await agents()).find(a => a.id === otherAgent)?.tokens.map((x: Json) => x.id), [otherToken], 'Only its tokens in this workspace are listed.');
+    assert.equal(ok(await http('POST', `/v1/agents/${otherAgent}/revoke`, MANAGER)).scope, 'tokens');
+    assert.deepEqual((await db.query('SELECT t.id, t.revoked_at IS NOT NULL AS ended, g.revoked FROM agent_tokens t JOIN bane_resource_grants g ON g.id = t.grant_id WHERE t.grant_id = $1 ORDER BY t.id = $2 DESC', [otherAgent, otherToken])).rows,
+      [{ id: otherToken, ended: true, revoked: false }, { id: farToken, ended: false, revoked: false }]);
+    error(await http('POST', '/v1/agents/mcp_at_missing/revoke', MANAGER), 404, 'NOT_FOUND');
+    // Revoking your own agent ends the sign-in and every token it made.
+    assert.equal(ok(await http('POST', `/v1/agents/${agentId}/revoke`, MANAGER)).scope, 'agent');
+    error(await http('GET', '/v1/me', minted.token), 401, 'AUTH_INVALID');
+    assert.equal((await http('POST', '/mcp', issued.token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).status, 403);
+    assert.ok(!(await agents()).some(a => a.id === agentId), 'A revoked agent is inactive.');
+    const ended = (await agents('?includeInactive=true')).find(a => a.id === agentId);
+    assert.deepEqual([ended?.status, ended?.tokens.map((x: Json) => x.id === minted.id && x.revokedAt !== null)], ['revoked', [true]]);
+  });
+
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
@@ -15321,6 +15361,148 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(objects.has(orphan),false);
     });
   });
+  test('API keys: every earlier key kind is an API key with exactly its old access, an inbox key ends with its inbox, and other workspaces are denied', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local, request }) => {
+      const wid = runtime.config.workspaceId, host = `${unique('keys')}.example`, domain = unique('mdom');
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [domain, wid, host, REGION]);
+      const address = async (name: string) => ok(await local('POST', '/v1/inbound/addresses', { address: `${name}@${host}` }), 201);
+      const inbox = async (body: Json = {}) => ok(await local('POST', '/v1/inboxes', body), 201);
+      const [a, b] = [await address('alpha'), await address('beta')];
+      const [ephemeral, kept, stray, later] = [await inbox(), await inbox({ type: 'persistent', localPart: 'kept' }), await inbox(), await inbox()];
+      const hex = () => randomUUID().replaceAll('-', ''), hash = (value: string) => createHash('sha256').update(value).digest('hex');
+      // Each kind as its rows exist before 305: an inbound key, an inbox key, a provisioning key and a connection key.
+      const earlier: Record<string, { prefix: string; ids: string[] | null; mail: string[]; expires?: string }> = {
+        every: { prefix: 'os_mbx_', ids: null, mail: ['read', 'send', 'modify'] },
+        chosen: { prefix: 'bane_mbx_', ids: [a.id], mail: ['read'] },
+        reply: { prefix: 'bane_mbx_', ids: [a.id], mail: ['read', 'send'] },
+        provisioning: { prefix: 'bane_mbx_', ids: [], mail: ['create', 'read', 'modify'] },
+        inbox: { prefix: 'bane_mbx_', ids: [ephemeral.id], mail: ['read'], expires: ephemeral.deleteAfter },
+        persistent: { prefix: 'bane_mbx_', ids: [kept.id], mail: ['read', 'send'] },
+        // createInboundKey on one ephemeral inbox set no expiry, so deleting the inbox never ended it.
+        stray: { prefix: 'bane_mbx_', ids: [stray.id], mail: ['read'] },
+        connection: { prefix: 'bane_mbx_', ids: [later.id, a.id], mail: ['read'] },
+      };
+      const keys: Record<string, { id: string; secret: string }> = {};
+      for (const [name, k] of Object.entries(earlier)) {
+        const secret = k.prefix + hex() + hex(), id = `mbk_${hex()}`;
+        await db.query('INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions,expires_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)',
+          [id, wid, name, hash(secret), secret.slice(0, 14), k.ids === null ? null : JSON.stringify(k.ids), JSON.stringify(k.mail), k.expires ?? null]);
+        keys[name] = { id, secret };
+      }
+      const legacy = { id: `key_${hex()}`, secret: `os_live_${hex()}${hex()}` };
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'legacy',$3,$4,'["read","send","manage"]','[]')`, [legacy.id, wid, hash(legacy.secret), legacy.secret.slice(0, 14)]);
+      // 305's backfill on those rows: exactly the keys the old inbox_end ended belong to their inbox.
+      await db.query('UPDATE mailbox_keys SET inbox_id = NULL WHERE workspace_id = $1', [wid]);
+      const backfill = String(await readFile(new URL('./migrations/305_key_consolidation.sql', import.meta.url))).match(/^UPDATE mailbox_keys k SET inbox_id[\s\S]*?;$/m)![0];
+      await db.query(backfill);
+      const tied = new Map((await db.query('SELECT id, inbox_id FROM mailbox_keys WHERE workspace_id = $1', [wid])).rows.map(r => [r.id, r.inbox_id]));
+      assert.deepEqual(Object.fromEntries(Object.entries(keys).map(([name, k]) => [name, tied.get(k.id)])),
+        { every: null, chosen: null, reply: null, provisioning: null, inbox: ephemeral.id, persistent: kept.id, stray: null, connection: null });
+
+      // One list: each is an API key whose access says what it could already do, and no workspace permissions.
+      const access = (type: string, addressIds: string[] | null, inboxId: string | null, mail: string[]) => ({ type, addressIds, inboxId, mail });
+      const expected: Record<string, Json> = {
+        every: access('addresses', null, null, ['read', 'send', 'modify']), chosen: access('addresses', [a.id], null, ['read']), reply: access('addresses', [a.id], null, ['read', 'send']),
+        provisioning: access('addresses', [], null, ['create', 'read', 'modify']), inbox: access('inbox', [ephemeral.id], ephemeral.id, ['read']),
+        persistent: access('inbox', [kept.id], kept.id, ['read', 'send']), stray: access('addresses', [stray.id], null, ['read']), connection: access('addresses', [later.id, a.id], null, ['read']),
+      };
+      const rows: Json[] = ok(await local('GET', '/v1/api-keys?limit=100')).data, listed = { get: (id: string): Json => rows.find(k => k.id === id) ?? assert.fail(`${id} is not listed`) };
+      for (const [name, k] of Object.entries(keys)) {
+        const row = listed.get(k.id);
+        assert.deepEqual([row.access, row.permissions, row.domains, row.prefix], [expected[name], [], [], k.secret.slice(0, 14)], name);
+      }
+      assert.equal(listed.get(keys.inbox!.id).expiresAt, ephemeral.deleteAfter);
+      assert.deepEqual([listed.get(legacy.id).access, listed.get(legacy.id).permissions, listed.get(legacy.id).expiresAt], [access('workspace', null, null, []), ['read', 'send', 'manage'], null]);
+      ok(await request('GET', '/v1/api-keys', legacy.secret));
+
+      const as = (name: string) => keys[name]!.secret;
+      const read = (secret: string, id: string) => request('GET', `/v1/inbound/addresses/${id}`, secret);
+      const thread = (secret: string, body: Json) => request('POST', '/v1/inbound/threads', secret, { to: ['someone@example.com'], subject: 'Hello', text: 'Hello', ...body });
+      // The bearer prefix keeps every limited key out of the workspace: no sending, keys, domains, passwords or identity.
+      for (const name of Object.keys(keys)) {
+        for (const [method, path, body] of [['GET', '/v1/me'], ['GET', '/v1/api-keys'], ['POST', '/v1/api-keys', { name: 'escalate', permissions: ['manage'] }], ['GET', '/v1/domains'], ['GET', '/v1/app-passwords'],
+          ['POST', '/v1/emails/send', { from: `alpha@${host}`, to: ['someone@example.com'], subject: 'x', text: 'x' }]] as const) error(await request(method, path, as(name), body), 401, 'AUTH_INVALID');
+        // Nor does it administer receiving.
+        error(await request('POST', '/v1/inbound/keys', as(name), { name: 'escalate', permissions: ['read'] }), 403, 'ADMIN_REQUIRED');
+        error(await request('GET', '/v1/inbound/webhooks', as(name)), 403, 'ADMIN_REQUIRED');
+      }
+      // Addresses: only the chosen ones, read or read and reply, never from another address.
+      ok(await read(as('chosen'), a.id)); error(await read(as('chosen'), b.id), 404, 'NOT_FOUND');
+      error(await thread(as('chosen'), { addressId: a.id }), 403, 'PERMISSION_DENIED');
+      error(await thread(as('reply'), { addressId: b.id }), 404, 'NOT_FOUND');
+      error(await thread(as('reply'), { addressId: a.id, from: `beta@${host}` }), 403, 'FROM_NOT_ALLOWED');
+      // Every address includes ones added later; a chosen-address key doesn't.
+      const gamma = await address('gamma');
+      ok(await read(as('every'), gamma.id)); error(await read(as('chosen'), gamma.id), 404, 'NOT_FOUND');
+      // A provisioning key creates inboxes and sees only those.
+      const made = ok(await request('POST', '/v1/inboxes', as('provisioning'), {}), 201);
+      assert.deepEqual(ok(await request('GET', '/v1/inboxes', as('provisioning'))).data.map((x: Json) => x.id), [made.id]);
+      error(await read(as('provisioning'), a.id), 404, 'NOT_FOUND');
+      // One inbox: that inbox only, and deleting it ends the key at once. Persistent inboxes too.
+      ok(await request('GET', `/v1/inboxes/${ephemeral.id}`, as('inbox'))); error(await request('GET', `/v1/inboxes/${kept.id}`, as('inbox')), 404, 'NOT_FOUND');
+      ok(await request('GET', `/v1/inboxes/${kept.id}`, as('persistent')));
+      for (const [name, box] of [['inbox', ephemeral], ['persistent', kept]] as const) {
+        ok(await local('DELETE', `/v1/inboxes/${box.id}`), 202);
+        error(await request('GET', '/v1/inboxes', as(name)), 401, 'AUTH_INVALID');
+      }
+      const active = ok(await local('GET', '/v1/api-keys?limit=100&includeRevoked=false')).data.map((k: Json) => k.id);
+      assert.ok(!active.includes(keys.inbox!.id) && !active.includes(keys.persistent!.id) && active.includes(keys.every!.id), 'An ended inbox key is not active.');
+      // Keys that never belonged to one inbox keep working when an inbox they could see is deleted.
+      for (const box of [stray, later]) ok(await local('DELETE', `/v1/inboxes/${box.id}`), 202);
+      assert.deepEqual(ok(await request('GET', '/v1/inboxes', as('stray'))).data, []);
+      ok(await read(as('connection'), a.id));
+
+      // The same keys through createApiKey: an address key, and an inbox key that ends with its inbox and its lease.
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Support agent', access: { type: 'addresses', addressIds: [a.id], mail: ['read', 'send'] } }), 201);
+      assert.match(reader.secret, /^bane_mbx_[0-9a-f]{64}$/);
+      assert.deepEqual([reader.access, reader.permissions, reader.domains, reader.expiresAt], [access('addresses', [a.id], null, ['read', 'send']), [], [], null]);
+      ok(await read(reader.secret, a.id)); error(await read(reader.secret, b.id), 404, 'NOT_FOUND');
+      error(await thread(reader.secret, { addressId: a.id, from: `beta@${host}` }), 403, 'FROM_NOT_ALLOWED');
+      error(await request('GET', '/v1/me', reader.secret), 401, 'AUTH_INVALID');
+      const box = await inbox();
+      const agent = ok(await local('POST', '/v1/api-keys', { name: 'Inbox agent', access: { type: 'inbox', inboxId: box.id } }), 201);
+      assert.deepEqual([agent.access, agent.expiresAt], [access('inbox', [box.id], box.id, ['read']), box.deleteAfter]);
+      ok(await request('GET', `/v1/inboxes/${box.id}`, agent.secret)); error(await read(agent.secret, a.id), 404, 'NOT_FOUND');
+      ok(await local('DELETE', `/v1/inboxes/${box.id}`), 202);
+      error(await request('GET', '/v1/inboxes', agent.secret), 401, 'AUTH_INVALID');
+      // The deprecated createInboundKey makes the same key, listed with the rest.
+      const alias = ok(await local('POST', '/v1/inbound/keys', { name: 'Alias', addressIds: [a.id], permissions: ['read'] }), 201);
+      assert.deepEqual(ok(await local('GET', '/v1/api-keys?limit=100')).data.find((k: Json) => k.id === alias.id).access, access('addresses', [a.id], null, ['read']));
+      for (const [body, code, field] of [
+        [{ access: { type: 'inbox', inboxId: a.id } }, 'UNKNOWN_INBOX', 'access.inboxId'], [{ access: { type: 'inbox', inboxId: box.id } }, 'UNKNOWN_INBOX', 'access.inboxId'],
+        [{ access: { type: 'inbox', inboxId: kept.id, mail: ['create'] } }, 'VALIDATION_FAILED', 'access.mail.0'], [{ permissions: ['read'], access: { type: 'addresses' } }, 'VALIDATION_FAILED', 'permissions'],
+        [{ access: { type: 'addresses', addressIds: [] } }, 'ADDRESS_SCOPE_REQUIRED', 'access.addressIds'], [{ access: { type: 'addresses', mail: ['create'] } }, 'ADDRESS_SCOPE_REQUIRED', 'access.addressIds'],
+      ] as const) assert.equal(error(await local('POST', '/v1/api-keys', { name: 'Invalid', ...body }), 422, code).field, field, code);
+      // Only an unrestricted manager creates them: not a send key, not a domain-limited manage key.
+      const sender = ok(await local('POST', '/v1/api-keys', { name: 'Sender', permissions: ['send'] }), 201).secret;
+      const domainManager = ok(await local('POST', '/v1/api-keys', { name: 'Domain manager', permissions: ['manage'], domains: [host] }), 201).secret;
+      for (const secret of [sender, domainManager]) error(await request('POST', '/v1/api-keys', secret, { name: 'x', access: { type: 'addresses', addressIds: [a.id] } }), 403, 'PERMISSION_DENIED');
+      const managerKey = ok(await local('POST', '/v1/api-keys', { name: 'Manager', permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.deepEqual(ok(await request('POST', '/v1/api-keys', managerKey, { name: 'From a key', access: { type: 'addresses', addressIds: [b.id] } }), 201).access, access('addresses', [b.id], null, ['read']));
+      // revokeApiKey ends any key, once.
+      ok(await local('POST', `/v1/api-keys/${reader.id}/revoke`)); ok(await local('POST', `/v1/api-keys/${reader.id}/revoke`));
+      error(await read(reader.secret, a.id), 401, 'AUTH_INVALID');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM audit_events WHERE workspace_id = $1 AND action = 'api_key.revoke' AND target_id = $2", [wid, reader.id])).rows[0].n, 1);
+
+      // App passwords: every inbox's in one list, for an unrestricted manager only.
+      const vault = await inbox({ type: 'persistent', localPart: 'vault' });
+      const password = ok(await local('POST', `/v1/inboxes/${vault.id}/app-passwords`, { name: 'Mail app', protocols: ['imap', 'smtp'] }), 201);
+      assert.deepEqual(ok(await local('GET', '/v1/app-passwords')).data.map((p: Json) => [p.id, p.name, p.inboxId, p.inboxAddress, p.protocols]), [[password.id, 'Mail app', vault.id, vault.address, ['imap', 'smtp']]]);
+      error(await request('GET', '/v1/app-passwords', sender), 403, 'ADMIN_REQUIRED');
+
+      // Another workspace: its keys are never listed, revoked or usable here, and its addresses never chosen.
+      const other = unique('keys-ws'), otherDomain = unique('mdom'), foreign = { id: `mbx_${hex()}`, key: `mbk_${hex()}`, secret: `bane_mbx_${hex()}${hex()}` };
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [otherDomain, other, `${other}.example`, REGION]);
+      await db.query('INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES($1,$2,$3,$4)', [foreign.id, other, otherDomain, `team@${other}.example`]);
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'foreign',$3,$4,$5::jsonb,'["read"]')`, [foreign.key, other, hash(foreign.secret), foreign.secret.slice(0, 14), JSON.stringify([foreign.id])]);
+      assert.ok(!ok(await local('GET', '/v1/api-keys?limit=100')).data.some((k: Json) => k.id === foreign.key));
+      error(await local('POST', `/v1/api-keys/${foreign.key}/revoke`), 404, 'NOT_FOUND');
+      error(await local('POST', '/v1/api-keys', { name: 'Foreign', access: { type: 'addresses', addressIds: [foreign.id] } }), 422, 'MAILBOX_NOT_FOUND');
+      error(await read(as('every'), foreign.id), 404, 'NOT_FOUND'); error(await read(foreign.secret, a.id), 404, 'NOT_FOUND');
+      assert.equal((await db.query('SELECT revoked_at FROM mailbox_keys WHERE id = $1', [foreign.key])).rows[0].revoked_at, null);
+    });
+  });
   test('agent inbox contracts and storage budgets',async t=>{
     await simulatedSesFixture(t,async({db,runtime,local,request,jobs})=>{
       const {mailboxIngestJobs,acceptInboundNotification}=await import('./src/mailbox-ingest.js'),{S3Client}=await import('@aws-sdk/client-s3'),{ingestInput}=await import('./src/mailbox-ingest-input.js'),{sql}=await import('drizzle-orm');
@@ -20360,8 +20542,10 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     // Inbound keys; a failed revoke writes nothing.
     const key = await call('POST', '/v1/inbound/keys', { name: 'Audit agent', permissions: ['read'] }, 201);
     secrets.push(key.body.secret);
-    assert.deepEqual((await audited(key, 'inbox_key.create', ['inbox_key', key.body.id])).summary.after, { name: 'Audit agent', permissions: ['read'] });
-    await audited(await call('POST', `/v1/inbound/keys/${key.body.id}/revoke`), 'inbox_key.revoke', ['inbox_key', key.body.id]);
+    // An inbound key is an API key limited to addresses: recorded as one, with what it may do.
+    const access = { type: 'addresses', mail: ['read'] }; // Audit summaries drop nulls: no addressIds is every address.
+    assert.deepEqual((await audited(key, 'api_key.create', ['api_key', key.body.id])).summary.after, { name: 'Audit agent', access });
+    assert.deepEqual((await audited(await call('POST', `/v1/inbound/keys/${key.body.id}/revoke`), 'api_key.revoke', ['api_key', key.body.id])).summary.before, { name: 'Audit agent', access });
     const missing = await local('POST', `/v1/inbound/keys/${key.body.id}/revoke`, undefined, 'live');
     error(missing, 404); assert.deepEqual(await rows(missing), []);
 

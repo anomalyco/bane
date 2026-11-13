@@ -58,6 +58,61 @@ export type McpConnectionBinding = {
     receiving?: boolean;
 };
 
+export type AgentList = {
+    data: Array<Agent>;
+};
+
+export type Agent = {
+    /**
+     * The sign-in (mcp_…).
+     */
+    id: string;
+    clientId: string;
+    name: string | null;
+    /**
+     * The label of the client entry that connected (?profile= on its MCP URL). Display only.
+     */
+    profile: string | null;
+    /**
+     * Who signed the agent in.
+     */
+    userEmail: string;
+    /**
+     * Your own sign-in. Otherwise another member's agent that made agent tokens in this workspace (owners and admins see these).
+     */
+    own: boolean;
+    status: 'active' | 'revoked' | 'expired';
+    /**
+     * What the sign-in was approved for, before your role in each workspace narrows it.
+     */
+    permissions: Array<'read' | 'send' | 'manage'>;
+    /**
+     * Your sign-ins: the default workspace for calls that name none. Null otherwise.
+     */
+    workspaceId: string | null;
+    createdAt: string;
+    /**
+     * The latest use of the sign-in or of one of its agent tokens here.
+     */
+    lastUsedAt: string | null;
+    /**
+     * Short-lived agent tokens it made in this workspace, newest first (at most 20). Revoking the agent revokes them.
+     */
+    tokens: Array<AgentTokenRecord>;
+};
+
+export type AgentTokenRecord = {
+    id: string;
+    grantId: string;
+    permissions: Array<'read' | 'send' | 'manage'>;
+    domains: Array<string>;
+    purpose: string;
+    expiresAt: string;
+    createdAt: string;
+    lastUsedAt: string | null;
+    revokedAt: string | null;
+};
+
 /**
  * The current workspace's hosted sending connection; null when self-hosted.
  */
@@ -136,33 +191,76 @@ export type AgentToken = {
     purpose: string;
 };
 
-export type AgentTokenRecord = {
-    id: string;
-    grantId: string;
-    permissions: Array<'read' | 'send' | 'manage'>;
-    domains: Array<string>;
-    purpose: string;
-    expiresAt: string;
-    createdAt: string;
-    lastUsedAt: string | null;
-    revokedAt: string | null;
+export type ApiKeyAccess = {
+    /**
+     * workspace: the whole workspace, with permissions and domains. addresses: only mail at receiving addresses. inbox: only one agent inbox; the key stops working when the inbox is deleted.
+     */
+    type: 'workspace' | 'addresses' | 'inbox';
+    /**
+     * addresses: the receiving addresses it may use, or null for every address including ones added later. inbox: the inbox. Null for workspace keys.
+     */
+    addressIds: Array<string> | null;
+    /**
+     * inbox: the agent inbox the key belongs to.
+     */
+    inboxId: string | null;
+    /**
+     * addresses and inbox: read (mail, events, attachments), send (reply and start conversations from those addresses only), modify (mark read, archive, star, label, delete an inbox), create (create agent inboxes and use the ones it created). Empty for workspace keys.
+     */
+    mail: Array<'read' | 'send' | 'modify' | 'create'>;
 };
 
 export type ApiKey = {
     id: string;
     name: string;
+    /**
+     * Workspace permissions. Empty for a key limited to addresses or an inbox: see access.
+     */
     permissions: Array<'read' | 'send' | 'manage'>;
     domains: Array<string>;
     prefix: string;
     createdAt: string;
     lastUsedAt: string | null;
     revokedAt: string | null;
+    access: ApiKeyAccess;
+    /**
+     * When a key limited to an expiring inbox stops working (the inbox's deletion time). Null otherwise.
+     */
+    expiresAt: string | null;
 };
 
 export type CreateApiKey = {
     name: string;
+    /**
+     * Workspace keys: read, send and manage. Defaults to send.
+     */
     permissions?: Array<'read' | 'send' | 'manage'>;
+    /**
+     * Workspace keys: sender domains it is limited to, including their subdomains. Defaults to all.
+     */
     domains?: Array<string>;
+    access?: CreateApiKeyAccess;
+};
+
+/**
+ * What the key is limited to. Defaults to the workspace. A key for addresses or an inbox takes its permissions in access.mail and can never send from other addresses, read other mail or manage the workspace.
+ */
+export type CreateApiKeyAccess = {
+    type: 'workspace';
+} | {
+    type: 'addresses';
+    /**
+     * Receiving address IDs. Omit for every address, including ones added later. [] with create: only the inboxes the key creates.
+     */
+    addressIds?: Array<string>;
+    mail?: Array<'read' | 'send' | 'modify' | 'create'>;
+} | {
+    type: 'inbox';
+    /**
+     * An active agent inbox. The key stops working when the inbox is deleted, and when an expiring inbox ends.
+     */
+    inboxId: string;
+    mail?: Array<'read' | 'send' | 'modify'>;
 };
 
 export type ContactRead = Contact & {
@@ -2530,6 +2628,17 @@ export type RitualTimelineStep = {
 } | {
     kind: 'return';
     line: number;
+};
+
+export type AppPasswordList = {
+    data: Array<{
+        id: string;
+        name: string;
+        protocols: Array<'imap' | 'smtp'>;
+        createdAt: string;
+        inboxId: string;
+        inboxAddress: string;
+    }>;
 };
 
 export type Inbox = {
@@ -5701,6 +5810,142 @@ export type RevokeMcpConnectionResponses = {
 };
 
 export type RevokeMcpConnectionResponse = RevokeMcpConnectionResponses[keyof RevokeMcpConnectionResponses];
+
+export type ListAgentsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Also list revoked and expired sign-ins and tokens.
+         */
+        includeInactive?: 'true' | 'false';
+    };
+    url: '/v1/agents';
+};
+
+export type ListAgentsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListAgentsError = ListAgentsErrors[keyof ListAgentsErrors];
+
+export type ListAgentsResponses = {
+    /**
+     * Success
+     */
+    200: AgentList;
+};
+
+export type ListAgentsResponse = ListAgentsResponses[keyof ListAgentsResponses];
+
+export type RevokeAgentData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/agents/{id}/revoke';
+};
+
+export type RevokeAgentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RevokeAgentError = RevokeAgentErrors[keyof RevokeAgentErrors];
+
+export type RevokeAgentResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        revoked: true;
+        /**
+         * agent: the sign-in and everything it made. tokens: its agent tokens in this workspace.
+         */
+        scope: 'agent' | 'tokens';
+    };
+};
+
+export type RevokeAgentResponse = RevokeAgentResponses[keyof RevokeAgentResponses];
 
 export type GetCurrentIdentityData = {
     body?: never;
@@ -16930,6 +17175,67 @@ export type CreateInboxAppPasswordResponses = {
 };
 
 export type CreateInboxAppPasswordResponse = CreateInboxAppPasswordResponses[keyof CreateInboxAppPasswordResponses];
+
+export type ListAppPasswordsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/app-passwords';
+};
+
+export type ListAppPasswordsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListAppPasswordsError = ListAppPasswordsErrors[keyof ListAppPasswordsErrors];
+
+export type ListAppPasswordsResponses = {
+    /**
+     * Success
+     */
+    200: AppPasswordList;
+};
+
+export type ListAppPasswordsResponse = ListAppPasswordsResponses[keyof ListAppPasswordsResponses];
 
 export type RevokeInboxAppPasswordData = {
     body?: never;

@@ -12,7 +12,7 @@ import { settingsColumns } from './skeletons'
 // Rows are one line each (53px); a row opens its details (before → after, reason, request ID). The section takes the
 // panel's full width, so values show whole on a desktop; a cell that still runs out of room ends in an ellipsis and
 // shows all of it on hover. An address is never put in that tooltip: it stays masked until it is revealed itself.
-const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'MCP client', agent_token: 'Agent token', inbox_key: 'Inbox key', app_password: 'App password' }
+const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'Agent', agent_token: 'Agent token', inbox_key: 'API key', app_password: 'App password' }
 function Who({ actor }: { actor: AuditEntry['actor'] }) {
   if (actor.type === 'member') return actor.email ? <PrivateAddress value={actor.email} /> : <>{actor.label ?? 'A member'}</>
   // Support reading the workspace under a grant stands out from everything the workspace did itself.
