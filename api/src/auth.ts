@@ -124,10 +124,10 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Dashboard sign-in is not configured for this deployment.');
     }
     if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
-    const { getDashboardActor, requireDashboardOrigin, settleDefaultAccount } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
+    const { getDashboardActor, migrateLegacyCookies, requireDashboardOrigin, settleDefaultAccount } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
     const dashboard = await timed(c,'session-db',()=>getDashboardActor(c.env,c.req.raw.headers));
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
-    settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
+    migrateLegacyCookies(c); settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
     c.set('actor', dashboard);
   }

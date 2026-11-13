@@ -316,7 +316,7 @@ async function measure(browser, job, fx) {
   let page, net;
   const problems = [];
   const work = (async () => {
-    if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `bane.session_token.${slot}` : 'bane.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
+    if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
     await context.addInitScript(probe);
     // Data Saver turns off the shell's idle warm-up of every other sidebar section: in-app clicks then load the next
     // page's code and data cold, and cold loads (apart from Overview, which exercises the warm-up in each pass) measure

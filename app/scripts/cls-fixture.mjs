@@ -186,7 +186,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,'https://account.anoma.ly',$2,now()+interval '2 hours')",[createHash('sha256').update(token).digest('hex'),userId]);
       const cookie = token;
       const call = async (method, path, body, status) => {
-        const r = await fetch(apiOrigin + path, { method, headers: { origin, cookie: `bane.session_token=${encodeURIComponent(cookie)}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+        const r = await fetch(apiOrigin + path, { method, headers: { origin, cookie: `nightmail.session_token=${encodeURIComponent(cookie)}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
         const text = await r.text();
         if (status ? r.status !== status : !r.ok) throw new Error(`CLS seed: ${method} ${path} → ${r.status} ${text.slice(0, 400)}`);
         return text ? JSON.parse(text) : null;
