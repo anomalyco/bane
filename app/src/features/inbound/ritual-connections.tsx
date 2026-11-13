@@ -116,7 +116,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
         </Field>}
       {!editing && type === 'forward' && <>
         <Field label="Ask from" hint="The receiving address that sends the request and the forwards.">
-          <Select value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...(boxes.data ?? []).map(a => ({ value: a.id, label: a.address }))]} />
+          <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...(boxes.data ?? []).map(a => ({ value: a.id, label: a.address }))]} />
         </Field>
         <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: the address is on a domain this workspace verified" />
       </>}
