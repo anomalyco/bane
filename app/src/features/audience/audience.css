@@ -33,7 +33,7 @@
 .audience-list-picker > .ui-input { padding-right: var(--space-32); text-overflow: ellipsis; }
 .audience-list-picker > svg { position: absolute; right: var(--space-12); top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
 .data-toolbar .audience-list-picker.audience-list-filter, .audience-list-picker.audience-count-list { width: 220px; max-width: 100%; flex-shrink: 0; }
-.audience-list-options { position: absolute; inset-inline: 0; top: calc(100% + var(--space-4)); min-width: 220px; max-height: min(280px, 40vh); overflow-y: auto; overscroll-behavior: contain; }
+.audience-list-options { position: absolute; inset-inline: 0; top: calc(100% + var(--space-4)); display: flex; flex-direction: column; min-width: 220px; max-height: min(280px, 40vh); }
 .audience-list-option { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); width: 100%; min-height: var(--control-height); padding: var(--space-4) var(--space-8); border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .audience-list-option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audience-list-option[aria-selected='true'] { background: var(--color-hover); }
