@@ -315,7 +315,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
             <Inspector.Breadcrumb />
             <Inspector.Document>{() => <p className="composer-inspector-hint">Select an image, button, section, column, heading, or paragraph to edit its design.</p>}</Inspector.Document>
             <Inspector.Node />
-            <Inspector.Text>{() => <p className="composer-inspector-hint">Choose the block name above to style the whole block. Use the formatting toolbar for selected text.</p>}</Inspector.Text>
+            <Inspector.Text>{() => <p className="composer-inspector-hint">Choose the block name above to style the whole block, or use the toolbar for selected text.</p>}</Inspector.Text>
           </Inspector.Root>
         </EmailEditor>
       </div>

@@ -26,6 +26,9 @@
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
+// Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
+// sheet on a phone), and the measurement covers the load and the open dialog together.
+//
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
 // cold desktop load, hovering the first few reveals them without anything moving.
@@ -48,10 +51,10 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, dialog }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
-// the router's history. It must land on `path`. `support` opens the support chat first (see above).
+// the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above).
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
@@ -108,6 +111,11 @@ const pages = ids => [
   ['Docs', '/docs', { from: '/' }],
   ['Operator', '/operator', { from: '/' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
+  ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
+  // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
+  ['Overview · UI notes mode', '/', { from: '/logs', notes: true }],
+  // An operator outside UI_NOTES_SUBJECTS with the mode forced on: no tab, toggle, pill or pins, and the API says 404.
+  ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
   ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
@@ -124,10 +132,11 @@ const pages = ids => [
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   ['Support chat', '/logs', { from: '/', support: true }],
+  ['Overview · sending limits dialog', '/', { dialog: 'How limits work' }],
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat']);
+const phonePages = new Set(['Overview', 'Overview · range', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · sending limits dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -275,6 +284,8 @@ async function measure(browser, job, fx) {
     if (job.mode === 'in-app') await context.addInitScript(() => { if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true }); });
     // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
     if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
+    // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
+    if (job.notes) await context.addInitScript(() => localStorage.setItem('bane.ui-notes', 'on'));
     await context.route(url => url.origin !== origin, route => { problems.push(`external request ${route.request().url()}`); return route.abort(); });
     await context.route(url => url.origin === origin && url.pathname.startsWith('/v1/'), async route => {
       const url = new URL(route.request().url());
@@ -303,6 +314,12 @@ async function measure(browser, job, fx) {
       const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
       if (!opened) problems.push('no Help button');
       else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
+      await settle(page, net);
+    }
+    if (job.dialog) {
+      const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);
+      if (!opened) problems.push(`no control “${job.dialog}”`);
+      else await page.waitForSelector('[role=dialog][data-state=open]', { timeout: 10_000 }).catch(() => problems.push(`“${job.dialog}” opened no dialog`));
       await settle(page, net);
     }
     if (job.mode === 'in-app') {
@@ -349,6 +366,11 @@ async function measure(browser, job, fx) {
       else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
       await settle(page, net);
       if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
+    }
+    if (job.user === 'rae') {
+      const leak = await page.evaluate(async () => [document.querySelector('.uin-pill, .uin-pin, .uin-layer') && 'the notes layer', [...document.querySelectorAll('[role=tab], [role=menuitem]')].some(el => el.textContent.startsWith('UI notes')) && 'a UI notes control',
+        await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
+      for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
@@ -411,11 +433,11 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, device, support, live, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    jobs.push({ name, path, user, scheme, device, support, live, notes, mode: 'load', slug: slug + '-load' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });

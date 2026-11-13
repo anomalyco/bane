@@ -50,9 +50,9 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
   // Connected but not able to edit rituals here: read or send access only, or a member of this workspace.
   const limited = !connected ? active[0] ?? null : null
   const status = apps.isPending ? 'Looking for a connected agent…'
-    : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>. Its saves show up here as it makes them.</>
+    : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>. Its saves show up here live.</>
     : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rituals in this workspace yet.</>
-    : 'Ask an agent to write or fix this ritual; its saves show up here as it makes them.'
+    : 'Ask an agent to write or fix this ritual; its saves show up here live.'
   const command = url ? `opencode mcp add bane --url '${url}'` : ''
   return <section className="ritual-agent" aria-labelledby="ritual-agent-title" data-open={open || undefined}>
     <div className="ritual-agent__row">

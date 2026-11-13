@@ -167,7 +167,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
         <IconButton variant="ghost" label={flags.trashed ? 'Restore' : 'Move to trash'} onClick={() => act({ trashed: !flags.trashed })}>{flags.trashed ? <Undo2 size={16} /> : <Trash2 size={16} />}</IconButton>
       </div>}
     </header>
-    {!stateAddress && states.length > 1 && <p className="muted inbound-scope-note">This conversation reached several addresses. Filter by one address to star, archive or mark it read.</p>}
+    {!stateAddress && states.length > 1 && <p className="muted inbound-scope-note">This conversation reached several addresses. Filter by one to star, archive or mark it read.</p>}
     {update.error && <Alert tone="danger">{update.error instanceof Error ? update.error.message : 'The conversation could not be updated.'}</Alert>}
     {olderCursor && <div className="inbound-older">{olderError ? <ErrorState error={olderError} onRetry={() => void loadOlder()} /> : <Button variant="ghost" size="sm" loading={loadingOlder} onClick={() => void loadOlder()}>Show earlier messages</Button>}</div>}
     <ol className="mailbox-messages">
@@ -224,7 +224,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
       <label className="mailbox-composer__to" htmlFor="inbound-reply">{explicit ? `Replying to ${target.direction === 'outbound' ? 'your message' : `${nameOf(target.from)}’s message`} from ${when(target.receivedAt)}` : 'Replying to the newest message'}</label>
       {explicit && <IconButton variant="ghost" size="sm" label="Reply to the newest message instead" onClick={onClearTarget}><X size={14} /></IconButton>}
     </div>
-    {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="This message reached more than one of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>
+    {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="It reached several of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>
       <Select id="inbound-reply-sender" value={sender ?? ''} onValueChange={setChosen} disabled={send.isPending} placeholder="Choose an address" options={candidates.map(id => ({ value: id, label: addressName(addresses, id) }))} />
     </Field>}
     <div className="inbound-recipients-review" aria-label="Reply recipients">
@@ -234,11 +234,11 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
-          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to go to a different address than the one it came from (<bdi>{target.from.address}</bdi>).</p>}
+          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi>{target.from.address}</bdi>).</p>}
         </>}
     </div>
     <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="Write a reply" disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
-    {send.error && <Alert tone="danger">{changed ? 'The recipients changed since you reviewed them. Check To and Cc above, then send again.' : send.error instanceof Error ? send.error.message : 'The reply could not be sent.'}</Alert>}
+    {send.error && <Alert tone="danger">{changed ? 'The recipients changed. Check To and Cc above, then send again.' : send.error instanceof Error ? send.error.message : 'The reply could not be sent.'}</Alert>}
     <div className="mailbox-composer__actions">
       {replyAll || extra > 0 ? <Checkbox label={replyAll ? 'Reply all' : `Reply all (+${extra})`} checked={replyAll} onCheckedChange={setReplyAll} disabled={send.isPending} /> : <span />}
       <Button variant="primary" type="submit" loading={send.isPending} disabled={!text.trim() || !resolved?.to.length}>Send reply</Button>

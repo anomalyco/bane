@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
@@ -47,8 +47,8 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
   const targetError = !value ? (tried ? `Enter the ${targetLabel[type].replace(/^HTTPS URL$/, 'URL').toLowerCase()}.` : '')
     : type === 'forward' ? (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? '' : 'Enter a full email address, like team@example.com.')
     : !/^https:\/\//i.test(value) ? (/^http:\/\//i.test(value) ? 'Use https://: Bane only posts to secure URLs.' : 'Start the URL with https://.')
-    : type === 'slack' && !/^https:\/\/hooks\.slack\.com\//i.test(value) ? 'Use the incoming webhook URL from Slack: it starts with https://hooks.slack.com/.'
-    : type === 'discord' && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(value) ? 'Use the webhook URL from Discord: it starts with https://discord.com/api/webhooks/.' : ''
+    : type === 'slack' && !/^https:\/\/hooks\.slack\.com\//i.test(value) ? 'Use Slack’s incoming webhook URL, starting https://hooks.slack.com/.'
+    : type === 'discord' && !/^https:\/\/(?:\w+\.)?discord(?:app)?\.com\/api\/webhooks\//i.test(value) ? 'Use Discord’s webhook URL, starting https://discord.com/api/webhooks/.' : ''
   const nameError = name && !nameValid ? `Use lowercase letters, digits and hyphens, like ${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'support'}.` : !name && tried ? 'Name it, like support. Rituals call it by this name.' : ''
   // Single flight: a second Create before the first answers would post the endpoint again.
   const send = useSingleFlight('endpoints.create', async () => {
@@ -70,8 +70,8 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
       <Field label="Name" error={nameError || undefined} hint={<>Rituals call it as <code>endpoints.{nameValid ? name : 'name'}{payloadOf[type]}</code></>}>
         <Input value={name} onChange={e => setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder={type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support'} autoComplete="off" aria-invalid={!!nameError || undefined} />
       </Field>
-      <Field label={targetLabel[type]} error={targetError || undefined} hint={type === 'slack' || type === 'discord' ? 'Stored encrypted and never shown again.' : type === 'forward' ? 'They confirm with a link we email them. Nothing is forwarded until they do.' : 'Bane signs each event; the secret is shown once.'}>
-        <Input type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => setTarget(e.target.value)} placeholder={type === 'forward' ? 'team@example.com' : 'https://'} />
+      <Field label={targetLabel[type]} error={targetError || undefined} hint={type === 'slack' || type === 'discord' ? 'Stored encrypted and never shown again.' : type === 'forward' ? 'We email them a confirmation link. Nothing is forwarded until they confirm.' : 'Bane signs each event; the secret is shown once.'}>
+        <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => setTarget(e.target.value)} placeholder={type === 'forward' ? 'team@example.com' : 'https://'} />
       </Field>
       {type === 'forward' && <>
         <Field label="Ask from" hint="The receiving address that sends the request and the forwards.">
@@ -87,11 +87,11 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
 /** Shown once after creating an endpoint: how rituals call it, and a webhook's signing secret, which is never shown again. */
 export function CreatedEndpointDialog({ created, onClose, writeRitual = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRitual?: boolean }) {
   const call = created ? `${created.call}${created.type === 'slack' ? '({ text: `New mail from ${email.from.address}` })' : created.type === 'discord' ? '({ content: `New mail from ${email.from.address}` })' : created.type === 'webhook' ? '({ subject: email.subject })' : '()'}` : ''
-  return <Dialog open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
+  return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Endpoint created'}
     footer={<><Button onClick={onClose}>Done</Button>{writeRitual && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rituals?new=1" onClick={onClose}>Write a ritual that uses it</Link>}</>}>
     {created && <div className="stack">
       <Field label="Call it from a ritual" hint={created.type === 'webhook' ? 'The payload is optional; without one it gets the whole message event.' : undefined}><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
-      {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again. Use it to check each request really comes from Bane."><div className="settings-copy-cell"><code>{created.secret}</code><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
+      {created.secret && <Field label="Signing secret" hint="Copy it now; it won’t be shown again. Use it to verify requests come from Bane."><div className="settings-copy-cell"><SecretCode>{created.secret}</SecretCode><CopyButton value={created.secret} label="Copy secret" /></div></Field>}
       {created.status === 'pending' && <p className="muted">{created.nextStep}</p>}
     </div>}
   </Dialog>

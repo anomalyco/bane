@@ -66,7 +66,7 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   const showError = touched && (!parsed || !allowed(parsed))
 
   useEffect(() => {
-    if (expanded && activeIndex >= 0) list.current?.children[activeIndex]?.scrollIntoView({ block: 'nearest' })
+    if (expanded && activeIndex >= 0) list.current?.querySelectorAll('[role="option"]')[activeIndex]?.scrollIntoView({ block: 'nearest' })
   }, [expanded, activeIndex])
 
   function publish(text: string) {
@@ -123,13 +123,13 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
           setActive(-1)
         }
       }} />
-    {expanded && <div ref={list} id={listId} role="listbox" aria-label="Sender addresses" className="campaign-sender-options">
+    {expanded && <div ref={list} id={listId} role="listbox" aria-label="Sender addresses" className="campaign-sender-options"><div className="ui-popover-scroll">
       {candidates.map((sender, index) => <button key={sender.email} type="button" role="option" id={`${listId}-${index}`} tabIndex={-1}
         aria-selected={index === activeIndex} className="campaign-sender-option"
         onPointerMove={() => setActive(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(sender)}>
         {formatSender(sender)}
       </button>)}
-    </div>}
+    </div></div>}
     {showError && <div id={errorId} className="campaign-sender-options campaign-sender-error" role="alert">{error}</div>}
   </div>
 }

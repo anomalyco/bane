@@ -23,21 +23,21 @@ export function SendingLimitsGuide({ headings = 'h3' }: { headings?: 'h2' | 'h3'
   return <div className="limits-guide">
     <section aria-label="Score and daily limit">
       <H>Score and daily limit</H>
-      <p>A Hosted workspace sends up to a daily limit, counted in recipients over a rolling 24 hours. The sender score sets it.</p>
+      <p>Hosted workspaces have a daily limit in recipients over a rolling 24 hours, set by the sender score.</p>
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Grade</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
         <tbody>{bands.map(([score, grade, limit]) => <tr key={score}><td>{score}</td><td>{grade}</td><td>{typeof limit === 'number' ? number(limit) : limit}</td><td>{typeof limit === 'number' ? number(perMinute(limit)) : number(500)}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
         <li>Per minute: the daily limit ÷ 20, at least 50 and at most 500.</li>
-        <li>Marketing may use the limit minus a reserve of 100 or 10%, whichever is more, so receipts and resets always go out.</li>
-        <li>The score rises at most 5 points and falls at most 10 points a day. A limit drops a band only once the score is 2 points under the band’s floor.</li>
+        <li>Marketing gets the limit minus a reserve of 100 or 10%, whichever is more, so receipts and resets always go out.</li>
+        <li>The score moves at most 5 points up or 10 down a day. The limit drops a band only when the score is 2 points under that band’s floor.</li>
         <li>Grades: A+ from 95, A from 90, B from 80, C from 70, D from 60, F below 60.</li>
       </ul>
     </section>
     <section aria-label="Warnings and holds">
       <H>Warnings and holds</H>
-      <p>Bane checks every 10 minutes. Each line needs the rate and the count together, so a few events never trip a small sender. Crossing any one line is enough.</p>
+      <p>Checked every 10 minutes. A line needs both its rate and its count, so a few events can’t trip a small sender. Crossing any one line is enough.</p>
       <ol className="limits-ladder">{ladder.map(step => <li key={step.step} className={`ui-tone--${step.tone}`}>
         <div className="limits-ladder__head"><span className="limits-ladder__mark" aria-hidden="true">{step.mark}</span><strong>{step.step}</strong></div>
         <ul>{step.when.map(line => <li key={line}>{line}</li>)}</ul>
@@ -47,7 +47,7 @@ export function SendingLimitsGuide({ headings = 'h3' }: { headings?: 'h2' | 'h3'
     </section>
     <section aria-label="Campaign list probe">
       <H>Campaign list probe</H>
-      <p>A campaign to more than 100 recipients sends to a probe first: 10% of its recipients, at least 100 and at most 500. More than 3% hard bounces or 2 complaints in the probe quarantine the campaign: it pauses and the bounced addresses are suppressed. Clean the list, then resume it; a second quarantine needs a review.</p>
+      <p>Campaigns to more than 100 recipients send to a probe first: 10% of recipients, 100 to 500. More than 3% hard bounces or 2 complaints in the probe quarantine it: the campaign pauses and bounced addresses are suppressed. Clean the list, then resume; a second quarantine needs a review.</p>
     </section>
   </div>
 }

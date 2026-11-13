@@ -24,7 +24,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
   }
   const close = () => { if (!contact.isPending) onClose() }
   if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support is open in a new tab' : 'Support reference'}
-    description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : 'Include this reference when you email Bane support, so they can find this request.'}
+    description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : 'Include this reference when you email Bane support.'}
     footer={<Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       <div className="contact-support__reference"><code>{done.id}</code><CopyButton value={done.id} label="Copy support reference" /></div>
@@ -40,7 +40,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
       </Field>
       <div className="contact-support__share">
         <Checkbox label="Share message content with support for this request" checked={shareContent} onCheckedChange={setShareContent} disabled={contact.isPending} aria-describedby="contact-support-share-hint" />
-        <div id="contact-support-share-hint" className="ui-field__hint">Support can read email bodies only if this is on, only in this workspace, and only for this request.</div>
+        <div id="contact-support-share-hint" className="ui-field__hint">Lets support read email bodies in this workspace, for this request only.</div>
       </div>
     </form>
   </Dialog>

@@ -47,13 +47,13 @@ export function McpApprovalPage() {
         </label>)}
       {browser.data && <div className="settings-row"><span className="settings-row__label"><span>Another account</span><span className="muted">Choose it at Anomaly account</span></span><span className="settings-row__control"><Button onClick={() => session?.addAccount(location.pathname)}>Use another account</Button></span></div>}
     </div>}
-    {browser.data && (!owner ? <Alert tone="info" title="This connection used another account">It signed in with an account that isn’t connected in this browser. Use another account to add it, or reconnect the client and choose one of these accounts at Anomaly account.</Alert>
+    {browser.data && (!owner ? <Alert tone="info" title="This connection used another account">It signed in with an account not connected in this browser. Add that account, or reconnect the client and choose one of these at Anomaly account.</Alert>
       : picked !== owner ? <Alert tone="info" title="Not this connection’s account">The client signed in with a different account. To connect {pickedAccount?.name || 'this account'} instead, reconnect the client and choose it at Anomaly account.</Alert>
       : owner !== identity?.id ? <div className="cluster"><Button variant="primary" loading={switching} onClick={() => void continueAs(owner)}>Continue as {pickedAccount?.name || pickedAccount?.email || 'this account'}</Button></div>
       : null)}
     {ready && <>
       <SectionHeader title="Default workspace" />
-      <p className="muted">Each tool call can name one of your workspaces; calls that name none use this one. Your role in a workspace decides what the client can do there.</p>
+      <p className="muted">Tool calls can name any of your workspaces, or default to this one. Your role in each decides what the client can do.</p>
       {connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} />
         : !connection.data ? <div className="settings-rows"><div className="settings-row"><Skeleton width={200} height={20} /></div></div>
         : connection.data.status === 'active' ? <div className="settings-rows"><McpApproval key={`${connection.data.id}:${connection.data.workspaceId}`} app={connection.data} workspaces={identity?.workspaces ?? []} linked={false} onRevoke={() => revoke.mutate(connection.data!.id)} /></div>

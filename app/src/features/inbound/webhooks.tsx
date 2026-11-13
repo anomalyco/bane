@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
@@ -45,7 +45,7 @@ function WebhookFields({ input, urlHint, onChange, addresses, errors, apiError, 
   return <div className="stack">
     <div className="form-grid">
       <Field label="Description" htmlFor="mailbox-webhook-description"><Input id="mailbox-webhook-description" value={input.description} onChange={event => onChange({ ...input, description: event.target.value })} disabled={disabled} placeholder="Support agent runtime" /></Field>
-      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint={urlHint ? 'Leave blank to keep the saved URL, or enter a replacement.' : 'A public HTTPS URL. Signed with Standard Webhooks headers.'}><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
+      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint={urlHint ? 'Leave blank to keep the saved URL, or enter a replacement.' : 'A public HTTPS URL. Signed with Standard Webhooks headers.'}><SecretInput id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder={urlHint ?? 'https://agents.acme.com/hooks/mail'} /></Field>
     </div>
     <div className="form-grid">
       <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.routeOnly ? <>Send mail to it from an address’s <Link to="/receiving">Goes to</Link>.</> : input.addressIds === null ? 'Includes addresses created later.' : undefined}>
@@ -98,7 +98,7 @@ function WebhooksList() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail on inbound addresses: received messages and the replies you send from them. Without a public URL, long-poll <code>GET /v1/inbound/events</code>. For email sent through the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
+    <p className="muted inbound-note">Signed POSTs (Standard Webhooks) for mail at your addresses: received messages and your replies. No public URL? Long-poll <code>GET /v1/inbound/events</code>. For email sent with the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
     {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
@@ -181,8 +181,8 @@ function WebhookDetail() {
         </form>}
       </section>
     </>}
-    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working immediately. Update your endpoint with the new secret right away." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
-    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped, and routes that deliver to it stop doing so. Events stay available through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
+    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working at once. Update your endpoint with the new one." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
+    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and routes stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }
