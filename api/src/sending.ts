@@ -28,11 +28,13 @@ import { assertBilling, billingGate } from './billing/gate.js';
 import type { BillingGate } from './billing/types.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { clients, type Client } from './email-preview/support.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
 const loadBoundedHtml = lazyModule(() => import('./bounded-html.js'));
 const loadCampaignBlocks = lazyModule(() => import('./campaign-blocks.js'));
+const loadEmailPreview = lazyModule(() => import('./email-preview/index.js'));
 const loadOpsUnsub = lazyModule(() => import('./operations.js'));
 const loadSendingSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 
@@ -147,6 +149,20 @@ const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: SuppressionEventData }).openapi('EmailEvent');
 const EmailContent = z.object({ untrustedContent: UntrustedContent, subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
+const PreviewClient = z.enum(clients).openapi('EmailPreviewClient');
+const previewOptions = {
+  clients: z.array(PreviewClient).min(1).max(clients.length).refine(list => new Set<Client>(list).size === list.length, 'Select each client only once.').openapi({ uniqueItems: true }),
+  theme: z.enum(['light', 'dark']),
+  device: z.enum(['desktop', 'mobile']).optional().describe('Viewport width in CSS pixels: mobile 390, desktop 800. Defaults to mobile for iOS, Android and Samsung Email; otherwise desktop.'),
+};
+const EmailPreviewInput = z.union([
+  z.object({ html: z.string().min(1).describe('HTML to preview, up to 256 KiB in UTF-8.'), ...previewOptions }).strict(),
+  z.object({ emailId: IdParams.shape.id.describe('Outbound email with retained HTML visible to this credential.'), ...previewOptions }).strict(),
+]).openapi('EmailPreviewInput', { description: 'Supply exactly one source: html or emailId.' }, { unionPreferredType: 'oneOf' });
+const EmailPreviews = z.object({ previews: z.array(z.object({
+  client: PreviewClient, html: z.string().describe('Untrusted offline document; render only as the srcdoc of an iframe with sandbox="". Empty for classic Outlook (lint only).'),
+  issues: z.array(z.object({ feature: z.string(), clients: z.array(PreviewClient), severity: z.enum(['warning', 'error']) })),
+})) }).openapi('EmailPreviews');
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string() }).openapi('Attachment');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
@@ -1172,6 +1188,27 @@ export function registerSending(app: App) {
     if (input.emails.reduce((n, e) => n + (e.html?.length ?? 0) + (e.text?.length ?? 0), 0) > 2 * 1024 * 1024) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', 'Combined batch body content may not exceed 2 MiB.');
     const result = await admitEmails(c, a, input);
     return c.json(BatchReceipt.parse(result), 202);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/preview', operationId: 'previewEmail', tags: ['Emails'], security,
+    summary: 'Preview HTML in selected email clients',
+    description: 'Read-only offline emulation, not a screenshot. Supply HTML or an outbound email ID; stored HTML has the same access and redaction as getEmailContent. Render untrusted output only via iframe.srcdoc with sandbox=""; the embedded CSP blocks remote assets. Results follow the requested client order. Classic Outlook is lint only (empty html). New Outlook for Windows models Outlook web; actual client behavior is unverified. Input over 256 KiB UTF-8, excessive document complexity, or combined output HTML over 4 MiB returns 413.',
+    request: { body: json(EmailPreviewInput) }, responses: { 200: response(EmailPreviews), ...errors },
+  }), async c => {
+    const a = actor(c), input = c.req.valid('json');
+    let html: string;
+    if ('emailId' in input) {
+      const row = await findEmail(c.env.db, a, input.emailId);
+      const content = await visibleEmailContent(c.env, a, row, row.untrustedContent);
+      if (!content.html) throw new ApiError(422, 'EMAIL_HTML_UNAVAILABLE', 'This email has no retained HTML to preview.', 'emailId');
+      html = content.html;
+    } else html = input.html;
+    const { emulateMany, PreviewLimitError } = await loadEmailPreview();
+    try {
+      return c.json({ previews: emulateMany(html, { clients: input.clients, theme: input.theme, device: input.device }) }, 200);
+    } catch (error) {
+      if (error instanceof PreviewLimitError) throw new ApiError(413, 'EMAIL_PREVIEW_LIMIT_EXCEEDED', error.message);
+      throw error;
+    }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
