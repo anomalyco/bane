@@ -331,7 +331,7 @@ function Tray({ open, onOpenChange, notes, number, moved, loading, onPick, onFoc
   const row = (note: UiNote) => <li key={note.id}><button type="button" className="uin-row" data-resolved={resolved(note.status) || undefined} onClick={event => onPick(note, event.currentTarget)}
     onPointerEnter={() => onFocus(note.id)} onPointerLeave={() => onFocus(null)}>
     <span className="uin-number" data-status={note.status}>{number.get(note.id)}</span>
-    <span className="uin-row__body">{note.body}</span>
+    <span className="uin-row__body" title={note.body}>{note.body}</span>
     <span className="uin-row__tag">{resolved(note.status) ? statusLabel[note.status] : moved.has(note.id) ? 'Element moved' : kindLabel(note.kind)}</span>
   </button></li>
   return <div ref={panel} className="uin-tray">
