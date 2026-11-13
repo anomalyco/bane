@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { ApiError, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
-import { SearchField, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
+import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
@@ -16,6 +16,7 @@ import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skel
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 import { useSingleFlight } from '../../lib/single-flight'
+import { usePhone } from '../../lib/media'
 
 const errorMessage = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 // Templates hold concrete example content; personalization belongs to the campaign made from them.
@@ -76,8 +77,8 @@ export function TemplatesPage() {
     <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /><Select aria-label="Filter templates" value={archived ? 'archived' : 'active'} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); value === 'archived' ? next.set('archived', 'true') : next.delete('archived'); next.delete('page'); return next })} options={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warm([queries.template(row.id)]); void composerChunk.preload().catch(() => {}) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} description={search || archived ? undefined : 'A template is a reusable email design. Publish one, then start campaigns from it with Use template.'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
-        {...templateColumns[0], render: row => <div className="campaign-row-name"><span className="campaign-row-title">{row.name}</span><span className="muted">{row.subject || row.description || 'No subject yet'}</span></div>, cardRender: row => row.name},
+      <DataTable className="campaigns-table" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warm([queries.template(row.id)]); void composerChunk.preload().catch(() => {}) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} description={search || archived ? undefined : 'A template is a reusable email design. Publish one, then start campaigns from it with Use template.'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
+        {...templateColumns[0], render: row => { const about = row.subject || row.description; return <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{about && <span className="muted" title={about}>{about}</span>}</div> }, cardRender: row => row.name},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => row.description || row.subject || 'No subject yet'},
         {...templateColumns[3], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>, cardRender: row => `Updated ${date(row.updatedAt, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`},
@@ -102,6 +103,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const cache = useQueryClient()
   const navigate = useNavigate()
   const toast = useToast()
+  const phone = usePhone()
   const composer = useRef<EmailComposerRef>(null)
   const attachments = useRef<CampaignAttachmentsRef>(null)
   const [template, setTemplate] = useState(initial)
@@ -168,20 +170,30 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>
       <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} data-actionable={error ? true : undefined} role="status" title={error || 'Changes save automatically. Publish to use them in new campaigns.'}><span className="campaign-sync-dot" aria-hidden="true" />{error ? <Button variant="ghost" size="sm" disabled={saving} onClick={() => void save()}>Save failed · Retry</Button> : <span>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : 'Saved'}</span>}</div>
-      <Button variant="ghost" disabled={saving || dirty || !draft.html} onClick={() => setPreviewOpen(true)}>Preview</Button>
-      {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}
-      <Button variant="ghost" disabled={saving} onClick={() => void archive()}>{archived ? 'Restore' : 'Archive'}</Button>
-      <Button variant="secondary" title={published ? 'Start a new campaign draft from the published version' : 'Publish this template to start campaigns from it'} disabled={!published || starting !== null || unavailable} loading={starting !== null} onClick={() => void start({ id: template.id, name: template.published?.name ?? template.draft.name })}>Use template</Button>
-      <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version; campaigns already made from it never change'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
+      {phone ? <>
+        <Button variant="primary" disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
+        <DropdownMenu items={[
+          { label: 'Preview', disabled: saving || dirty || !draft.html, onSelect: () => setPreviewOpen(true) },
+          { label: 'Use template', disabled: !published || starting !== null || unavailable, hint: published ? undefined : 'Publish this template first', onSelect: () => void start({ id: template.id, name: template.published?.name ?? template.draft.name }) },
+          { label: archived ? 'Restore' : 'Archive', disabled: saving, onSelect: () => void archive() },
+          ...(archived ? [{ label: 'Delete', destructive: true, onSelect: () => setDeleteOpen(true) }] : []),
+        ]} />
+      </> : <>
+        <Button variant="ghost" disabled={saving || dirty || !draft.html} onClick={() => setPreviewOpen(true)}>Preview</Button>
+        {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}
+        <Button variant="ghost" disabled={saving} onClick={() => void archive()}>{archived ? 'Restore' : 'Archive'}</Button>
+        <Button variant="secondary" title={published ? 'Start a new campaign draft from the published version' : 'Publish this template to start campaigns from it'} disabled={!published || starting !== null || unavailable} loading={starting !== null} onClick={() => void start({ id: template.id, name: template.published?.name ?? template.draft.name })}>Use template</Button>
+        <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version; campaigns already made from it never change'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
+      </>}
     </>} />
     <section className="campaign-compose-workspace" aria-label="Template composer"><div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
-      <p className="template-compose-intro">A reusable starting point for campaigns. Write example content here; add personalization such as {'{{name}}'} in each campaign.</p>
+      <p className="template-compose-intro">Write example content. Add personalization, such as {'{{name}}'}, in each campaign.</p>
       <div className="campaign-compose-metadata">
         <div className="campaign-compose-row"><label htmlFor="template-name">Name</label><Input id="template-name" placeholder="Template name" value={draft.name} disabled={archived} aria-invalid={!draft.name.trim() || undefined} onChange={event => change('name', event.target.value)} /></div>
-        <div className="campaign-compose-row"><label htmlFor="template-description">Purpose</label><Input id="template-description" placeholder="When to use it, shown when picking a template" value={draft.description} disabled={archived} onChange={event => change('description', event.target.value)} /></div>
+        <div className="campaign-compose-row"><label htmlFor="template-description">Purpose</label><Input id="template-description" placeholder="When to use it" value={draft.description} disabled={archived} onChange={event => change('description', event.target.value)} /></div>
         <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="template-subject">Subject</label><Input id="template-subject" placeholder="Example subject" value={draft.subject} disabled={archived} aria-invalid={Boolean(subjectHint) || undefined} aria-describedby={subjectHint ? 'template-subject-hint' : undefined} onChange={event => change('subject', event.target.value)} /></div>
         {subjectHint && <p id="template-subject-hint" className="campaign-compose-feedback ui-field__error" role="alert">{subjectHint}</p>}
-        <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Text shown after the subject in the inbox" value={draft.previewText ?? ''} disabled={archived} aria-invalid={Boolean(previewHint) || undefined} aria-describedby={previewHint ? 'template-preview-hint' : undefined} onChange={event => change('previewText', event.target.value)} /></div>
+        <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Shown after the subject" value={draft.previewText ?? ''} disabled={archived} aria-invalid={Boolean(previewHint) || undefined} aria-describedby={previewHint ? 'template-preview-hint' : undefined} onChange={event => change('previewText', event.target.value)} /></div>
         {previewHint && <p id="template-preview-hint" className="campaign-compose-feedback ui-field__error" role="alert">{previewHint}</p>}
         <div className="campaign-compose-row"><label htmlFor="template-from">From name</label><Input id="template-from" placeholder="Sender name, e.g. Acme" value={draft.fromName ?? ''} disabled={archived} onChange={event => change('fromName', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" placeholder="Optional reply@example.com" value={draft.replyTo.join(', ')} disabled={archived} onChange={event => change('replyTo', event.target.value.split(',').map(value => value.trim()).filter(Boolean))} /></div>
