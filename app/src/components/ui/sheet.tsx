@@ -1,5 +1,6 @@
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
+import { scrollFade } from './scroll-fade'
 
 // Swipe a bottom sheet down to close it: past a quarter of its height, or a quick flick at any distance. Dragging up
 // past the top meets friction instead of a wall. Starts on the sheet's grab area, or anywhere on it while its content
@@ -67,7 +68,7 @@ export function Sheet({ open, onOpenChange, title, description, children, classN
       <div className="ui-sheet__grab" aria-hidden="true"><span /></div>
       <DialogPrimitive.Title className={hideTitle ? 'sr-only' : 'ui-sheet__title'}>{title}</DialogPrimitive.Title>
       {description && <DialogPrimitive.Description className="ui-sheet__description">{description}</DialogPrimitive.Description>}
-      <div className="ui-sheet__body">{children}</div>
+      <div ref={scrollFade} className="ui-sheet__body ui-scroll-fade">{children}</div>
     </DialogPrimitive.Content>
   </DialogPrimitive.Portal></DialogPrimitive.Root>
 }

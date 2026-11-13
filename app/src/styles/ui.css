@@ -83,6 +83,15 @@ a.ui-tab { text-decoration: none; }
 .ui-dialog__description { color: var(--color-muted); margin-top: var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .ui-dialog__body { min-height: 0; overflow-y: auto; padding: 0; margin: var(--space-16) 0 0; }
 .ui-dialog__body:empty { display: none; }
+/* Dialog and sheet bodies scroll with no scrollbar, so content spans the surface's padding evenly on both sides; an
+   edge with more content beyond it fades into the surface instead (scroll-fade.tsx sets data-more-above/below). */
+@property --fade-above { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-below { syntax: '<length>'; inherits: false; initial-value: 0px; }
+.ui-scroll-fade { scrollbar-width: none; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-above), #000 calc(100% - var(--fade-below)), transparent); mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-above), #000 calc(100% - var(--fade-below)), transparent); }
+.ui-scroll-fade::-webkit-scrollbar { display: none; }
+.ui-scroll-fade[data-settled] { transition: --fade-above 160ms ease-out, --fade-below 160ms ease-out; }
+.ui-scroll-fade[data-more-above] { --fade-above: 24px; }
+.ui-scroll-fade[data-more-below] { --fade-below: 32px; }
 .ui-dialog__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-8); margin-top: var(--space-16); flex-shrink: 0; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
 .ui-table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
