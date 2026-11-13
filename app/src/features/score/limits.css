@@ -18,3 +18,11 @@
 /* In Overview's explainer dialog: wide enough for the table. */
 .ui-dialog.limits-dialog:not(.ui-dialog--sheet) { width: min(640px, calc(100vw - 32px)); }
 .limits-dialog__docs { display: inline-block; margin-top: var(--space-16); font-size: var(--text-sm); }
+/* Phone: four columns must fit without sideways scrolling, so cells wrap and the first column gives way. */
+@media (max-width: 640px) {
+  .limits-table :is(th, td) { height: auto; padding: var(--space-6) var(--space-8) var(--space-6) 0; white-space: normal; vertical-align: top; }
+  .limits-table th { padding-block: var(--space-8); font-size: 9px; letter-spacing: .06em; }
+  .limits-table :is(th, td):nth-child(2) { white-space: nowrap; }
+  .limits-table :is(th, td):nth-child(n + 3) { white-space: nowrap; }
+  .limits-table td:nth-child(3):has(> *), .limits-table td:nth-child(3) { text-wrap: balance; }
+}
