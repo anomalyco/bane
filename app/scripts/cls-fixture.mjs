@@ -265,6 +265,10 @@ async function billing(db) {
   await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days',free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=3000,month_spend_uc=3240000000 WHERE workspace_id='ws_harbor'`);
 }
 
+/** Driftwood's triage ritual, version `n`: each agent save in a live job changes one line in place, so the line count
+ *  (and the editor's height) stays the same. A longer script grows the editor, which is the content changing. */
+export const liveSource = n => `export default function route(email, ctx) {\n  if (email.headers.has("list-unsubscribe")) return junk("newsletter")\n  label(${JSON.stringify(n ? `refund-${n}` : 'support')})\n  endpoints.support({ text: \`\${email.from.address}: \${email.subject}\` })\n}\n`;
+
 export async function seed(fx) {
   const { db } = fx;
   const dana = await fx.signIn('dana', 'dana@northwind.example', 'Dana Rivera', { id: 'ws_northwind', name: 'Northwind' });
@@ -363,6 +367,16 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // Driftwood: the rituals page while an agent edits beside it (cls.mjs `live` jobs). Kai's OpenCode approval can change
+  // rituals here (the page says it is connected), and the agent's own API key saves the ritual while a job watches.
+  const kai = await fx.signIn('kai', 'kai@driftwood.example', 'Kai Moana', { id: 'ws_live', name: 'Driftwood' });
+  await domain(db, 'ws_live', await hosted(db, 'ws_live'), 'driftwood.example', { receiving: true });
+  const desk = await kai.api('POST', '/v1/inbound/addresses', { address: 'support@driftwood.example', key: 'support', displayName: 'Support' }, 201);
+  await kai.api('POST', '/v1/endpoints', { type: 'slack', name: 'support', url: 'https://hooks.slack.com/services/T0SYNTH/B0SYNTH/driftwoodfixture0a1' }, 201);
+  await kai.api('PUT', '/v1/rituals', { rituals: [{ key: 'triage', source: liveSource(0) }], attachments: [{ ritual: 'triage', target: desk.id, continue: false }] }, 200);
+  const agent = await kai.api('POST', '/v1/api-keys', { name: 'Refund agent', permissions: ['read', 'send', 'manage'], domains: [] }, 201);
+  await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
+  fx.liveKey = agent.secret;
   return {
     mcp, restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,
