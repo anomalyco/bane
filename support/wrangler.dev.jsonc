@@ -16,8 +16,8 @@
   "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
   "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }, { "name": "INTAKE", "class_name": "SupportIntake" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }, { "tag": "v2", "new_sqlite_classes": ["SupportIntake"] }],
-  // Create once: wrangler d1 create bane-support-dev, then put its id here (see support/README.md).
-  "d1_databases": [{ "binding": "DB", "database_name": "bane-support-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
+  // Created 2026-11-13 in anomaly-dev (ENAM).
+  "d1_databases": [{ "binding": "DB", "database_name": "bane-support-dev", "database_id": "17045a10-d16c-4d0b-a8b7-03c67ce54a47", "migrations_dir": "migrations" }],
   // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
   "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "bane-support-dev-uploads" }],
   // Downscales screenshots too large to send to the model (Cloudflare Images binding; optional in code).
