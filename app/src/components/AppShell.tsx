@@ -151,7 +151,8 @@ export function AppShell() {
     const preferred = regions.data?.defaultRegion
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
-  useEffect(() => { document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
+  // Docs pages name themselves (features/docs).
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...navigation, operatorLink].find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'bane'} · bane` }, [location.pathname])
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

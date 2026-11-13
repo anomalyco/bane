@@ -117,8 +117,14 @@ const pages = ids => [
   ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
-  ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
-  ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
+  // The docs: inside the dashboard signed in (a guide from the contents, an operation, a deep-linked overview section),
+  // in their own layout signed out.
+  ['Docs · guide', '/docs/rituals', { from: '/docs', click: 'Rituals and omens' }],
+  ['Docs · MCP guide', '/docs/mcp', { from: '/' }],
+  ['Docs · operation', '/docs/api/sendEmail', { from: '/docs/receiving' }],
+  ['Docs · section', '/docs#sending-limits', { from: '/api-keys' }],
+  ['Docs · signed out', '/docs', { user: null }],
+  ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/', { user: ['dana', 'nia'], from: '/', switchTo: 'Lumen Labs' }],
@@ -135,7 +141,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat', 'Overview · sending limits dialog']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
