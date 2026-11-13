@@ -19,7 +19,7 @@
   let account = null, workspace = null, ready = null
   try { account = sessionStorage.getItem('bane.account'); workspace = account && localStorage.getItem('bane.workspace:' + account); ready = localStorage.getItem('bane.dashboard-ready') } catch {}
   const start = url => {
-    const response = fetch(url, { credentials: 'include', headers: { Accept: 'application/json', ...(account ? { 'X-Bane-Account': account } : {}), ...(workspace ? { 'X-Bane-Workspace': workspace } : {}) } })
+    const response = fetch(url, { credentials: 'include', headers: { Accept: 'application/json', ...(account ? { 'X-Nightmail-Account': account } : {}), ...(workspace ? { 'X-Bane-Workspace': workspace } : {}) } })
     response.catch(() => {}) // The app awaits the real rejection; this only silences the unhandled one.
     return response
   }

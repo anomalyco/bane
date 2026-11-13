@@ -30,6 +30,7 @@ import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, 
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
+import { headerPrefix, requestHeader } from './brand.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -1292,12 +1293,12 @@ export function registerSending(app: App) {
   });
   app.post('/v1/attachments/upload', async c => {
     const a = actor(c, 'send');
-    const encodedFilename = c.req.header('x-bane-filename') ?? c.req.header('x-opensend-filename');
+    const encodedFilename = requestHeader(c.req.raw.headers, 'filename');
     let filename = '';
-    try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', 'X-Bane-Filename must be URI-encoded UTF-8.'); }
+    try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', `${headerPrefix}Filename must be URI-encoded UTF-8.`); }
     const contentLength = Number(c.req.header('content-length'));
     if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB.');
-    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: c.req.header('x-bane-disposition') ?? c.req.header('x-opensend-disposition') ?? 'attachment', contentId: c.req.header('x-bane-content-id') ?? c.req.header('x-opensend-content-id') });
+    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: requestHeader(c.req.raw.headers, 'disposition') ?? 'attachment', contentId: requestHeader(c.req.raw.headers, 'content-id') ?? undefined });
     if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     const result = await saveAttachment(c, a, parsed.data, bytes);

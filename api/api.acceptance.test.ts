@@ -1689,7 +1689,7 @@ describe('Public contract and authentication', () => {
     if (!body.available) assert.deepEqual([body.acceptedLast30Days, body.deliveryRate, body.medianSendLatencyMs, body.regions, new Set(body.acceptedHourly)], [null, null, null, [], new Set([null])]);
     assert.ok(body.regions.every((region: unknown) => typeof region === 'string'));
     const again = await http('GET', '/v1/public/stats');
-    assert.equal(again.headers.get('x-bane-stats-cache'), 'hit');
+    assert.equal(again.headers.get('x-nightmail-stats-cache'), 'hit');
     assert.deepEqual(ok(again), body);
     assert.deepEqual(ok(await http('GET', '/openapi.json')).paths['/v1/public/stats'].get.security, []);
     error(await http('GET', '/v1/public/other'), 401); // Only the stats route is public.
@@ -1796,7 +1796,7 @@ describe('Public contract and authentication', () => {
       await publicStatsTick({ config: runtime.config, db: { transaction: async () => { throw new Error('canceling statement due to statement timeout'); } } as never });
       const counted = t.mock.method(db, 'query');
       const first = await local('GET', '/v1/public/stats'), second = await local('GET', '/v1/public/stats');
-      assert.deepEqual([first.headers.get('x-bane-stats-cache'), second.headers.get('x-bane-stats-cache')], ['miss', 'hit']);
+      assert.deepEqual([first.headers.get('x-nightmail-stats-cache'), second.headers.get('x-nightmail-stats-cache')], ['miss', 'hit']);
       assert.deepEqual(ok(first), stored, 'A failed refresh leaves the last published figures in place.');
       assert.deepEqual(ok(second), stored);
       assert.equal(counted.mock.callCount(), 1, 'One statement for the miss, none for the hit.');
@@ -1867,7 +1867,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
     assert.equal(me.environment, undefined);
     assert.ok(me.permissions.includes('manage'));
     assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'live' })).environment, undefined);
-    error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-opensend-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
+    // X-Nightmail-Environment, and the earlier X-Bane- and X-OpenSend- names, are refused unless they say live.
+    for (const name of ['x-nightmail-environment', 'x-bane-environment', 'x-opensend-environment']) error(await http('POST', '/v1/emails/send', MANAGER, mail(), { [name]: 'test' }), 400, 'ENVIRONMENT_REMOVED');
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-nightmail-environment': 'live' })).environment, undefined);
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
     assert.equal(inspected.id, manager!.userId);
     assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
@@ -1912,7 +1914,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       const pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL}); cleanup(t,()=>pool.end());
       const runtime:import('./src/core.js').Runtime={db:drizzle(pool),config:loadConfig({...process.env,PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google'}),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused')},async get(){throw Error('unused')},async delete(){throw Error('unused')}}};
       const local=async(method:string,path:string,body?:Json,cookie?:string,headers:Record<string,string>={})=>http(method,path,undefined,body,{origin,...(cookie?{cookie}:{}),...headers},5000,origin,r=>app.fetch(r,runtime));
-      const base='/v1/workspaces/current',select=(id:string)=>({'X-Bane-Workspace':id});
+      const base='/v1/workspaces/current',select=(id:string)=>({'X-Nightmail-Workspace':id}); // Other scenarios still select with X-Bane-Workspace.
       const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
       async function workspaceFixture(email:string,own:boolean){
         const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
@@ -6473,6 +6475,10 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(legacyUpload.status,201);const oldAsset=await legacyUpload.json() as Json;
     cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${oldAsset.id}`,key.secret),[200,404]);});
     assert.deepEqual([oldAsset.filename,oldAsset.disposition,oldAsset.contentId],['old logo.gif','inline','opensend-logo']);
+    // The current names win over the earlier ones when a request carries both.
+    const current=ok(await upload('ignored.gif','image/gif',Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64'),{'x-nightmail-filename':'new%20logo.gif','x-nightmail-disposition':'inline','x-nightmail-content-id':'nightmail-logo','x-bane-content-id':'bane-logo'}),201);
+    cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${current.id}`,key.secret),[200,404]);});
+    assert.deepEqual([current.filename,current.disposition,current.contentId],['new logo.gif','inline','nightmail-logo']);
     error(await upload('unsafe.vbs', 'text/plain', bytes), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
     error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-bane-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
@@ -7210,8 +7216,8 @@ describe('Dashboard API capabilities', () => {
     const historical=`/v1/metrics?from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z&region=${REGION}`;
     await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
     const cached=await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
-    assert.equal(cached.headers.get('x-bane-metrics-cache'),'hit');
-    assert.equal((await http('GET',historical,key.secret)).headers.get('x-bane-metrics-cache'),null);
+    assert.equal(cached.headers.get('x-nightmail-metrics-cache'),'hit');
+    assert.equal((await http('GET',historical,key.secret)).headers.get('x-nightmail-metrics-cache'),null);
     const before = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(before.basis, 'created-cohort');
     assert.equal(before.region, REGION);
@@ -7373,27 +7379,27 @@ describe('Dashboard API capabilities', () => {
       const scoped = ok(await local('POST', '/v1/api-keys', { name: 'Scoped score reader', permissions: ['read'], domains: ['score.example'] }), 201); secrets.add(scoped.secret);
       assert.equal(error(await request('GET', '/v1/sender-score', scoped.secret), 403).code, 'UNRESTRICTED_KEY_REQUIRED');
       const dashboard = await local('GET', '/v1/sender-score'), again = await local('GET', '/v1/sender-score');
-      assert.deepEqual([dashboard.status, dashboard.headers.get('x-bane-sender-score-cache'), again.headers.get('x-bane-sender-score-cache')], [200, 'miss', 'hit']);
+      assert.deepEqual([dashboard.status, dashboard.headers.get('x-nightmail-sender-score-cache'), again.headers.get('x-nightmail-sender-score-cache')], [200, 'miss', 'hit']);
       // A change of standing inside the same minute shows at once (it used to be served from the cache for up to 60 s).
       const { applyChange } = await import('./src/standing.js');
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'operator', via: 'console' }, kind: 'operator', step: 'warn' }));
       const changed = await local('GET', '/v1/sender-score');
-      assert.deepEqual([changed.headers.get('x-bane-sender-score-cache'), changed.body.standing.step], ['miss', 'warn']);
+      assert.deepEqual([changed.headers.get('x-nightmail-sender-score-cache'), changed.body.standing.step], ['miss', 'warn']);
       // A new email changes the workspace's activity, so the next dashboard read is computed again rather than served stale.
       // clock_timestamp(), not now(): the fixture's transaction started before the rows above, so now() could equal theirs.
       await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
         VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', clock_timestamp())`, [unique('score-late-'), wid, REGION]);
       const fresh = await local('GET', '/v1/sender-score');
-      assert.deepEqual([fresh.status, fresh.headers.get('x-bane-sender-score-cache')], [200, 'miss']);
+      assert.deepEqual([fresh.status, fresh.headers.get('x-nightmail-sender-score-cache')], [200, 'miss']);
       // PR92 P2: only emails and email events move the key. A contact consent change, which a member can make as often as
       // they like, leaves every Overview read cached instead of forcing all three to be computed again.
       const metrics = '/v1/metrics?granularity=day';
-      const cacheOf = async () => [(await local('GET', '/v1/sender-score')).headers.get('x-bane-sender-score-cache'), (await local('GET', metrics)).headers.get('x-bane-metrics-cache')];
+      const cacheOf = async () => [(await local('GET', '/v1/sender-score')).headers.get('x-nightmail-sender-score-cache'), (await local('GET', metrics)).headers.get('x-nightmail-metrics-cache')];
       await cacheOf(); await local('GET', '/v1/usage');
       assert.deepEqual(await cacheOf(), ['hit', 'hit']);
       await db.query(`INSERT INTO operation_events(id, workspace_id, type, region, created_at, data) VALUES ($1, $2, 'contact.subscription_changed', NULL, now(), jsonb_build_object('contactId', 'con_fixture', 'status', 'unsubscribed'))`, [unique('evt_consent_'), wid]);
       assert.deepEqual(await cacheOf(), ['hit', 'hit']);
-      assert.equal((await local('GET', '/v1/usage')).headers.get('x-bane-usage-cache'), 'hit');
+      assert.equal((await local('GET', '/v1/usage')).headers.get('x-nightmail-usage-cache'), 'hit');
       // A session recomputes at most 30 of these reads a minute. Past that it gets the last result, marked stale, or a 429
       // when there is none, so reads can't be turned into repeated scans. (now() is fixed in this transaction: a second later is newer mail.)
       await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
@@ -7401,7 +7407,7 @@ describe('Dashboard API capabilities', () => {
       await db.query(`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES ($1, $2, date_trunc('minute', now()) + interval '1 minute', 30)
         ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = 30, window_start = excluded.window_start`, [wid, `dashboard-reads:user_${manager!.userId}`]);
       const stale = await local('GET', '/v1/sender-score');
-      assert.deepEqual([stale.status, stale.headers.get('x-bane-sender-score-cache'), stale.body.standing.step], [200, 'stale', 'warn']);
+      assert.deepEqual([stale.status, stale.headers.get('x-nightmail-sender-score-cache'), stale.body.standing.step], [200, 'stale', 'warn']);
       const unseen = await local('GET', `/v1/metrics?from=2026-01-01T00:00:00.000Z&to=2026-01-02T00:00:00.000Z`);
       assert.equal(error(unseen, 429).code, 'DASHBOARD_RATE_LIMITED');
     });
@@ -9482,7 +9488,8 @@ describe('Operational configuration and public event boundaries', () => {
         function checkCallback(index: number, value: string | undefined, synthetic: boolean) {
           const { headers, body } = callbacks[index];
           assert.equal(headers.authorization, value); assert.equal(headers['content-type'], 'application/json');
-          assert.equal(headers['bane-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
+          assert.equal(headers['nightmail-test'], synthetic ? 'true' : undefined); assert.equal(headers['bane-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
+          assert.equal(headers['user-agent'], 'Nightmail-Webhooks/1.0');
           assert.match(String(headers['webhook-timestamp']), /^\d+$/);
           assert.equal(headers['webhook-signature'], 'v1,' + createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.${body}`).digest('base64'));
         }
@@ -16659,16 +16666,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const first=async(mid:string,extra:string)=>{raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\n${extra}Subject: Test ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`));await submit(mid,['late@receive.example'],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
           // As stored by a deployment that did not record the verdicts yet.
           await db.query("UPDATE mail_messages SET verdicts=verdicts-'forwardSafe'-'ritualVerified' WHERE workspace_id=$1 AND ses_message_id=$2",[wid,mid]);};
-        await first('fwd-old','');await first('fwd-old-loop','X-Bane-Loop: v1.1.synthetic\r\n');
+        await first('fwd-old','');await first('fwd-old-loop','X-Bane-Loop: v1.1.synthetic\r\n');await first('fwd-new-loop','X-Nightmail-Loop: v1.1.synthetic\r\n');
         await call('PUT','/v1/rituals',{rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]});
         try{
-          for(const [mid,status,error] of [['fwd-old','delivered',null],['fwd-old-loop','failed','FORWARD_BLOCKED']] as const){
+          for(const [mid,status,error] of [['fwd-old','delivered',null],['fwd-old-loop','failed','FORWARD_BLOCKED'],['fwd-new-loop','failed','FORWARD_BLOCKED']] as const){
             await submit(mid,['late@receive.example',box.address],'Mail');await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);
             const m=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
             const d=(await db.query("SELECT id FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,m.id])).rows[0];
             await mailboxEventJobs['mailbox.webhook']!(runtime,{deliveryId:d.id},{id:unique('job'),workspaceId:wid,attempts:1}).catch(()=>{});
             assert.deepEqual((await db.query('SELECT status,last_error FROM mailbox_webhook_deliveries WHERE id=$1',[d.id])).rows[0],{status,last_error:error},mid);
           }
+          const forwarded=(await db.query("SELECT headers FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Test fwd-old'",[wid])).rows[0];
+          assert.ok(forwarded?.headers.some((h:Json)=>h.name==='X-Nightmail-Loop' && h.value.startsWith('v1.1.')),'A forward carries X-Nightmail-Loop.');
         }finally{await call('PUT','/v1/rituals',{});}
       });
       await t.test('delivery: an endpoint paused between the claim and the fence parks the delivery and posts nothing until resumed',async()=>{

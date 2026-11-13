@@ -1,4 +1,4 @@
-import { publicOrigin } from './brand.js'
+import { headerPrefix, publicOrigin } from './brand.js'
 export interface UploadAttachmentBytesOptions {
   apiUrl: string
   token: string
@@ -42,9 +42,9 @@ export async function uploadAttachmentBytes(options: UploadAttachmentBytesOption
     headers: {
       Authorization: `Bearer ${options.token}`,
       'Content-Type': options.contentType ?? 'application/octet-stream',
-      'X-Bane-Filename': encodeURIComponent(options.filename),
-      'X-Bane-Disposition': options.disposition ?? 'attachment',
-      ...(options.contentId ? { 'X-Bane-Content-Id': options.contentId } : {}),
+      [`${headerPrefix}Filename`]: encodeURIComponent(options.filename),
+      [`${headerPrefix}Disposition`]: options.disposition ?? 'attachment',
+      ...(options.contentId ? { [`${headerPrefix}Content-Id`]: options.contentId } : {}),
       ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}),
       Accept: 'application/json',
     },

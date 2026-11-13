@@ -163,7 +163,7 @@ export function registerPublicStats(app: App) {
       if (!row) throw new ApiError(503, 'PUBLIC_STATS_PENDING', 'Public figures are computed every minute. Try again shortly.', undefined, true);
       return row.stats;
     });
-    c.header('x-bane-stats-cache', hit ? 'hit' : 'miss');
+    c.header('x-nightmail-stats-cache', hit ? 'hit' : 'miss');
     return c.json(value, 200);
   });
 }

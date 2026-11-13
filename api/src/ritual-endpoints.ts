@@ -11,6 +11,7 @@ import { lockMailboxLane } from './mailbox-store.js';
 import { sendFromMailbox } from './mailbox-send.js';
 import { endpointPolicy, DEFAULT_POLICY } from './ritual-retry.js';
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
+import { loopHeader, loopHeaderNames } from './brand.js';
 
 const base = '/v1/endpoints',
   meta = { security, tags: ['Endpoints'] },
@@ -432,7 +433,7 @@ function forwardSafe(m: typeof mailMessages.$inferSelect) {
   if (stored !== undefined) return stored;
   const names = m.headers.map(h => h.name.toLowerCase());
   return m.status === 'received' && !m.automated && m.verdicts.dmarc !== 'FAIL' && names.length < 200
-    && !names.some(n => ['x-bane-loop', 'auto-submitted', 'x-autoreply', 'x-autorespond'].includes(n)) && names.filter(n => n === 'received').length <= 25;
+    && !names.some(n => [...loopHeaderNames, 'auto-submitted', 'x-autoreply', 'x-autorespond'].includes(n)) && names.filter(n => n === 'received').length <= 25;
 }
 /** Delivers one Slack, Discord or forward call. Retries, rates and fences are applied by ritualDelivery. */
 export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWebhook) {
@@ -455,7 +456,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
       m.spam ||
       m.status !== 'received' ||
       m.verdicts.virus !== 'PASS' ||
-      m.headers.some(x => ['auto-submitted', 'x-bane-loop', 'list-id', 'precedence'].includes(x.name.toLowerCase())) ||
+      m.headers.some(x => ['auto-submitted', ...loopHeaderNames, 'list-id', 'precedence'].includes(x.name.toLowerCase())) ||
       m.headers.filter(x => x.name.toLowerCase() === 'received').length >= 25
     )
       throw new ApiError(422, 'FORWARD_BLOCKED', 'Automated, junk, unparsed, looped or unscanned mail is never forwarded.');
@@ -478,7 +479,7 @@ export async function deliverConnector(runtime: Runtime, w: string, h: ClaimedWe
       subject: 'Fwd: ' + m.subject.slice(0, 200),
       text: `${(m.text || m.snippet || '(No plain text)').slice(0, 64000)}\n\n--\nForwarded by ${box.address}. Stop these forwards: ${stopUrl}`,
       screen: true, inReplyTo: null, references: [], autoSubmitted: 'auto-generated',
-      headers: [{ name: 'X-Bane-Loop', value: 'v1.1.' + token }],
+      headers: [{ name: loopHeader, value: 'v1.1.' + token }],
       attachments: [],
     });
     await tx.execute(sql`UPDATE mail_forward_once SET email_id=${sent.message.sendingEmailId} WHERE workspace_id=${w} AND message_id=${m.id} AND endpoint=${hook}`);
