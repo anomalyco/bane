@@ -517,7 +517,7 @@ export function RitualsPage() {
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
         <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
-          <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
+          <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
         <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
