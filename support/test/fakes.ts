@@ -59,7 +59,8 @@ export default {
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/')) {
       const id = url.pathname.split('/').pop();
       const auto = id.includes('auto');
-      return Response.json({ id, threadId: 'thr_mail_1', direction: 'inbound', subject: 'Bounces from Gmail?', from: { name: 'Ada', address: id.includes('stranger') ? 'stranger@else.test' : 'ada@acme.test' },
+      const threadId = ({ msg_mail_1: 'thr_mail_1', msg_nodmarc_1: 'thr_nodmarc', msg_auto_1: 'thr_auto' })[id] ?? 'thr_other';
+      return Response.json({ id, threadId, direction: 'inbound', subject: 'Bounces from Gmail?', from: { name: 'Ada', address: id.includes('stranger') ? 'stranger@else.test' : 'ada@acme.test' },
         text: 'Why are Gmail bounces up this week?', replyText: 'Why are Gmail bounces up this week?', messageId: '<m1@acme.test>',
         headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: 'Bounces from Gmail?' }], verdicts: { dmarc: id.includes('nodmarc') ? 'FAIL' : 'PASS', spf: 'PASS' } });
     }

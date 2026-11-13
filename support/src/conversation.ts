@@ -467,7 +467,8 @@ export class SupportConversation extends DurableObject<Env> {
         this.update(m => { m.pendingSender = sender; m.confirmSentAt = Date.now(); m.email = sender; });
         this.sql.exec("UPDATE support_inbox SET state = 'awaiting_confirmation' WHERE message_id = ?", next.message_id);
         const link = `${this.env.PUBLIC_URL}/confirm/${await confirmToken(this.env.SUPPORT_ROOT_SECRET, meta.conversationId, sender)}`;
-        await this.emailTurn(this.meta()!, message, next.message_id, sender, { unverified: true, keepPending: true, note: `The sender is not verified yet. Answer anything that needs no account data. If their question needs their account, say you need to confirm it's them first and include this link on its own line: ${link} (or they can sign in to Bane and press Help).` });
+        await this.emailTurn(this.meta()!, message, next.message_id, sender, { unverified: true, keepPending: true, confirmLink: link,
+          note: 'The sender is not verified yet. Answer anything that needs no account data. If their question needs their account, say you need to confirm it’s them first; the harness adds the confirmation link after your reply, so don’t write one.' });
         return true;
       }
     }
@@ -480,7 +481,7 @@ export class SupportConversation extends DurableObject<Env> {
       customer: { userId: meta.userId, email: meta.email, name: meta.name, role: meta.role, workspaces: meta.workspace ? [meta.workspace] : meta.workspaces.map(w => ({ id: w.id, name: w.name })) } };
   }
 
-  private async emailTurn(meta: Meta, message: InboundMessage, messageId: string, sender: string, options: { unverified: boolean; note?: string; keepPending?: boolean }) {
+  private async emailTurn(meta: Meta, message: InboundMessage, messageId: string, sender: string, options: { unverified: boolean; note?: string; keepPending?: boolean; confirmLink?: string }) {
     // Fail closed: without the gateway key the message stays in the inbox and the alarm retries it.
     if (!this.env.CONSOLE_GATEWAY_KEY) throw new MissingSecret('CONSOLE_GATEWAY_KEY');
     const refused = this.admit(meta);
@@ -498,6 +499,12 @@ export class SupportConversation extends DurableObject<Env> {
         await this.harnessTicket(meta, { category: 'other', severity: 'P3', summary: 'The output gate held an email reply.', ask: body.slice(0, 600), tried: [], recommendation: 'Read the thread and reply to the customer.', evidence: { ids: [messageId] } });
         reply = 'Thanks for writing. I’ve passed this to the Bane team to check, and someone will reply here, usually within one business day.\n\nBane support (AI)';
       }
+    }
+    // The confirmation link is the harness's, never left to the model: it always goes out with an unverified reply.
+    if (options.confirmLink) {
+      const signOff = /\n\nBane support \(AI\)\s*$/;
+      const confirm = `To look at your account, I first need to confirm this email is from you. Open this link and press Confirm (it works once, for 24 hours):\n${options.confirmLink}\n\nOr sign in to Bane and press Help.`;
+      reply = signOff.test(reply) ? reply.replace(signOff, `\n\n${confirm}\n\nBane support (AI)`) : `${reply}\n\n${confirm}`;
     }
     // Only ever to the address that wrote (and, once verified, the verified address); Reply-To and Cc are ignored.
     await baneApi(this.env).reply(message.threadId ?? meta.threadId!, { replyToMessageId: messageId, text: reply, to: sender }, `reply-${messageId}`);
