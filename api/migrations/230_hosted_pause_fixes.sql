@@ -6,7 +6,8 @@ SET LOCAL lock_timeout='2s';
 --    resume) for 48 hours, as an absolute cap that a second resume cannot raise.
 -- 3. Bane is the source of truth for the SES tenant status: every pause and resume bumps a generation, each regional
 --    tenant records what was applied at which generation, and a resume holds sending until the tenants it disabled
---    are enabled again.
+--    are enabled again. A disable is journaled (DISABLING) before AWS is called, so an outcome lost between AWS and
+--    the database reads as "possibly disabled" and is enabled again on resume, never as "never disabled".
 -- 4. Content-screen verdicts are counted when the screen runs (dispatch), by the epoch then current.
 ALTER TABLE provider_connections
   ADD COLUMN restore_until timestamptz,
@@ -17,8 +18,12 @@ ALTER TABLE provider_connections
   ADD COLUMN resume_pending_at timestamptz;
 CREATE TABLE hosted_tenant_status (
   connection_id text NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE, region text NOT NULL,
-  applied text NOT NULL CHECK (applied IN ('ENABLED','DISABLED')), generation bigint NOT NULL, applied_at timestamptz NOT NULL DEFAULT now(),
+  applied text NOT NULL CHECK (applied IN ('ENABLED','DISABLING','DISABLED')), generation bigint NOT NULL, applied_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (connection_id, region));
+-- A held stream stays queued at dispatch too (src/dispatcher.ts): already-admitted marketing never leaves while held.
+CREATE FUNCTION hosted_marketing_held(wid text) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT FROM provider_connections WHERE workspace_id=wid AND kind='shared' AND marketing_held_at IS NOT NULL)
+$$;
 CREATE TABLE hosted_screen_hourly (workspace_id text NOT NULL, epoch timestamptz NOT NULL, hour timestamptz NOT NULL,
   screened int NOT NULL DEFAULT 0, rejected int NOT NULL DEFAULT 0, PRIMARY KEY (workspace_id, epoch, hour));
 

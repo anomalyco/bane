@@ -34,3 +34,12 @@
 .developer-icon-actions[data-pending] { visibility: hidden; }
 
 .first-send-test { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); }
+/* Copy sits at the top-right of the code it copies. */
+.developer-snippet { position: relative; min-width: 0; }
+.developer-snippet > .developer-code { padding-right: 48px; }
+/* A config never breaks a key or URL across lines; it scrolls instead. */
+.developer-snippet > .developer-code:not(.developer-code--wrap) { white-space: pre; overflow-x: auto; overflow-wrap: normal; }
+.ui-button.developer-snippet__copy { position: absolute; top: 8px; right: 8px; }
+/* Wider on desktop for the configs; on a phone it stays the full-width bottom sheet. */
+@media (min-width: 641px) { .ui-dialog.connect-agent-dialog { width: min(640px, calc(100vw - 32px)); } }
+.connect-agent__empty { margin: 0; font-size: var(--text-sm); }

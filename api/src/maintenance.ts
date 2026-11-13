@@ -1,12 +1,12 @@
 import { sql, type SQL } from 'drizzle-orm';
-import type { Runtime } from './core.js';
+import { ApiError, type Runtime } from './core.js';
 import { log } from './core.js';
-import { enqueue } from './jobs.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
+const UPLOAD_BATCH = 1000;
 const DAY_MS = 24 * 3600_000;
 
 /**
@@ -119,12 +119,11 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
-  for (const table of ['auth_state_slots','auth_verification','oauth_client_assertion','oauth_access_token','auth_session']) {
+  // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
+  await drain('bane_signin_attempts', batch(sql`bane_signin_attempts`, sql`last_at < now() - interval '30 days'`));
+  for (const table of ['auth_state_slots','bane_dpop_proofs','bane_sessions','bane_login_flows']) {
     await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
   }
-  // Do not cascade away an unexpired access token when its refresh token expires first.
-  await drain('oauth_refresh_token',batch(sql`oauth_refresh_token`,sql`expires_at <= now() AND NOT EXISTS
-    (SELECT FROM oauth_access_token a WHERE a.refresh_id=oauth_refresh_token.id AND a.expires_at>now())`));
   await runtime.db.execute(sql`SELECT mail_prune_route_versions()`);
   await drain('mail_receipts',batch(sql`mail_receipts`,sql`status IN ('processed','failed') AND coalesce(processed_at,created_at)<${cutoff}`));
   await drain('mail_receipt_holds',batch(sql`mail_receipt_holds`,sql`status<>'held' AND expires_at<${cutoff}`));
@@ -136,22 +135,13 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
       // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
       await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' || table==='hosted_screen_hourly' ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
   }
-  // Do not cascade-delete a consent/token committed as we pick candidates: lock the parent first,
-  // then check its indexed references again in a fresh statement while FK inserts are fenced.
-  const unusedClient = sql`NOT EXISTS (SELECT FROM oauth_consent WHERE client_id=c.client_id)
-    AND NOT EXISTS (SELECT FROM oauth_access_token WHERE client_id=c.client_id)
-    AND NOT EXISTS (SELECT FROM oauth_refresh_token WHERE client_id=c.client_id)`;
-  while (Date.now() < deadline) {
-    const count = await runtime.db.transaction(async tx => {
-      const { rows } = await tx.execute<{id:string}>(sql`SELECT c.id FROM oauth_client c WHERE c.created_at < now()-interval '7 days'
-        AND c.user_id IS NULL AND c.reference_id IS NULL AND c.client_discovery_id IS NULL AND ${unusedClient} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED`);
-      if (!rows.length) return 0;
-      return (await tx.execute(sql`DELETE FROM oauth_client c WHERE c.id=ANY(${sql.param(rows.map(row => row.id))}::text[]) AND ${unusedClient}`)).rowCount ?? 0;
-    });
-    deleted.oauth_client = (deleted.oauth_client ?? 0) + count;
-    if (count < RETENTION_BATCH) break;
-  }
   await drain('agent_tokens', batch(sql`agent_tokens`, sql`expires_at < ${cutoff}`));
+  // The audit trail past its retention (src/audit.ts RETENTION); the table refuses to delete anything earlier.
+  await drain('audit_events', () => sql`WITH gone AS (DELETE FROM audit_events WHERE id IN (SELECT id FROM audit_events WHERE retain_until <= now() ORDER BY retain_until LIMIT ${RETENTION_BATCH}) RETURNING 1)
+    SELECT count(*)::int AS n FROM gone`);
+  // Support grants live two hours; their trail is in audit_events. Handoffs expire after a week.
+  await drain('support_grants', batch(sql`support_grants`, sql`expires_at < ${cutoff}`));
+  await drain('support_handoffs', batch(sql`support_handoffs`, sql`expires_at < ${cutoff}`));
   await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
   await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));
   // An email and its attachment links leave in the same statement, so no link can outlive its email.
@@ -184,25 +174,54 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('operation_deliveries', batch(sql`operation_deliveries`, sql`created_at < ${cutoff} AND status NOT IN ('pending','paused')`));
   await drain('operation_events', batch(sql`operation_events`, sql`created_at < ${cutoff}`));
   await drain('operation_sns_receipts', batch(sql`operation_sns_receipts`, sql`created_at < ${cutoff}`));
-  await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff}`));
+  await drain('operation_feedback_failures', batch(sql`operation_feedback_failures`, sql`created_at < ${cutoff} AND reason NOT IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY')`));
   await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type NOT IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
-  await runtime.db.transaction(async tx => {
-    const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; source_template_asset_id: string | null }>(sql`WITH old AS (
+  // A fixed 50 rows an hour fell behind any installation retiring more than about 1,200 uploads a day, so their objects and
+  // the workspace's stored-attachment usage were never released. Up to 5,000 a run now (120,000 a day), 1,000 per
+  // transaction in workspace order: each queues an object deletion that shares the 'other' job class with domain checks and
+  // alerts, and each row's usage trigger holds its workspace's usage row until the batch commits.
+  const uploads = async (name: string, statement: () => SQL) => {
+    for (let i = 0; i < 5 && Date.now() < deadline; i++) {
+      const n = Number((await runtime.db.execute<{ n: number }>(statement())).rows[0]?.n ?? 0);
+      deleted[name] = (deleted[name] ?? 0) + n;
+      if (n < UPLOAD_BATCH) return;
+    }
+  };
+  await uploads('unused_attachments', () => sql`WITH old AS (
       SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
-        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.attachment_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.workspace_id, a.source_template_asset_id`);
-    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-    const unusedTemplateAssets = await tx.execute<{ storage_key: string; workspace_id: string }>(sql`WITH old AS (
+        AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.workspace_id = a.workspace_id AND l.attachment_id = a.id)
+      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id, a.source_template_asset_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key)
+      FROM gone WHERE source_template_asset_id IS NULL
+    ) SELECT count(*)::int AS n FROM gone`);
+  await uploads('unused_template_assets', () => sql`WITH old AS (
       SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
         AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
-      LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id`);
-    for (const object of unusedTemplateAssets.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, payload: { key: object.storage_key } });
-  });
+      ORDER BY a.workspace_id, a.id LIMIT ${UPLOAD_BATCH} FOR UPDATE SKIP LOCKED
+    ), gone AS (DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key, a.workspace_id
+    ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||replace(gen_random_uuid()::text,'-',''),'maintenance.deleteAttachment',workspace_id,jsonb_build_object('key',storage_key) FROM gone
+    ) SELECT count(*)::int AS n FROM gone`);
   await drain('jobs_attachment_deletes', batch(sql`jobs`, sql`status = 'completed' AND type IN ('maintenance.deleteAttachment','mail.deleteObjects') AND created_at < ${cutoff}`));
   const complete=inboxComplete && Date.now()<deadline;
   log('info', { code: complete ? 'RETENTION_COMPLETED' : 'RETENTION_PARTIAL', deleted });
+}
+/** The hourly upkeep. Every step is best-effort: a failing step (a retention statement that keeps timing out) must not
+ * skip the steps after it, and on Node, where this used to run inside the dispatch loop, it must not stop job processing
+ * and mail dispatch. Returns the codes of the steps that failed. */
+export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promise<Runtime> = async () => runtime) {
+  const failed: string[] = [];
+  for (const [code, step] of [
+    ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
+    ['UPLOAD_RECONCILE_FAILED', () => reconcileUploads(runtime)],
+    ['REPUTATION_ALERT_CHECK_FAILED', async () => (await import('./reputation-alerts.js')).checkReputationAlerts(runtime)],
+    ['MAILBOX_HOURLY_FAILED', async () => (await import('./mailbox-ingest.js')).mailboxHourly(await mailboxRuntime())],
+    // Billing settles the closed hours (and once a UTC day its storage, unpaid, drift and expiry work).
+    ['BILLING_HOURLY_FAILED', async () => { if (runtime.config.multiTenant) await (await import('./billing/cron.js')).billingHourly(runtime); }],
+  ] as const) {
+    try { await step(); } catch (error) { failed.push(code); log('warn', { code: error instanceof ApiError ? error.code : code, step: code }); }
+  }
+  return failed;
 }

@@ -61,7 +61,7 @@ function decode(cursor: string | undefined) {
   if (!cursor) return null;
   try {
     const [host, rank, match, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString()) as [string, number, string, string];
-    if (typeof host !== 'string' || typeof rank !== 'number' || typeof match !== 'string' || typeof id !== 'string') throw Error();
+    if (typeof host !== 'string' || !Number.isInteger(rank) || rank < 0 || rank > 9 || typeof match !== 'string' || typeof id !== 'string') throw Error();
     return { host, rank, match, id };
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'cursor is not a cursor this endpoint returned.', 'cursor'); }
 }

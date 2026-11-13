@@ -3,21 +3,50 @@ import { log, type Runtime } from '../core.js';
 
 const SETTLE_BUDGET_MS = 60_000, SETTLE_CONCURRENCY = 4, SETTLE_PAGE = 500;
 const LAG_ALERT_MS = 3 * 3_600_000, BYO_FAIR_USE = 10_000_000;
+// Closed hours only, and at least five minutes closed: the Node runner's hourly tick is not aligned to :07 like the
+// Worker cron, and a writer that started before the boundary may still be upserting the previous hour's row.
+const CLOSED_HOURS = sql`date_trunc('hour', now() - interval '5 minutes', 'UTC')`;
 
 /**
  * Hourly (worker.ts `7 * * * *`, runner.ts hourly), Hosted only: once a UTC day the storage day, the unpaid scan, the
  * drift check and the BYO fair-use report; then settlement of every workspace with unsettled usage in closed hours.
- * Nothing runs while billing_config.mode is 'off' (meters still record).
+ * Nothing runs while billing_config.mode is 'off' (an operator kill-switch; meters still record).
  */
 export async function billingHourly(runtime: Runtime): Promise<void> {
   const { rows: [cfg] } = await runtime.db.execute<{ mode: string }>(sql`SELECT mode FROM billing_config WHERE singleton`);
   if (!cfg || cfg.mode === 'off') return;
   // One runner a day: the same durable election as maintenance:sending-depth, due again at the next 00:05 UTC.
   const { rows: elected } = await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,next_wake_at)
-    VALUES ('billing:daily', date_trunc('day', now(), 'UTC') + interval '1 day 5 minutes')
+    VALUES ('billing:daily', (date_trunc('day', now() AT TIME ZONE 'UTC') + interval '1 day 5 minutes') AT TIME ZONE 'UTC')
     ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
   if (elected.length) await billingDaily(runtime);
   await settleClosedHours(runtime);
+  // Prepaid credit expires 12 months after purchase: only real money moves, so only under enforce.
+  if (cfg.mode === 'enforce') try { await creditExpiry(runtime); } catch (error) { log('error', { code: 'BILLING_CREDIT_EXPIRY_FAILED', message: error instanceof Error ? error.message : String(error) }); }
+}
+
+/**
+ * Credit lots (migration 288): one 'credit_expiring' notice per top-up 30 days before its remaining credit expires,
+ * then the expiry of every lot whose expiry hour has closed (billing_expire_lot settles the workspace first, so usage
+ * before the expiry spends that credit). Bounded per run; the rest goes next hour.
+ */
+export async function creditExpiry(runtime: Runtime, cutoff?: string): Promise<{ notices: number; expired: number; busy: number }> {
+  const at = cutoff ? sql`${cutoff}::timestamptz` : CLOSED_HOURS;
+  const { rows: [noticed] } = await runtime.db.execute<{ n: number }>(sql`SELECT count(billing_notice(workspace_id, 'credit_expiring', 'credit_expiring:'||workspace_id||':'||source_id,
+      jsonb_build_object('lot', source_id, 'remainingUc', remaining_uc::text, 'expiresAt', expires_at)))::int AS n
+    FROM (SELECT workspace_id, source_id, remaining_uc, expires_at FROM billing_credit_lots l
+      WHERE remaining_uc > 0 AND expires_at IS NOT NULL AND expires_at > now() AND expires_at <= now() + interval '30 days'
+        AND NOT EXISTS (SELECT FROM billing_notices n WHERE n.dedupe_key='credit_expiring:'||l.workspace_id||':'||l.source_id)
+      ORDER BY expires_at LIMIT ${SETTLE_PAGE}) due`);
+  const { rows: due } = await runtime.db.execute<{ workspace_id: string; source_id: string }>(sql`SELECT workspace_id, source_id FROM billing_credit_lots
+    WHERE remaining_uc > 0 AND expires_at IS NOT NULL AND date_trunc('hour', expires_at, 'UTC') + interval '1 hour' <= ${at} ORDER BY expires_at LIMIT ${SETTLE_PAGE}`);
+  let expired = 0, busy = 0;
+  for (const lot of due) {
+    const { rows: [r] } = await runtime.db.execute<{ r: { busy?: boolean; expired?: boolean } }>(sql`SELECT billing_expire_lot(${lot.workspace_id}, ${lot.source_id}, ${at}) AS r`);
+    if (r?.r.busy) busy++; else if (r?.r.expired) expired++;
+  }
+  if (noticed?.n || due.length) log('info', { code: 'BILLING_CREDIT_EXPIRY', notices: noticed?.n ?? 0, expired, busy });
+  return { notices: noticed?.n ?? 0, expired, busy };
 }
 
 export async function billingDaily(runtime: Runtime): Promise<void> {
@@ -62,7 +91,7 @@ export async function billingDaily(runtime: Runtime): Promise<void> {
 /** Settles every workspace with unsettled usage before the current hour, four at a time, within a 60 s budget. */
 export async function settleClosedHours(runtime: Runtime, cutoff?: string): Promise<{ workspaces: number; entries: number; busy: number }> {
   const started = Date.now(), deadline = started + SETTLE_BUDGET_MS;
-  const at = cutoff ? sql`${cutoff}::timestamptz` : sql`date_trunc('hour', now(), 'UTC')`;
+  const at = cutoff ? sql`${cutoff}::timestamptz` : CLOSED_HOURS;
   let workspaces = 0, entries = 0, busy = 0;
   const seen = new Set<string>();
   while (Date.now() < deadline) {

@@ -12,11 +12,15 @@ set +x
 umask 077
 secrets_file=$(mktemp "${RUNNER_TEMP:?}/bane-app-secrets.XXXXXX.json")
 trap 'rm -f -- "$secrets_file"' EXIT
-for name in BETTER_AUTH_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET TYPESAFE_API_KEY; do
+# Hosted sign-in and MCP are Google-only: config.ts refuses to start without it, so
+# fail here, before secrets sync or migrations, instead of deploying a 503.
+acr=$(node -e "const ts=require('typescript');const c=ts.parseConfigFileTextToJson('w',require('fs').readFileSync(process.argv[1],'utf8')).config;process.stdout.write(String(c?.vars?.MULTI_TENANT)+' '+String(c?.vars?.ACCOUNT_REQUIRED_ACR))" "$config")
+[[ $acr == 'true urn:anomaly:acr:google' ]] || { echo "::error::$config must set MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google"; exit 1; }
+for name in BANE_ROOT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
 # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
-app_secrets='$ENV | {BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, TYPESAFE_API_KEY}'
+app_secrets='$ENV | {BANE_ROOT_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_KEY}'
 
 # The IMAP/SMTP gateway's shared key (gateway/PHASE2.md). The stage's committed
 # bane:mailGatewayEnabled is the only switch, so neither state can fail open:
@@ -86,8 +90,8 @@ else
   echo "::warning::Billing is ${billing:-off} on $STAGE and its Stripe keys are not set: payments answer 503 BILLING_NOT_CONFIGURED."
 fi
 args+=(--secrets-file "$secrets_file")
-if [[ -n ${AUTH_ALLOWED_EMAILS:-} ]]; then args+=(--var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"); fi
-if [[ -n ${AUTH_ALLOWED_DOMAINS:-} ]]; then args+=(--var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"); fi
+# Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table.
+if [[ ${DEPLOY_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then args+=(--var "DEPLOY_SHA:$DEPLOY_SHA"); fi
 WRANGLER_LOG=error "$wrangler" "${args[@]}"
 if bound; then state=true; else state=false; fi
 [[ $state == "$gateway" ]] || { echo "::error::Worker MAILGW_API_TOKEN bound=$state, but bane:mailGatewayEnabled=$gateway"; exit 1; }

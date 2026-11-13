@@ -4,6 +4,7 @@ import { ApiError, digest, errors, id, json, randomSecret, response, security, w
 import { claimSends } from './states.js';
 import { mailboxes, mailMessages, mailboxWebhooks, retainedMail } from './db/mailbox.js';
 import { ritualAdmin, ownReceiving, resumeNeedsUrl } from './rituals.js';
+import { recordAudit } from './audit.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, WebhookHeaders, webhookSecret, webhookUrl } from './operations.js';
 import { webhookSecretBinding } from './mailbox-events.js';
 import { lockMailboxLane } from './mailbox-store.js';
@@ -200,6 +201,7 @@ export function registerEndpoints(app: App) {
         secret = webhookSecret();
         await tx.insert(mailboxWebhooks).values({ id: hookId, workspaceId: w, key: q.name, name: q.name, url: webhookUrl(c.env, q.url), description: '', eventTypes: [], mailboxIds: null, paused: false, format: 'bane', junk: 'skip', timeoutSeconds: q.timeoutSeconds, retryAttempts: q.retryAttempts ?? 9, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, q.headers, binding) });
         await ownReceiving(tx, c, 'endpoint', hookId);
+        await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: hookId }, after: { name: q.name, type: q.type, headerNames: q.headers?.map(h => h.name) } });
         return;
       }
       const count = (await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM mail_endpoints WHERE workspace_id=${w}`)).rows[0]!.n;
@@ -213,6 +215,8 @@ export function registerEndpoints(app: App) {
       await tx.execute(sql`INSERT INTO mail_endpoints(workspace_id,ref,hook_id,encrypted_value,verified,expires_at,preverified_by) VALUES(${w},${q.type + ':' + q.name},${hookId},${await encrypt(c.env, value, w + ':endpoint:' + hookId)},${q.type !== 'forward' || preverified},${q.type === 'forward' && !preverified ? sql`now()+interval '24 hours'` : null},${preverified ? a.keyId : null})`);
       await ownReceiving(tx, c, 'endpoint', hookId);
       if (q.type === 'forward' && !preverified) await requestConfirmation(c, tx, w, { hook_id: hookId }, value, q.from);
+      // Slack and Discord URLs are credentials: only a forward's address is named.
+      await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: hookId }, after: { name: q.name, type: q.type, ...(q.type === 'forward' ? { address: value, preverified } : {}) } });
     });
     c.header('Cache-Control', 'no-store');
     const created = await endpointView(c.env, w, await findEndpoint(c.env.db, w, q.name));
@@ -248,6 +252,8 @@ export function registerEndpoints(app: App) {
         await tx.execute(sql`INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES(${w},${row.hook_id},${next.perMinute},${next.retryOnTimeout},${next.idempotent})
           ON CONFLICT(workspace_id,hook_id) DO UPDATE SET per_minute=excluded.per_minute,retry_on_timeout=excluded.retry_on_timeout,idempotent=excluded.idempotent`);
       }
+      await recordAudit(tx, c, { action: 'endpoint.update', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, details: { fields: Object.keys(q) },
+        after: { name, type: row.type, paused: q.paused, perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent } });
     });
     return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 200);
   });
@@ -262,6 +268,7 @@ export function registerEndpoints(app: App) {
       if (used.ritual) throw new ApiError(409, 'ENDPOINT_IN_USE', `An attached ritual calls endpoints.${name}. Remove the call or detach the ritual, then delete.`);
       if (used.route) throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${name}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
       await tx.delete(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
+      await recordAudit(tx, c, { action: 'endpoint.delete', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, before: { name, type: row.type } });
     });
     return c.json({ name, deleted: true as const }, 200);
   });

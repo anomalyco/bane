@@ -1,5 +1,6 @@
 import { DASHBOARD_CACHE_NOTE, dashboardRead } from './dashboard-cache.js';
 import { registerSenderScore } from './sender-score.js';
+import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { registerUsage } from './usage.js';
 import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
@@ -8,12 +9,12 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, chargeBudget, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
-import { SuppressionEventData, webhookUrlHint, WebhookUrlHint } from './core.js';
+import { SuppressionEventData, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor } from './core.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -87,7 +88,7 @@ function webhookManager(c: Ctx) {
   if (a.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, change or delete webhooks or read their signing secrets.');
   return a;
 }
-// A webhook that an approval sets up, changes or reads the signing secret of is tied to the approval, like the keys it
+// A webhook that an approval sets up, changes or rotates the signing secret of is tied to the approval, like the keys it
 // creates: it is posted to only while the approval is active (webhookJob) and is held when the approval is removed
 // (migration 198). The approval is read again here, inside the write's transaction, and held (shared lock) until the
 // write commits: a removal under way finishes first and the write is refused; one that starts later waits for the
@@ -100,7 +101,7 @@ async function ownWebhook(c: Ctx, tx: DbExecutor, a: Actor, webhookId: string) {
 }
 // A held webhook is marked (reconfirm). Its URL is write-only, so nothing is posted to it, a test included, until
 // the URL is sent again. Sending the URL takes the webhook over: the mark goes, and so does the signing secret the
-// approval could read.
+// approval was given (on create or rotate).
 const webhookNeedsUrl = () => new ApiError(409, 'WEBHOOK_URL_REQUIRED', 'Deliveries were held when the approval that set up or changed this webhook was removed, and its URL is write-only. Send the URL again to resume; the webhook then gets a new signing secret.', 'url');
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: (sesv2: Sesv2Mod) => Promise<T>,creatingIdentity=false): Promise<T> {
@@ -144,7 +145,9 @@ const hookTimeouts=new Map<string,{count:number;until:number}>();
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
 export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string, timeoutSeconds=5) {
   const key=await digest(binding+'\n'+url),prior=hookTimeouts.get(key);
-  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString());
+  // Nothing leaves while the breaker is open: return only this claim's attempt. Resetting the count let every delivery to an
+  // endpoint that always times out retry forever (three real tries per window, the rest deferred back to attempt 0).
+  if(prior && prior.count>=3 && prior.until>Date.now())throw new JobDeferred(new Date(prior.until).toISOString(),undefined,true);
   const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
   const merged = new Headers();
   for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
@@ -822,9 +825,11 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
-    if (c.env.config.multiTenant) await c.env.db.update(workspaces).set({ name }).where(eq(workspaces.id, a.workspaceId));
-    else await c.env.db.execute(sql`INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
-      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now()`);
+    const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId }, before: sql`jsonb_build_object('name',(SELECT name FROM old))`, after: { name }, details: { fields: ['name'] } }, { from: sql`changed` });
+    await c.env.db.execute(c.env.config.multiTenant
+      ? sql`WITH old AS (SELECT name FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=${name} WHERE id=${a.workspaceId} RETURNING id), audit AS (${audit}) SELECT 1`
+      : sql`WITH old AS (SELECT name FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
+      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now() RETURNING workspace_id), audit AS (${audit}) SELECT 1`);
     return c.json({ name }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
@@ -838,7 +843,10 @@ export function registerOperations(app: App) {
       const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
       await Promise.all([preloadSesTransport(true), loadOperationsSesv2(), loadRegistries()]);
-      const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
+      // A new claim and its audit row are one statement; a retried or reconnected claim writes none.
+      const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region,reserved=>auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`${reserved}.id`},
+        after:sql`jsonb_build_object('name',${input.name}::text,'region',${reserved}.connection->>'region')`},{from:reserved,where:sql`${reserved}.fresh AND ${reserved}.id IS NOT NULL AND ${reserved}.error_code IS NULL`})),
+        row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
@@ -874,9 +882,11 @@ export function registerOperations(app: App) {
       catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`INSERT INTO operation_domains(id,workspace_id,name,region)
+    const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`WITH saved AS (INSERT INTO operation_domains(id,workspace_id,name,region)
       VALUES (${id('dom')},${a.workspaceId},${body.name},${body.region}) ON CONFLICT ON CONSTRAINT operation_domain_scope
-      DO UPDATE SET updated_at=now() RETURNING id,name,region`);
+      DO UPDATE SET updated_at=now() RETURNING id,name,region,xmax=0 AS created),
+      audit AS (${auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`saved.id`},after:body},{from:sql`saved`,where:sql`saved.created`})})
+      SELECT id,name,region FROM saved`);
     return c.json(await domainReadiness(c.env, row!, identity,'create'), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
@@ -884,6 +894,7 @@ export function registerOperations(app: App) {
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const { mailFromDomain } = c.req.valid('json');
     if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
+    const mailFromAudit = { action: 'domain.mail_from', workspaceId: a.workspaceId, target: { type: 'domain', id: row.id }, after: { name: row.name, mailFromDomain } };
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
@@ -899,11 +910,17 @@ export function registerOperations(app: App) {
         const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
         await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
           ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,'supersede')}`);
+        await recordAudit(db,c,mailFromAudit);
         return derivedReadiness({...current,identity:facts});
       }); a.wakeJobs=1; return c.json(report,200);
     }
     const client = await getSes(c.env, row.region);
-    await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    // The change is in SES, not in a database row. Fail closed: the audit row is written first and committed only once SES
+    // accepted the change, so a change without its row needs a lost commit (the client then sees 500 and retries).
+    await c.env.db.transaction(async tx => {
+      await recordAudit(tx, c, mailFromAudit);
+      await sesCall(({ PutEmailIdentityMailFromAttributesCommand }) => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    });
     return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/receiving-host',operationId:'chooseReceivingHost',tags:['Domains'],security,
@@ -934,6 +951,7 @@ export function registerOperations(app: App) {
       if (!current || current.token!==row.token || (current.receiving_host && host!==current.receiving_host)) throw new ApiError(409,'DOMAIN_CHANGED','The domain changed while its DNS was checked. Try again.',undefined,true);
       const identity:IdentityFacts={...(current.identity ?? identityOnly({VerificationStatus:'PENDING'})),...facts,...(host===null ? {mx:current.identity?.mx?.expected.name===current.receiving_host ? current.identity?.mx ?? null : null} : {})};
       await db.execute(sql`UPDATE domain_claims SET identity=${JSON.stringify(identity)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${current.name} AND token=${current.token}`);
+      await recordAudit(db,c,{action:'domain.receiving_host',workspaceId:a.workspaceId,target:{type:'domain',id:domainId},before:{receivingChoice:current.identity?.receivingChoice ?? null},after:{name:current.name,receivingChoice:host}});
       return derivedReadiness({...current,identity});
     });
     return c.json(saved,200);
@@ -976,14 +994,14 @@ export function registerOperations(app: App) {
     const claim=verifyReturn(c.env.config.authSecret,token);
     if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
     // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
-    const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./google-auth.js'));
+    const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
     const user=await verifiedDashboardUser(c.env,c.req.raw.headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
     if(!user || claim.userId!==user.userId) return back();
     const {userId}=user;
     const wid=claim.workspaceId;
     const result=await c.env.db.execute(sql`WITH target AS (SELECT d.id,d.token FROM (${hostedDomainSelect(wid,id,sql`FOR SHARE OF dc`)}) d
       JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
-      selected AS (UPDATE auth_user SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
+      selected AS (UPDATE bane_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
     if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
     return back();
@@ -1008,7 +1026,8 @@ export function registerOperations(app: App) {
         // A claim whose connection is gone has no SES identity to own; releasing it only frees the name.
         const detached=(await db.execute<{id:string;name:string;token:string}>(sql`SELECT d.id,d.name,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
           WHERE d.workspace_id=${a.workspaceId} AND d.id=${c.req.valid('param').id} AND dc.connection_id IS NULL FOR UPDATE OF dc`)).rows[0] ?? notFound('Domain');
-        allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached); return;
+        allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached);
+        return recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:detached.id},before:{name:detached.name}});
       }
       allowedDomain(a,row.name);
       if (!row.identity?.imported) {
@@ -1019,6 +1038,7 @@ export function registerOperations(app: App) {
       }
       await releaseClaim(db,a.workspaceId,row);
       if (row.connection.kind==='byo' && row.receiving_host) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,a.workspaceId,row.region);
+      await recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:row.id},before:{name:row.name,region:row.region,receivingHost:row.receiving_host}});
     }); return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
@@ -1037,6 +1057,7 @@ export function registerOperations(app: App) {
       await ownWebhook(c, tx, a, webhookId);
       const created = await tx.insert(webhooks).values(values).returning();
       await recordSecret(tx, a, webhookId, 'created');
+      await recordAudit(tx, c, { action: 'webhook.create', workspaceId: a.workspaceId, target: { type: 'webhook', id: webhookId }, after: { url: webhookUrlHint(url), eventTypes: body.eventTypes, regions: body.regions ?? null, paused: body.paused, headerNames: headers?.map(h => h.name) } });
       return created;
     });
     c.header('Cache-Control', 'no-store');
@@ -1064,11 +1085,18 @@ export function registerOperations(app: App) {
           UPDATE operation_deliveries d SET status='pending', generation=d.generation+1, updated_at=now() FROM parked p WHERE d.id=p.id AND p.attempt_count<${WEBHOOK_ATTEMPTS} RETURNING d.id, d.generation, d.attempt_count
         ) INSERT INTO jobs(id, workspace_id, type, payload, attempts)
           SELECT 'job_'||replace(gen_random_uuid()::text,'-',''), ${a.workspaceId}, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', generation), attempt_count FROM resumed`);
+      // Changed field names and non-secret values: a URL hint, never header values.
+      await recordAudit(tx, c, { action: 'webhook.update', workspaceId: a.workspaceId, target: { type: 'webhook', id: current.id }, details: { fields: [...Object.keys(body), ...(headers ? ['headers'] : [])] },
+        before: { url: body.url ? webhookUrlHint(locked.url) : undefined, eventTypes: body.eventTypes ? locked.eventTypes : undefined, regions: body.regions !== undefined ? locked.regions : undefined, paused: body.paused !== undefined ? locked.paused : undefined },
+        after: { url: body.url ? webhookUrlHint(body.url) : undefined, eventTypes: body.eventTypes, regions: body.regions, paused: body.paused, headerNames: headers?.map(h => h.name) } });
       return updated!;
     }); return c.json(await metadata(c.env, row, a), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
-    const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
+    const a = webhookManager(c), row = await getWebhook(c.env, a, c.req.valid('param').id);
+    await c.env.db.execute(sql`WITH deleted AS (DELETE FROM operation_webhooks WHERE workspace_id=${a.workspaceId} AND id=${row.id} RETURNING id),
+      audit AS (${auditInsert(auditContext(c), { action: 'webhook.delete', workspaceId: a.workspaceId, target: { type: 'webhook', id: sql`deleted.id` }, before: { url: webhookUrlHint(row.url), eventTypes: row.eventTypes, paused: row.paused } }, { from: sql`deleted` })}) SELECT 1`);
+    return c.json({ deleted: true }, 200);
   });
   // Reveal hands out a durable capability: whoever holds the secret can sign requests the receiver trusts, with no trace in
   // Bane. So only a person's own credentials read it back (a dashboard session, or an API key not made through an MCP
@@ -1083,7 +1111,11 @@ export function registerOperations(app: App) {
       throw new ApiError(429, 'REVEAL_RATE_LIMITED', `This workspace read signing secrets back ${REVEALS_PER_MINUTE} times in the last minute. Retry after the window resets.`, undefined, true);
     }
     const secret = await decrypt(c.env, row.encryptedSecret, secretBinding(a, row.id));
-    await recordSecret(c.env.db, a, row.id, 'revealed');
+    // Both records commit before the secret is returned: the secret hand-out log and the account's audit trail.
+    await c.env.db.transaction(async tx => {
+      await recordSecret(tx, a, row.id, 'revealed');
+      await recordAudit(tx, c, { action: 'webhook.secret_reveal', workspaceId: a.workspaceId, target: { type: 'webhook', id: row.id }, details: { url: webhookUrlHint(row.url) } });
+    });
     return c.json({ secret }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/rotate-secret', operationId: 'rotateWebhookSecret', tags: ['Webhooks'], security, description: 'Replace the endpoint\'s signing secret and return the new one. Deliveries are signed with it from now on, so update your receiver. Each rotation is recorded with the credential and time.', request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
@@ -1096,6 +1128,7 @@ export function registerOperations(app: App) {
       const secret = webhookSecret();
       await tx.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId)));
       await recordSecret(tx, a, webhookId, 'rotated');
+      await recordAudit(tx, c, { action: 'webhook.secret_rotate', workspaceId: a.workspaceId, target: { type: 'webhook', id: row.id }, details: { url: webhookUrlHint(row.url) } });
       return secret;
     });
     return c.json({ secret }, 200);
@@ -1108,7 +1141,10 @@ export function registerOperations(app: App) {
     return c.json({ id: deliveryId, status: 'pending' as const }, 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
-    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'); const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), q.cursor ? lt(deliveries.id, q.cursor) : undefined)).orderBy(desc(deliveries.id)).limit(q.limit + 1); return c.json({ data: rows.slice(0, q.limit).map(row => visibleDelivery(row, a)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    // Newest first by creation time: delivery IDs are random, so ordering by ID showed an arbitrary sample, not the latest.
+    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'), binding = `webhook-deliveries:${endpoint.id}`, cursor = readCursor(q.cursor, binding);
+    const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), cursor ? sql`(${deliveries.createdAt},${deliveries.id})<(${cursor.at}::timestamptz,${cursor.id})` : undefined)).orderBy(desc(deliveries.createdAt), desc(deliveries.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(row => visibleDelivery(row, a)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   const deliveryParams = z.object({ id: z.string(), deliveryId: z.string() }).openapi('WebhookDeliveryParams');
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries/{deliveryId}', operationId: 'getWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 200: response(deliverySchema.extend({ attempts: z.array(attemptSchema) }).openapi('WebhookDeliveryDetail')), ...errors } }), async c => {
@@ -1189,7 +1225,7 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
     // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
-    try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', errorType: error instanceof Error ? error.name : 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 7).join('\n') : undefined }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(certificateTimeout) }); } catch (error) { logError(error, { code: 'SNS_CERTIFICATE_FETCH_FAILED' }, 'warn'); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
     if (!res.ok) {
       await res.body?.cancel();
       if(res.status===404 || res.status===410){
@@ -1336,6 +1372,17 @@ function registerPublicEvents(app: App) {
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
       const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
       if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      return c.json({ accepted: true }, 202);
+    }
+    // An SES tenant status event (EventBridge) has no mail object: it is judged by its topic, account, region and an
+    // owned tenant ARN (src/standing.ts), before the mail checks below; both ingress paths use the same check.
+    const tenantEvent = c.env.config.multiTenant && (message as { source?: unknown } | null)?.source === 'aws.ses' ? (await import('./standing.js')).tenantStatusEvent(message as Record<string, unknown>) : null;
+    if (tenantEvent) {
+      if (binding?.kind !== 'shared') throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'SES tenant status events are accepted only from a Bane-owned shared feedback topic.');
+      const tenantItem = { message: message as Record<string, unknown>, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region, topicKind: 'shared' as const };
+      if (c.env.feedback) { await c.env.feedback.enqueue([tenantItem]); return c.json({ accepted: true }, 202); }
+      const refused = await (await import('./standing.js')).ingestTenantStatus(c.env, tenantEvent, tenantItem);
+      if (refused) throw new ApiError(403, refused, 'This SES tenant status event does not match a tenant Bane owns on this topic.');
       return c.json({ accepted: true }, 202);
     }
     verifySesAccount(c.env, message, envelope.TopicArn);
@@ -1570,9 +1617,8 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
     const standing = runtime.config.multiTenant && !simulatedTopic(item.topicArn) && item.message?.source === 'aws.ses' ? await import('./standing.js') : null;
     const tenantEvent = standing?.tenantStatusEvent(item.message);
     if (standing && tenantEvent) {
-      if (tenantEvent.account !== item.topicArn.split(':')[4]) { outcomes[index] = { ok: false, error: 'SES_ACCOUNT_MISMATCH' }; continue; }
-      await standing.ingestTenantStatus(runtime, tenantEvent);
-      outcomes[index] = { ok: true }; continue;
+      const refused = await standing.ingestTenantStatus(runtime, tenantEvent, item);
+      outcomes[index] = refused ? { ok: false, error: refused } : { ok: true }; continue;
     }
     try {
       if (simulatedTopic(item.topicArn)) assertSimulatedFeedback(runtime, item);
@@ -1655,6 +1701,135 @@ async function quarantineFeedback(runtime: Runtime, item: FeedbackItem, workspac
     log('error',{code:'SES_FEEDBACK_QUARANTINED',id:key});
     return {ok:false,error:'SES_FEEDBACK_QUARANTINED'};
   } catch { return {ok:false,error:'FEEDBACK_PERSIST_FAILED'}; }
+}
+
+const UNTAGGED_PAYLOAD_CAP = 65536, RECOVERY_PREFIX = 'feedback-recovery/v1/';
+type QueueRecoveryReason = 'FEEDBACK_UNTAGGED' | 'FEEDBACK_LEGACY_RECOVERY' | 'FEEDBACK_QUEUE_RECOVERY';
+function recoverableJson(body: unknown): string | undefined {
+  const seen = new Set<object>();
+  const valid = (value: unknown): boolean => {
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+    if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0);
+    if (!value || typeof value !== 'object' || seen.has(value)) return false;
+    if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
+    seen.add(value);
+    const entries = Object.entries(value);
+    const ok = (!Array.isArray(value) || entries.length === value.length && entries.every(([key], index) => key === String(index))) && entries.every(([, v]) => valid(v));
+    seen.delete(value); return ok;
+  };
+  try { return valid(body) ? JSON.stringify(body) : undefined; } catch { return undefined; }
+}
+async function retainQueueFeedback(runtime: Runtime, lane: string, body: unknown, reason: QueueRecoveryReason): Promise<string | undefined> {
+  // JSON is the provider-feedback format. Never replace an unrepresentable body with a preview and ack it.
+  const text = recoverableJson(body); if (text === undefined) return;
+  const prefix = reason === 'FEEDBACK_UNTAGGED' ? 'untagged' : reason === 'FEEDBACK_LEGACY_RECOVERY' ? 'legacy' : 'queue';
+  const key = `${prefix}:${await digest(`${lane}\n${text}`)}`;
+  const topic = (body as { topicArn?: unknown; body?: { topicArn?: unknown } } | null)?.topicArn ?? (body as { body?: { topicArn?: unknown } } | null)?.body?.topicArn;
+  const chunks: string[] = [];
+  if (text.length > UNTAGGED_PAYLOAD_CAP) {
+    // Split on Unicode code points: passing a lone surrogate to PostgreSQL would destroy that byte sequence.
+    const points = Array.from(text);
+    for (let i = 0; i < points.length; i += 16384) chunks.push(points.slice(i, i + 16384).join(''));
+  }
+  return runtime.db.transaction(async tx => {
+    const result = await tx.execute(sql`INSERT INTO operation_feedback_failures(id,payload,topic_arn,reason,payload_chunk_count)
+      VALUES (${key},${chunks.length ? '' : text},${typeof topic === 'string' && topic.length <= 512 ? topic : null},${reason},${chunks.length})
+      ON CONFLICT (id) DO UPDATE SET reason=EXCLUDED.reason RETURNING id`);
+    if (result.rowCount !== 1) return;
+    if (chunks.length) await tx.execute(sql`INSERT INTO operation_feedback_failure_chunks(failure_id,ordinal,payload)
+      SELECT ${key},ordinality-1,payload FROM unnest(${sql.param(chunks)}::text[]) WITH ORDINALITY AS c(payload,ordinality) ON CONFLICT DO NOTHING`);
+    return key;
+  });
+}
+/**
+ * Keeps an untagged item from the legacy feedback queue for operator review. The body is untrusted:
+ * it is stored as complete text/chunks under a content digest and never attributed from its body.
+ */
+export async function quarantineUntaggedFeedback(runtime: Runtime, lane: string, body: unknown): Promise<boolean> {
+  return !!await retainQueueFeedback(runtime, lane, body, 'FEEDBACK_UNTAGGED');
+}
+async function retainOrSpillFeedback(runtime: Runtime, body: import('./adapters/feedback-queue.js').LegacyFeedbackRecovery | import('./adapters/feedback-archive.js').FeedbackArchive, reason: QueueRecoveryReason): Promise<'database' | 'storage'> {
+  try {
+    if (!await retainQueueFeedback(runtime, body.source.queue, body, reason)) throw new Error('Feedback recovery could not be encoded');
+    return 'database';
+  } catch {
+    // Independent of PostgreSQL and queue-message size. The complete, authenticated object is
+    // reconciled into the quarantine table by the minute cron before this key is removed.
+    const text = JSON.stringify(body), key = `${RECOVERY_PREFIX}${await digest(text)}.json`;
+    await runtime.storage.put(key, Buffer.from(text), 'application/json');
+    log('warn', { code: 'FEEDBACK_RECOVERY_SPILLED', sourceQueue: body.source.queue, sourceId: body.source.id });
+    return 'storage';
+  }
+}
+export async function retainLegacyFeedback(runtime: Runtime, body: import('./adapters/feedback-queue.js').LegacyFeedbackRecovery): Promise<'database' | 'storage'> {
+  const { authenticLegacyRecovery } = await import('./adapters/feedback-queue.js');
+  if (!authenticLegacyRecovery(runtime.config, body)) throw new Error('Unauthenticated legacy recovery');
+  return retainOrSpillFeedback(runtime, body, 'FEEDBACK_LEGACY_RECOVERY');
+}
+export async function archiveQueueFeedback(runtime: Runtime, source: import('./adapters/feedback-archive.js').FeedbackSource, body: unknown, error: string): Promise<void> {
+  const { feedbackArchive } = await import('./adapters/feedback-archive.js');
+  const archive = await feedbackArchive(runtime.config.authSecret, source, body, error);
+  await retainOrSpillFeedback(runtime, archive, 'FEEDBACK_QUEUE_RECOVERY');
+}
+/** Drain the private object-store spill buffer into PostgreSQL; never ingest from storage directly. */
+export async function drainFeedbackRecovery(runtime: Runtime): Promise<number> {
+  if (!runtime.storage.list) return 0;
+  const [{ authenticLegacyRecovery }, { authenticFeedbackArchive }] = await Promise.all([import('./adapters/feedback-queue.js'),import('./adapters/feedback-archive.js')]);
+  let stored = 0, after: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const listed = await runtime.storage.list(RECOVERY_PREFIX, after);
+    for (const entry of listed.objects) {
+      const object = await runtime.storage.get(entry.key); if (!object) continue;
+      const text = Buffer.from(object.body).toString('utf8');
+      if (entry.key !== `${RECOVERY_PREFIX}${await digest(text)}.json`) { log('error',{code:'FEEDBACK_RECOVERY_CORRUPT'}); continue; }
+      let value: unknown; try { value = JSON.parse(text); } catch { log('error',{code:'FEEDBACK_RECOVERY_CORRUPT'}); continue; }
+      const reason = authenticLegacyRecovery(runtime.config,value) ? 'FEEDBACK_LEGACY_RECOVERY' : authenticFeedbackArchive(runtime.config,value) ? 'FEEDBACK_QUEUE_RECOVERY' : undefined;
+      if (!reason) { log('error',{code:'FEEDBACK_RECOVERY_UNAUTHENTICATED'}); continue; }
+      const source = (value as {source:{queue:string}}).source;
+      if (!await retainQueueFeedback(runtime,source.queue,value,reason)) throw new Error('Feedback recovery could not be restored');
+      await runtime.storage.delete(entry.key); stored++;
+    }
+    after = listed.cursor; if (!after) break;
+  }
+  return stored;
+}
+export async function completeLegacyFeedback(runtime: Runtime, body: import('./adapters/feedback-queue.js').LegacyFeedbackRecovery): Promise<void> {
+  const id = `legacy:${await digest(`${body.source.queue}\n${JSON.stringify(body)}`)}`;
+  await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE id=${id} AND reason='FEEDBACK_LEGACY_RECOVERY'`);
+}
+export async function readFeedbackQuarantine(runtime: Runtime, ids?: string[], after?: string) {
+  const rows = (await runtime.db.execute<{ id: string; reason: string; payload: string; topic_arn: string | null; created_at: string; payload_chunk_count: number; actual_chunks: number }>(sql`
+    SELECT f.id,f.reason,CASE WHEN f.payload_chunk_count=0 THEN f.payload ELSE c.payload END AS payload,
+      f.topic_arn,f.created_at::text,f.payload_chunk_count,coalesce(c.n,0)::int AS actual_chunks
+    FROM operation_feedback_failures f LEFT JOIN LATERAL
+      (SELECT string_agg(payload,'' ORDER BY ordinal) AS payload,count(*) AS n FROM operation_feedback_failure_chunks WHERE failure_id=f.id) c ON true
+    WHERE f.reason IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY') ${ids ? sql`AND f.id = ANY(${sql.param(ids)}::text[])` : sql``}
+      ${after ? sql`AND (f.created_at,f.id) > (SELECT created_at,id FROM operation_feedback_failures WHERE id=${after})` : sql``}
+    ORDER BY f.created_at,f.id LIMIT 500`)).rows;
+  for (const row of rows) if (row.payload_chunk_count !== row.actual_chunks) throw new Error(`Incomplete feedback recovery ${row.id}`);
+  return rows;
+}
+/** Replays only authenticated quarantine rows. An operator's selection is not provider provenance. */
+export async function replayQuarantinedFeedback(runtime: Runtime, ids: string[]): Promise<{ id: string; ok: boolean; error?: string }[]> {
+  if (!ids.length) return [];
+  const { authenticatedFeedbackItem } = await import('./adapters/feedback-queue.js');
+  const { authenticFeedbackArchive, feedbackArchiveBody } = await import('./adapters/feedback-archive.js');
+  const rows = await readFeedbackQuarantine(runtime, ids);
+  const items: { id: string; item?: FeedbackItem; error?: string }[] = rows.map(row => {
+    try {
+      const stored = JSON.parse(row.payload), raw = authenticFeedbackArchive(runtime.config,stored) ? feedbackArchiveBody(stored) : stored;
+      const authenticated = authenticatedFeedbackItem(runtime.config, raw);
+      const value = authenticated ?? raw as Partial<FeedbackItem> | null;
+      if (!value || typeof value !== 'object' || typeof value.region !== 'string' || typeof value.topicArn !== 'string' || typeof value.messageId !== 'string' || !value.message || typeof value.message !== 'object') return { id: row.id, error: 'FEEDBACK_INVALID' };
+      if (!authenticated) return { id: row.id, error: 'FEEDBACK_UNAUTHENTICATED' };
+      return { id: row.id, item: authenticated };
+    } catch { return { id: row.id, error: 'FEEDBACK_INVALID' }; }
+  });
+  const outcomes = await ingestFeedbackBatch(runtime, items.flatMap(entry => entry.item ? [entry.item] : []));
+  const results = items.map(entry => entry.item ? { id: entry.id, ...outcomes.shift()! } : { id: entry.id, ok: false, error: entry.error });
+  const done = results.filter(r => r.ok).map(r => r.id);
+  if (done.length) await runtime.db.execute(sql`DELETE FROM operation_feedback_failures WHERE reason IN ('FEEDBACK_UNTAGGED','FEEDBACK_LEGACY_RECOVERY','FEEDBACK_QUEUE_RECOVERY') AND id = ANY(${sql.param(done)}::text[])`);
+  return results;
 }
 
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {

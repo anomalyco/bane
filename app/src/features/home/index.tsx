@@ -1,9 +1,11 @@
 import { lazy, useEffect, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
+import { Link } from 'react-router'
 import { Button, LoadingRegion, Skeleton } from '../../components/ui'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AnomalyLogo } from '../../components/AnomalyLogo'
+import { SignInConsent } from '../../components/LegalLinks'
 import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
@@ -85,7 +87,7 @@ export function HomeHeader({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, '
 
 export function HomeActions({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 'onSignIn' | 'onSignInIntent' | 'busy'>) {
   return <div className="home-actions">
-    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Start with Google</Button>
+    <Button variant="primary" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in to Bane</Button>
     <a className="ui-button ui-button--secondary ui-button--md" href="/docs">Docs <ArrowUpRight size={16} aria-hidden="true" /></a>
   </div>
 }
@@ -93,7 +95,7 @@ export function HomeActions({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 
 export function HomeFooter() {
   return <footer className="home-footer muted">
     <a className="home-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={20} /></a>
-    <nav aria-label="Developer links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">SDK</a></nav>
+    <nav aria-label="Site links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">SDK</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
   </footer>
 }
 
@@ -106,7 +108,8 @@ function CurrentHome({ onSignIn, onSignInIntent, busy, notice }: HomeProps) {
         <h1>Email infrastructure done right.</h1>
         <p>One API on Amazon SES.</p>
         <HomeActions onSignIn={onSignIn} onSignInIntent={onSignInIntent} busy={busy} />
-        <p className="home-invite muted">Invite-only for now. Sign in with Google to request access.</p>
+        <p className="home-invite muted">Invite-only. Open your invitation or sign in with an approved account.</p>
+        <SignInConsent className="home-invite muted" />
         {notice}
       </section>
       {/* No board until there are figures to show: while they're withheld (available: false) or failing, the page goes straight to the capabilities. */}

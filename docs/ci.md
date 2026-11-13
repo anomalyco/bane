@@ -1,6 +1,6 @@
 # CI: what runs where, and how to fix it
 
-Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev E2E passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
+Every change reaches production through `dev`: a PR merges into `dev`, the dev deploy migrates the dev database, deploys the Worker and runs the live E2E (`api/scripts/e2e.ts`) against `dev.bane.mx`, and production only deploys a commit whose dev push CI and dev E2E both passed. A red dev E2E therefore blocks every release after it. The checks below exist so that what used to break dev after merge breaks the PR instead.
 
 ## Merging into `dev`: the merge queue (one step from on)
 
@@ -24,15 +24,30 @@ CI and the dev deploy are ready for GitHub's merge queue on `dev`: `ci.yml` runs
 | Every PR, `dev` push | `acceptance` | The API's acceptance suite on Node against an isolated Postgres and S3 fixture, in two shards, plus the **deadlock guard** | ~2–3 min |
 | Every PR, `dev` push | `preview` | The real Worker under `wrangler dev` (workerd) with dev's wrangler config, on a database upgraded from `dev`'s schema; see **Preview stack** | ~2 min |
 | Every PR, `dev` push | `audit`, `gateway`, `cls` | Dependency advisories, the Rust mail gateway, layout shift on every dashboard page | ~3 min, in parallel |
-| `dev` push | Deploy dev | Migrate, deploy, health, live dev E2E | ~5 min |
+| `dev` push, alongside CI | Deploy dev | Migrate, deploy, health, live dev E2E | ~2–3 min, plus ~1 min when Pulumi has work |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, ten runs each in parallel, reported in one issue | ~6 min |
-| Push to `production` | Deploy production | Requires the passing dev E2E for the exact SHA | ~4 min |
+| Push to `production` | Deploy production | Requires a passing dev push CI and dev E2E for the exact SHA; no approval (see **Releasing to production**) | ~2 min, plus ~1 min when Pulumi has work |
+| Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) | ~2 min, plus the session |
 
 `build` and `acceptance` are required on `dev`.
 
+## Releasing to production
+
+1. **Dev.** A push to `dev` starts CI and `Deploy dev` at the same time. The dev deploy no longer waits for CI: it checks the pusher and that the commit is still the `dev` tip, then deploys and runs the live E2E. A commit whose CI fails can therefore reach `dev.bane.mx`, but never production.
+2. **Production.** Fast-forward `production` to a `dev` commit (`git push bane <sha>:production`). Authorize requires the commit to be reachable from `production` and `dev`, then runs `.github/scripts/dev-proof.sh`. That script requires a successful `deploy.yml` dev job named for exactly this SHA whose `Live dev E2E` step passed, and a successful `ci.yml` push run on `dev` for exactly this SHA. If that CI is still running, it waits up to 25 minutes and fails as soon as CI fails.
+3. **No approval.** The `production` environment has no required reviewers (removed on Nov 12; before that, every production run waited for thdxr or R44VC0RP to approve). The deploy proceeds as soon as Authorize has the proof. These guards remain: the `production` ruleset (fast-forward only, no deletion), its branch protection (only thdxr and R44VC0RP push), the environment's branch policy (`production` only), the actor check, the stage-tip check in every job, and `PROD_DEPLOY_ENABLED`. To put an approval back, add a required-reviewers rule to the environment (Settings → Environments → `production`, or `PUT repos/anomalyco/bane/environments/production` with `reviewers` and the existing `deployment_branch_policy`).
+
+**Pulumi only runs when it has work.** `.github/scripts/pulumi-has-work.sh` compares the commit being deployed with the commit of the stage's newest successful Deploy job (read from the job's name, so a rollback counts as the commit it deployed). Pulumi runs when one of these changed in that range:
+
+- `infra/pulumi/` or `infra/aws-shared/`, except Markdown;
+- `api/src/mail-controls.ts` or `.github/scripts/receiving-rule-set.sh`;
+- the `pulumi` job in `deploy.yml`, compared with `yq` after expanding anchors and dropping its `Require …` guard steps.
+
+An edit elsewhere in `deploy.yml` (the Worker deploy or the E2E) no longer runs Pulumi; on Nov 12 that alone ran it four times. Pulumi also runs when no deployed commit is an ancestor, and on every `workflow_dispatch`.
+
 ## When the dev E2E fails
 
-The deploy's `Report the dev E2E failure` job opens an issue labeled `dev-e2e` (or comments on the open one) with the failed steps, their errors and request IDs, and the bane-dev Worker's log lines for those requests. Those lines come from `wrangler tail`, which runs during the E2E; they are limited to the failed requests and to Bane's structured fields (level, code, operation, status, SQLSTATE, a 300-character message) because the issue is public. If the dev token cannot tail Workers, the issue says so and you search the request IDs in the Cloudflare dashboard instead.
+The deploy's `Report the dev E2E failure` job opens an issue labeled `dev-e2e` (or comments on the open one) with the failed steps, their errors and request IDs, and the bane-dev Worker's log lines for those requests. Those lines come from `wrangler tail`, which runs during the E2E; they are limited to the failed requests and to Bane's structured fields (level, code, route, status, SQLSTATE, a 300-character message; see **Request logs** below) because the issue is public. If the dev token cannot tail Workers, the issue says so and you search the request IDs in the Cloudflare dashboard instead.
 
 Production stays blocked, as before: it deploys only a commit whose dev E2E passed. To unblock:
 
@@ -77,6 +92,12 @@ Below 640 px every `DataTable` renders its rows as cards from each column's `car
 
 **Fix:** set `card` to `'title'`, `'aside'`, `'line'`, `'inline'`, `'field'`, `'end'` or `'hide'` (see `Column` in `app/src/components/ui/primitives.tsx`).
 
+### Identity
+
+Identity is `(issuer, subject)`. An issuer can assert a verified address that the sign-in method never vouched for (a GitHub-made account that links a personal Google account signs in with `acr=google` and its GitHub-verified work address), so no code may admit, link or authorize a person by email. **Fails when** `api/src`, `api/scripts` or a migration from 270 on names one of the removed email paths (`claim_bane_legacy_user`, `bane_legacy_claims`, `AUTH_ALLOWED_EMAILS`, `AUTH_ALLOWED_DOMAINS`, `allowedEmails`, `allowedDomains`, `signupApproved`, `google_hosted_domain`).
+
+**Fix:** decide by subject: the sign-in's provider identity for hosted staff (`api/src/account-policy.ts`), an invitation link, `AUTH_ALLOWED_SUBJECTS` when self-hosted, or an operator binding a subject (`scripts/list-signin-attempts.ts`). A line that must name a removed setting, such as the startup refusal, carries `premerge-identity: allowed`.
+
 ## Deadlock guard (`acceptance`)
 
 Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two endpoints locking the same rows (the workspace's settings row, a domain claim, a receipt or its window) in opposite orders. Each request then failed with a 500 after `deadlock_timeout`. The acceptance job now:
@@ -87,7 +108,7 @@ Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two
 
 **When it fails:** the log excerpt names both statements and the rows they waited for. Find the two code paths and make them take their locks in the same order: the workspace's `ses_installation_settings` row first, then domain claims, then receipts and their windows (`lockedSettings()` in `api/src/sending.ts` is the helper). Add a test that holds the first lock and proves the second path waits for it (see `regional sender: a send waits on the settings row…`), and add the pair to the `lock order:` stress test once it is fixed.
 
-Locally: `PGPORT=<port> PG_CONTAINER=<container> RUNNER_TEMP=$(mktemp -d) bash ../.github/scripts/acceptance.sh` from `api/`, against a disposable Postgres (`docker run -d -e POSTGRES_PASSWORD=fixture-admin -p 127.0.0.1:<port>:5432 postgres:17.11-alpine`).
+Locally: `PGPORT=<port> PG_CONTAINER=<container> RUNNER_TEMP=$(mktemp -d) bash ../.github/scripts/acceptance.sh` from `api/`, against a disposable Postgres (`docker run -d -e POSTGRES_PASSWORD=fixture-admin -p 127.0.0.1:<port>:5432 postgres:17.11-alpine`). The suite listens on ports 8787, 8788, 4569 and 4570; when another checkout's suite is running, pick others with `ACCEPTANCE_PORTS="18787 18788 14569 14570"`.
 
 ## Flakes: quarantine and the nightly runs
 
@@ -140,3 +161,42 @@ The local workerd stack catches the classes that hit dev (routing, module loadin
 tear, the model checker behind `api/tear/*` (access, admission, delivery, dispatch, inbox, ses), is a private repository, so CI cannot fetch it. `api/tear/nightly.sh` runs every checker's `ci` (with a seed that rotates by date) against a disposable Postgres in Docker, on a machine that can fetch it, in about 20 minutes. Logs and a summary go to `~/.cache/bane-tear/<date>`. With `TEAR_REPORT_REPO=anomalyco/bane`, a failing night opens or comments on the `tear-nightly` issue with each failing checker's minimal witnesses.
 
 Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a detached checkout of `dev` at `~/dev/bane-tear-nightly`. A witness after an API change is often model drift: for example, the first run found `rescheduleCampaign` and `unscheduleCampaign` missing from `api/tear/src/rest.rs`. Add new routes there when you add them to the API.
+
+## Request logs
+
+Every process logs one JSON object per line (`log` and `logError` in `api/src/core.ts`): the Worker to Workers Logs (`observability` in both wrangler configs, 100% head sampling), the Node API and runner to stdout (CloudWatch on Fargate), and the mail gateway to CloudWatch `/ecs/bane-mail-gateway`. Each line carries `service` (`worker`, `api`, `runner`, `gateway`) and `deploy`, the first 12 characters of the commit (`DEPLOY_SHA`, which `deploy-worker.sh` sets on the Worker; set it in the environment for Node).
+
+- **One request line per request** (`event: "request"`, written by the first middleware in `app.ts`): `requestId`, `route` (the matched handler's template, such as `/v1/emails/:id` or `/mcp`, or `unmatched`; never the raw path), `method`, `status`, `code` and `field` for a failure, `databaseCode`, `durationMs`, `workspace` (the workspace ID only), `principal` (`apiKey`, `dashboard`, `mcp`, `agentToken`, `inboxKey`, `gateway`, `anonymous`) and per-step `timings`. Level: `info` below 400, `warn` for 4xx, `error` for 5xx. `field` names only the schema's own top-level fields: an unsupported key is whatever the caller sent, so it is never logged. MCP authenticates and answers inside its route, so `/mcp` records its principal and a failure code itself (`MCP_AUTH_REQUIRED`, `AUTH_UNAVAILABLE`, `ORIGIN_NOT_ALLOWED`, `MCP_HTTP_<status>`).
+- **One error line per unexpected failure** (`logError`): the same `requestId` (or `jobId` for a job), `code` (an upper-case code string, else `UNKNOWN_ERROR`), `errorType` (a string `name` shaped like a class name, else `Error`), `databaseCode` (a five-character SQLSTATE string from the `cause` chain) and up to 12 stack frames from Bane's own code (the Worker bundle, `src/` or `dist/`), rebuilt as `function (file:line:column)`. Never a message, neither the error's nor an `ApiError`'s: a database error's message quotes its parameters, and an error's name is just a property, and either can span lines that look like frames. So `stackFrames` reads frames only after the exact `name: message` header text (matched by characters, not lines), and logs no frames when the stack does not start with it.
+- **Sampling:** successful requests are logged 1 in 10 and routine job and queue successes 1 in 100. A kept line carries `sampleRate`, so a count is the number of lines divided by it. Failures, warnings and errors are always logged.
+- **Never logged:** bodies, headers, query strings, messages, addresses, tokens, keys, or any object but a plain one. `log` rebuilds every value itself (arrays by index up to 50 elements, objects from their own data properties up to 50 keys) and never calls a method, getter or `toJSON` of what it logs; an error, class instance, accessor, proxy that throws or anything nested deeper than three levels becomes `"[object]"`. It reads every error property once, as a primitive, and never throws: a line it cannot build is written as `{"level":"error","code":"LOG_SERIALIZE_FAILED"}`. Callers log operations, IDs and codes; `log` also replaces anything shaped like an address or a long hex credential before writing. The acceptance test `request logs: one line per request…` sends addresses, bodies, forged tokens, unsupported keys and a NUL byte that PostgreSQL refuses (SQLSTATE 22021, its message quoting fake frames) and checks none of it reaches a line.
+- **Workers Logs retention is short** (about three days on these accounts), which is why the nightly report keeps its own daily aggregates.
+
+To find a request: Workers Logs for `bane-dev` or `bane-production`, filter `requestId`. Production volume is small (about 8,000 lines a day), well inside the Workers Paid allowance.
+
+## Nightly report and self-improve loop
+
+`api/scripts/nightly-report.ts` reads the last 24 hours of request and error lines from Workers Logs (the Observability telemetry API, both accounts) and the gateway's CloudWatch group, and writes `~/.config/opensend-mx/reports/nightly-<date>.md` and `.json` on Ryan's Mac. Per stage it lists:
+
+- the top failing routes by count and by failure rate, with their error codes;
+- error codes not logged in the previous seven days;
+- p95 latency regressions of successful requests (25% or more in the table; an issue at 1.5× and 250 ms over at least 20 samples);
+- 5xx by deploy SHA (older lines are matched to their Worker version and the deploy run that created it);
+- dispatcher, runner and job failures, and webhook delivery failures;
+- the gateway's auth failures (`GATEWAY_AUTH_FAILED`, and `GATEWAY_AUTH_UNAVAILABLE` when the API did not answer).
+
+Each window's aggregate is cached under `reports/state/<stage>/`, and the seven-day baseline comes from those files, so the first week builds it. The events API samples long windows instead of paging, so the script checks every page against the exact count and splits the window, down to one second, until it comes back whole. The API also leaves out a few lines its count includes (33 of 6,539 on dev on Nov 12, even in one-second windows), so a window counts as complete at 99.5%. An incomplete window files no issues and is never cached or used as a baseline; the report says so.
+
+**Issues.** With `NIGHTLY_FILE_ISSUES=1` it opens one issue labeled `nightly` per new problem, at most five a night: a route and error code that answered 5xx, a new error code at error level (a new client error only from 50 a day), a p95 regression, or a jump in gateway auth failures. The body starts with a `nightly-fingerprint` comment; a problem with an open issue is only linked from the report, and one whose issue was closed gets a new issue that names the old one. The repository is public, so an issue is built only from values that pass `publicText` in the script: route templates, error codes, SQLSTATEs, stage names and counts. Request IDs stay in the private report; stack frames and log messages are never read, because a multiline database error can put caller text where a frame is expected.
+
+**Self-improve.** Ryan's Mac runs `~/.config/opensend-mx/nightly-report.sh` with cronctl (`bane-nightly-report`, 03:00 America/New_York, after tear's 02:30). It moves the detached checkout `~/dev/bane-nightly-report` to `bane/dev`, refreshes the `cf` work profile's token, runs the report, then starts one OpenCode child session (`anthropic/claude-opus-5-5`, high) under the Bane session that set it up. That session takes the top one to three issues filed that night, reproduces each on the isolated local harness (the acceptance suite or the preview stack against a disposable Postgres in Docker, never dev or production), opens a small fix PR to `dev` for each one it reproduces (never merged), comments on the ones it cannot, and appends what it did to the report's `## Self-improve` section.
+
+Run the report by hand from `api/` (read-only unless `NIGHTLY_FILE_ISSUES=1`):
+
+```sh
+CLOUDFLARE_API_TOKEN=<Workers Observability read> NIGHTLY_AWS_PROFILE_DEV=bane-dev NIGHTLY_AWS_PROFILE_PRODUCTION=bane-production \
+  node --import tsx scripts/nightly-report.ts
+```
+
+**Why Workers Logs and not something new:** it already holds every Worker line at no extra cost, it is queryable over the API, and the Node processes write the same shape to CloudWatch. Workers Analytics Engine would give exact per-route counters for longer, but it needs a new binding on the production Worker and cannot take the gateway's or runner's events; Logpush to R2 adds a job, a bucket and a query engine for volumes this small; and Postgres has 25 connections in production to spend on mail, not logs. If traffic grows past what sampled lines can estimate, add an Analytics Engine data point in `logRequest` next to the line.
+

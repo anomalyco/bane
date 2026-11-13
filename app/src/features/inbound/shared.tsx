@@ -1,13 +1,12 @@
 import type { InboundAddress, MailAddress } from '../../data/types'
-import { PrivateAddress } from '../../components/PrivateAddress'
+import { NameText, PrivateAddress } from '../../components/PrivateAddress'
+import { cleanName, nameParts } from '../../lib/private-address'
 
-// Bidi overrides, isolates and zero-width marks in a sender-chosen display name can make
-// "evil@x.example" read as another address (L17). Names are shown without them.
-const INVISIBLE = /[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g
-export const cleanName = (name: string | null | undefined) => name?.replace(INVISIBLE, '').trim() || null
-export const nameOf = (value: MailAddress) => cleanName(value.name) || value.address.split('@')[0]!
-/** A sender in a list: the cleaned display name, or the masked address when there is none. */
-export function Sender({ value }: { value: MailAddress }) { const name = cleanName(value.name); return name ? <>{name}</> : <PrivateAddress value={value.address} /> }
+export { cleanName }
+/** A sender in a list: the display name, or the masked address when there is none (or it only repeats the address). */
+export function Sender({ value }: { value: MailAddress }) { const parts = nameParts(value.name, value.address); return parts ? <NameText parts={parts} /> : <PrivateAddress value={value.address} /> }
+/** A sender in words, for a label or a title: the display name, never a piece of the address. */
+export const nameOf = (value: MailAddress) => { const parts = nameParts(value.name, value.address); return parts && parts.every(part => !part.address) ? parts.map(part => part.text).join('') : 'this sender' }
 export const full = (value: MailAddress) => cleanName(value.name) ? `${cleanName(value.name)} <${value.address}>` : value.address
 export const addressName = (addresses: Map<string, InboundAddress>, id: string) => addresses.get(id)?.address ?? id
 export function when(value: string) {

@@ -256,7 +256,17 @@ export const desiredTenantStatus = (pc: SQL = sql`pc`) => sql`CASE WHEN ${pc}.pa
 export const tenantStatusDrift = () => sql`SELECT pc.workspace_id FROM provider_connections pc WHERE pc.kind='shared' AND (pc.resume_pending_at IS NOT NULL
   OR (pc.paused_at IS NOT NULL AND EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=pc.id AND r.tenant_state='ready'
     AND NOT EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.region=r.region AND t.applied='DISABLED' AND t.generation=pc.tenant_generation)))
-  OR (pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')))`;
+  OR (pc.paused_at IS NULL AND EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied<>'ENABLED')))`;
+/**
+ * An operator's pause after a review, in one statement with its audit row: the only way to pause an exempt (first-party)
+ * workspace. Re-arms a resume that is waiting for its tenants; bumps the generation so the SES tenants are disabled.
+ */
+export const pauseHostedByOperator = (wid: string, reason: string, via: 'script' | 'console' = 'script') => sql`WITH paused AS (
+    UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason='Hosted sending paused by Bane after a review.',resume_pending_at=NULL,tenant_generation=pc.tenant_generation+1
+    WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NULL OR pc.resume_pending_at IS NOT NULL) RETURNING pc.workspace_id
+  ), audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'pause-hosted-sending',jsonb_build_object('reason',${reason}::text,'via',${via}::text) FROM paused),
+  queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})
+  SELECT workspace_id FROM paused`;
 export type HostedCaps = { firstWeek: number; secondWeek: number; mature: number };
 export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' | 'console'; operator?: string | null; caps: HostedCaps };
 /**
@@ -270,7 +280,7 @@ export type HostedResume = { reason: string; percent?: 50 | 100; via?: 'script' 
 const resumeConnection = (wid: string, percent: number, caps: HostedCaps) => sql`previous AS MATERIALIZED (
     SELECT pc.id,pc.paused_at,pc.pause_reason,pc.marketing_held_at,pc.marketing_hold_reason,CASE WHEN pc.restore_until>now() THEN pc.restore_cap END AS active_cap,
       hosted_base_cap(${wid},${caps.firstWeek},${caps.secondWeek},${caps.mature}) AS base,
-      pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied='DISABLED')
+      pc.paused_at IS NOT NULL AND (EXISTS (SELECT FROM hosted_tenant_status t WHERE t.connection_id=pc.id AND t.applied<>'ENABLED')
         OR EXISTS (SELECT FROM jobs j WHERE j.id='hosted.tenantStatus:'||pc.workspace_id AND j.status='running')) AS enable_first
     FROM provider_connections pc WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NOT NULL OR pc.marketing_held_at IS NOT NULL) FOR UPDATE
   ), resumed AS (UPDATE provider_connections pc SET
@@ -371,9 +381,12 @@ export const recordPrepared = (ref: CampaignRef, prepared: number, next: Running
  *  after the run read the row leaves it scheduled, and the run reads it again. */
 export const startSending = (ref: CampaignRef, due: { scheduledAt: string | null; reviewId: string | null }) =>
   moveCampaign(ref, ['scheduled'], 'sending', sql``, sql`scheduled_at IS NOT DISTINCT FROM ${due.scheduledAt}::timestamptz AND review_id IS NOT DISTINCT FROM ${due.reviewId}`);
-export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null, reason: 'hosted_daily_quota' | 'balance' = 'hosted_daily_quota') {
-  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? reason : null},waiting_until=${hostedUntil}::timestamptz`);
+/** `skipped`: recipients passed over by a delivered-only release; they count as canceled. */
+export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null, skipped = 0, reason: 'hosted_daily_quota' | 'balance' = 'hosted_daily_quota') {
+  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},canceled=canceled+${skipped},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? reason : null},waiting_until=${hostedUntil}::timestamptz`);
 }
+/** An owner resumed a failed list probe: release the rest only to contacts delivered before, and check health at once. */
+export const restrictToDelivered = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET delivered_only=true,health_checked_at=NULL,updated_at=now() WHERE ${campaignRow(ref)} RETURNING id`;
 export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
 export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;

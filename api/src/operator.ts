@@ -38,7 +38,7 @@ const TimelineItem = z.object({ at: z.string(), kind: z.enum(['standing', 'limit
   title: z.string(), detail: z.unknown() }).openapi('OperatorTimelineItem');
 const WorkspaceView = z.object({ workspace: z.object({ id: z.string(), name: z.string(), createdAt: z.string() }), score: z.unknown(), standing: StandingSchema.nullable(),
   connection: z.object({ region: z.string(), paused: z.boolean(), resuming: z.boolean(), pauseReason: z.string().nullable(), tenantGeneration: z.number().int(),
-    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLED']), generation: z.number().int(), appliedAt: z.string() }))
+    tenants: z.array(z.object({ region: z.string(), applied: z.enum(['ENABLED', 'DISABLING', 'DISABLED']).describe('DISABLING: Bane asked AWS and does not know the outcome yet, so it treats the tenant as possibly disabled.'), generation: z.number().int(), appliedAt: z.string() }))
       .describe('What Bane last applied to each regional SES tenant (none: never switched, so enabled).') }).nullable(),
   domains: z.array(z.object({ name: z.string(), region: z.string().nullable(), pool: z.string(), dkim: z.boolean(), mailFrom: z.boolean(), dmarc: z.string().nullable() })),
   members: z.array(z.object({ userId: z.string(), email: z.string(), role: z.string() })), siblings: z.array(z.object({ id: z.string(), name: z.string() })),
@@ -115,7 +115,7 @@ export function registerOperator(app: App) {
         'dkim',coalesce(dc.identity #>> '{ses,DkimAttributes,Status}'='SUCCESS',false),'mailFrom',coalesce(dc.identity #>> '{ses,MailFromAttributes,MailFromDomainStatus}'='SUCCESS',false),'dmarc',dc.identity #>> '{dmarc,status}') ORDER BY dc.name)
         FROM domain_claims dc LEFT JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) LEFT JOIN hosted_domain_tiers t ON t.connection_id=dc.connection_id AND t.name=dc.name
         WHERE dc.workspace_id=${wid}),'[]') AS domains,
-      coalesce((SELECT json_agg(json_build_object('userId',m.user_id,'email',u.email,'role',m.role) ORDER BY m.role,u.email) FROM workspace_members m JOIN auth_user u ON u.id=m.user_id WHERE m.workspace_id=${wid}),'[]') AS members,
+      coalesce((SELECT json_agg(json_build_object('userId',m.user_id,'email',u.email,'role',m.role) ORDER BY m.role,u.email) FROM workspace_members m JOIN bane_users u ON u.id=m.user_id WHERE m.workspace_id=${wid}),'[]') AS members,
       coalesce((SELECT json_agg(json_build_object('id',o.id,'name',o.name) ORDER BY o.created_at) FROM workspaces me JOIN workspaces o ON o.quota_sponsor=me.quota_sponsor AND o.id<>me.id WHERE me.id=${wid} AND me.quota_sponsor IS NOT NULL),'[]') AS siblings,
       (SELECT CASE WHEN send_cap_override IS NOT NULL THEN json_build_object('daily',send_cap_override,'expiresAt',send_cap_override_expires_at) END FROM workspaces WHERE id=${wid}) AS override,
       (SELECT exempt_hosted_quotas FROM workspaces WHERE id=${wid}) AS exempt,

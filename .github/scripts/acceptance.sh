@@ -19,8 +19,8 @@ ALTER ROLE fixture SET lock_timeout = '15s';
 SQL
 export DATABASE_URL=postgresql://fixture:fixture@127.0.0.1:$PGPORT/fixture
 export HOST=127.0.0.1
-export AUTH_ALLOWED_EMAILS=operator@example.com AUTH_ALLOWED_DOMAINS=example.com GOOGLE_CLIENT_ID=fixture GOOGLE_CLIENT_SECRET=fixture
-BETTER_AUTH_SECRET=$(openssl rand -hex 36); export BETTER_AUTH_SECRET
+export AUTH_ALLOWED_SUBJECTS=acceptance-operator ACCOUNT_REQUIRED_ACR=urn:anomaly:acr:google ACCOUNT_CLIENT_ID=fixture ACCOUNT_CLIENT_PRIVATE_KEY=unused-by-session-fixture
+BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture
 export SIMULATED_SES_LATENCY_MS=0 SIMULATED_SES_DELIVERY_DELAY_MS=0
@@ -39,12 +39,19 @@ shard() (
     if (( rc != 0 )); then tail -n 100 "$HOME"/*.log; fi
   }
   trap cleanup EXIT
+  export ACCOUNT_ISSUER="https://127.0.0.1:$((PORT+1000))" BANE_TEST_SIGNING_KEY="$HOME/fixture.pem" NODE_EXTRA_CA_CERTS="$HOME/fixture.crt"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' -keyout "$BANE_TEST_SIGNING_KEY" -out "$NODE_EXTRA_CA_CERTS" 2>/dev/null
+  node --import tsx scripts/fixture-issuer.ts > "$HOME/issuer.log" 2>&1 & pids+=("$!")
   # The emulator normalizes bucket paths differently from the AWS SDK; like the previous fixture,
   # it checks object operations here, not SigV4 calculations.
   # This release packages the CLI module but omits its bin entry point.
   node -e 'require("../.github/s3-fixture/node_modules/@20minutes/s3rver/lib/cli").parseAsync([process.argv[0], "s3rver", ...process.argv.slice(1)]).catch(error => { console.error(error.message); process.exitCode = 1; })' -- -a "$HOST" -p "$4" -d "$HOME/objects" --no-vhost-buckets --allow-mismatched-signatures --configure-bucket fixture > "$HOME/storage.log" 2>&1 & pids+=("$!")
   node --import tsx src/server.ts > "$HOME/server.log" 2>&1 & pids+=("$!")
-  node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
+  # The simulated shard runs its job handlers inside rollback-only transactions.
+  # A second worker updating those tables can deadlock with queryBudget's DDL.
+  if [[ $1 == integration ]]; then
+    node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
+  fi
   # Start as soon as all fixtures are alive and the HTTP server accepts requests.
   for ((i=0; i<100; i++)); do
     kill -0 "${pids[@]}"
@@ -78,8 +85,10 @@ case ${ACCEPTANCE_QUARANTINE:-} in
   *) echo "ACCEPTANCE_QUARANTINE must be unset, only or all" >&2; exit 2 ;;
 esac
 if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then mkdir -p "$ACCEPTANCE_JUNIT"; fi
-shard integration 8787 '' 4569 "${integration_filter[@]}" & integration=$!
-shard simulated 8788 _sim 4570 "${simulated_filter[@]}" & simulated=$!
+# Two API ports, then two object-storage ports. Override them when another checkout's suite is running on this machine.
+read -r api_port sim_port storage_port sim_storage_port <<< "${ACCEPTANCE_PORTS:-8787 8788 4569 4570}"
+shard integration "$api_port" '' "$storage_port" "${integration_filter[@]}" & integration=$!
+shard simulated "$sim_port" _sim "$sim_storage_port" "${simulated_filter[@]}" & simulated=$!
 rc=0
 wait "$integration" || rc=$?
 wait "$simulated" || rc=$?

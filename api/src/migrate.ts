@@ -8,7 +8,7 @@ import { deriveEncryptionKey, loadConfig, migrationSettings } from './config.js'
 import { decrypt, reencryptWebhookSecrets } from './operations.js';
 import { ensureRegionSettings } from './ses-region-state.js';
 
-const rotation = process.env.PREVIOUS_BETTER_AUTH_SECRET || process.env.ENCRYPTION_KEY ? loadConfig(process.env) : null;
+const rotation = process.env.PREVIOUS_BANE_ROOT_SECRET || process.env.ENCRYPTION_KEY ? loadConfig(process.env) : null;
 const config = rotation ?? migrationSettings(process.env);
 
 const client = new Client(postgresConnection(process.env.DATABASE_URL));
@@ -29,14 +29,14 @@ try {
     if (foreign.rowCount) throw new Error('LEGACY_WORKSPACE_MIGRATION_REQUIRED: non-default workspace data requires an explicit migration plan before this upgrade. No data was modified.');
   }
   // Fresh databases have neither table. Older schemas still include environment in the binding.
-  if (!rotation && process.env.BETTER_AUTH_SECRET !== undefined) {
+  if (!rotation && process.env.BANE_ROOT_SECRET !== undefined) {
     for (const table of ['operation_webhooks','mailbox_webhooks']) {
       if (!(await client.query('SELECT to_regclass($1) AS t',[table])).rows[0].t) continue;
       const sample=(await client.query(`SELECT id,workspace_id,encrypted_secret,coalesce(to_jsonb(w)->>'environment','live') AS env FROM ${table} w LIMIT 1`)).rows[0];
       if (!sample) continue;
       const binding=`${sample.workspace_id}:${sample.env}:${table==='mailbox_webhooks'?'mailbox:':''}${sample.id}`;
-      try { await decrypt({config:{encryptionKey:deriveEncryptionKey(process.env.BETTER_AUTH_SECRET)}},sample.encrypted_secret,binding); }
-      catch { throw new Error('KEY_ROTATION_REQUIRED: BETTER_AUTH_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
+      try { await decrypt({config:{encryptionKey:deriveEncryptionKey(process.env.BANE_ROOT_SECRET)}},sample.encrypted_secret,binding); }
+      catch { throw new Error('KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
       log('info', {code:'STORED_WEBHOOK_SECRET_DECRYPT_VERIFIED'});
       break;
     }

@@ -13,9 +13,9 @@ import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookCol
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed', 'account.standing.changed']
-// The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks and subscription changes are opt-in.
+// The same defaults as POST /v1/webhooks: every delivery outcome. Opens, clicks, subscription and standing changes are opt-in.
 const defaultEvents: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']
-const eventHints: Partial<Record<WebhookEvent, string>> = { 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Bane or SES refused to send it', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
+const eventHints: Partial<Record<WebhookEvent, string>> = { 'account.standing.changed': 'Bane warned, held or released this workspace’s sending', 'email.sent': 'SES accepted the email', 'email.delivered': 'The recipient’s server accepted it', 'email.bounced': 'It couldn’t be delivered', 'email.complained': 'The recipient marked it as spam', 'email.rejected': 'Bane or SES refused to send it', 'email.rendering_failed': 'A template couldn’t be filled in', 'email.delivery_delayed': 'Delivery is being retried', 'email.opened': 'Needs open tracking', 'email.clicked': 'Needs click tracking', 'contact.subscription_changed': 'A contact subscribed or unsubscribed' }
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...defaultEvents] }
 const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
 const eventLabel = (event: string) => event === 'account.standing.changed' ? 'Sending standing changed' : label(event.replace(/^email\./, '').replace('.', '_'))
@@ -62,7 +62,7 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note">Bane calls your URL when something happens to email you send: delivered, bounced, marked as spam and more. Each call is signed so you can <Link to="/docs#webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
+    <p className="muted settings-section-note">Bane calls your URL when something happens to email you send: delivered, bounced, marked as spam and more. Each call is signed so you can <Link to="/docs#guide-webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },
@@ -205,5 +205,5 @@ export function WebhookDetailPage() {
 
 // How to use the signing secret, wherever it is shown.
 function SigningNote() {
-  return <p className="muted settings-section-note">Bane signs every delivery with this secret in the <code>Webhook-Signature</code> header. Check it on your server so you only act on calls from Bane: <Link to="/docs#webhook-signatures">how to verify signatures</Link>.</p>
+  return <p className="muted settings-section-note">Bane signs every delivery with this secret in the <code>Webhook-Signature</code> header. Check it on your server so you only act on calls from Bane: <Link to="/docs#guide-webhook-signatures">how to verify signatures</Link>.</p>
 }
