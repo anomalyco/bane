@@ -303,6 +303,8 @@ export async function seed(fx) {
     security: await make({ address: 'security@northwind.example', key: 'security', displayName: 'Security' }),
     dana: await make({ address: 'dana@northwind.example', displayName: 'Dana Rivera' }),
   };
+  // An inbound key scoped to several addresses: API keys' Access column lists each of them, masked.
+  await dana.api('POST', '/v1/inbound/keys', { name: 'Triage agent', permissions: ['read', 'send'], addressIds: [A.support.id, A.billing.id, A.sales.id] }, 201);
   const crm = await dana.api('POST', '/v1/inbound/webhooks', { description: 'CRM intake', url: 'https://hooks.northwind.example/crm', eventTypes: [], addressIds: null, format: 'bane' }, 201);
   await dana.api('POST', '/v1/inbound/webhooks', { description: 'Helpdesk', url: 'https://helpdesk.northwind.example/inbound', eventTypes: ['message.received'], addressIds: [A.support.id], format: 'bane' }, 201);
   const crmId = crm.webhook?.id ?? crm.id;
