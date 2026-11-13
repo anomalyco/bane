@@ -9,15 +9,16 @@ import { IconButton } from './ui'
 // conversation and its transport load on first use (hover, focus or press warms them).
 //
 // Where it runs: the demo dashboard and ?support=demo (kept for the browser session; ?support=off clears it) get the
-// scripted demo conversation. A hosted workspace gets the live support Worker once the build sets VITE_SUPPORT_CHAT=true;
-// until then the button stays out of production. ?support=<conversationId> (a support email's "continue in Bane" link)
-// opens the panel on that conversation.
+// scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
+// everyone (dev deploys), "staff" for Bane staff (the operator role) and workspaces Anomaly made free, unset for no one
+// (production until it is rolled out). ?support=<conversationId> (a support email's "continue in Bane" link) opens the
+// panel on that conversation.
 const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'bane.support'
 export type SupportMode = 'demo' | 'live'
 
-function readMode(demoApi: boolean, hosted: boolean) {
+function readMode(demoApi: boolean, hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
   try {
     if (param === 'demo') sessionStorage.setItem(modeKey, 'demo')
@@ -25,13 +26,15 @@ function readMode(demoApi: boolean, hosted: boolean) {
   } catch { /* Session storage is unavailable: the parameter still applies to this load. */ }
   let stored: string | null = null
   try { stored = sessionStorage.getItem(modeKey) } catch { stored = param === 'demo' ? 'demo' : null }
-  const mode: SupportMode | null = demoApi || stored === 'demo' ? 'demo' : hosted && import.meta.env.VITE_SUPPORT_CHAT === 'true' ? 'live' : null
+  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
+  const live = hosted && (flag === 'true' || flag === 'staff' && staff)
+  const mode: SupportMode | null = demoApi || stored === 'demo' ? 'demo' : live ? 'live' : null
   return { mode, resume: mode === 'live' && param?.startsWith('conv_') ? param : null }
 }
 
 export type SupportChat = ReturnType<typeof useSupportChat>
-export function useSupportChat({ demoApi, hosted }: { demoApi: boolean; hosted: boolean }) {
-  const [{ mode, resume }] = useState(() => readMode(demoApi, hosted))
+export function useSupportChat({ demoApi, hosted, staff }: { demoApi: boolean; hosted: boolean; staff: boolean }) {
+  const [{ mode, resume }] = useState(() => readMode(demoApi, hosted, staff))
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)

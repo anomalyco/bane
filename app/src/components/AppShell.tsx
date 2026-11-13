@@ -45,7 +45,7 @@ export function AppShell() {
   const scoreAbout = useScoreAbout()
   // The support chat: Help in the page's bottom-right corner (in the top bar on a phone or tablet), one conversation for
   // the whole visit that stays open across pages.
-  const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant })
+  const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
