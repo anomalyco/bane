@@ -25,23 +25,63 @@ Sending and receiving checkpoint independently. Pulumi provisions the mail contr
 
 ## One-time operator action — not executed during development
 
-1. **Before deploying**, authorize the Pulumi role. Run from the repository root using the two IAM-administrator profiles, **not** the Worker. The IAM role name is `bane-deploy` in both accounts. Keep the existing inline policy name so this replaces the old DLQ-only grant:
+1. **Fence both stages before changing IAM or merging this release.** Disable the `Deploy` workflow, cancel queued runs, wait for running privileged jobs to finish, and block new assumptions of both `bane-deploy` roles. As an independent IAM administrator, install an additional inline policy named `bane-operator-transition` on **both** roles with `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}`. Keep it until the final verification below. This deny applies to existing sessions too: merely pausing GitHub does not revoke credentials already issued. Confirm the fence is effective and wait out any previously issued sessions before creating a boundary. Do not run old stack definitions while fenced. Existing mail delivery and running gateway tasks continue; only infrastructure deployments stop.
+
+   Under the fence, use the reviewed candidate commit and the stage's IAM-administrator profile, not `bane-deploy`. Inventory the default versions of all attached policies, both role attachments/trust documents, the four gateway secret metadata ARNs, the current gateway task definition and all running/deploying revisions. On a fresh account create only missing secret metadata first. Never fetch secret values. Render the policy templates with these exact substitutions:
+
+   | Placeholder | Value |
+   |---|---|
+   | `YOUR_AWS_ACCOUNT_ID`, `YOUR_STAGE`, `YOUR_STAGE_ORIGIN` | `905840579680`, `dev`, `https://dev.bane.mx`; or `009882681002`, `production`, `https://bane.mx` |
+   | `YOUR_GATEWAY_DB_URL_ARN`, `YOUR_GATEWAY_TLS_CERT_ARN`, `YOUR_GATEWAY_TLS_KEY_ARN`, `YOUR_GATEWAY_API_TOKEN_ARN` | Full ARNs from `aws secretsmanager describe-secret --region us-east-2 --secret-id bane/$stage/mail-gateway/<name> --query ARN --output text` |
+   | `YOUR_GATEWAY_TASK_DEFINITION_ARN` | The full, numeric revision ARN reviewed and approved by the operator; never `*`, a family, or `latest` |
+
+   Replace whole placeholder tokens (longest first if using `sed`), parse the result as JSON, and reject any remaining `YOUR_` token. Keep rendered documents in a private local directory. The following order is required **in each account**, while both fences remain installed:
+
+   1. Create `policy/bane-gateway-boundary` from `gateway-boundary-policy.json`, or compare and publish a new default version if it already exists. If a managed policy already has five versions, delete only a reviewed **nondefault** version before creating the new one. Re-read its default document and compare it to the rendered document. Attach it as operator to both existing gateway roles with `iam put-role-permissions-boundary`; verify both `PermissionsBoundaryArn` values. Inspect and correct their trust/inline policies to the reviewed gateway definitions; the task role stays empty. No old deploy principal can rewrite this boundary because the independent fence is still in force. **In the same fenced step, publish and verify runtime-boundary v3 as described below.** The deploy-role fence does not disable already-issued runtime access keys; the narrowed runtime boundary is what removes their old mail-control powers.
+   2. Replace inline `bane-deploy` with `deploy-role-policy.json` and inline `bane-inbound-dlq-deploy` with `receiving-deploy-policy.json`. Publish new default versions of `policy/deploy/bane-gateway-resources` and `policy/deploy/bane-gateway-network` from the matching files. Compare all four live documents with the rendered versions; remove any separately inventoried obsolete grant that would undo the intended ceiling. Do not remove the transition fence yet.
+   3. From the reviewed candidate commit, run the matching Pulumi program **as the administrator**, using `bane:operatorPublish=true` in a private temporary stack config. In this mode the AWS providers use the administrator's normal credentials instead of assuming the fenced deploy role. Review the refresh/preview first: adopt the already-attached boundaries and existing mail controls, with no resource replacement, deletion, receipt-set activation, secret-value read or traffic change. This mode is the only way to create/update mail-control policies, gateway roles, and task definitions. Normal CI ignores changes to those existing resources, and IAM denies their publication even if repository code removes that safeguard. For a fresh stack, bootstrap the absent resources here before enabling normal CI.
+   4. Inspect the approved gateway revision's complete definition: exact task/execution roles, digest-pinned reviewed image, command/entrypoint, environment, secret ARNs and log configuration. Register a new revision as operator if needed, move the service to it, and update the gateway-resources policy's exact revision ARN. Retire any unreviewed historical revisions and confirm no old deployment/task remains. Re-read **both** boundaries' live default documents, both gateway attachments, and `bane-runtime`'s boundary attachment. Repeat the runtime effective-permission checks below; every expected denial and required read must pass. Run a refreshed normal-mode Pulumi preview against the candidate; it must not propose writes to operator-owned resources. Restore normal stack settings (`operatorPublish` absent/false), merge the same candidate, and only then remove the independent fence, restore the original reviewed trust, and re-enable deployments. A rollback keeps both narrowed boundaries and uses compatible code; never restore runtime v2 or definitions that remove a boundary.
+
+   If interrupted, leave both fences installed, re-read live state and resume at the first unverified step; do not create duplicate policy versions blindly or reopen CI to repair prerequisites. ECS does not offer an IAM condition that approves a task definition's image, command and injected secrets. Registration is therefore explicitly denied to `bane-deploy`, not filtered in source code. Gateway role creation and inline-policy changes are also operator-only, closing the arbitrary-trust-on-create route. CI can update only the named service and only to the exact operator-approved revision. The offline acceptance tests cover both stage policies, both checked-in boundaries, the resource-policy mutation paths and the transition fence. The live default versions and attachments still must be verified by the operator before unfencing.
+
+   **Required runtime-boundary v3 gate (both accounts, fence still installed).** Render the reviewed ceiling, not the old live document:
 
    ```bash
    set -euo pipefail
-   export AWS_REGION=us-east-2 AWS_PAGER=''
-   file=$(mktemp); trap 'rm -f "$file"' EXIT
-   for stage in dev production; do
-     case "$stage" in dev) account=905840579680; origin=https://dev.bane.mx;; production) account=009882681002; origin=https://bane.mx;; esac
-     profile=bane-$stage
-     test "$(aws --profile "$profile" sts get-caller-identity --query Account --output text)" = "$account"
-     sed -e "s/YOUR_AWS_ACCOUNT_ID/$account/g" -e "s|YOUR_STAGE_ORIGIN|$origin|g" infra/aws-shared/receiving-deploy-policy.json >"$file"
-     aws --profile "$profile" iam put-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --policy-document "file://$file"
-     aws --profile "$profile" iam get-role-policy --role-name bane-deploy --policy-name bane-inbound-dlq-deploy --query PolicyDocument --output json | jq -e --slurpfile expected "$file" '. == $expected[0]'
-   done
+   : "${stage:?dev or production}" "${dir:?private output directory}"
+   case "$stage" in dev) account=905840579680; origin=https://dev.bane.mx;; production) account=009882681002; origin=https://bane.mx;; *) exit 1;; esac
+   profile=bane-$stage
+   test "$(aws --profile "$profile" sts get-caller-identity --query Account --output text)" = "$account"
+   node infra/aws-shared/runtime-policies.mjs --fresh bane-runtime-boundary "$account" "$origin" > "$dir/runtime-boundary.json"
+   boundary="arn:aws:iam::$account:policy/bane-runtime-boundary"
    ```
 
-   Expected: `true` twice. Verify the existing runtime **permissions boundary** permits the new bucket reads (`s3:GetBucketPolicy`, `s3:GetBucketPublicAccessBlock`, `s3:GetLifecycleConfiguration`) and the read-only topic/subscription calls. If the boundary blocks them, amend that boundary on the same resource/region, not the runtime write grants. Only an operator may [bootstrap the reviewed empty Ohio set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail.
+   Compare the current default first. If different, publish with `aws --profile "$profile" iam create-policy-version --policy-arn "$boundary" --policy-document "file://$dir/runtime-boundary.json" --set-as-default`; handle the five-version limit by deleting only a reviewed nondefault version. If the inventory proves the policy absent, use `iam create-policy --policy-name bane-runtime-boundary --policy-document "file://$dir/runtime-boundary.json"` instead. Attach the expected boundary with `aws --profile "$profile" iam put-user-permissions-boundary --user-name bane-runtime --permissions-boundary "$boundary"` if needed. “v3” identifies this reviewed document, **not** an assumed AWS version number. Re-read and verify the actual default and attachment:
+
+   ```bash
+   version=$(aws --profile "$profile" iam get-policy --policy-arn "$boundary" --query Policy.DefaultVersionId --output text)
+   aws --profile "$profile" iam get-policy-version --policy-arn "$boundary" --version-id "$version" --query PolicyVersion.Document --output json |
+     jq -e --slurpfile expected "$dir/runtime-boundary.json" '. == $expected[0]'
+   test "$(aws --profile "$profile" iam get-user --user-name bane-runtime --query User.PermissionsBoundary.PermissionsBoundaryArn --output text)" = "$boundary"
+   aws --profile "$profile" iam simulate-principal-policy --policy-source-arn "arn:aws:iam::$account:user/bane-runtime" \
+     --action-names s3:PutBucketPolicy s3:PutBucketPublicAccessBlock s3:PutLifecycleConfiguration \
+     --resource-arns "arn:aws:s3:::bane-$account-mail-us-east-2" \
+     --context-entries ContextKeyName=aws:RequestedRegion,ContextKeyValues=us-east-2,ContextKeyType=string ContextKeyName=s3:ResourceAccount,ContextKeyValues=$account,ContextKeyType=string \
+     --output json | jq -e '(.EvaluationResults|length)==3 and all(.EvaluationResults[]; .EvalDecision=="explicitDeny")'
+   aws --profile "$profile" iam simulate-principal-policy --policy-source-arn "arn:aws:iam::$account:user/bane-runtime" \
+     --action-names ses:CreateReceiptRule ses:UpdateReceiptRule ses:CreateConfigurationSetEventDestination ses:UpdateConfigurationSetEventDestination ses:PutConfigurationSetSuppressionOptions sns:SetTopicAttributes sns:SetSubscriptionAttributes \
+     --resource-arns '*' --context-entries ContextKeyName=aws:RequestedRegion,ContextKeyValues=us-east-2,ContextKeyType=string \
+     --output json | jq -e '(.EvaluationResults|length)==7 and all(.EvaluationResults[]; .EvalDecision=="explicitDeny")'
+   aws --profile "$profile" iam simulate-principal-policy --policy-source-arn "arn:aws:iam::$account:user/bane-runtime" \
+     --action-names s3:GetBucketPolicy s3:GetBucketPublicAccessBlock s3:GetLifecycleConfiguration \
+     --resource-arns "arn:aws:s3:::bane-$account-mail-us-east-2" \
+     --context-entries ContextKeyName=aws:RequestedRegion,ContextKeyValues=us-east-2,ContextKeyType=string ContextKeyName=s3:ResourceAccount,ContextKeyValues=$account,ContextKeyType=string \
+     --output json | jq -e '(.EvaluationResults|length)==3 and all(.EvaluationResults[]; .EvalDecision=="allowed")'
+   ```
+
+   Save the comparison and simulation results with the private rollout record. A missing attachment, changed default document, unexpected allow, or denied required read keeps **both** CI fences in place. Never restore the broad runtime boundary to make the rollout pass.
+
+   Verify the existing runtime **permissions boundary** permits the new bucket reads (`s3:GetBucketPolicy`, `s3:GetBucketPublicAccessBlock`, `s3:GetLifecycleConfiguration`) and the read-only topic/subscription calls. If the boundary blocks them, amend that boundary on the same resource/region, not the runtime write grants. Only an operator may [bootstrap the reviewed empty Ohio set on a fresh account](../infra/aws-shared/README.md); never replace a set serving mail.
 
 2. **Inventory before the first Pulumi update.** Run the following per stage, pointing Pulumi at that stage's normal backend. `PAGER_ARN` must be an existing, monitored same-account Ohio topic (not inbound) allowing CloudWatch to publish from the named DLQ alarm. Set `TRUSTED_PUBLISH=false` for a new/private Virginia topic. For an existing published topic, set it to `true` **only** after checking the trusted pool row has the expected account/feedback ARN and `confirmed_generation=generation`; do not close a live feedback route or accept SNS subscription status alone as signed evidence.
 
@@ -89,8 +129,8 @@ Sending and receiving checkpoint independently. Pulumi provisions the mail contr
 
 Order matters: the old Worker writes attachment keys the old policy refuses, and the new Worker refuses to send until Pulumi owns the event destinations. Do these per stage, dev first, before the Worker deploy. Nothing here was run against AWS during development.
 
-1. **Deploy role.** Rerun step 1 above unchanged: it re-applies `receiving-deploy-policy.json`, which now also grants the two feedback dead-letter queues and alarms, the Ohio feedback subscription and redrive, and the four pool event destinations.
-2. **Runtime boundary (N1).** The `bane-runtime-boundary` policy is not in this repository. Confirm it allows `s3:GetObject`, `s3:PutObject` and `s3:PutObjectTagging` on `arn:aws:s3:::bane-<account>-mail-us-east-2/workspaces/*/att/*`, or on the exact key shapes in `infra/aws-shared/runtime-ohio-policy.json`:
+1. **Deploy role.** Complete the fenced transition above first. Queue policies, subscription redrive and the four pool event destinations now require the reviewed operator publish mode; ordinary CI retains them and may refresh their state and update alarms.
+2. **Runtime boundary (N1).** Install and verify the checked-in v3 ceiling above. Confirm it allows `s3:GetObject`, `s3:PutObject` and `s3:PutObjectTagging` on the attachment key shapes in `infra/aws-shared/runtime-ohio-policy.json`:
 
    ```bash
    aws iam get-policy-version --policy-arn "arn:aws:iam::$account:policy/bane-runtime-boundary" \
@@ -118,7 +158,7 @@ Order matters: the old Worker writes attachment keys the old policy refuses, and
 5. **Pulumi, then the Worker.** Preview, expect imports for the existing destinations and feedback subscriptions, creates for the two feedback queues, queue policies and alarms, and in-place updates for the topic delivery policies and the three runtime policies. Then run the normal deploy. If the Worker logs `POOL_SENDING_DRIFT … event destinations`, Pulumi has not applied the destinations; do not restore the old runtime grants.
 6. **BYO v5 customers (N1).** Received attachments need the updated `api/byo-template.yaml` stack before the new Worker serves their receiving. BYO receiving is not enabled in production.
 
-Before the first rotation, [upgrade with the current key](../infra/pulumi/README.md#runtime-credentials) so the Worker reads the bundled secret and Pulumi registers the drain hook. Rotate every 90 days, or at once on suspicion: confirm `bane-deploy` may call `iam:DeleteAccessKey` on `user/bane-runtime`, then `pulumi config set --stack "$STAGE" bane:runtimeKeyRotation "$(date +%Y-%m-%d)"` and deploy. One Worker-secret update publishes the new pair; the previous key stays valid for a five-minute drain before deletion.
+Runtime key rotation, gateway secret creation and runtime policy publication are operator-only. Complete the state-only handoff and verified credential rotation in the operator project before reopening deploys; never use a CI rotation setting.
 
 ## Redrive one failed notification
 

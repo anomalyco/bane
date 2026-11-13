@@ -1,0 +1,319 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SesRead",
+      "Effect": "Allow",
+      "Action": [
+        "ses:Describe*",
+        "ses:List*",
+        "ses:Get*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SesBaneIdentities",
+      "Effect": "Allow",
+      "Action": [
+        "ses:CreateEmailIdentity",
+        "ses:DeleteEmailIdentity",
+        "ses:GetEmailIdentity",
+        "ses:PutEmailIdentityMailFromAttributes",
+        "ses:PutEmailIdentityDkimAttributes",
+        "ses:PutEmailIdentityFeedbackAttributes",
+        "ses:PutEmailIdentityConfigurationSetAttributes",
+        "ses:TagResource",
+        "ses:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/bane.mx",
+        "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/*.bane.mx",
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/bane.mx",
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/*.bane.mx"
+      ]
+    },
+    {
+      "Sid": "RuntimeUser",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetUser",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListUserPolicies",
+        "iam:GetUserPolicy",
+        "iam:ListAccessKeys"
+      ],
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime"
+    },
+    {
+      "Sid": "AttachOnlyApprovedRuntimePolicies",
+      "Effect": "Allow",
+      "Action": "iam:AttachUserPolicy",
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"
+        },
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime",
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-ohio",
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-trusted"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "RuntimePolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListPolicyTags"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-ohio",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-trusted"
+      ]
+    },
+    {
+      "Sid": "GatewayRolesRead",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags",
+        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
+      ]
+    },
+    {
+      "Sid": "GatewayRolesAreOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
+      ]
+    },
+    {
+      "Sid": "PassToEcs",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-execution"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "GatewayCodeIsOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:DeleteTaskDefinitions",
+        "ecs:RunTask",
+        "ecs:StartTask",
+        "ecs:ExecuteCommand"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MailControlsAreOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "ses:PutIdentityPolicy",
+        "ses:DeleteIdentityPolicy",
+        "ses:CreateEmailIdentityPolicy",
+        "ses:UpdateEmailIdentityPolicy",
+        "ses:DeleteEmailIdentityPolicy",
+        "ses:CreateReceiptRule",
+        "ses:UpdateReceiptRule",
+        "ses:DeleteReceiptRule",
+        "ses:CreateReceiptRuleSet",
+        "ses:DeleteReceiptRuleSet",
+        "ses:SetActiveReceiptRuleSet",
+        "ses:SetReceiptRulePosition",
+        "ses:ReorderReceiptRuleSet",
+        "ses:CreateConfigurationSetEventDestination",
+        "ses:UpdateConfigurationSetEventDestination",
+        "ses:DeleteConfigurationSetEventDestination",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketAcl",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutLifecycleConfiguration",
+        "sns:CreateTopic",
+        "sns:SetTopicAttributes",
+        "sns:SetSubscriptionAttributes",
+        "sns:AddPermission",
+        "sns:RemovePermission",
+        "sqs:CreateQueue",
+        "sqs:SetQueueAttributes",
+        "sqs:AddPermission",
+        "sqs:RemovePermission"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProtectDeployRole",
+      "Effect": "Deny",
+      "Action": "iam:*",
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-deploy"
+    },
+    {
+      "Sid": "ProtectOperatorPolicies",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreatePolicy*",
+        "iam:DeletePolicy*",
+        "iam:SetDefaultPolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-operator",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
+      ]
+    },
+    {
+      "Sid": "NoPrincipalOrTrustChanges",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:DeleteRole",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:DeleteUserPermissionsBoundary",
+        "iam:CreateServiceLinkedRole",
+        "iam:CreateLoginProfile",
+        "iam:UpdateLoginProfile",
+        "iam:CreateOpenIDConnectProvider",
+        "iam:CreateSAMLProvider",
+        "iam:CreateGroup",
+        "iam:AttachGroupPolicy",
+        "iam:PutGroupPolicy",
+        "iam:AddUserToGroup",
+        "iam:CreateInstanceProfile",
+        "iam:SetDefaultPolicyVersion",
+        "iam:CreateVirtualMFADevice",
+        "iam:DeactivateMFADevice",
+        "iam:UploadSSHPublicKey",
+        "iam:UploadServerCertificate",
+        "iam:CreateServiceSpecificCredential",
+        "iam:UpdateSSHPublicKey",
+        "sts:AssumeRole"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OnlyTheGatewayBoundaryOnRoles",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-gateway-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyTheRuntimeBoundaryOnUsers",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:PutUserPermissionsBoundary",
+        "iam:PutUserPolicy",
+        "iam:AttachUserPolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "TaskRoleStaysEmpty",
+      "Effect": "Deny",
+      "Action": [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:role/bane-mail-gateway-task"
+    },
+    {
+      "Sid": "RuntimeIdentityIsOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:PutUserPolicy",
+        "iam:DeleteUserPolicy",
+        "iam:PutUserPermissionsBoundary",
+        "iam:DetachUserPolicy"
+      ],
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime"
+    },
+    {
+      "Sid": "OnlyApprovedRuntimeAttachments",
+      "Effect": "Deny",
+      "Action": "iam:AttachUserPolicy",
+      "Resource": "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:user/bane-runtime",
+      "Condition": {
+        "ArnNotEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime",
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-ohio",
+            "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-trusted"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "RuntimePolicyVersionsAreOperatorOwned",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:DeletePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-ohio",
+        "arn:aws:iam::YOUR_AWS_ACCOUNT_ID:policy/bane-runtime-trusted"
+      ]
+    }
+  ]
+}

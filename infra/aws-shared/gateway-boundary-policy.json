@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrLogin",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "us-east-2"}}
+    },
+    {
+      "Sid": "EcrPull",
+      "Effect": "Allow",
+      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Resource": "arn:aws:ecr:us-east-2:YOUR_AWS_ACCOUNT_ID:repository/bane-mail-gateway"
+    },
+    {
+      "Sid": "TaskLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-2:YOUR_AWS_ACCOUNT_ID:log-group:/ecs/bane-mail-gateway:log-stream:gateway/bane-mail-gateway/*"
+    },
+    {
+      "Sid": "GatewaySecrets",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": [
+        "YOUR_GATEWAY_DB_URL_ARN",
+        "YOUR_GATEWAY_TLS_CERT_ARN",
+        "YOUR_GATEWAY_TLS_KEY_ARN",
+        "YOUR_GATEWAY_API_TOKEN_ARN"
+      ]
+    }
+  ]
+}

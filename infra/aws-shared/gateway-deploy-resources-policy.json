@@ -1,0 +1,101 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DescribeRepositories",
+        "ecr:PutImageScanningConfiguration",
+        "ecr:PutImageTagMutability",
+        "ecr:GetLifecyclePolicy",
+        "ecr:PutLifecyclePolicy",
+        "ecr:ListTagsForResource",
+        "ecr:TagResource",
+        "ecr:UntagResource"
+      ],
+      "Resource": "arn:aws:ecr:us-east-2:YOUR_AWS_ACCOUNT_ID:repository/bane-mail-gateway"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:CreateCluster",
+        "ecs:DescribeClusters",
+        "ecs:UpdateCluster",
+        "ecs:CreateService",
+        "ecs:DescribeServices",
+        "ecs:UpdateService",
+        "ecs:ListServiceDeployments",
+        "ecs:DescribeServiceDeployments",
+        "ecs:ListTagsForResource",
+        "ecs:TagResource",
+        "ecs:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:cluster/bane-mail-gateway",
+        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:service/bane-mail-gateway/bane-mail-gateway",
+        "arn:aws:ecs:us-east-2:YOUR_AWS_ACCOUNT_ID:service-deployment/bane-mail-gateway/bane-mail-gateway/*"
+      ],
+      "Condition": {
+        "ArnEqualsIfExists": {
+          "ecs:task-definition": "YOUR_GATEWAY_TASK_DEFINITION_ARN"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition",
+        "ecs:ListAccountSettings",
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-2"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:ListTagsForResource",
+        "logs:TagResource",
+        "logs:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-east-2:YOUR_AWS_ACCOUNT_ID:log-group:/ecs/bane-mail-gateway",
+        "arn:aws:logs:us-east-2:YOUR_AWS_ACCOUNT_ID:log-group:/ecs/bane-mail-gateway:*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:ListTagsForResource",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:us-east-2:YOUR_AWS_ACCOUNT_ID:alarm:bane-mail-gateway-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetResourcePolicy"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/*"
+    },
+    {
+      "Effect": "Deny",
+      "NotAction": [
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetResourcePolicy"
+      ],
+      "Resource": "arn:aws:secretsmanager:us-east-2:YOUR_AWS_ACCOUNT_ID:secret:bane/YOUR_STAGE/mail-gateway/*"
+    }
+  ]
+}
