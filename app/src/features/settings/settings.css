@@ -231,3 +231,4 @@
 .settings-role-guide > div { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: var(--space-8); }
 .settings-role-guide dt { font-weight: var(--font-weight-bold); }
 .settings-role-guide dd { margin: 0; }
+.mcp-approval__who > :last-child { min-width: 0; }

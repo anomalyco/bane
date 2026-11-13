@@ -20,8 +20,8 @@
 
 /* An address in a setting, a table cell or a fact keeps to its own box: masked it is cut at the edge, so it never runs
    into the next column or past the row; revealed it wraps (two lines fit a 53px row). */
-:is(.settings-row__control, .settings-people td, .settings-facts dd) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-:is(.settings-row__control, .settings-people td, .settings-facts dd) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; word-break: break-all; }
+:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; word-break: break-all; }
 
 /* Rows: 53px each, label left and control right, split by hairlines. */
 .settings-rows { display: flex; flex-direction: column; border-top: 1px solid var(--color-border-muted); }
