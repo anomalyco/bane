@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Share } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, SecretCode, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, SectionHeader, Select, useToast } from '../../components/ui'
 import { useApiMutation, useApiDef, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
@@ -106,8 +106,8 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
-  if (created) return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Invitation link" description={`Share this link with them yourself; Bane doesn’t email it. It works only for that address, until ${date(created.expiresAt)}.`} footer={<Button variant="primary" onClick={close}>Done</Button>}>
-    <div className="settings-secret"><code>{created.acceptUrl}</code><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
+  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Invitation link" description={`Share this link with them yourself; Bane doesn’t email it. It works only for that address, until ${date(created.expiresAt)}.`} footer={<Button variant="primary" onClick={close}>Done</Button>}>
+    <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
   return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description="Bane doesn’t send an email: you get a link to share with them. They join by signing in with this address." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>

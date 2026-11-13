@@ -23,6 +23,9 @@ const values = z.object({
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   // Hosted staff: Google Workspace domains (the provider identity's hd claim) that may sign up and create workspaces.
   AUTH_STAFF_GOOGLE_DOMAINS: z.string().default(''),
+  // Hosted: who may use staff UI notes (src/ui-notes.ts), as "issuer subject" pairs separated by commas. They must also
+  // hold the operator role. Empty turns the feature off: its routes answer 404 and the dashboard shows none of it.
+  UI_NOTES_SUBJECTS: z.string().default(''),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
@@ -146,6 +149,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
   if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
   if (staffGoogleDomains.length && requiredAcr !== GOOGLE_ACR) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
+  const uiNotesSubjects = v.MULTI_TENANT !== 'true' ? [] : list(v.UI_NOTES_SUBJECTS).map(pair => {
+    const [issuer, subject, extra] = pair.split(/\s+/);
+    if (!issuer || !subject || extra !== undefined || !/^https:\/\/[^/\s]+$/.test(issuer) || subject.length > 255) throw new ApiError(503, 'CONFIG_INVALID', 'UI_NOTES_SUBJECTS lists "https://issuer subject" pairs separated by commas.');
+    return { issuer, subject };
+  });
   const regions = [v.DEFAULT_SES_REGION];
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
@@ -174,7 +182,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
-    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr,
+    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly',
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
     encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
