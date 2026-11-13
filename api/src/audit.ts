@@ -134,7 +134,7 @@ export function ipNetwork(address: string | null | undefined): string | null {
   if (full.length !== 8 || full.some(g => !/^[0-9a-f]{1,4}$/i.test(g))) return null;
   return `${full.slice(0, 3).map(g => g.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/48`;
 }
-/** The product family of a user agent ("Chrome 131 on macOS", "@banemx/sdk 0.4", "curl"), never the full string. */
+/** The product family of a user agent ("Chrome 131 on macOS", "@nightmail/sdk 0.4", "curl"), never the full string. */
 export function userAgentFamily(agent: string | null | undefined): string | null {
   if (!agent) return null;
   const os = /Windows/.test(agent) ? 'Windows' : /iPhone|iPad/.test(agent) ? 'iOS' : /Android/.test(agent) ? 'Android' : /Mac OS X|Macintosh/.test(agent) ? 'macOS' : /Linux/.test(agent) ? 'Linux' : null;

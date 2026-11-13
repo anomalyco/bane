@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { hostedHosts, supportHost } from '../../../../api/src/brand'
+import { hostedHosts, repositoryUrl, supportHost } from '../../../../api/src/brand'
 
 // The agent's restricted Markdown (support/PROTOCOL.md §4.2): paragraphs, **bold**, `code`, fenced code, numbered and
 // bulleted lists, and links. Built as React elements, never HTML. Links render only to Nightmail's own sites and repository;
@@ -43,13 +43,13 @@ function blocks(source: string): Block[] {
   return out
 }
 
-const SITES = new Set(hostedHosts.flatMap(host => [host, supportHost(host)]))
+const SITES = new Set(hostedHosts.flatMap(host => [host, supportHost(host)])), REPOSITORY = new URL(repositoryUrl)
 export function allowedLink(href: string): URL | null {
   let url: URL
   try { url = new URL(href) } catch { return null }
   if (url.protocol !== 'https:' || url.username || url.password || url.port) return null
   if (SITES.has(url.hostname)) return url
-  return url.hostname === 'github.com' && /^\/anomalyco\/bane(?:[/?#]|$)/.test(url.pathname + url.search) ? url : null
+  return url.hostname === REPOSITORY.hostname && (url.pathname === REPOSITORY.pathname || url.pathname.startsWith(`${REPOSITORY.pathname}/`)) ? url : null
 }
 function LinkTo({ url, children }: { url: URL; children: ReactNode }) {
   // A link into this dashboard navigates in place, so the conversation stays open beside it.

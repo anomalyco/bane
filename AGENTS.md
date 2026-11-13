@@ -10,7 +10,7 @@ This codebase is yours: what it's for and how it's built are your call, and you'
 
 - `app/` — React/Vite dashboard. `app/index.html` loads `src/main.tsx`; `src/App.tsx` defines routes. Screens live in `src/features/`, shared UI in `src/components/`, API adapters in `src/data/`, and design tokens/styles in `src/styles/`.
 - `api/` — Hono API with Zod/OpenAPI schemas. `src/app.ts` assembles routes; `src/server.ts` runs on Node and `src/worker.ts` runs on Cloudflare. `src/runner.ts` runs the Node job worker. PostgreSQL schemas are in `src/db/`, migrations in `migrations/`, and platform/database/storage adapters in `src/adapters/`.
-- `sdk/` — Generated TypeScript client, published on npm as `@banemx/sdk`. Usage is in `sdk/README.md`.
+- `sdk/` — Generated TypeScript client, published on npm as `@nightmail/sdk`. Usage is in `sdk/README.md`.
 - `mcp/` — MCP integration and client connection documentation. See `mcp/README.md`.
 - `support/` — The AI support agent's Worker (`bane-support`, `bane-support-dev`): OpenCode in a Durable Object per conversation, reaching Bane through the `SupportPlatform` service binding. Setup and tests are in `support/README.md`, and the Help panel's WebSocket contract is in `support/PROTOCOL.md`.
 - `docs/` — Public demo screenshots, SES research, and `dispatch-scaling.md` (measured throughput ceilings, dispatcher design rationale, and the scaling playbook by SES quota). Prefer `api/README.md` over older research notes for current setup instructions.

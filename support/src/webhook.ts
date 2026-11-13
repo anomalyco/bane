@@ -1,5 +1,5 @@
 // Verifies Nightmail's Standard Webhooks signature (the same check as `verifyWebhook` in sdk/src/webhooks.ts, which the
-// published @banemx/sdk doesn't ship yet): HMAC-SHA256 over `id.timestamp.body` with the whsec_ secret, within 5 minutes.
+// published @nightmail/sdk doesn't ship yet): HMAC-SHA256 over `id.timestamp.body` with the whsec_ secret, within 5 minutes.
 const base64 = (value: string) => Uint8Array.from(atob(value), c => c.charCodeAt(0));
 
 export async function verifyWebhook(body: string, headers: Headers, secret: string, toleranceSeconds = 300): Promise<boolean> {

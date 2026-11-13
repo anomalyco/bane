@@ -14,7 +14,7 @@ for (const [path, pathItem] of Object.entries(document.paths ?? {})) for (const 
   if (!Array.isArray(samples) || samples.length !== 2) throw new Error(`${operation.operationId} must provide TypeScript SDK and cURL samples.`);
   const typescript = samples.find(sample => sample.lang === 'TypeScript')?.source;
   const curl = samples.find(sample => sample.lang === 'Shell')?.source;
-  if (!typescript?.includes(`import { ${operation.operationId} } from '@banemx/sdk'`) || !typescript.includes(`await ${operation.operationId}({`)) throw new Error(`${operation.operationId} has an invalid SDK sample.`);
+  if (!typescript?.includes(`import { ${operation.operationId} } from '@nightmail/sdk'`) || !typescript.includes(`await ${operation.operationId}({`)) throw new Error(`${operation.operationId} has an invalid SDK sample.`);
   if (!curl?.startsWith(`curl --request ${method.toUpperCase()}`) || !curl.includes(path.split('/{')[0])) throw new Error(`${operation.operationId} has an invalid cURL sample.`);
   operations.push({ id: operation.operationId, typescript });
 }
@@ -31,7 +31,7 @@ try {
   const config = join(directory, 'tsconfig.json');
   await writeFile(config, JSON.stringify({ compilerOptions: {
     target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', strict: true, noEmit: true, skipLibCheck: true, ignoreDeprecations: '6.0',
-    baseUrl: workspaceRoot, paths: { '@banemx/sdk': ['sdk/src/index.ts'], '@banemx/sdk/client': ['sdk/src/client/index.ts'] },
+    baseUrl: workspaceRoot, paths: { '@nightmail/sdk': ['sdk/src/index.ts'], '@nightmail/sdk/client': ['sdk/src/client/index.ts'] },
     typeRoots: [join(apiRoot, 'node_modules/@types')], types: ['node'],
   }, files }, null, 2));
   const result = spawnSync(process.execPath, [join(apiRoot, 'node_modules/typescript/bin/tsc'), '-p', config], { encoding: 'utf8' });

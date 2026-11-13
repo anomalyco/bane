@@ -1,7 +1,7 @@
 {
-  "name": "@banemx/sdk",
+  "name": "@nightmail/sdk",
   "version": "0.4.1",
-  "description": "TypeScript SDK for the Bane email API",
+  "description": "TypeScript SDK for the Nightmail email API",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -12,7 +12,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "bane": "./dist/cli.js"
+    "nightmail": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -46,7 +46,7 @@
     "url": "https://github.com/anomalyco/nightmail/issues"
   },
   "keywords": [
-    "bane",
+    "nightmail",
     "email",
     "ses",
     "sdk",
@@ -55,7 +55,8 @@
   ],
   "publishConfig": {
     "access": "public",
-    "registry": "https://registry.npmjs.org/"
+    "registry": "https://registry.npmjs.org/",
+    "provenance": true
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

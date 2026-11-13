@@ -20,7 +20,7 @@ const base64 = (value: string) => Uint8Array.from(atob(value), (c) => c.charCode
  *
  * ```ts
  * const body = await request.text();
- * if (!(await verifyWebhook(body, request.headers, process.env.BANE_WEBHOOK_SECRET!))) return new Response(null, { status: 401 });
+ * if (!(await verifyWebhook(body, request.headers, process.env.NIGHTMAIL_WEBHOOK_SECRET!))) return new Response(null, { status: 401 });
  * const payload: InboundWebhookPayload = JSON.parse(body);
  * ```
  */

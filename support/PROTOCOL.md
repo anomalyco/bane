@@ -101,7 +101,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
 
 - `kind: "first"` is the greeting the agent writes when the conversation opens, from the person's account (name, recent campaigns and sends, standing, open issues). The panel shows a typing state until it starts; it never sends a canned greeting of its own.
 - `kind: "notice"` is a short line from the harness, not the model (for example "Account access renewed"). Render it smaller.
-- Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/bane`; show any other URL as plain text. Never render images or raw HTML.
+- Text is **Markdown, restricted**: paragraphs, `**bold**`, `` `code` ``, fenced code, numbered and bulleted lists, links. Render links only to `https://bane.mx`, `https://dev.bane.mx`, `https://support.bane.mx`, `https://support.dev.bane.mx` and `https://github.com/anomalyco/nightmail`; show any other URL as plain text. Never render images or raw HTML.
 - Always use `message.end.text` as the stored text. When `redacted` is true, it is a replacement such as "I've sent this to the team to check".
 
 ### 4.3 Tool activity, consent and tickets
