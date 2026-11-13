@@ -2315,6 +2315,168 @@
         ],
         "additionalProperties": false
       },
+      "EmailPreviews": {
+        "type": "object",
+        "properties": {
+          "previews": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "client": {
+                  "$ref": "#/components/schemas/EmailPreviewClient"
+                },
+                "html": {
+                  "type": "string",
+                  "description": "Untrusted offline document; render only as the srcdoc of an iframe with sandbox=\"\". Empty for classic Outlook (lint only)."
+                },
+                "issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "feature": {
+                        "type": "string"
+                      },
+                      "clients": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/EmailPreviewClient"
+                        }
+                      },
+                      "severity": {
+                        "type": "string",
+                        "enum": [
+                          "warning",
+                          "error"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "feature",
+                      "clients",
+                      "severity"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "client",
+                "html",
+                "issues"
+              ]
+            }
+          }
+        },
+        "required": [
+          "previews"
+        ]
+      },
+      "EmailPreviewClient": {
+        "type": "string",
+        "enum": [
+          "gmail-web",
+          "gmail-ios",
+          "gmail-android",
+          "gmail-ios-non-google",
+          "gmail-android-non-google",
+          "apple-mail-macos",
+          "apple-mail-ios",
+          "outlook-web",
+          "outlook-new-windows",
+          "outlook-mac",
+          "outlook-classic-windows",
+          "yahoo-web",
+          "aol-web",
+          "samsung-email"
+        ]
+      },
+      "EmailPreviewInput": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "html": {
+                "type": "string",
+                "minLength": 1,
+                "description": "HTML to preview, up to 256 KiB in UTF-8."
+              },
+              "clients": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EmailPreviewClient"
+                },
+                "minItems": 1,
+                "maxItems": 14,
+                "uniqueItems": true
+              },
+              "theme": {
+                "type": "string",
+                "enum": [
+                  "light",
+                  "dark"
+                ]
+              },
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device."
+              }
+            },
+            "required": [
+              "html",
+              "clients",
+              "theme"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "emailId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Outbound email with retained HTML visible to this credential."
+              },
+              "clients": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EmailPreviewClient"
+                },
+                "minItems": 1,
+                "maxItems": 14,
+                "uniqueItems": true
+              },
+              "theme": {
+                "type": "string",
+                "enum": [
+                  "light",
+                  "dark"
+                ]
+              },
+              "device": {
+                "type": "string",
+                "enum": [
+                  "desktop",
+                  "mobile"
+                ],
+                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device."
+              }
+            },
+            "required": [
+              "emailId",
+              "clients",
+              "theme"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "Supply exactly one source: html or emailId."
+      },
       "Email": {
         "type": "object",
         "properties": {
@@ -28000,6 +28162,161 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/batch' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"emails\": [\n    {\n      \"from\": \"sender@example.com\",\n      \"to\": \"recipient@example.com\",\n      \"cc\": [],\n      \"bcc\": [],\n      \"replyTo\": [],\n      \"kind\": \"transactional\",\n      \"attachments\": [],\n      \"subject\": \"Hello from Bane\",\n      \"text\": \"Your message is ready.\"\n    }\n  ]\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/emails/preview": {
+      "post": {
+        "operationId": "previewEmail",
+        "tags": [
+          "Emails"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Preview HTML in selected email clients",
+        "description": "Read-only offline emulation, not a screenshot. Supply HTML or an outbound email ID; stored HTML has the same access and redaction as getEmailContent. Render untrusted output only via iframe.srcdoc with sandbox=\"\"; the embedded CSP blocks remote assets. Results follow the requested client order. Classic Outlook is lint only (empty html). New Outlook for Windows models Outlook web; actual client behavior is unverified. Input over 256 KiB UTF-8, excessive document complexity, or combined output HTML over 4 MiB returns 413.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailPreviewInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailPreviews"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { previewEmail } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await previewEmail({\n  client,\n  body: {\n    \"html\": \"<h1>Hello</h1><p>Your message is ready.</p>\",\n    \"clients\": [\n      \"gmail-web\"\n    ],\n    \"theme\": \"light\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/emails/preview' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"html\": \"<h1>Hello</h1><p>Your message is ready.</p>\",\n  \"clients\": [\n    \"gmail-web\"\n  ],\n  \"theme\": \"light\"\n}'"
           }
         ]
       }

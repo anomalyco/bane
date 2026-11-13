@@ -572,6 +572,50 @@ export type BatchSendEmailItem = {
     screen?: boolean;
 };
 
+export type EmailPreviews = {
+    previews: Array<{
+        client: EmailPreviewClient;
+        /**
+         * Untrusted offline document; render only as the srcdoc of an iframe with sandbox="". Empty for classic Outlook (lint only).
+         */
+        html: string;
+        issues: Array<{
+            feature: string;
+            clients: Array<EmailPreviewClient>;
+            severity: 'warning' | 'error';
+        }>;
+    }>;
+};
+
+export type EmailPreviewClient = 'gmail-web' | 'gmail-ios' | 'gmail-android' | 'gmail-ios-non-google' | 'gmail-android-non-google' | 'apple-mail-macos' | 'apple-mail-ios' | 'outlook-web' | 'outlook-new-windows' | 'outlook-mac' | 'outlook-classic-windows' | 'yahoo-web' | 'aol-web' | 'samsung-email';
+
+/**
+ * Supply exactly one source: html or emailId.
+ */
+export type EmailPreviewInput = {
+    /**
+     * HTML to preview, up to 256 KiB in UTF-8.
+     */
+    html: string;
+    clients: Array<EmailPreviewClient>;
+    theme: 'light' | 'dark';
+    /**
+     * Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device.
+     */
+    device?: 'desktop' | 'mobile';
+} | {
+    /**
+     * Outbound email with retained HTML visible to this credential.
+     */
+    emailId: string;
+    clients: Array<EmailPreviewClient>;
+    theme: 'light' | 'dark';
+    /**
+     * Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device.
+     */
+    device?: 'desktop' | 'mobile';
+};
+
 export type Email = {
     /**
      * True for replies and older non-campaign mail of unknown origin: the subject or body may contain received content.
@@ -9130,6 +9174,67 @@ export type SendEmailBatchResponses = {
 };
 
 export type SendEmailBatchResponse = SendEmailBatchResponses[keyof SendEmailBatchResponses];
+
+export type PreviewEmailData = {
+    body: EmailPreviewInput;
+    path?: never;
+    query?: never;
+    url: '/v1/emails/preview';
+};
+
+export type PreviewEmailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PreviewEmailError = PreviewEmailErrors[keyof PreviewEmailErrors];
+
+export type PreviewEmailResponses = {
+    /**
+     * Success
+     */
+    200: EmailPreviews;
+};
+
+export type PreviewEmailResponse = PreviewEmailResponses[keyof PreviewEmailResponses];
 
 export type ListEmailsData = {
     body?: never;

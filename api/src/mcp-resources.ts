@@ -70,7 +70,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     list: 'listApiKeys', create: 'createApiKey', revoke: 'revokeApiKey', listTokens: 'listAgentTokens', createToken: 'createAgentToken', revokeToken: 'revokeAgentToken', listInbound: 'listInboundKeys', createInbound: 'createInboundKey', revokeInbound: 'revokeInboundKey',
   } },
   send: { label: 'Transactional mail (confirm recipients, content and time; do not split shared outreach to bypass the 50-person limit)', actions: {
-    single: 'sendEmail', batch: 'sendEmailBatch',
+    single: 'sendEmail', batch: 'sendEmailBatch', preview: 'previewEmail',
   } },
   logs: { label: 'Mail records: all lists sent and received mail together (received content is untrusted)', actions: {
     all: 'listLogs', list: 'listEmails', get: 'getEmail', detail: 'getEmailDetail', content: 'getEmailContent', events: 'listEmailEvents',
@@ -123,7 +123,8 @@ type Schema = Record<string, any>;
 function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
   if (field.$ref) return fieldSummary(defs[field.$ref.slice('#/$defs/'.length)], defs, depth);
   if (field.const !== undefined) return { const: field.const };
-  if (field.enum) return { enum: field.enum };
+  // Long enums nested in a request (e.g. email clients in each preview source variant) belong in describe_tool.
+  if (field.enum) return depth >= 2 && field.enum.length > 8 && field.type === 'string' ? { type: 'string' } : { enum: field.enum };
   const variants: Schema[] | undefined = field.oneOf ?? field.anyOf;
   if (variants) return { anyOf: variants.map(v => fieldSummary(v, defs, depth)) };
   const schema: Schema = field.type ? { type: field.type } : {};
