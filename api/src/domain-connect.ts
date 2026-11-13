@@ -2,6 +2,7 @@ import { createHmac, hkdfSync, sign, timingSafeEqual } from 'node:crypto';
 import { z } from '@hono/zod-openapi';
 import type { Config } from './core.js';
 import { domainConnectProviderId } from './brand.js';
+import { isProofRecord } from './states.js';
 
 const template = `/v2/domainTemplates/providers/${domainConnectProviderId}/services/mail`;
 export const groupIds = ['sending', 'ownership', 'receiving', 'receivingReply', 'mailfrom'] as const;
@@ -110,7 +111,8 @@ export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:bo
       add('sending',{dkim1:selectors[0]!,dkim2:selectors[1]!,dkim3:selectors[2]!,dkimZone:zone.slice(0,-'.amazonses.com'.length)});
     }
   }
-  const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && r.name===`_bane.${domain.name}`);
+  // The registered template publishes the token as _bane, which proves a claim shown with any label.
+  const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && isProofRecord(r.name,domain.name));
   if(shared && proof) add('ownership',{ownership:proof.value});
   const mx=pending.find(r=>r.purpose==='receiving' && r.type==='MX');
   const inbound=mx && /^inbound-smtp\.([a-z]{2}(?:-[a-z]+)+-\d+)\.amazonaws\.com$/.exec(mx.value)?.[1];

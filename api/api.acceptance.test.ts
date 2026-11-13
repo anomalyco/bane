@@ -2157,7 +2157,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             if(url.origin==='https://cloudflare-dns.com') {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
-              if(q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
+              if(q===`_nightmail.${name}` || q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
               if(type==='NS') return Response.json({Status:3}); // Receiving hosts here are not delegated zones.
@@ -2221,7 +2221,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
             const type=record.type==='SPFM'?'TXT':record.type, value=record.type==='SPFM'?`v=spf1 ${record.spfRules} ~all`:expand(record.pointsTo ?? record.data);
-            assert.ok(manual.dns.some((r:Json)=>r.name===target && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
+            // The registered template publishes the ownership token as _bane, which proves a claim shown as _nightmail.
+            const same=(shown:string)=>record.groupId==='ownership' ? shown.replace(/^_(?:nightmail|bane|opensend)\./,'')===target.replace(/^_bane\./,'') : shown===target;
+            assert.ok(manual.dns.some((r:Json)=>same(r.name) && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
           }
           assert.deepEqual((await getSetup('?groups=ownership')).groups,['ownership']); assert.equal(requests.length,before,'Cached consent URL generation makes no outbound calls.');
           const ret=new URL(params.get('redirect_uri')!); assert.equal(ret.origin,origin); const token=params.get('state')!; assert.equal(ret.pathname.split('/').at(-1),token);
@@ -2340,7 +2342,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
           assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
-          assert.equal(proof.name,`_bane.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
+          assert.equal(proof.name,`_nightmail.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
           // Receiving defaults to reply.<domain>: a pasted root MX would take the domain's existing mail.
           assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:`reply.${domain}`,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
@@ -2381,8 +2383,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
 
           identity.DkimAttributes=dkim; answer=''; await pace();
           await assert.rejects(check(40),e=>e instanceof JobDeferred && Date.parse(e.availableAt)<=Date.now()+16_000 && e.payload?.poll===1);
-          assert.equal(lookups,2,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
-          await assert.rejects(check(),JobDeferred); assert.equal(lookups,2,'Account pacing must prevent a second SES read.');
+          assert.equal(lookups,3,'The first DKIM success checks TXT (each label); NXDOMAIN restarts at the short delay even after 40 polls.');
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,3,'Account pacing must prevent a second SES read.');
           await pace();
           // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
           await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
@@ -2396,7 +2398,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`GET verified domain: 1 domain statement; ${verifiedQueries} pg round trips including dashboard auth; no wake.`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
-          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,6,"Three checks of both ownership labels; the legacy TXT proves the claim.");
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,9,"Three checks of the three ownership labels; the legacy _opensend TXT proves the claim.");
           assert.ok(associations.has(`bane-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
           // A verified sender on a connection whose tenant is not ready is refused at admission, never queued silently.
           await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
@@ -2606,7 +2608,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               const {cleanup}=await import('./src/maintenance.js');
               const create=async()=>ok(await add(b.cookie,unique('expiry')+'.invalid'),201);
               const expired=await create(),foreignTag=await create(),recent=await create();
-              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_bane.'+x.name).value;
+              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_nightmail.'+x.name).value;
               const token=getToken(expired);
               identities.get(`${platform}:${foreignTag.name}`)!.Tags=[{Key:'bane:domain-claim',Value:randomUUID()}];
               await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=ANY($1)",[[expired.name,foreignTag.name,domain]]);
@@ -2807,6 +2809,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             }),e=>e===rollback);
           }); } finally { runtime.db=original; }
           assert.ok(calls.slice(start).every(n=>/^(Get|List)/.test(n)),'No writes to customer AWS resources during verification or import.');
+          // A claim made before the Nightmail rename keeps showing (and is proven by) the _bane record its owner published.
+          await pool.query("UPDATE domain_claims SET proof_label='bane' WHERE workspace_id=$1 AND name=$2",[a.org.id,reserved]);
           const list:Json[]=ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;assert.equal(list.length,3);
           const signedDomain=list.find(x=>x.name===imported)!;
           assert.deepEqual([signedDomain.sending,signedDomain.verificationStatus,signedDomain.dkimStatus,signedDomain.mailFromDomain,signedDomain.mailFromStatus],['verified','SUCCESS','SUCCESS','bounce.'+imported,'SUCCESS']);
@@ -2823,15 +2827,15 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             }),e=>e===rollback);
           }
           await canReserve(true);
-          async function check(item:Json,correct:boolean){
-            const proof=item.dns.find((r:Json)=>r.name==='_bane.'+item.name);assert.equal(proof.status,'pending');
+          async function check(item:Json,correct:boolean,label='nightmail'){
+            const proof=item.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT');assert.equal(proof.name,`_${label}.${item.name}`);assert.equal(proof.status,'pending');
             dns.set(proof.name,correct?proof.value:'wrong');await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
             return operationJobs['domain.verify']!(runtime,{domainId:item.id,token:proof.value},{id:'domain.verify:'+proof.value,attempts:1,workspaceId:a.org.id});
           }
           await check(signedDomain,false);await canReserve(true);
           assert.equal((await pool.query('SELECT 1 FROM mailbox_domains WHERE workspace_id=$1 AND domain_id=$2',[a.org.id,signedDomain.id])).rowCount,0,'An unproven import is authorized only for sending.');
           await check(signedDomain,true);await canReserve(false);
-          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true),JobDeferred);
+          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true,'bane'),JobDeferred);
           await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
           const scopes=(await pool.query('SELECT name,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,reserved]])).rows;
           assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'txt'},'A pending foreign reservation does not block either valid DNS proof');
@@ -11036,7 +11040,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     domain=await read();assert.deepEqual([domain.receiving,domain.dns[0].status],['verified','verified']);
     for (const local of ['abuse','postmaster','security','dmarc']) assert.equal(await probe(`${local}@${host}`),1);
     assert.equal(await probe(`fixture@e2e.${host}`),0,'The root never receives for the platform’s own hosts.');
-    assert.ok(!queried.some(q=>q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
+    assert.ok(!queried.some(q=>q.endsWith(`_nightmail.${host}`) || q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
     // Ingest: an inbox created on purpose receives; nothing else becomes an address, and the validation mailboxes
     // a certificate authority could use never do, even after someone switches the catch-all back to creating addresses.
     const stored=async(recipients:string[],catchAll:'store'|'create_mailbox')=>{let result:Json={};const mid=unique('platform-ingest'),message=unique('msg');
@@ -11636,7 +11640,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
       // DNS stub (cloudflare-dns.com JSON): exact names first, then a *.domain wildcard for names without records of their own.
       const zone = new Map<string, { mx?: string[]; cname?: string; ns?: string[] }>();
-      // Each claim publishes its _bane ownership TXT: the hourly recheck requires a fresh proof before a claim may receive.
+      // Each claim publishes the legacy _bane ownership TXT, which proves a new (_nightmail) claim too: the hourly recheck
+      // requires a fresh proof before a claim may receive.
       const proofs = new Map<string, string>();
       // Lookups in flight, their abort signals, and an optional resolver delay: how parallel one check is and what bounds it.
       let inFlight = 0, maxInFlight = 0, delayMs = 0; const signals: (AbortSignal | null | undefined)[] = [];
@@ -11710,7 +11715,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(reserved.message, new RegExp(`MAIL FROM subdomain, so its MX must point to feedback-smtp\\.${REGION}`)); assert.match(reserved.message, /Use inbound\./);
         error(await choose(d, `tokena._domainkey.${d.name}`), 422); // Underscore names (DKIM, _bane) are never valid receiving hosts.
         const ses = { DkimAttributes: { Tokens: tokens }, MailFromAttributes: { MailFromDomain: `reply.${d.name}` } } as Json;
-        assert.deepEqual([`tokena._domainkey.${d.name}`, `_bane.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
+        assert.deepEqual([`tokena._domainkey.${d.name}`, `_nightmail.${d.name}`, `_bane.${d.name}`, `_opensend.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'ownership TXT record', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
         assert.deepEqual(receivingCandidates('acme.example').slice(0, 3), ['reply.acme.example', 'inbound.acme.example', 'mail.acme.example']);
         // The other direction: MAIL FROM can't take the suggested receiving host either (refused before any SES call).
         error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `inbound.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT');
