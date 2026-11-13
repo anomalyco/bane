@@ -12,8 +12,10 @@ import { Alert, Button, EmptyState, ErrorState, Select, Sheet, Skeleton, Skeleto
 import { useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
-import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { AccountSwitcher } from './AccountSwitcher'
 import { StandingBanner } from './StandingBanner'
+import { BillingBanner } from './BillingBanner'
+import { LegalFooterLinks } from './LegalLinks'
 import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
@@ -169,7 +171,7 @@ export function AppShell() {
   const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const context = <>
-    {access.multiTenant && <WorkspaceSwitcher />}
+    {access.multiTenant && <AccountSwitcher />}
     {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
     {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
     {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
@@ -182,10 +184,12 @@ export function AppShell() {
       {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
       <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
+    <LegalFooterLinks />
   </>
   const supportHost = support.mode && <SupportHost chat={support} />
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <StandingBanner />
+    <BillingBanner />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
       {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
         : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />

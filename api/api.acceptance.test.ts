@@ -1,6 +1,6 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { SnsCertificateState } from './src/operations.js';
@@ -450,13 +450,13 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
   const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   const plain = resourceTools(catalog), bytes = Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{tools:plain}}));
   // Budget the full-grant JSON-RPC response, including discovery, not just an ordinary manage grant.
-  assert.equal(plain.length, 29); assert.ok(bytes <= 50_000, `${bytes} bytes`);
+  assert.equal(plain.length, 30); assert.ok(bytes <= 50_000, `${bytes} bytes`);
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
     const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
@@ -690,10 +690,25 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   runtime.config.accountClient!.requiredAcr=undefined;
   const googleAcr = 'urn:anomaly:acr:google';
   let tokenAcr: string | undefined = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
+  // The account service's DPoP rules for a first-party client (packages/server/src/tokens.ts and dpop.ts): the code
+  // exchange needs a proof (invalid_dpop_proof) carrying the server's nonce (use_dpop_nonce), the access token is bound
+  // to that key, and userinfo then needs the DPoP scheme and a proof of the same key with the token's hash.
+  const dpopNonce = randomUUID(), b64u = (v: string | Buffer) => Buffer.from(v).toString('base64url');
+  let boundJkt = '', exchanges = { refused: 0, nonce: 0, issued: 0 };
+  const dpopProof = (init: RequestInit | undefined, htu: string) => {
+    const jwt = new Headers(init?.headers).get('dpop'); if (!jwt) return null;
+    const [h, p, sig] = jwt.split('.'), header = JSON.parse(Buffer.from(h!, 'base64url').toString()), payload = JSON.parse(Buffer.from(p!, 'base64url').toString());
+    const jwk = header.jwk as { kty: string; crv: string; x: string; y: string; d?: string }, now = Math.floor(Date.now() / 1000);
+    assert.ok(header.typ === 'dpop+jwt' && header.alg === 'ES256' && jwk.kty === 'EC' && jwk.crv === 'P-256' && !('d' in jwk), 'DPoP header');
+    assert.ok(verifySignature('sha256', Buffer.from(h + '.' + p), { key: createPublicKey({ key: jwk as never, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, Buffer.from(sig!, 'base64url')), 'DPoP signature');
+    assert.ok(payload.htu === htu && payload.htm === (init?.method ?? 'GET') && payload.iat >= now - 60 && payload.iat <= now + 10 && typeof payload.jti === 'string', 'DPoP claims');
+    return { jkt: b64u(createHash('sha256').update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })).digest()), nonce: payload.nonce, ath: payload.ath };
+  };
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
-      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined});
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined,
+        response_modes_supported:['query'],dpop_signing_alg_values_supported:['ES256','EdDSA']});
       case '/par': {
         pushed = new URLSearchParams(String(init?.body));
         assert.equal(pushed.get('client_id'),'dashboard');
@@ -703,18 +718,29 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
         return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
       }
-      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
+      case '/userinfo': {
+        const proof = dpopProof(init, issuer+'/userinfo');
+        if (new Headers(init?.headers).get('authorization') !== 'DPoP fixture' || proof?.jkt !== boundJkt || proof.ath !== b64u(createHash('sha256').update('fixture').digest()))
+          return new Response(null,{status:401,headers:{'www-authenticate':'DPoP error="invalid_token"'}});
+        return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
+      }
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
+        const proof = dpopProof(init, issuer+'/token');
+        if (!proof) { exchanges.refused++; return Response.json({error:'invalid_dpop_proof'},{status:400}); }
+        if (proof.nonce !== dpopNonce) { exchanges.nonce++; return Response.json({error:'use_dpop_nonce'},{status:400,headers:{'dpop-nonce':dpopNonce}}); }
+        boundJkt = proof.jkt; exchanges.issued++;
         const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
-        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+        return Response.json({access_token:'fixture',token_type:'DPoP',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
       default: throw Error('unexpected issuer endpoint');
     }
   });
   const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
+  const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-bane-client-ip':`192.0.2.${peer}`}}),runtime);
   async function login(authorizationError?:string) {
     peer++; pushed=undefined;
     const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
@@ -724,9 +750,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const params = pushed ?? front;
     nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
     const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({...(authorizationError?{error:authorizationError}:{code:'fixture'}),state:params.get('state')!,iss:issuer});
-    assert.equal((await request(path,'GET')).headers.get('location'),origin+'/?auth=error');
-    const result=await request(path,'GET',cookie);
-    assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
+    assert.equal((await navigate(path)).headers.get('location'),origin+'/?auth=error');
+    const result=await navigate(path,cookie);
+    assert.equal((await navigate(path,cookie)).headers.get('location'),origin+'/?auth=error');
     return result;
   }
   const subjects=[subject];
@@ -740,9 +766,13 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
   }
+  // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
+  assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
   // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
   providerName='google';providerHd='example.org';providerVerified=true;verified=false;
-  const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  // The dashboard reopens as the account that just signed in (a browser can hold several).
+  const landed=(response:Response)=>{const url=new URL(response.headers.get('location')!);assert.match(url.searchParams.get('account')??'',/^[0-9a-f-]{36}$/);url.searchParams.delete('account');return url.href;};
+  const result=await login();assert.equal(landed(result),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
@@ -771,7 +801,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await login('interaction_required')).headers.get('location'),origin+'/?auth=interaction_required');
   assert.equal(await sessionCount(),before);
   tokenAcr=googleAcr;
-  const accepted=await login();assert.equal(accepted.headers.get('location'),origin+'/');
+  const accepted=await login();assert.equal(landed(accepted),origin+'/');
   assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
@@ -797,7 +827,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
   await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
   await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
-  const seated=await login();assert.equal(seated.headers.get('location'),origin+'/');
+  const seated=await login();assert.equal(landed(seated),origin+'/');
   const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
   assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
@@ -806,6 +836,287 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Workspace creation follows the sign-in's staff status, not the address.
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
   assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+});
+
+// Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
+// exactly one of them (X-Bane-Account, else the browser default), and nothing of one account reaches another.
+test('Account switcher: two accounts in one browser switch, stay apart on every route and sign out alone', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const origin = 'https://dashboard.example.org', issuer = 'https://accounts-switch.example.org', googleAcr = 'urn:anomaly:acr:google';
+  const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:googleAcr, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  type Person = { subject: string; email: string; id?: string; workspace?: string };
+  let person: Person = {subject:'', email:''}, nonce = '', tokenAcr = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
+  // The account service's DPoP rules, as in the OIDC callback test: every code exchange, adds included, proves a fresh
+  // ES256 key carrying the server's nonce, and gets a DPoP-bound token.
+  const dpopNonce = randomUUID(), proved = new Set<string>();
+  const proofKey = (init: RequestInit | undefined) => {
+    const jwt = new Headers(init?.headers).get('dpop'); if (!jwt) return null;
+    const [h, p, sig] = jwt.split('.'), header = JSON.parse(Buffer.from(h!, 'base64url').toString()), payload = JSON.parse(Buffer.from(p!, 'base64url').toString());
+    assert.ok(header.typ === 'dpop+jwt' && header.alg === 'ES256' && !('d' in header.jwk), 'DPoP header');
+    assert.ok(verifySignature('sha256', Buffer.from(h + '.' + p), { key: createPublicKey({ key: header.jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, Buffer.from(sig!, 'base64url')), 'DPoP signature');
+    assert.ok(payload.htu === issuer+'/token' && payload.htm === 'POST' && typeof payload.jti === 'string', 'DPoP claims');
+    return { key: JSON.stringify([header.jwk.x, header.jwk.y]), nonce: payload.nonce as string | undefined };
+  };
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',pushed_authorization_request_endpoint:issuer+'/par',response_modes_supported:['query'],dpop_signing_alg_values_supported:['ES256']});
+      case '/par': pushed = new URLSearchParams(String(init?.body)); return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const proof = proofKey(init);
+        if (!proof) return Response.json({error:'invalid_dpop_proof'},{status:400});
+        if (proof.nonce !== dpopNonce) return Response.json({error:'use_dpop_nonce'},{status:400,headers:{'dpop-nonce':dpopNonce}});
+        assert.ok(!proved.has(proof.key), 'Each sign-in proves its own key'); proved.add(proof.key);
+        const now=Math.floor(Date.now()/1000),upstream={[PROVIDER_IDENTITY_CLAIM]:{provider:'google',sub:'g-'+person.subject,email:person.email,email_verified:true,hd:'example.org'}};
+        const body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:person.subject,nonce,acr:tokenAcr,name:person.email.split('@')[0],email:person.email,email_verified:true,...upstream}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'DPoP',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  const people: Person[] = [];
+  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,people.map(p=>p.subject)]);});
+  const someone = (name: string): Person => { const p = {subject:randomUUID(), email:`${name}-${randomUUID()}@example.org`}; people.push(p); return p; };
+  // One browser: its cookie jar, as Set-Cookie leaves it.
+  const jar = new Map<string,string>();
+  const store = (response: Response) => { for (const line of response.headers.getSetCookie()) { const [pair] = line.split(';'), name = pair!.slice(0,pair!.indexOf('=')), value = pair!.slice(name.length+1); if (!value || /max-age=0/i.test(line)) jar.delete(name); else jar.set(name,value); } return response; };
+  const cookie = () => [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
+  const request = (path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => app.fetch(new Request(origin+path,{method,
+    headers:{origin,cookie:cookie(),'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
+  const as = (p: Person, extra: Record<string,string> = {}) => ({'x-bane-account':p.id!,...extra});
+  const code = async (response: Response) => ((await response.json()) as {error?:{code:string}}).error?.code;
+  // A sign-in in two halves: started here, finished when the account service redirects back (a cross-site GET).
+  async function begin(p: Person, add = false, callbackURL = origin+'/') {
+    peer++;
+    const start = store(await request('/api/auth/sign-in/account','POST',{callbackURL,...(add?{prompt:'select_account'}:{})}));
+    assert.equal(start.status,200);
+    // Add account asks the account service for its chooser; every sign-in, adds included, requires Google again.
+    assert.equal(pushed!.get('prompt'), add ? 'select_account' : null);
+    assert.deepEqual(JSON.parse(pushed!.get('claims')!).id_token.acr,{essential:true,values:[googleAcr]});
+    const flowNonce = pushed!.get('nonce')!, state = pushed!.get('state')!, binding = jar.get('__Host-bane.login')!;
+    return async () => {
+      person = p; nonce = flowNonce; jar.set('__Host-bane.login',binding);
+      const before = proved.size, done = store(await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state,iss:issuer}),{headers:{cookie:cookie(),'sec-fetch-site':'cross-site'}}),runtime));
+      if (done.headers.get('location')?.includes('account=')) assert.equal(proved.size,before+1,'The exchange proved a DPoP key');
+      return done;
+    };
+  }
+  const signIn = async (p: Person, add = false, callbackURL = origin+'/') => (await begin(p, add, callbackURL))();
+  async function connect(p: Person, add: boolean) {
+    const done = await signIn(p, add);
+    const location = new URL(done.headers.get('location')!);
+    assert.equal(location.pathname,'/');
+    p.id = location.searchParams.get('account')!;
+    const me = await (await request('/v1/me','GET',undefined,as(p))).json() as {id:string;workspaceId:string;email:string};
+    assert.deepEqual([me.id,me.email],[p.id,p.email]);
+    p.workspace = me.workspaceId;
+    return p;
+  }
+  const personal = await connect(someone('personal'), false);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token']);
+  const work = await connect(someone('work'), true);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token','__Host-bane.session_token.1']);
+  assert.notEqual(personal.workspace, work.workspace);
+  // Without a tab's account the browser default (the one added last) answers; with one, exactly that account.
+  const who = async (headers: Record<string,string> = {}) => ((await store(await request('/v1/me','GET',undefined,headers)).json()) as {id:string}).id;
+  assert.equal(await who(), work.id);
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(await who(as(work)), work.id);
+  // Another account's workspace is refused, not served as the tab's account.
+  const crossed = await request('/v1/me','GET',undefined,as(personal,{'x-bane-workspace':work.workspace!}));
+  assert.equal(crossed.status,403); assert.equal(await code(crossed),'WORKSPACE_ACCESS_DENIED');
+  for (const forged of ['someone-else', 'bad value', '']) {
+    const refused = await request('/v1/me','GET',undefined,{'x-bane-account':forged});
+    assert.equal(refused.status,401,forged); assert.equal(await code(refused),'ACCOUNT_SIGNED_OUT');
+  }
+  // The browser's account list: only the accounts connected here, each with its own workspaces.
+  const listed = await (await request('/api/auth/accounts','GET',undefined,as(personal))).json() as {accounts:{id:string;email:string;workspaces:{id:string}[]}[];active:string;limit:number};
+  assert.deepEqual(listed.accounts.map(a=>[a.id,a.email,a.workspaces.map(w=>w.id)]),[[personal.id,personal.email,[personal.workspace]],[work.id,work.email,[work.workspace]]]);
+  assert.deepEqual([listed.active,listed.limit],[personal.id,5]);
+  // Billing's free-account flag binds to one account's issuer subject: in a shared browser it frees that account's
+  // workspaces only, whichever account the tab is on.
+  const free = async (p: Person) => ((await (await request('/v1/me','GET',undefined,as(p))).json()) as {billing:{free:boolean}|null}).billing?.free;
+  await db.query(`SELECT billing_set_person_free($1, true, 'Anomaly staff account', NULL, 'script')`, [work.id]);
+  assert.deepEqual([await free(personal), await free(work), (await db.query('SELECT count(*)::int AS n FROM billing_free_people WHERE issuer=$1 AND subject=$2', [issuer, work.subject])).rows[0].n], [false, true, 1]);
+  await db.query(`SELECT billing_set_person_free($1, false, 'Anomaly staff account', NULL, 'script')`, [work.id]);
+  assert.deepEqual([await free(personal), await free(work)], [false, false]);
+
+  // No route answers one account with the other's data. Each account creates marked records, then every GET route
+  // without a path parameter is read as each account, with and without the other's workspace named.
+  const markers = new Map<string,string[]>();
+  for (const p of [personal, work]) {
+    const tag = `marker-${randomUUID()}`, contact = `${tag}@example.net`;
+    assert.equal((await request('/v1/api-keys','POST',{name:tag,permissions:['read']},as(p))).status,201);
+    assert.equal((await request('/v1/contacts','POST',{email:contact},as(p))).status,201);
+    markers.set(p.id!,[tag,contact,p.email,p.workspace!]);
+  }
+  const document = JSON.parse(await readFile(new URL('./openapi.json',import.meta.url),'utf8')) as {paths:Record<string,{get?:unknown}>};
+  const routes = Object.entries(document.paths).filter(([path,ops])=>ops.get && !path.includes('{')).map(([path])=>path);
+  assert.ok(routes.length >= 40, 'every parameterless GET route');
+  for (const [self, other] of [[personal, work], [work, personal]] as const) for (const path of routes) {
+    const response = await Promise.race([request(path,'GET',undefined,as(self)), new Promise<Response>((_,reject)=>setTimeout(()=>reject(Error(`${path} timed out`)),10_000))]);
+    const text = await response.text();
+    for (const marker of markers.get(other.id!)!) assert.ok(!text.includes(marker),`${path} as ${self.email} returned the other account's ${marker}`);
+  }
+
+  // Switching the browser default needs the dashboard's Origin, and only to an account connected here.
+  for (const foreign of [undefined,'https://attacker.invalid']) {
+    const forged = await app.fetch(new Request(origin+'/api/auth/accounts/switch',{method:'POST',headers:{cookie:cookie(),'content-type':'application/json',...(foreign?{origin:foreign}:{})},body:JSON.stringify({account:personal.id})}),runtime);
+    assert.equal(forged.status,403); assert.equal(await code(forged),'CSRF_ORIGIN_INVALID');
+    assert.equal(await who(), work.id, 'A forged switch changes nothing');
+  }
+  const unknown = await request('/api/auth/accounts/switch','POST',{account:'not-connected-here'});
+  assert.equal(unknown.status,401);
+  const switched = store(await request('/api/auth/accounts/switch','POST',{account:personal.id}));
+  assert.equal(switched.status,200); assert.equal(await who(), personal.id);
+
+  // Signing out of one account keeps the other.
+  const out = store(await request('/api/auth/sign-out','POST',{account:work.id},as(personal)));
+  assert.deepEqual(await out.json(),{success:true,accounts:[personal.id],active:personal.id});
+  assert.ok(!jar.has('__Host-bane.session_token.1'));
+  const gone = await request('/v1/me','GET',undefined,as(work));
+  assert.equal(gone.status,401); assert.equal(await code(gone),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1',[work.id])).rows[0].n,0);
+
+  // A session revoked on the server, or expired, drops only that account; the list clears just its cookie.
+  await connect(work, true);
+  assert.equal(jar.get('__Host-bane.account'), work.id);
+  await db.query('DELETE FROM bane_sessions WHERE user_id=$1',[work.id]);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(jar.get('__Host-bane.account'), work.id, 'A tab naming its account leaves the default alone');
+  // Without a tab's account the stale default falls to a live account once, and the default then names that account.
+  assert.equal(await who(), personal.id);
+  assert.equal(jar.get('__Host-bane.account'), personal.id, 'The stale default is replaced, not left to fall through again');
+  const pruned = store(await request('/api/auth/accounts','GET',undefined,as(personal)));
+  assert.deepEqual(((await pruned.json()) as {accounts:{id:string}[]}).accounts.map(a=>a.id),[personal.id]);
+  assert.deepEqual([...jar.keys()].filter(k=>k.includes('session_token')),['__Host-bane.session_token']);
+  await connect(work, true);
+  await db.query("UPDATE bane_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[personal.id]);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(work)), work.id);
+  assert.equal(await who(), work.id, 'The default falls to a live account');
+  await connect(personal, true);
+
+  // An add that doesn't meet the required authentication changes no session.
+  const before = (await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows;
+  tokenAcr = 'urn:anomaly:acr:passkey';
+  assert.equal((await signIn(someone('passkey'), true)).headers.get('location'), origin+'/?auth=google_required');
+  tokenAcr = googleAcr;
+  assert.deepEqual((await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows,before);
+  assert.equal(await who(as(personal)), personal.id);
+  // An add in a popup returns to the popup page, which tells the tab that opened it; so does a refused one.
+  const popup = await signIn(someone('popup'), true, origin+'/signed-in/?tab=fixture');
+  const added = new URL(popup.headers.get('location')!);
+  assert.deepEqual([added.pathname,added.searchParams.get('tab'),added.searchParams.get('account')?.length! > 0],['/signed-in/','fixture',true]);
+  tokenAcr = 'urn:anomaly:acr:passkey';
+  assert.equal((await signIn(someone('popup-refused'), true, origin+'/signed-in/?tab=fixture')).headers.get('location'),origin+'/signed-in/?tab=fixture&auth=google_required');
+  tokenAcr = googleAcr;
+
+  // Signing in again as a connected account replaces its own session, in its own slot.
+  const previous = jar.get('__Host-bane.session_token'), size = jar.size;
+  const again = await signIn(personal);
+  assert.equal(new URL(again.headers.get('location')!).searchParams.get('account'), personal.id);
+  assert.notEqual(jar.get('__Host-bane.session_token'), previous, 'Signing in again replaces the account’s own session, in its own slot');
+  assert.equal(jar.size, size);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1 AND expires_at>now()',[personal.id])).rows[0].n,1);
+  // At most five accounts. A sign-in started at four that finishes after a fifth was added is refused at the callback,
+  // and nothing of it is kept; at five, every sign-in is refused before the account service is asked.
+  await connect(someone('fourth'), true);
+  const sixth = someone('sixth'), late = await begin(sixth, true);
+  await connect(someone('fifth'), true);
+  assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length, 5);
+  assert.equal((await late()).headers.get('location'), origin+'/?auth=account_limit');
+  assert.equal((await db.query('SELECT FROM bane_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,sixth.subject])).rowCount,0,'Nothing of a refused sixth account is kept');
+  for (const prompt of [{prompt:'select_account'},{}]) {
+    const full = await request('/api/auth/sign-in/account','POST',{callbackURL:origin+'/',...prompt});
+    assert.equal(full.status,409); assert.equal(await code(full),'ACCOUNT_LIMIT');
+  }
+
+  // An empty sign-out (earlier dashboards) leaves the account this request acts as; sign out of all leaves every one.
+  assert.equal((store(await request('/api/auth/sign-out','POST',undefined,as(work)))).status,200);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(store(await request('/api/auth/sign-out','POST',{all:true})).status,200);
+  assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length,0);
+  assert.equal((await request('/v1/me')).status,401);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE issuer=$1 AND expires_at>now()',[issuer])).rows[0].n,0);
+});
+
+// MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
+// approvals, each acting only in its own account's workspace; `?profile=` is a label and never selects anything.
+test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {authorizeResource} = await import('./src/oidc-resource.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const issuer = 'https://mcp-profiles.example.org', origin = 'https://bane.example.org', resource = origin+'/mcp';
+  const runtime: import('./src/core.js').Runtime = { config:{...loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_ROOT_SECRET:'fixture-only-'.repeat(4)}),accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}},
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
+  const signer = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  t.mock.method(globalThis,'fetch',async (url: string|URL) => {
+    assert.equal(new URL(url).origin,issuer);
+    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) : Response.json({issuer,jwks_uri:issuer+'/keys'});
+  });
+  const now = Math.floor(Date.now()/1000);
+  let tick = 0;
+  const token = (subject: string) => {
+    const body = [{alg:'ES256',typ:'at+jwt',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:'opencode',iat:now+tick++,exp:now+300,jti:randomUUID(),scope:'bane:read bane:send',acr:'urn:anomaly:acr:google'}].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
+    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  };
+  const mcp = async (subject: string, profile?: string) => {
+    const response = await authorizeResource(runtime,new Request(resource+(profile?`?profile=${encodeURIComponent(profile)}`:''),{method:'POST',headers:{authorization:`Bearer ${token(subject)}`}}),async a=>Response.json({workspaceId:a.workspaceId,keyId:a.keyId}));
+    return {status:response.status,body:await response.json() as {workspaceId:string;keyId:string}};
+  };
+  // Two accounts, each in its own workspace, both signed in to one browser.
+  const jar: string[] = [], accounts: {user:string;subject:string;workspace:string}[] = [];
+  await db.query('BEGIN');
+  try {
+    for (const [slot,name] of ['personal','work'].entries()) {
+      const user = unique('mcp-profile'), workspace = unique('mcp-profile-ws'), session = createHash('sha256').update(randomUUID()).digest('base64url');
+      await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,name,`${user}@example.org`]);
+      await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[issuer,user]);
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[workspace]);
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),user,workspace]);
+      await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
+      jar.push(`__Host-bane.session_token${slot?'.'+slot:''}=${session}`);
+      accounts.push({user,subject:user,workspace});
+    }
+    const [personal, work] = accounts as [typeof accounts[number], typeof accounts[number]];
+    // Each entry's token acts in its own account's workspace, whatever its label says.
+    const first = await mcp(personal.subject,'personal'), second = await mcp(work.subject,'work');
+    assert.deepEqual([first.status,first.body.workspaceId,second.status,second.body.workspaceId],[200,personal.workspace,200,work.workspace]);
+    assert.notEqual(first.body.keyId,second.body.keyId);
+    const swapped = await mcp(personal.subject,'work');
+    assert.deepEqual([swapped.status,swapped.body.workspaceId,swapped.body.keyId],[200,personal.workspace,first.body.keyId],'A label never selects another approval');
+    const grants = (await db.query('SELECT user_id,profile FROM bane_resource_grants WHERE client_id=$1 AND user_id=ANY($2)',['opencode',[personal.user,work.user]])).rows;
+    assert.equal(grants.length,2,'One approval per account and client');
+    assert.deepEqual(Object.fromEntries(grants.map(g=>[g.user_id,g.profile])),{[personal.user]:'work',[work.user]:'work'},'The label follows the entry that last connected; it is not part of the approval');
+    // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
+    await mcp(work.subject,'  Work <script>  laptop  ');
+    const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
+    const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
+    assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',work.workspace]]);
+    assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,personal.workspace]]);
+    // The approval page learns which connected account owns a connection, so it acts as that account.
+    const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
+    assert.equal(owner.connection.account,work.user);
+    // Revoking one entry, as its own account, leaves the other entry working; the wrong account can't revoke it.
+    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,personal,'POST')).status,404);
+    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,work,'POST')).status,200);
+    assert.equal((await mcp(work.subject,'work')).status,403);
+    assert.deepEqual([(await mcp(personal.subject,'personal')).status,(await mcp(personal.subject)).body.workspaceId],[200,personal.workspace]);
+  } finally { await db.query('ROLLBACK'); }
 });
 
 test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
@@ -887,7 +1198,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
     const pending=await run(multi());
     assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
-    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:'Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/account'},id:null});
+    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:`Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/mcp/${(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id}`},id:null});
     const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
     assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
     const multiId=unbound.rows[0].id as string;
@@ -1827,7 +2138,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND status='completed' AND available_at>now()",[vjob.id])).rowCount,1);
           ok(await local('GET','/v1/me',undefined,b.cookie,select(a.org.id)));
           const success=await local('GET',ret.pathname,undefined,b.cookie); // No workspace header or state from Cloudflare.
-          assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}`);
+          assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}?account=${encodeURIComponent(me.id)}`,'The page reopens as the account that started the setup');
           assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,b.org.id);
           assert.equal((await local('GET',ret.pathname+`?state=${token}`,undefined,b.cookie)).status,303,'Replays may only request the same throttled recheck.');
           // The harness runner can claim the recheck between the callback and this read. The old completed job was due tomorrow.
@@ -2615,6 +2926,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       assert.equal(ok(await local('GET', '/v1/me', undefined, returning)).workspaceId, a.org.id, 'An unsolicited invitation must not switch an existing member into another workspace.');
       const accept = `/v1/workspaces/invitations/${invited.id}/accept`;
       error(await local('POST', accept, undefined, a.cookie), 404);
+      // A bearer credential never rides the session cookie: 403, as on every dashboard-only route (the live E2E's API key).
+      error(await local('POST', accept, undefined, guest, { authorization: 'Bearer bane_not_a_session' }), 403, 'DASHBOARD_AUTH_REQUIRED');
       assert.equal(ok(await local('POST', accept, undefined, guest)).workspaceId, b.org.id);
       assert.equal(ok(await local('GET', '/v1/me', undefined, guest)).role, 'admin');
       error(await local('POST', `${base}/members`, { email: address(), role:'owner' }, guest), 403, 'OWNER_REQUIRED');
@@ -2922,7 +3235,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      assert.equal(fullListing.result.tools.length, 29); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 30); assert.ok(wireBytes <= 50_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -3478,16 +3791,20 @@ describe('Hosted MCP OAuth and tools', () => {
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
-      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, platformToken = `bane_ops_${hex()}`;
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
-        support: { platformToken, url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
-      secrets.add(platformToken);
+        support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
         const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
         return { status: res.status, body: parsed, headers: res.headers };
       };
+      // The support platform: the SupportPlatform service-binding entrypoint (src/worker.ts) wraps exactly this, with
+      // the runtime marked as the binding's caller. No token: the binding is the credential.
+      const { supportPlatform, supportPlatformAllows } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
@@ -3590,22 +3907,28 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([claims.jti, claims.aud, claims.workspace.id, claims.user.id, claims.shareContent, claims.requestIds], [handoff.id, 'bane-support', wid, manager!.userId, true, [createdRequest]]);
       ok(await send('POST', '/v1/contact-support', session(member), { shareContent: false }), 201);
 
-      // The support platform's server verifies an emailed request and mints a grant for that one user.
-      const service = bearer(platformToken);
+      // The support platform verifies the handoff it was given: Bane checks its own signature and the stored row.
+      const checked = await platform.verifyHandoff(handoff.token);
+      assert.ok(checked.ok); assert.deepEqual([checked.handoff.id, checked.handoff.userId, checked.handoff.workspace.id, checked.handoff.shareContent, checked.handoff.usedAt, checked.handoff.message], [handoff.id, manager!.userId, wid, true, null, 'Why did my key stop working?']);
+      assert.deepEqual(await platform.verifyHandoff(`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`), { ok: false, code: 'HANDOFF_INVALID' });
+      const otherKey = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, { verifyHandoffToken } = await import('./src/support-platform.js');
+      assert.deepEqual(await verifyHandoffToken({ ...runtime.config, support: { signingKey: { kty: 'OKP', crv: 'Ed25519', d: otherKey.d, x: otherKey.x } } }, handoff.token), { ok: false, code: 'HANDOFF_INVALID' }, 'Another installation’s key does not verify it.');
+      assert.deepEqual(await verifyHandoffToken(runtime.config, handoff.token, Date.now() + 11 * 60_000), { ok: false, code: 'HANDOFF_EXPIRED' });
+      // The support platform verifies an emailed request and mints a grant for that one user.
       const dmarc = { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<support-1@example.com>' };
-      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
+      const verified = ok(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
       assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
-      assert.deepEqual(ok(await send('POST', '/v1/operator/support/verify-email', service, { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
+      assert.deepEqual(ok(await service('POST', '/v1/operator/support/verify-email', { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
       // Evidence the platform could not have: a DMARC pass without the verified message, a magic link opened in the future.
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
-      const mint = (body: Json) => send('POST', '/v1/operator/support/grants', service, { reason: 'Customer asked about a revoked key', ...body });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
+      const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
       assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
       assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
       error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
-      assert.equal(ok(await send('GET', `/v1/operator/support/handoffs/${handoff.id}`, service)).grantId, grant.id);
+      assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
       error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
       const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
@@ -3649,7 +3972,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Rate limit, revocation and expiry.
       await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
       error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
-      ok(await send('POST', `/v1/operator/support/grants/${grant.id}/revoke`, service));
+      ok(await service('POST', `/v1/operator/support/grants/${grant.id}/revoke`));
       error(await send('GET', '/v1/support/context', support), 403, 'SUPPORT_GRANT_REQUIRED');
       const again = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 201); secrets.add(again.token);
       await db.query(`UPDATE support_grants SET created_at = now() - interval '3 hours', expires_at = now() - interval '2 hours' WHERE id = $1`, [again.id]);
@@ -3685,20 +4008,467 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-7', verification: 'handoff', handoffId: late.id }), 404);
 
-      // Rotation: the previous platform token works until it is removed, and the trail names which one acted.
-      const nextToken = `bane_ops_${hex()}`; secrets.add(nextToken);
-      Object.assign(runtime.config.support!, { platformToken: nextToken, previousPlatformToken: platformToken });
-      ok(await send('GET', '/v1/operator/support/grants?ticketRef=T-5', service));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, bearer(nextToken)));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, service));
-      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE action = 'audit.read' AND actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id),
-        ['service:support-platform:current', 'service:support-platform:previous']);
-      Object.assign(runtime.config.support!, { previousPlatformToken: undefined });
-      error(await send('GET', '/v1/operator/support/grants', service), 403, 'OPERATOR_REQUIRED');
-
+      // The binding is narrow: only the support operator routes and grant reads, as service:bane-support, and no bearer
+      // token is an operator any more (the static platform token is retired).
+      error(await service('GET', '/v1/operator/support/grants?ticketRef=T-5'), 404, 'NOT_FOUND');
+      error(await service('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`), 404, 'NOT_FOUND');
+      assert.equal(supportPlatformAllows('GET', '/v1/support/../operator/users/x/audit'), false);
+      // Past its allow-list, the gate itself still refuses the binding everywhere else under /v1/operator.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/users/${manager!.userId}/audit`), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(bypass.status, 403);
+      // Any Authorization header on an operator route is refused, even through the binding's runtime.
+      const withBearer = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/handoffs/${handoff.id}`, { headers: bearer(`bane_ops_${hex()}`) }), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(withBearer.status, 403);
+      // Grant reads through the binding need the grant itself; the trail names the binding as the operator.
+      assert.equal((await platform.read('/v1/support/workspaces', theirs.token)).status, 200);
+      assert.equal((await platform.read('/v1/support/workspaces', `bane_support_${hex()}`)).status, 403);
+      assert.equal((await platform.call('GET', '/v1/support/workspaces')).status, 403, 'A /v1/support read without a grant.');
+      const used = await platform.verifyHandoff(handoff.token);
+      assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === grant.id, JSON.stringify(used));
+      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id), ['service:bane-support']);
       // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
       await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
       assert.equal((await db.query(`SELECT FROM audit_events WHERE action = 'operator.set_operator' AND user_id IS NULL AND workspace_id IS NULL`)).rowCount, 0);
+    });
+  });
+
+  test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      // Grants come from an operator's dashboard session (the support platform mints them the same way).
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
+      const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
+      const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
+      const plain = await mint({ userId: manager!.userId, ticketRef: 'D-2', verification: 'dmarc', workspaceIds: [wid] });
+      const both = await mint({ userId: manager!.userId, ticketRef: 'D-3', verification: 'dmarc' });
+      const theirs = await mint({ userId: outsider.userId, ticketRef: 'D-4', verification: 'magic_link' });
+      assert.deepEqual([content.contentWorkspaceId, plain.contentWorkspaceId, both.workspaceIds.length], [wid, null, 2]);
+      const support = bearer(content.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+
+      // Synthetic mail of one workspace over the last days: providers, outcomes, a campaign, screen refusals, a simulated email.
+      const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst');
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [domainId, wid, domain, REGION]);
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,identity,created_at) VALUES ($1,$2,$1,'verified',$3,now() - interval '5 days')`, [wid, domain, JSON.stringify({ proven: true, mx: null, note: null,
+        ses: { DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true }, MailFromAttributes: { MailFromDomain: mailFrom, MailFromDomainStatus: 'SUCCESS' } },
+        dmarc: { status: 'none', record: 'v=DMARC1; p=none', source: domain, adkim: 'r', aspf: 'r', checkedAt: Date.now(), recommend: false, alignedMailFrom: mailFrom } })]);
+      type Mail = { id: string; to: string; status: string; outcomes: number; campaign?: string; kind?: string; subject?: string; error?: string; days?: number; simulated?: boolean; html?: string; text?: string };
+      const mails: Mail[] = [];
+      const mail = (n: number, m: Omit<Mail, 'id' | 'to'> & { to: (i: number) => string }) => { const made = Array.from({ length: n }, (_, i) => ({ ...m, id: unique('email'), to: m.to(i) })); mails.push(...made); return made; };
+      mail(36, { to: i => `reader${i}@gmail.com`, status: 'delivered', outcomes: 3, days: 2 });
+      const opens = mail(3, { to: i => `opener${i}@gmail.com`, status: 'delivered', outcomes: 3 | 16, days: 2 });
+      mail(1, { to: () => 'clicker@googlemail.com', status: 'delivered', outcomes: 3 | 16 | 32, days: 2 });
+      const complaints = mail(2, { to: i => `annoyed${i}@gmail.com`, status: 'complained', outcomes: 3 | 8, days: 1 });
+      const bounces = mail(4, { to: i => `gone${i}@outlook.com`, status: 'bounced', outcomes: 1 | 4, days: 1 });
+      mail(6, { to: i => `kept${i}@hotmail.co.uk`, status: 'delivered', outcomes: 3, days: 1 });
+      mail(5, { to: i => `staff${i}@corp-${tag}.example.org`, status: 'delivered', outcomes: 3, days: 1 });
+      const rejected = mail(2, { to: i => `promo${i}@gmail.com`, status: 'rejected', outcomes: 0, error: 'CONTENT_REJECTED_SPAM', subject: 'WIN A PRIZE '.repeat(20), days: 1 });
+      mail(1, { to: () => 'test@example.org', status: 'delivered', outcomes: 3, simulated: true, days: 1 });
+      const campaignMail = mail(20, { to: i => `fan${i}@yahoo.com`, status: 'delivered', outcomes: 3, campaign: campaignId, kind: 'marketing', days: 3 });
+      for (const m of campaignMail.slice(0, 2)) Object.assign(m, { status: 'bounced', outcomes: 1 | 4 });
+      const [lintable] = mail(1, { to: () => 'friend@icloud.com', status: 'delivered', outcomes: 3, subject: 'RE: hello', days: 1,
+        html: '<p>Hi {{name}}, your order shipped.</p><div style="display:none">secret words for filters only</div><a href="https://bit.ly/abc">www.shop.example.com</a> <a href="http://localhost:3000/track">track</a>', text: 'Hi {{name}}' });
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, error_code, event_outcomes, campaign_id, provider_id, created_at)
+        SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', m.subject, m.status, m.snapshot, m.simulated, m.error, m.outcomes, m.campaign, CASE WHEN m.outcomes & 1 <> 0 THEN 'ses-' || m.id END,
+          now() - make_interval(days => m.days) FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text, subject text, status text, snapshot jsonb, simulated boolean, error text, outcomes int, campaign text, days int)`,
+        [wid, REGION, `hello@${domain}`, JSON.stringify(mails.map(m => ({ id: m.id, to_address: m.to, subject: m.subject ?? 'Weekly news', status: m.status, simulated: !!m.simulated, error: m.error ?? null, outcomes: m.outcomes, campaign: m.campaign ?? null, days: m.days ?? 1,
+          snapshot: { from: `hello@${domain}`, to: [m.to], cc: [], bcc: [], replyTo: [], region: REGION, kind: m.kind ?? 'transactional', subject: m.subject ?? 'Weekly news', html: m.html ?? '<p>Weekly news</p>', text: m.text, attachments: [], tracking: true, headers: [] } })))]);
+      const event = (email: string, type: string, data: Json, simulated = false) => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at) VALUES ($1,$2,$3,$4,$5,$6,now() - interval '20 hours')`, [unique('event'), wid, email, type, JSON.stringify(data), simulated]);
+      for (const m of bounces) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'General', status: '5.7.515',
+        diagnosticCode: `smtp; 550 5.7.515 Access denied, ${domain} does not meet the required authentication level for ${m.to} from 192.0.2.${m.id.length % 200}` });
+      for (const m of campaignMail.slice(0, 2)) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'NoEmail', status: '5.1.1', diagnosticCode: `smtp; 550 5.1.1 <${m.to}>: user unknown` });
+      for (const m of complaints) await event(m.id, 'complaint', { complaintFeedbackType: 'abuse' });
+      await event(opens[0]!.id, 'open', { isBotEvent: 'Likely' }); await event(opens[1]!.id, 'open', { isBotEvent: false }); await event(opens[2]!.id, 'open', {});
+      for (const m of rejected) await event(m.id, 'reject', { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.97, model: 'jev-fixture', threshold: 0.9 } });
+      await db.query(`INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour,screened,rejected) VALUES ($1,'-infinity',date_trunc('hour',now()) - interval '20 hours',50,2)`, [wid]);
+      await db.query(`INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,occurred_at) VALUES ($1,$2,'con_x','gone@outlook.com','unsubscribed','rfc8058-post',now() - interval '1 day')`, [unique('cns'), wid]);
+      // Standing: 15 days at 92, no ladder step; a limit request up to 25,000 qualifies.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at) VALUES ($1,'graded',100,92,92,95,10000,10000,'ok',now())`, [wid]);
+      await db.query(`INSERT INTO sender_score_daily(workspace_id,day,accepted,bounced,complained,score,quality,target,daily_limit,step)
+        SELECT $1,(now() AT TIME ZONE 'UTC')::date - n,100,1,0,92,95,92,10000,'ok' FROM generate_series(0,14) n`, [wid]);
+      // Audience: one list with role, mistyped and stale addresses, and an import whose contacts bounced since.
+      await db.query(`INSERT INTO audience_lists(id,workspace_id,name) VALUES ($1,$2,'Newsletter')`, [listId, wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,suppression_reason,suppressed_at,observed_since,last_open_at)
+        SELECT 'con_'||$2||'_'||n, $1, CASE WHEN n <= 10 THEN 'info@corp'||n||'.example.org' WHEN n <= 12 THEN 'person'||n||'@gmial.com' ELSE 'person'||n||'@gmail.com' END,
+          CASE WHEN n <= 100 THEN 'subscribed' ELSE 'unknown' END, n BETWEEN 13 AND 16, CASE WHEN n BETWEEN 13 AND 15 THEN 'hard_bounce' WHEN n = 16 THEN 'complaint' END,
+          CASE WHEN n BETWEEN 13 AND 16 THEN now() - interval '1 day' END, CASE WHEN n <= 110 THEN now() - interval '200 days' END,
+          CASE WHEN n <= 50 THEN now() - interval '190 days' WHEN n <= 110 THEN now() - interval '3 days' END FROM generate_series(1,120) n`, [wid, tag]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1`, [wid, listId]);
+      await db.query(`INSERT INTO audience_imports(id,workspace_id,list_id,status,rows,errors,imported,created_at) VALUES ($1,$2,$3,'committed',
+        (SELECT jsonb_agg(jsonb_build_object('row',n,'email','person'||n||'@'||CASE WHEN n <= 12 THEN 'gmial.com' ELSE 'gmail.com' END,'properties','{}'::jsonb)) FROM generate_series(11,40) n),'[{"row":41,"field":"email","message":"invalid"}]',30,now() - interval '5 days')`, [unique('imp'), wid, listId]);
+      // A campaign whose draft breaks the screen's rules.
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total,prepared,expanded,created_at) VALUES ($1,$2,$3,'done',20,20,20,now() - interval '3 days')`, [campaignId, wid, JSON.stringify({ name: 'Early access', from: `hello@${domain}`, subject: 'SALE!!! EVERYTHING MUST GO',
+        region: REGION, tracking: true, attachments: [], audience: { listId }, defaults: { firstName: 'there' }, previewText: 'Big news',
+        html: '<p>Hi {{firstName}} {{plan}}, click here</p><img src="https://cdn.example.com/hero.png" width="600" height="1800"><a href="https://bit.ly/x">www.shop.example.com</a><a href="http://staging.shop.example.com/offer">Offer</a>' })]);
+
+      // Public DNS for the domain health read, answered here (no network): count the lookups it makes.
+      const dohRecords: Record<string, string[]> = { [`${domain}|TXT`]: ['"v=spf1 include:_spf.google.com include:amazonses.com ~all"'], [`_dmarc.${domain}|TXT`]: ['"v=DMARC1; p=none"'],
+        [`default._bimi.${domain}|TXT`]: ['"v=BIMI1; l=https://example.com/logo.svg"'], [`${mailFrom}|MX`]: [`10 feedback-smtp.${REGION}.amazonses.com.`], [`${mailFrom}|TXT`]: ['"v=spf1 include:amazonses.com ~all"'] };
+      // Swapped in by hand and back in finally: a second t.mock of fetch would restore the fixture's mock after the fixture
+      // restored the real fetch (mocks restore in creation order), leaving every later test without network.
+      const previous = globalThis.fetch, lookups: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'cloudflare-dns.com') return previous(input, init);
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!; lookups.push(`${name}|${type}`);
+        return Response.json({ Status: 0, Answer: (dohRecords[`${name}|${type}`] ?? []).map(data => ({ name: `${name}.`, type: type === 'MX' ? 15 : 16, data })) });
+      };
+      try {
+
+        // Route 8: standing history and the limit request rule.
+        const standing = (await get(`/v1/support/standing?requestedLimit=20000`)).data[0];
+        assert.equal(standing.history.days.length, 15); assert.deepEqual(Object.keys(standing.history.days[0]).sort(), ['accepted', 'bounced', 'complained', 'day', 'limit', 'quality', 'rejected', 'score', 'step']);
+        assert.deepEqual(standing.limitRequest, { eligibleForAutoApproval: true, reasons: [], maxAuto: 25000, requested: 20000 });
+        assert.deepEqual((await get('/v1/support/standing?requestedLimit=30000')).data[0].limitRequest.reasons.map((r: Json) => r.code), ['OVER_AUTO_MAXIMUM']);
+        await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) VALUES ($1,$2,1,now() - interval '10 days','step','ok','warn','{"kind":"system"}')`, [unique('stev'), wid]);
+        await db.query(`UPDATE sender_score_daily SET score = 88 WHERE workspace_id = $1 AND day = (now() AT TIME ZONE 'UTC')::date - 3`, [wid]);
+        const refused = (await get('/v1/support/standing')).data[0];
+        assert.deepEqual(refused.limitRequest.reasons.map((r: Json) => r.code), ['SCORE_BELOW_90', 'RECENT_LADDER_STEP']);
+        assert.deepEqual(refused.history.changes.map((x: Json) => [x.kind, x.from, x.to]), [['step', 'ok', 'warn']]);
+
+        // Route 1: metrics, totals with numerators and denominators; per provider (gmail, microsoft, yahoo, apple, the corp domain).
+        const metrics = await get(`/v1/support/deliverability/metrics?since=${new Date(Date.now() - 7 * 86_400_000).toISOString()}`);
+        const real = mails.filter(m => !m.simulated);
+        assert.equal(metrics.workspaceId, wid); assert.ok(Date.parse(metrics.computedAt) > Date.now() - 60_000);
+        assert.deepEqual([metrics.totals.emails, metrics.totals.simulated, metrics.totals.hardBounced, metrics.totals.complained, metrics.totals.opened, metrics.totals.openedHuman, metrics.totals.clicked, metrics.totals.screenRejected, metrics.totals.unsubscribed],
+          [real.length, 1, 6, 2, 4, 2, 1, 2, 1]);
+        const accepted = real.filter(m => m.outcomes & 1).length;
+        assert.deepEqual(metrics.totals.rates.complaint, { numerator: 2, denominator: accepted, value: Math.round(2 / accepted * 1e6) / 1e6 });
+        assert.deepEqual(metrics.totals.rates.open, { numerator: 4, denominator: metrics.totals.delivered, value: Math.round(4 / metrics.totals.delivered * 1e6) / 1e6 });
+        assert.deepEqual(metrics.screen, { screened: 50, rejected: 2 });
+        assert.ok(metrics.buckets.every((b: Json) => /^\d{4}-\d{2}-\d{2}$/.test(b.at)) && metrics.groups === null);
+        const byProvider = await get(`/v1/support/deliverability/metrics?groupBy=provider`);
+        const group = (key: string) => byProvider.groups.find((g: Json) => g.key === key);
+        assert.deepEqual([group('gmail').complained, group('gmail').provider, group('microsoft').hardBounced, group('yahoo').emails, group(`corp-${tag}.example.org`).provider], [2, 'gmail', 4, 20, 'other']);
+        assert.ok(byProvider.findings.some((f: Json) => f.code === 'COMPLAINT_RATE' && f.scope === 'gmail' && f.evidence.complained === 2), JSON.stringify(byProvider.findings));
+        assert.ok(byProvider.findings.some((f: Json) => f.code === 'HARD_BOUNCE_RATE' && f.scope === 'microsoft' && f.severity === 'critical'));
+        const byStream = await get(`/v1/support/deliverability/metrics?groupBy=stream`);
+        assert.deepEqual(byStream.groups.map((g: Json) => [g.key, g.emails]).sort(), [['marketing', 20], ['transactional', real.length - 20]]);
+        assert.equal((await get(`/v1/support/deliverability/metrics?campaignId=${campaignId}`)).totals.hardBounced, 2);
+        assert.equal((await get(`/v1/support/deliverability/metrics?granularity=hour&groupBy=campaign`)).groups.find((g: Json) => g.key === campaignId), undefined, 'Hourly reads cover 48 hours by default.');
+        // At most 20 groups plus other: 25 recipient domains.
+        const many = Array.from({ length: 25 }, (_, i) => ({ id: unique('email'), to: `x@d${i}-${tag}.example.net` }));
+        await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, created_at)
+          SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', 'Hi', 'queued', '{"kind":"transactional"}', false, now() - interval '12 hours' FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text)`,
+          [wid, REGION, `hello@${domain}`, JSON.stringify(many.map(m => ({ id: m.id, to_address: m.to })))]);
+        const capped = await get(`/v1/support/deliverability/metrics?groupBy=provider&since=${new Date(Date.now() - 8 * 86_400_000).toISOString()}`);
+        assert.equal(capped.groups.length, 21); assert.equal(capped.groups.at(-1).key, 'other'); assert.ok(capped.groups.at(-1).other && capped.groups.at(-1).emails > 0);
+        // Never an address in an aggregate.
+        const address = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
+        for (const body of [metrics, byProvider, capped]) assert.ok(!address.test(JSON.stringify(body)), 'Aggregates name domains, never addresses.');
+        error(await send('GET', '/v1/support/deliverability/metrics?granularity=hour&since=' + new Date(Date.now() - 4 * 86_400_000).toISOString(), support), 422, 'WINDOW_TOO_LONG');
+        error(await send('GET', '/v1/support/deliverability/metrics?since=' + new Date(Date.now() - 40 * 86_400_000).toISOString(), support), 422);
+
+        // Route 2: bounce reasons, grouped and redacted; the first-send rate; authentication findings.
+        const reasons = await get('/v1/support/deliverability/bounces');
+        const auth = reasons.groups.find((g: Json) => g.status === '5.7.515');
+        assert.deepEqual([auth.provider, auth.class, auth.subtype, auth.count, auth.campaigns], ['microsoft', 'bounce', 'Permanent/General', 4, []]);
+        assert.match(auth.diagnostic, /<address> from <ip>$/); assert.ok(auth.diagnostic.length <= 160);
+        assert.deepEqual(reasons.groups.find((g: Json) => g.status === '5.1.1').campaigns, [campaignId]);
+        assert.deepEqual(reasons.complaints, [{ feedbackType: 'abuse', count: 2 }]);
+        assert.deepEqual([reasons.firstSend.numerator, reasons.firstSend.denominator], [2, 20]);
+        assert.deepEqual(reasons.findings.map((f: Json) => f.code).sort(), ['AUTHENTICATION_REJECTED', 'FIRST_SEND_BOUNCES']);
+        assert.ok(!address.test(JSON.stringify(reasons)) && !/192\.0\.2\./.test(JSON.stringify(reasons)), 'Diagnostics are redacted.');
+        assert.deepEqual((await get('/v1/support/deliverability/bounces?provider=yahoo&type=bounce')).groups.map((g: Json) => g.status), ['5.1.1']);
+
+        // Route 3: domain health with one budgeted live DNS read (5 labels), then the 5-minute cache.
+        const health = await get(`/v1/support/domains/${domainId}/health`);
+        assert.deepEqual(lookups.sort(), Object.keys(dohRecords).sort());
+        assert.deepEqual([health.claim.sending, health.claim.dkim, health.claim.mailFrom.domain, health.claim.connection, health.alignment.verdict, health.alignment.returnPath], ['verified', 'SUCCESS', mailFrom, { kind: 'shared', region: REGION }, 'aligned', mailFrom]);
+        assert.deepEqual([health.dns.complete, health.dns.spf.includesAmazonSes, health.dns.spf.lookups, health.dns.spf.all, health.dns.dmarc.p, health.dns.dmarc.rua, health.dns.dmarc.source, health.dns.bimi.logo, health.dns.bimi.authority],
+          [true, true, 2, '~all', 'none', false, 'live', true, false]);
+        assert.deepEqual([health.dns.mailFrom.mx, health.volume.warmupAgeDays, health.streams.campaign], [[`feedback-smtp.${REGION}.amazonses.com`], 3, 20]);
+        assert.deepEqual(health.findings.map((f: Json) => f.code).sort(), ['BIMI_NOT_READY', 'DMARC_NO_REPORTS']);
+        assert.equal((await get(`/v1/support/domains/${domainId}/health`, bearer(plain.token))).computedAt, health.computedAt, 'Results are cached 60 seconds per workspace and parameters.');
+        lookups.length = 0;
+        const { liveDns } = await import('./src/deliverability.js');
+        assert.equal((await liveDns(domain, { domain: mailFrom, region: REGION }, null)).checkedAt, health.dns.checkedAt);
+        assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
+        error(await send('GET', `/v1/support/domains/${domainId}/health`, bearer(theirs.token)), 404);
+
+        // Route 4: the screen, with spam scores and subjects capped at 120 characters.
+        const screen = await get('/v1/support/screen');
+        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].spamScore, screen.rejections[0].model, screen.rejections[0].subject.length], [50, 2, 2, 0.97, 'jev-fixture', 120]);
+
+        // Route 5: campaigns with the campaign stats computation; content only with consent.
+        const campaigns = await get('/v1/support/campaigns');
+        const listed = campaigns.data.find((x: Json) => x.id === campaignId);
+        assert.deepEqual([listed.audience.listName, listed.stats.rates.bounce, listed.previewTextLength, 'content' in listed], ['Newsletter', { numerator: 2, denominator: 20, value: 0.1 }, 8, false]);
+        const detail = await get(`/v1/support/campaigns/${campaignId}`);
+        assert.match(detail.content.html, /hero\.png/); assert.equal((await get(`/v1/support/campaigns/${campaignId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
+        error(await send('GET', `/v1/support/campaigns/${campaignId}`, bearer(theirs.token)), 404);
+
+        // Route 6: lint; metadata always, content checks with consent (the probation screen's own HTML pass).
+        const emailLint = await get(`/v1/support/emails/${lintable!.id}/lint`);
+        assert.deepEqual([emailLint.metadata.subject.replyWithoutThread, emailLint.metadata.alignment.dkimAligned, emailLint.content.hiddenWords, emailLint.content.links.shorteners, emailLint.content.links.localOrStaging, emailLint.content.unresolvedTokens],
+          [true, true, 5, ['bit.ly'], ['localhost'], ['name']]);
+        assert.deepEqual(emailLint.findings.map((f: Json) => f.code).filter((code: string) => ['MISLEADING_REPLY_PREFIX', 'URL_SHORTENER', 'LINK_TEXT_MISMATCH', 'HIDDEN_TEXT', 'STAGING_LINKS', 'UNRESOLVED_TOKENS'].includes(code)).sort(),
+          ['HIDDEN_TEXT', 'LINK_TEXT_MISMATCH', 'MISLEADING_REPLY_PREFIX', 'STAGING_LINKS', 'UNRESOLVED_TOKENS', 'URL_SHORTENER']);
+        const metadataOnly = ok(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(plain.token)));
+        assert.deepEqual([metadataOnly.contentShared, metadataOnly.content], [false, null]); assert.ok(!JSON.stringify(metadataOnly).includes('bit.ly'));
+        const campaignLint = await get(`/v1/support/campaigns/${campaignId}/lint`);
+        assert.deepEqual([campaignLint.content.images.rulePasses, campaignLint.content.unresolvedTokens, campaignLint.content.links.plainHttp, campaignLint.metadata.listUnsubscribe], [false, ['plan'], 1, true]);
+        assert.ok(['IMAGE_TEXT_RATIO', 'URL_SHORTENER', 'STAGING_LINKS', 'SUBJECT_CAPITALS', 'SUBJECT_PUNCTUATION'].every(code => campaignLint.findings.some((f: Json) => f.code === code)), JSON.stringify(campaignLint.findings.map((f: Json) => f.code)));
+
+        // Route 7: audience health, counts only.
+        const audience = await get('/v1/support/audience/health');
+        const newsletter = audience.lists[0];
+        assert.deepEqual([newsletter.name, newsletter.contacts, newsletter.role, newsletter.typoDomains, newsletter.stale, newsletter.neverObserved, newsletter.suppressedBy, newsletter.subscribed], ['Newsletter', 120, 10, 2, 50, 10, { hard_bounce: 3, complaint: 1 }, 100]);
+        assert.deepEqual([audience.imports[0].imported, audience.imports[0].errors, audience.imports[0].contacts, audience.imports[0].hardBounce.numerator], [30, 1, 30, 3]);
+        assert.ok(['STALE_CONTACTS', 'ROLE_ADDRESSES', 'TYPO_DOMAINS', 'IMPORT_BOUNCES'].every(code => audience.findings.some((f: Json) => f.code === code)));
+        assert.ok(!address.test(JSON.stringify(audience)), 'Audience health never shows an address.');
+
+        // One workspace per aggregate; another customer's workspace is invisible; every read sets the 3-second timeout.
+        error(await send('GET', '/v1/support/deliverability/metrics', bearer(both.token)), 422, 'WORKSPACE_REQUIRED');
+        ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, bearer(both.token)));
+        error(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${other}`, support), 404);
+        error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(theirs.token)), 404);
+        assert.equal(ok(await send('GET', '/v1/support/audience/health', bearer(theirs.token))).lists.length, 0);
+        // budgetedRead runs inside the fixture's transaction as a savepoint, so its SET LOCAL is still visible here.
+        assert.equal((await db.query('SHOW statement_timeout')).rows[0].statement_timeout, '3s');
+        // Each aggregate costs 5 of the grant's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
+        const fresh = await mint({ userId: manager!.userId, ticketRef: 'D-5', verification: 'dmarc', workspaceIds: [wid] });
+        for (let i = 0; i < 24; i++) ok(await send('GET', '/v1/support/screen', bearer(fresh.token)));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/screen', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+        error(await send('GET', '/v1/support/workspaces', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+        await db.query('UPDATE support_grants SET used = 119 WHERE id = $1', [fresh.id]);
+        ok(await send('GET', '/v1/support/workspaces', bearer(fresh.token)));
+        // Every read is audited like the other support routes.
+        assert.ok((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND summary->>'route' = '/v1/support/deliverability/metrics'`, [content.id])).rows[0].n >= 8);
+      } finally { globalThis.fetch = previous; }
+    });
+  });
+
+  test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
+      const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
+      const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      assert.deepEqual(both.workspaceIds.sort(), [wid, second].sort());
+
+      // Not configured (a Node installation, or no token yet): available false, and nothing is asked.
+      const unconfigured = await get('/v1/support/requests');
+      assert.deepEqual([unconfigured.available, unconfigured.reason, unconfigured.groups, unconfigured.totals, unconfigured.retention], [false, 'not_configured', [], { errors: 0, truncated: false }, '3 days']);
+      assert.deepEqual(Object.keys(unconfigured).sort(), ['available', 'computedAt', 'groups', 'reason', 'retention', 'totals', 'window']);
+      const untraced = await get(`/v1/support/requests/${rid()}`);
+      assert.deepEqual([untraced.found, untraced.logs, untraced.logsAvailable], [false, [], false]);
+
+      // Workers Logs, answered here: the grant's lines, and lines it must never see even when Cloudflare returns them.
+      runtime.config.observability = { token: 'cf-observability-fixture-token', accountId: 'f'.repeat(32), script: 'bane-fixture' };
+      const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid();
+      const line = (minutesAgo: number, source: Json, script = 'bane-fixture') => ({ dataset: 'cloudflare-workers', timestamp: minutes(minutesAgo),
+        $metadata: { id: randomUUID(), message: 'POST https://bane.mx/v1/emails?to=private@example.org', url: 'https://bane.mx/v1/emails?to=private@example.org', region: 'IAD' },
+        $workers: { scriptName: script, eventType: 'fetch', outcome: 'ok' },
+        source: { level: 'warn', timestamp: new Date(minutes(minutesAgo)).toISOString(), service: 'worker', deploy: 'abc1234', event: 'request', method: 'POST', route: '/v1/emails', status: 422,
+          code: 'VALIDATION_FAILED', field: 'to', durationMs: 12.345, principal: 'apiKey', workspace: wid, ...source } });
+      const events = [
+        ...ids.map((requestId, i) => line(i + 1, { requestId })),
+        line(20, { requestId: domainIds[0], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard',
+          message: 'secret message text from private@example.org', ip: '203.0.113.9', userAgent: 'curl/8.4.0', url: '/v1/domains/dom_1?token=abcdef', body: { html: 'private body words' } }),
+        line(25, { requestId: domainIds[1], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard' }),
+        line(30, { requestId: failed, status: 500, code: 'INTERNAL_ERROR', databaseCode: '57014', stack: 'at handler (src/emails.ts:1:1)' }),
+        line(35, { requestId: rid(), method: 'GET', route: '/v1/contacts/someone@example.org', status: 404, code: 'NOT_FOUND' }),
+        line(2, { requestId: shared, workspace: second, route: '/v1/campaigns', code: 'CAMPAIGN_NOT_READY' }),
+        // Never this grant's: another customer's workspace, the grant's own support reads, another Worker, a non-request line.
+        line(3, { requestId: ids[0], workspace: other, route: '/v1/other-secret', code: 'OTHER_WORKSPACE_CODE' }),
+        line(4, { requestId: rid(), workspace: other, status: 500, code: 'OTHER_WORKSPACE_CODE' }),
+        line(5, { requestId: rid(), route: '/v1/support/context', principal: 'support', code: 'WORKSPACE_REQUIRED' }),
+        line(6, { requestId: rid(), code: 'OTHER_SCRIPT' }, 'bane-support'),
+        line(7, { requestId: rid(), event: undefined, status: 500, code: 'NOT_A_REQUEST_LINE' }),
+        line(8, { requestId: rid(), workspace: undefined, status: 401, code: 'UNAUTHORIZED_NO_WORKSPACE' }),
+      ];
+      let outage: { status: number; body: Json } | null = null;
+      const asked: { url: string; authorization: string | null; body: Json }[] = [], warnings: string[] = [];
+      // Swapped in by hand and back in finally (see the deliverability test).
+      const previous = globalThis.fetch, warn = console.warn;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'api.cloudflare.com') return previous(input, init);
+        asked.push({ url: url.href, authorization: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+        if (outage) return Response.json(outage.body, { status: outage.status });
+        return Response.json({ success: true, errors: [], messages: [], result: { run: { id: 'run' }, events: { count: events.length, events } } });
+      };
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+      try {
+        const eq = (key: string, value: unknown, type = 'string') => ({ key, operation: 'eq', type, value });
+        const workspaceGroup = (list: string[]) => ({ kind: 'group', filterCombination: 'or', filters: list.map(id => eq('workspace', id)) });
+        const listed = await get('/v1/support/requests');
+        // The query: this account and Worker, the token, request lines of the grant's workspace only, errors only, 24 hours.
+        assert.equal(asked.length, 1);
+        const [query] = asked;
+        assert.equal(query!.url, `https://api.cloudflare.com/client/v4/accounts/${'f'.repeat(32)}/workers/observability/telemetry/query`);
+        assert.equal(query!.authorization, 'Bearer cf-observability-fixture-token');
+        assert.deepEqual([query!.body.view, query!.body.limit, query!.body.dry, query!.body.parameters.datasets, query!.body.timeframe.to - query!.body.timeframe.from], ['events', 1000, true, ['cloudflare-workers'], 86_400_000]);
+        assert.deepEqual(query!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), { key: 'status', operation: 'gte', type: 'number', value: 400 }]);
+        // Grouped, most frequent first; the samples are each group's latest five; never another workspace's or a non-customer line.
+        assert.deepEqual([listed.available, listed.reason, listed.retention, listed.totals], [true, undefined, '3 days', { errors: 11, truncated: false }]);
+        assert.deepEqual(listed.groups.map((g: Json) => [g.route, g.method, g.status, g.code, g.principal, g.count]), [
+          ['/v1/emails', 'POST', 422, 'VALIDATION_FAILED', 'apiKey', 7], ['/v1/domains/:id', 'GET', 404, 'NOT_FOUND', 'dashboard', 2],
+          ['/v1/emails', 'POST', 500, 'INTERNAL_ERROR', 'apiKey', 1], ['unmatched', 'GET', 404, 'NOT_FOUND', 'apiKey', 1]]);
+        const [emails, domains] = listed.groups;
+        assert.deepEqual([emails.sampleRequestIds, emails.firstSeen, emails.lastSeen], [ids.slice(0, 5), new Date(events[6]!.timestamp).toISOString(), new Date(events[0]!.timestamp).toISOString()]);
+        assert.deepEqual(domains.sampleRequestIds, domainIds);
+        assert.ok(listed.groups.every((g: Json) => Object.keys(g).sort().join() === 'code,count,firstSeen,lastSeen,method,principal,route,sampleRequestIds,status'));
+        const text = JSON.stringify(listed);
+        for (const leak of [other, second, 'OTHER_WORKSPACE_CODE', '/v1/other-secret', 'WORKSPACE_REQUIRED', '/v1/support/', 'OTHER_SCRIPT', 'NOT_A_REQUEST_LINE', 'UNAUTHORIZED_NO_WORKSPACE',
+          'secret message', '203.0.113', 'curl', 'token=', 'private', '@', 'IAD', '57014', 'src/emails.ts', 'abc1234', 'cf-observability'])
+          assert.ok(!text.includes(leak), `The answer must not carry ${leak}: ${text}`);
+        // Cached 60 seconds per workspaces and parameters.
+        assert.equal((await get('/v1/support/requests')).computedAt, listed.computedAt); assert.equal(asked.length, 1);
+        // The filters reach Cloudflare and are applied here again: the stub returns every line whatever was asked.
+        const fives = await get('/v1/support/requests?status=5xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 500 }]);
+        assert.deepEqual(fives.groups.map((g: Json) => [g.code, g.count, g.sampleRequestIds]), [['INTERNAL_ERROR', 1, [failed]]]);
+        const fours = await get('/v1/support/requests?status=4xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 400 }, { key: 'status', operation: 'lt', type: 'number', value: 500 }]);
+        assert.equal(fours.totals.errors, 10);
+        const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
+        assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
+        // A grant over two workspaces asks for both; workspaceId narrows to one.
+        const wide = await get('/v1/support/requests', bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
+        assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
+        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
+        assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
+        error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
+        // Windows: at most 3 days back, since before until.
+        error(await send('GET', `/v1/support/requests?since=${new Date(Date.now() - 4 * 86_400_000).toISOString()}`, support), 422, 'WINDOW_TOO_OLD');
+        error(await send('GET', `/v1/support/requests?since=${new Date().toISOString()}&until=${new Date(Date.now() - 60_000).toISOString()}`, support), 422, 'INVALID_DATE_RANGE');
+        const before = asked.length;
+        error(await send('GET', '/v1/support/requests?route=/v1/emails?to=x', support), 422);
+        assert.equal(asked.length, before, 'A refused read asks nothing.');
+
+        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID).
+        const traced = await get(`/v1/support/requests/${ids[0]}`);
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
+        assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
+        assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.']);
+        assert.deepEqual(traced.logs[0], { at: new Date(events[0]!.timestamp).toISOString(), route: '/v1/emails', method: 'POST', status: 422, code: 'VALIDATION_FAILED', durationMs: 12.3, principal: 'apiKey', workspaceId: wid });
+        assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
+        assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
+
+        // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
+        warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
+        const since = new Date(Date.now() - 3_600_000).toISOString();
+        const down = await get(`/v1/support/requests?since=${since}`);
+        assert.deepEqual([down.available, down.reason, down.groups, down.totals.errors], [false, 'unavailable', [], 0]);
+        const downTrace = await get(`/v1/support/requests/${ids[1]}`);
+        assert.deepEqual([downTrace.logsAvailable, downTrace.logs, downTrace.found], [false, [], false]);
+        outage = { status: 200, body: { success: false, errors: [{ message: 'Invalid filter' }] } };
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).reason, 'unavailable');
+        const logged = warnings.flatMap(w => { try { return [JSON.parse(w) as Json]; } catch { return []; } }).filter(w => w.code === 'SUPPORT_LOGS_UNAVAILABLE');
+        assert.deepEqual(logged.map(w => w.status), [500, 500, 200]);
+        assert.ok(!warnings.join().includes('Authentication error') && !warnings.join().includes('cf-observability'));
+        outage = null;
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).available, true, 'A failure is not cached.');
+
+        // Each request read costs 5 of the grant's 120 a minute.
+        const fresh = await mint({ userId: manager!.userId, ticketRef: 'L-3', workspaceIds: [wid] });
+        await get(`/v1/support/requests/${ids[2]}`, bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 5);
+        for (let i = 0; i < 23; i++) await get('/v1/support/requests', bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/requests', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+      } finally { globalThis.fetch = previous; console.warn = warn; }
+    });
+  });
+
+  test('Support staff sign-in: an operator session gets a 2-minute staff token for the support site; only the binding verifies it, and only while they are an operator', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const jwk = (generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json), key = { kty: 'OKP' as const, crv: 'Ed25519' as const, d: jwk.d as string, x: jwk.x as string };
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
+      const app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const operator = await sessionFixture(t), member = await sessionFixture(t);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
+      const callback = 'https://support.example.com/staff/callback';
+      const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
+
+      // An operator's dashboard session: 302 to exactly the callback, carrying a 2-minute EdDSA JWS with today's key ID.
+      const signed = await signIn(callback);
+      assert.equal(signed.status, 302, JSON.stringify(signed.body));
+      const location = new URL(signed.headers.get('location')!);
+      assert.deepEqual([location.origin + location.pathname, [...location.searchParams.keys()], signed.headers.get('cache-control')], [callback, ['staff'], 'no-store']);
+      const token = location.searchParams.get('staff')!, [header, payload, signature] = token.split('.') as [string, string, string];
+      const head = JSON.parse(Buffer.from(header, 'base64url').toString()), claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+      const jwks = ok(await send('GET', '/v1/public/support-keys'));
+      assert.deepEqual([head.alg, head.kid], ['EdDSA', jwks.keys[0].kid]);
+      const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], { name: 'Ed25519' }, false, ['verify']);
+      assert.ok(await crypto.subtle.verify({ name: 'Ed25519' }, verifier, Buffer.from(signature, 'base64url'), new TextEncoder().encode(`${header}.${payload}`)));
+      assert.deepEqual([claims.iss, claims.aud, claims.sub, claims.email, claims.role, claims.exp - claims.iat], [runtime.config.publicUrl, 'bane-support-staff', operator.userId, operator.email, 'operator:read', 120]);
+      assert.match(claims.jti, /^sst_[0-9a-f]{32}$/); assert.ok(Math.abs(claims.iat - Date.now() / 1000) < 60);
+      const audit = (await db.query(`SELECT actor_type, actor_id, user_id, workspace_id, internal, summary FROM audit_events WHERE action = 'support.staff_sign_in' AND actor_id = $1`, [operator.userId])).rows;
+      assert.deepEqual(audit.map(r => [r.actor_type, r.user_id, r.workspace_id, r.internal, r.summary.jti]), [['operator', operator.userId, null, true, claims.jti]]);
+
+      // The support Worker verifies it through the binding: the operator as they are now, and the jti and expiry for single use.
+      assert.deepEqual(await platform.verifyStaff(token), { ok: true, staff: { userId: operator.userId, email: operator.email, role: 'operator:read' }, jti: claims.jti, expiresAt: new Date(claims.exp * 1000).toISOString() });
+
+      // Refused: a session that is not an operator's, any other return, the binding asking for a sign-in, a dashboard verifying.
+      error(await signIn(callback, member), 403, 'OPERATOR_REQUIRED');
+      for (const wrong of [`${callback}?next=/tickets`, `${callback}#x`, `${callback}/`, 'https://support.example.com/staff/other', 'https://support.example.com/start', 'https://evil.example.com/staff/callback',
+        'http://support.example.com/staff/callback', 'https://support.example.com.evil.example/staff/callback', 'https://staff@support.example.com/staff/callback', '/staff/callback', 'not a url'])
+        error(await signIn(wrong), 422, 'RETURN_URL_INVALID');
+      assert.equal(supportPlatformAllows('GET', '/v1/operator/support/staff-sign-in'), false);
+      assert.equal(supportPlatformAllows('POST', '/v1/operator/support/staff/verify'), true);
+      const viaBinding = await platform.call<Json>('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`);
+      assert.deepEqual([viaBinding.status, viaBinding.body.error.code], [404, 'NOT_FOUND']);
+      // Past its allow-list, the route itself still refuses the binding.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`), { ...runtime, platformCaller: 'bane-support' });
+      assert.deepEqual([bypass.status, bypass.headers.get('location')], [403, null]);
+      error(await send('POST', '/v1/operator/support/staff/verify', session(operator), { token }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+      error(await send('POST', '/v1/operator/support/staff/verify', session(member), { token }), 403, 'OPERATOR_REQUIRED');
+
+      // Tokens Bane did not issue for staff sign-in, or that are past their two minutes, or whose subject is no operator.
+      const now = Math.floor(Date.now() / 1000), sign = (extra: Json, with_ = key) => signSupportToken(with_, { ...claims, ...extra });
+      const other = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
+      const invalid = [`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`, `${header}.${Buffer.from(JSON.stringify({ ...claims, sub: member.userId })).toString('base64url')}.${signature}`,
+        await sign({ aud: 'bane-support' }), await sign({ iss: 'https://other.example.com' }), await sign({ exp: now + 3600 }), await sign({ jti: 'sho_' + '0'.repeat(32) }),
+        await sign({}, { kty: 'OKP', crv: 'Ed25519', d: other.d, x: other.x }), '', 'a.b.c'];
+      for (const bad of invalid) assert.deepEqual(await platform.verifyStaff(bad), { ok: false, code: 'STAFF_INVALID' }, bad);
+      assert.deepEqual(await platform.verifyStaff(await sign({ iat: now - 300, exp: now - 180 })), { ok: false, code: 'STAFF_EXPIRED' });
+      assert.deepEqual(await platform.verifyStaff(await sign({ sub: member.userId })), { ok: false, code: 'NOT_OPERATOR' });
+      // Demoted since: the same valid token no longer signs them in, nor can they ask for another.
+      await db.query('DELETE FROM platform_operators WHERE user_id = $1', [operator.userId]);
+      assert.deepEqual(await platform.verifyStaff(token), { ok: false, code: 'NOT_OPERATOR' });
+      error(await signIn(callback), 403, 'OPERATOR_REQUIRED');
     });
   });
 
@@ -4626,6 +5396,349 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     for (const item of first.data) await poll(`/v1/emails/${item.id}`, key.secret, body => body.status === 'delivered');
     error(await http('POST', '/v1/emails/batch', key.secret, { emails: [] }), 422);
     error(await http('POST', '/v1/emails/send', key.secret, { from: 'sender@example.com', to: address(), region: REGION, template: { name: unique('missing-template'), data: { firstName: '<script>safe</script>' } } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
+  });
+});
+
+describe('Billing: metering, gate and settlement', () => {
+  // A Hosted (shared pool) workspace that sends live (not installation-simulated), so its recipients are billed.
+  async function billingFixture(runtime: import('./src/core.js').Runtime, db: pg.Client, local: (method: string, path: string, body?: Json) => Promise<Reply>, request: typeof http) {
+    const wid = runtime.config.workspaceId, pool = '222233334444', domain = 'billing.example', from = `hello@${domain}`;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','bane-billing-fixture')`, [wid, REGION, pool]);
+    await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1`, [wid]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]); // No daily cap in the way.
+    const key = ok(await local('POST', '/v1/api-keys', { name: 'Billing sender', permissions: ['read', 'send'] }), 201); secrets.add(key.secret);
+    ok(await request('GET', '/v1/me', key.secret)); // A key's first use records it; admission is measured after that.
+    let n = 0;
+    return {
+      wid, from,
+      send: (recipients = 1) => request('POST', '/v1/emails/send', key.secret, { from, to: Array.from({ length: recipients }, () => `reader-${n++}@example.net`), subject: 'Billing fixture', text: 'Fixture.' }),
+      mode: (mode: 'off' | 'shadow' | 'enforce', extra = '') => db.query(`UPDATE billing_config SET mode=$1${extra}`, [mode]),
+      freeUsed: (used: number) => db.query(`INSERT INTO billing_accounts(workspace_id,free_emails_used) VALUES ($1,$2) ON CONFLICT (workspace_id) DO UPDATE SET free_emails_used=$2,free_month=(date_trunc('month',now() AT TIME ZONE 'UTC'))::date`, [wid, used]),
+      post: async (kind: string, source: string, paid: bigint, promo = 0n) => (await db.query(`SELECT billing_post($1,$2,$3,$4,$5,'{}','system') AS r`, [wid, kind, source, paid.toString(), promo.toString()])).rows[0].r,
+      position: async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p,
+      open: async (meter: string) => Number((await db.query(`SELECT coalesce(sum(quantity-settled_quantity),0)::int AS n FROM billing_usage_hourly WHERE workspace_id=$1 AND meter=$2`, [wid, meter])).rows[0].n),
+      account: async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0],
+    };
+  }
+  const settle = async (db: pg.Client, wid: string, cutoff = "date_trunc('hour', now(), 'UTC')") => (await db.query(`SELECT billing_settle($1, ${cutoff}) AS s`, [wid])).rows[0].s;
+  const captureLogs = (t: TestContext) => { const logs: Json[] = []; for (const level of ['error', 'warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} }); return logs; };
+
+  test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
+      // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
+      // from the first one, recipients counted, in the same statement.
+      assert.deepEqual((await db.query(`SELECT mode FROM billing_config WHERE singleton`)).rows[0].mode, 'enforce');
+      assert.equal((await f.position()).mode, 'prepaid');
+      await f.mode('off');
+      await meter('billing-off-admitted', async () => ok(await f.send(2), 202), 1);
+      assert.equal(await f.open('send'), 2);
+      // Enforce, nothing paid and the free 3,000 used: refused in the same single statement, before anything else.
+      await f.mode('enforce'); await f.freeUsed(3000);
+      const denied = await meter('billing-enforce-denied', async () => error(await f.send(), 402, 'BALANCE_EXHAUSTED'), 1);
+      assert.equal(denied.retryable, true); assert.match(denied.message, /settings#billing/);
+      assert.equal(await f.open('send'), 2, 'A refused send is not metered.');
+      // Shadow: the same shortfall is allowed and logged as the would-be denial.
+      await f.mode('shadow');
+      const logs = captureLogs(t);
+      ok(await f.send(), 202);
+      assert.ok(logs.some(l => l.code === 'BILLING_SHADOW_DENY' && l.workspaceId === f.wid && l.requiredUc === '20000'), 'Shadow logs BILLING_SHADOW_DENY.');
+      // Enforce with exactly ten emails' worth beyond the 3 already open: 20 concurrent one-recipient sends admit exactly 10.
+      await f.mode('enforce');
+      await f.post('topup', `attempt:${unique('fixture')}`, 13n * 20000n);
+      const results = await Promise.all(Array.from({ length: 20 }, () => f.send()));
+      assert.deepEqual([results.filter(r => r.status === 202).length, results.filter(r => r.status === 402 && r.body.error.code === 'BALANCE_EXHAUSTED').length], [10, 10]);
+      assert.equal((await f.position()).availableUc, '0');
+      // Exempt and invoiced accounts are never gated; neither is the platform's own workspace.
+      for (const mode of ['exempt', 'invoiced']) { await db.query('UPDATE billing_accounts SET mode=$2 WHERE workspace_id=$1', [f.wid, mode]); ok(await f.send(), 202); }
+      await db.query(`UPDATE billing_accounts SET mode='prepaid' WHERE workspace_id=$1`, [f.wid]);
+      error(await f.send(), 402, 'BALANCE_EXHAUSTED');
+      runtime.config.platformDomainWorkspace = f.wid;
+      try { ok(await f.send(), 202); } finally { runtime.config.platformDomainWorkspace = undefined; }
+      // A debt blocks even sends the free allowance would cover.
+      await db.query(`UPDATE billing_accounts SET free_emails_used=0 WHERE workspace_id=$1`, [f.wid]);
+      await f.post('adjustment', `adjustment:${unique('debt')}`, -1_000_000n);
+      assert.ok((await f.position()).freeEmailsLeft > 0);
+      error(await f.send(), 402, 'BALANCE_EXHAUSTED');
+      // Off again: nothing is gated.
+      await f.mode('off'); ok(await f.send(), 202);
+    });
+  });
+
+  test('settlement prices closed hours once, applies the combined free tier, rolls the month, and shadow or exempt post $0', async t => {
+    await simulatedSesFixture(t, async ({ db }) => {
+      const wid = unique('billing-settle'), at = (h: number) => `date_trunc('hour', now(), 'UTC') - interval '${h} hours'`;
+      const usage = (meter: string, hours: number, q: number) => db.query(`INSERT INTO billing_usage_hourly AS u (workspace_id,hour,meter,quantity) VALUES ($1, ${at(hours)}, $2, $3)
+        ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=u.quantity+excluded.quantity`, [wid, meter, q]);
+      const ledger = async () => (await db.query(`SELECT kind,paid_uc::text,promo_uc::text,detail FROM billing_ledger WHERE workspace_id=$1 ORDER BY id`, [wid])).rows;
+      const account = async () => (await db.query('SELECT * FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      await db.query(`UPDATE billing_config SET mode='shadow'`);
+      // 2,000 sent and 1,000 received use the free 3,000; then one more send costs 20,000 µ¢ and 7 Omens 70,000 µ¢.
+      await usage('send', 3, 2000); await usage('receive', 3, 1000); await usage('send', 2, 1); await usage('omen', 2, 7); await usage('byo_send', 2, 5);
+      await usage('send', 0, 4); // The current hour is still open: never settled.
+      const first = await settle(db, wid);
+      assert.deepEqual([first.entries, first.costUc, first.charged], [5, '90000', false]);
+      const [row] = await ledger();
+      assert.deepEqual([row.kind, row.paid_uc, row.promo_uc, row.detail.costUc, row.detail.meters.send.payable, row.detail.meters.byo_send.costUc], ['usage', '0', '0', '90000', 1, 0], 'Shadow posts a $0 usage row with the would-be cost.');
+      assert.deepEqual([(await account()).free_emails_used, (await account()).month_spend_uc, (await account()).balance_uc], [3001, '90000', '0']);
+      // Idempotent: a second run finds nothing; a late write into a settled hour settles with the next run.
+      assert.deepEqual(await settle(db, wid), { entries: 0 });
+      await usage('send', 3, 5);
+      assert.equal((await settle(db, wid)).costUc, '100000');
+      // The gate counts the open hour against what's left of the free tier.
+      assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.openUc, '80000');
+      // Enforce: promo first, then paid; the account goes into debt and unpaid_since starts; a top-up collects it.
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      await db.query(`SELECT billing_post($1,'grant','grant:fixture',0,50000,'{}','operator:fixture')`, [wid]);
+      await usage('send', 1, 10);
+      const charged = await settle(db, wid);
+      assert.deepEqual([charged.costUc, charged.charged], ['200000', true]);
+      const debt = await account();
+      assert.deepEqual([debt.promo_uc, debt.balance_uc, debt.unpaid_since !== null], ['0', '-150000', true]);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind='sends_paused' AND status='pending'`, [wid])).rows[0].n, 1);
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-collect',170000,0,'{}','stripe')`, [wid]);
+      const paid = await account();
+      assert.deepEqual([paid.balance_uc, paid.unpaid_since, paid.empty_since], ['20000', null, null], 'A top-up collects the debt and ends the episode.');
+      assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`billing.restored:${wid}`])).rows[0].status, 'pending');
+      // A write-off settles the books but leaves unpaid_since (and so a receive hold) until a top-up.
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:fixture-debt',-500000,0,'{}','operator:fixture')`, [wid]);
+      await db.query(`SELECT billing_post($1,'write_off','write_off:fixture',480000,0,'{}','system')`, [wid]);
+      const written = await account();
+      assert.deepEqual([written.balance_uc, written.unpaid_since !== null], ['0', true]);
+      // Exempt accounts settle at $0 under enforce too, with the would-be cost recorded.
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
+      await usage('omen', 1, 3);
+      assert.deepEqual([(await settle(db, wid)).charged, (await ledger()).at(-1).detail.costUc], [false, '30000']);
+      // Month roll: last month's used free tier doesn't carry over; this month's first emails are free again.
+      const roll = unique('billing-roll');
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_emails_used,month_spend_uc) VALUES ($1,'2026-09-01',3000,123)`, [roll]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2026-09-30 23:00Z','send',2),($1,'2026-10-01 05:00Z','send',10)`, [roll]);
+      const rolled = await settle(db, roll, "'2026-10-02 00:00Z'::timestamptz");
+      const after = (await db.query('SELECT free_month::text,free_emails_used,month_spend_uc::text FROM billing_accounts WHERE workspace_id=$1', [roll])).rows[0];
+      assert.deepEqual([rolled.costUc, after], ['40000', { free_month: '2026-10-01', free_emails_used: 10, month_spend_uc: '0' }]);
+      // Drift: every balance equals the sum of its ledger rows.
+      assert.deepEqual((await db.query(`SELECT a.workspace_id FROM billing_accounts a WHERE a.workspace_id=ANY($1) AND (a.balance_uc,a.promo_uc)<>(SELECT coalesce(sum(paid_uc),0),coalesce(sum(promo_uc),0) FROM billing_ledger l WHERE l.workspace_id=a.workspace_id)`, [[wid, roll]])).rows, []);
+      await db.query('SAVEPOINT ledger_append_only');
+      await assert.rejects(db.query(`UPDATE billing_ledger SET paid_uc=0 WHERE workspace_id=$1`, [wid]), /append-only/);
+      await db.query('ROLLBACK TO SAVEPOINT ledger_append_only');
+    });
+  });
+
+  test('meters: pre-SES refunds land in the current hour, spam rejections stay charged, receives, Omens and storage count once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const usage = async () => Object.fromEntries((await db.query(`SELECT meter,sum(quantity)::int AS q FROM billing_usage_hourly WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC') GROUP BY 1`, [f.wid])).rows.map(r => [r.meter, r.q]));
+      // Two days after admission, a pre-SES rejection refunds its three recipients into the current hour.
+      const old = unique('billing-old');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,'["a@example.net","b@example.net"]','["c@example.net"]','[]','Old','{}',false,now()-interval '2 days')`, [old, f.wid, REGION, f.from]);
+      assert.equal((await usage()).send, 3);
+      await db.query(`UPDATE billing_config SET mode='shadow'`); await settle(db, f.wid, "now() + interval '1 hour'");
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
+      assert.equal((await usage()).send, 0, 'The refund is an unsettled −3 in the current hour.');
+      assert.equal((await db.query(`SELECT quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='send' AND hour=date_trunc('hour',now(),'UTC')`, [f.wid])).rows[0].d, '-3');
+      // A spam-screen rejection stays charged.
+      const spam = unique('billing-spam');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated) VALUES ($1,$2,$3,'fixture',$4,'["s@example.net"]','[]','[]','Spam','{}',false)`, [spam, f.wid, REGION, f.from]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='CONTENT_REJECTED_SPAM' WHERE id=$1`, [spam]);
+      assert.equal((await usage()).send, 1);
+      // Receives: one per message with an SES message ID (spam included), Omens from verdicts.omenCalls, stored bytes per day.
+      const thread = unique('thread');
+      await db.query(`INSERT INTO mail_threads(id,workspace_id) VALUES ($1,$2)`, [thread, f.wid]);
+      const message = (id: string, ses: string | null, extra: { spam?: boolean; verdict?: string; omen?: number; bytes?: number; days?: number } = {}) => db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,ses_message_id,spam,verdicts,size_bytes,received_at)
+        VALUES ($1,$2,'inbound',$3,$4,$5,$6,$7,now()-make_interval(days=>$8))`, [id, f.wid, thread, ses, !!extra.spam, JSON.stringify({ ...extra.omen ? { omenCalls: extra.omen } : {}, ...extra.verdict ? { spam: extra.verdict } : {} }), extra.bytes ?? 1000, extra.days ?? 0]);
+      await message(unique('msg'), unique('ses'), { omen: 2, bytes: 5000 });
+      await message(unique('msg'), unique('ses'), { spam: true }); // Junked without an SES spam verdict: billed.
+      await message(unique('msg'), null, { bytes: 700 }); // IMAP APPEND or a sandbox copy: stored, never a receive.
+      // Mail SES's spam scan flagged (FAIL or GRAY) is free: no receive unit and no stored bytes, but its Omen calls count.
+      await message(unique('msg'), unique('ses'), { spam: true, verdict: 'FAIL', bytes: 9000, omen: 1 });
+      await message(unique('msg'), unique('ses'), { spam: true, verdict: 'GRAY', bytes: 9000 });
+      await message(unique('msg'), unique('ses'), { verdict: 'FAIL', bytes: 9000 }); // Not junked: billed.
+      assert.deepEqual([(await usage()).receive, (await usage()).omen], [3, 3]);
+      const today = Number((await db.query(`SELECT bytes FROM mail_storage_days WHERE workspace_id=$1 AND day=(now() AT TIME ZONE 'UTC')::date`, [f.wid])).rows[0].bytes);
+      assert.equal(today, 15700);
+      // Storage: bytes older than 90 days roll into the aged sum, which is metered beyond the free 1 GB, at $0 until storage_billing_from.
+      const aged = unique('msg');
+      await message(aged, unique('ses'), { bytes: 1_500_000_000, days: 120 });
+      const day = (await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d;
+      assert.ok(day.metered >= 1);
+      const storage = (await db.query(`SELECT quantity::text, billing_rate_uc('storage',1::smallint,hour)::text AS rate FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='storage'`, [f.wid])).rows[0];
+      assert.deepEqual(storage, { quantity: '500000000', rate: '0' });
+      assert.deepEqual((await db.query(`SELECT billing_storage_day((now() AT TIME ZONE 'UTC')::date - 1) AS d`)).rows[0].d.aged, 0, 'Rerunning a day is a no-op.');
+      await db.query(`UPDATE billing_config SET storage_billing_from=now()::date - 30`);
+      assert.ok(Number((await db.query(`SELECT billing_rate_uc('storage',1::smallint,date_trunc('hour',now(),'UTC')) AS r`)).rows[0].r) > 0);
+      // Deleting aged mail takes its bytes off the aged sum.
+      await db.query(`DELETE FROM mail_messages WHERE id=$1`, [aged]);
+      assert.equal((await db.query(`SELECT aged_bytes::text FROM mail_storage_aged WHERE workspace_id=$1`, [f.wid])).rows[0].aged_bytes, '0');
+    });
+  });
+
+  test('a campaign waits on balance, then a top-up wakes it through billing.restored', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const list = ok(await local('POST', '/v1/lists', { name: 'Billing' }), 201);
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'billing-contact-'||n,$1,'reader'||n||'@example.net','subscribed' FROM generate_series(1,3) n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`, [f.wid, list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'Billing', from: f.from, subject: 'Balance', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201);
+      await f.mode('enforce'); await f.freeUsed(3000);
+      // Launch refuses with 402 while nothing can be paid for.
+      error(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 402, 'BALANCE_EXHAUSTED');
+      await f.post('topup', 'attempt:fixture-one', 20000n);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+      const released = async () => Number((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1`, [c.id])).rows[0].n);
+      for (let i = 0; i < 4 && await released() < 1; i++) await run('campaign.run');
+      assert.equal(await released(), 1, 'Only the one affordable recipient is released.');
+      await run('campaign.run');
+      const waiting = ok(await local('GET', `/v1/campaigns/${c.id}`));
+      assert.equal(waiting.delivery.waiting.reason, 'balance');
+      await f.post('topup', 'attempt:fixture-two', 100000n);
+      const { restoreJob } = await import('./src/billing/restore.js');
+      await restoreJob(runtime, {}, { id: `billing.restored:${f.wid}`, attempts: 1, workspaceId: f.wid });
+      await run('campaign.run');
+      assert.equal(await released(), 3);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${c.id}`)).delivery.waiting, null);
+    });
+  });
+
+  test('receive hold: unpaid for 7 days under enforce holds new mail; a credit that clears the debt releases it to ingest', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = runtime.config.workspaceId, { restoreJob } = await import('./src/billing/restore.js');
+      const position = async () => (await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p;
+      const mid = unique('held');
+      await db.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status,error)
+        VALUES ($1,$2,$3,'fixture',$4,'["inbox@billing.example"]','{}','held','BILLING_HOLD')`, [wid, mid, REGION, 'held/' + mid]);
+      await db.query(`SELECT billing_post($1,'adjustment','adjustment:fixture-hold',-100000,0,'{}','operator:fixture')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [wid]);
+      assert.equal((await position()).receiveHeld, false, 'Off (and shadow) never hold.');
+      await db.query(`UPDATE billing_config SET mode='enforce'`);
+      assert.equal((await position()).receiveHeld, false, 'receive_hold stays off until the held/ IAM is in place.');
+      await db.query(`UPDATE billing_config SET receive_hold=true`);
+      assert.equal((await position()).receiveHeld, true);
+      // The daily scan says so once per episode; billing holds are invisible to the 3-day budget-hold expiry.
+      const scan = (await db.query('SELECT billing_unpaid_scan() AS s')).rows[0].s;
+      assert.ok(scan.receiveHeld >= 1 && scan.receiveHoldSoon >= 1);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id=$1 AND kind IN ('receive_hold_soon','receive_held')`, [wid])).rows[0].n, 2);
+      await db.query(`SELECT release_receive_budget_holds($1)`, [wid]);
+      const receipt = async () => (await db.query('SELECT status,error,object_key FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2', [wid, mid])).rows[0];
+      assert.deepEqual(await receipt(), { status: 'held', error: 'BILLING_HOLD', object_key: 'held/' + mid });
+      const job = { id: `billing.restored:${wid}`, attempts: 1, workspaceId: wid };
+      // A credit that leaves the debt keeps the hold.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-partial',50000,0,'{}','stripe')`, [wid]);
+      await restoreJob(runtime, {}, job);
+      assert.equal((await receipt()).status, 'held');
+      // Paying the debt releases the receipt to ingest, which reads it from held/.
+      await db.query(`SELECT billing_post($1,'topup','attempt:fixture-clear',2000000,0,'{}','stripe')`, [wid]);
+      assert.equal((await position()).receiveHeld, false);
+      await restoreJob(runtime, {}, job);
+      assert.deepEqual(await receipt(), { status: 'pending', error: null, object_key: 'held/' + mid });
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId'=$2`, [wid, mid])).rows[0].n, 1);
+    });
+  });
+  test('refunds return promo first, a refund from an earlier month is priced against that month, and write-offs repeat per day', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const f = await billingFixture(runtime, db, local, request);
+      const account = async (wid = f.wid) => (await db.query('SELECT balance_uc::text,promo_uc::text,promo_spent_uc::text FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0];
+      const row = (id: string, wid: string, created: string, recipients = 1) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,created_at)
+        VALUES ($1,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||n||'@example.net') FROM generate_series(1,$5::int) n),'[]','[]','Fixture','{}',false,${created})`, [id, wid, REGION, f.from, recipients]);
+      const settleAll = (wid = f.wid) => settle(db, wid, "now() + interval '1 hour'");
+      // Promo pays first; when refunds outweigh new usage, the money goes back to promo up to what promo paid.
+      await f.freeUsed(3000);
+      await f.post('grant', 'grant:fixture-promo', 0n, 100_000n);
+      const sent = unique('promo-paid');
+      await row(sent, f.wid, 'now()', 3);
+      await settleAll();
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '40000', promo_spent_uc: '60000' });
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [sent]);
+      assert.equal((await settleAll()).costUc, '-60000');
+      assert.deepEqual(await account(), { balance_uc: '0', promo_uc: '100000', promo_spent_uc: '0' }, 'Not a cent of promo became paid (refundable) credit.');
+      // A send admitted last month and charged there (beyond that month's free 3,000) is refunded this month: the refund
+      // lands in last month's last hour and returns exactly what last month charged for it.
+      const lastMonth = "date_trunc('month', now(), 'UTC') - interval '2 days'";
+      const old = unique('cross-month');
+      await row(old, f.wid, lastMonth, 2);
+      // As last month settled it: 3,000 free units and these 2 paid ones (the insert trigger meters into the current hour).
+      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-2 WHERE workspace_id=$1 AND hour=date_trunc('hour', now(), 'UTC') AND meter='send'`, [f.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 3002, 3002)`, [f.wid]);
+      await db.query(`UPDATE sending_emails SET status='rejected',error_code='RENDERING_FAILED' WHERE id=$1`, [old]);
+      const target = (await db.query(`SELECT hour = date_trunc('month', now(), 'UTC') - interval '1 hour' AS last_hour, quantity-settled_quantity AS d FROM billing_usage_hourly WHERE workspace_id=$1 AND quantity<>settled_quantity`, [f.wid])).rows;
+      assert.deepEqual(target, [{ last_hour: true, d: '-2' }]);
+      assert.equal((await settleAll()).costUc, '-40000', 'Both refunded recipients were paid for last month, so both come back.');
+      // A refund of last month's free sends returns nothing, even though this month's free tier is spent.
+      const other = unique('billing-free-month'), free = unique('cross-month-free');
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared','222233334444','ready')`, [other, REGION]);
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_emails_used) VALUES ($1,3000)`, [other]);
+      await row(free, other, lastMonth);
+      await db.query(`UPDATE billing_usage_hourly SET quantity=quantity-1 WHERE workspace_id=$1 AND meter='send'`, [other]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) VALUES ($1, date_trunc('hour', ${lastMonth}), 'send', 10, 10)`, [other]);
+      await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [free]);
+      assert.equal((await settleAll(other)).costUc, '0');
+      // Write-offs: debt that builds up again under the same unpaid episode is written off again (the key carries the day).
+      const wo = unique('billing-writeoff'), post = (kind: string, src: string, paid: number) => db.query(`SELECT billing_post($1,$2,$3,$4,0,'{}','system')`, [wo, kind, src, paid]);
+      await post('adjustment', 'adjustment:debt-1', -300_000);
+      await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '70 days' WHERE workspace_id=$1`, [wo]);
+      // The first write-off, under 248's key (the episode's date alone).
+      await db.query(`SELECT billing_post($1,'write_off','write_off:'||$1||':'||((now()-interval '70 days') AT TIME ZONE 'UTC')::date,300000,0,'{}','system')`, [wo]);
+      await post('adjustment', 'adjustment:debt-2', -50_000);
+      assert.ok((await db.query('SELECT billing_unpaid_scan() AS s')).rows[0].s.writtenOff >= 1);
+      const after = (await db.query('SELECT balance_uc::text, unpaid_since IS NOT NULL AS unpaid FROM billing_accounts WHERE workspace_id=$1', [wo])).rows[0];
+      assert.deepEqual(after, { balance_uc: '0', unpaid: true }, 'Written off again; unpaid_since (and a receive hold) stays until a top-up.');
+    });
+  });
+  test('prepaid credit: the oldest top-up is spent first, one notice 30 days before, and it expires once its hour has closed', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { creditExpiry } = await import('./src/billing/cron.js');
+      const wid = unique('billing-lots'), usd = (n: number) => BigInt(Math.round(n * 100)) * 1_000_000n;
+      const post = (kind: string, src: string, paid: bigint) => db.query(`SELECT billing_post($1,$2,$3,$4,0,'{}','system') AS r`, [wid, kind, src, paid.toString()]);
+      const lots = async () => Object.fromEntries((await db.query(`SELECT source_id, remaining_uc::text FROM billing_credit_lots WHERE workspace_id=$1 ORDER BY source_id`, [wid])).rows.map(r => [r.source_id, r.remaining_uc]));
+      const invariant = async () => { const r = (await db.query(`SELECT greatest(a.balance_uc,0)::text AS balance, (SELECT coalesce(sum(remaining_uc),0) FROM billing_credit_lots l WHERE l.workspace_id=a.workspace_id AND l.expired_at IS NULL)::text AS lots FROM billing_accounts a WHERE workspace_id=$1`, [wid])).rows[0]; assert.equal(r.lots, r.balance, 'Unexpired lots hold exactly the positive paid balance.'); };
+      // Two top-ups: $10 bought almost a year ago (expires in 20 days) and $20 today (expires in 12 months).
+      await post('topup', 'attempt:older', usd(10));
+      await db.query(`UPDATE billing_credit_lots SET created_at=now()-interval '345 days', expires_at=now()+interval '20 days' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
+      await post('topup', 'attempt:newer', usd(20));
+      assert.equal((await db.query(`SELECT (expires_at AT TIME ZONE 'UTC')::date = ((now() AT TIME ZONE 'UTC') + interval '12 months')::date AS year FROM billing_credit_lots WHERE workspace_id=$1 AND source_id='attempt:newer'`, [wid])).rows[0].year, true);
+      // Usage spends the oldest credit first, and across top-ups once it runs out.
+      await post('usage', 'usage:fixture-1', -usd(4));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': String(usd(6)) });
+      // One notice, 30 days before the older top-up's remaining credit expires: running again sends nothing more.
+      for (let i = 0; i < 2; i++) await creditExpiry(runtime);
+      const notices = (await db.query(`SELECT kind, status, data FROM billing_notices WHERE workspace_id=$1`, [wid])).rows;
+      assert.deepEqual(notices.map(n => [n.kind, n.status, n.data.lot, n.data.remainingUc]), [['credit_expiring', 'pending', 'attempt:older', String(usd(6))]]);
+      await post('usage', 'usage:fixture-2', -usd(8));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(18)), 'attempt:older': '0' });
+      // A usage refund goes back to the credit spent last: the newer top-up's $2, then $1 of the older one.
+      await post('usage', 'usage:fixture-3', usd(3));
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': String(usd(1)) });
+      await invariant();
+      // Expiry: the older lot expired 30 minutes into the previous hour. Not before that hour has closed...
+      await db.query(`UPDATE billing_credit_lots SET expires_at=date_trunc('hour', now(), 'UTC') - interval '30 minutes' WHERE workspace_id=$1 AND source_id='attempt:older'`, [wid]);
+      // ...and usage from before the expiry (5 paid sends in that hour) is settled first, so it spends the expiring credit.
+      await db.query(`UPDATE billing_accounts SET free_emails_used=3000, free_month=(date_trunc('month', now() AT TIME ZONE 'UTC'))::date WHERE workspace_id=$1`, [wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 5)`, [wid]);
+      const expiries = async () => (await db.query(`SELECT count(*)::int AS n FROM billing_ledger WHERE workspace_id=$1 AND kind='expire'`, [wid])).rows[0].n;
+      const [earlier, cutoff] = (await db.query(`SELECT date_trunc('hour', now(), 'UTC') - interval '1 hour' AS e, date_trunc('hour', now(), 'UTC') AS c`)).rows.map(r => [r.e.toISOString(), r.c.toISOString()])[0]!;
+      await creditExpiry(runtime, earlier);
+      assert.deepEqual([await expiries(), (await lots())['attempt:older']], [0, String(usd(1))], 'Not before the expiry hour has closed.');
+      await creditExpiry(runtime, cutoff);
+      await creditExpiry(runtime, cutoff);
+      assert.equal(await expiries(), 1, 'Once per top-up.');
+      const rows = (await db.query(`SELECT kind, paid_uc::text, source_id FROM billing_ledger WHERE workspace_id=$1 AND kind IN ('usage','expire') ORDER BY id DESC LIMIT 2`, [wid])).rows;
+      assert.deepEqual(rows.map(r => [r.kind, r.paid_uc, r.source_id]), [['expire', String(-(usd(1) - 100_000n)), `expire:${wid}:attempt:older`], ['usage', '-100000', rows[1].source_id]]);
+      assert.deepEqual(await lots(), { 'attempt:newer': String(usd(20)), 'attempt:older': '0' });
+      assert.equal((await db.query('SELECT balance_uc::text AS b FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].b, String(usd(20)));
+      await invariant();
+    });
+  });
+  test('244 removed the per-inbox IMAP charge; password revocation still notifies open sessions', async t => {
+    const db = await fixtureDatabase(t);
+    const gone = (await db.query(`SELECT to_regprocedure('inbox_protocol_daily_usage(date)') AS f, to_regclass('inbox_protocol_periods') AS t`)).rows[0];
+    assert.deepEqual(gone, { f: null, t: null });
+    const body = (await db.query(`SELECT prosrc FROM pg_proc WHERE proname='inbox_protocol_meter'`)).rows[0].prosrc;
+    assert.match(body, /pg_notify\('bane_protocol_auth'/); assert.doesNotMatch(body, /inbox_protocol_periods/);
+    assert.equal((await db.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname IN ('protocol_meter','protocol_end')`)).rows[0].n, 2);
   });
 });
 
@@ -5945,6 +7058,616 @@ describe('Campaign authorization and dispatch credentials', () => {
   });
 });
 
+// Package B (billing-build-spec §12.2). Stripe is a stateful in-memory fake behind STRIPE_API_BASE: customers, Checkout
+// sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with switches for
+// declines, a 5xx before any effect, an answer lost after the effect, and refusals. No real key exists in this file.
+const STRIPE_TEST_BASE = 'https://stripe.test', STRIPE_TEST_WEBHOOK_SECRET = 'whsec_test';
+type FakeRule = { match: RegExp; times: number; code?: string };
+function decodeStripeForm(form: URLSearchParams): Json {
+  const out: Json = {};
+  for (const [key, value] of form) {
+    const parts = key.replace(/\]/g, '').split('[');
+    let node = out;
+    parts.forEach((part, i) => { if (i === parts.length - 1) node[part] = value; else node = node[part] ??= {}; });
+  }
+  return out;
+}
+function fakeStripe(t: TestContext, inTransaction: () => boolean) {
+  let serial = 0;
+  const next = (prefix: string) => `${prefix}_fake${++serial}${randomUUID().slice(0, 8)}`;
+  const objects = new Map<string, Json>(), keys = new Map<string, { signature: string; status: number; body: Json }>();
+  const calls: { method: string; path: string; key: string | null; params: Json }[] = [];
+  const now = () => Math.floor(Date.now() / 1000);
+  const fake = {
+    objects, calls, violations: [] as string[],
+    /** The card every checkout or setup saves; a fresh fingerprint per fixture. */
+    card: { brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2030, fingerprint: `fp_${randomUUID().slice(0, 12)}` },
+    taxRate: 0, refundStatus: 'succeeded',
+    decline: null as null | { code: string; decline_code?: string },
+    unavailable: [] as FakeRule[], lost: [] as FakeRule[], refused: [] as FakeRule[],
+    onRequest: undefined as undefined | ((method: string, path: string) => Promise<void>),
+    count: (pattern: RegExp) => calls.filter(c => pattern.test(`${c.method} ${c.path}`)).length,
+    invoices: () => [...objects.values()].filter(o => o.object === 'invoice'),
+    paymentMethod(customer: string | null) {
+      const pm = { id: next('pm'), object: 'payment_method', type: 'card', customer, card: { ...fake.card } };
+      objects.set(pm.id, pm); return pm;
+    },
+    charge(amount: number, customer: string | null, metadata: Json = {}) {
+      const pm = fake.paymentMethod(customer), pi = { id: next('pi'), object: 'payment_intent', amount, status: 'succeeded', customer, payment_method: pm.id, latest_charge: '', metadata };
+      const ch = { id: next('ch'), object: 'charge', amount, payment_intent: pi.id, receipt_url: `https://pay.stripe.test/receipts/${pi.id}` };
+      pi.latest_charge = ch.id; objects.set(pi.id, pi); objects.set(ch.id, ch); return pi;
+    },
+    /** A person paid on the Checkout page: the session completes with a PaymentIntent and Checkout's paid invoice. */
+    payCheckout(sessionId: string, options: { subtotal?: number } = {}) {
+      const s = objects.get(sessionId)!, subtotal = options.subtotal ?? Number(s.params.line_items['0'].price_data.unit_amount), tax = Math.round(subtotal * fake.taxRate);
+      const pi = fake.charge(subtotal + tax, s.customer, s.params.payment_intent_data?.metadata ?? {});
+      const invoice = { id: next('in'), object: 'invoice', status: 'paid', customer: s.customer, metadata: s.params.invoice_creation?.invoice_data?.metadata ?? {}, created: now(),
+        lines: { data: [{ id: next('il'), amount: subtotal }] }, subtotal, total: subtotal + tax, total_excluding_tax: subtotal, amount_paid: subtotal + tax,
+        hosted_invoice_url: 'https://invoice.stripe.test/i/' + sessionId, invoice_pdf: 'https://invoice.stripe.test/pdf/' + sessionId,
+        payments: { object: 'list', data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: pi.id } }] } };
+      objects.set(invoice.id, invoice);
+      Object.assign(s, { status: 'complete', payment_status: 'paid', payment_intent: pi.id, invoice: invoice.id, amount_subtotal: subtotal, amount_total: subtotal + tax, total_details: { amount_tax: tax } });
+      return s;
+    },
+    completeSetup(sessionId: string) {
+      const s = objects.get(sessionId)!, pm = fake.paymentMethod(s.customer), si = { id: next('seti'), object: 'setup_intent', status: 'succeeded', payment_method: pm.id };
+      objects.set(si.id, si); Object.assign(s, { status: 'complete', setup_intent: si.id }); return s;
+    },
+  };
+  const error = (status: number, type: string, code?: string, extra: Json = {}): [number, Json] => [status, { error: { type, code, message: `Synthetic ${code ?? type}.`, ...extra } }];
+  const missing = () => error(404, 'invalid_request_error', 'resource_missing');
+  const expand = (o: Json, fields: string[]) => {
+    const copy = { ...o };
+    for (const f of fields) if (typeof copy[f] === 'string' && objects.has(copy[f])) copy[f] = { ...objects.get(copy[f]) };
+    return copy;
+  };
+  const route = (method: string, path: string, p: Json, query: URLSearchParams): [number, Json] => {
+    const found = path.split('/').slice(2).map(decodeURIComponent).map(segment => objects.get(segment)).find(Boolean);
+    const fields = [...query.entries()].filter(([k]) => k.startsWith('expand')).map(([, v]) => v);
+    switch (true) {
+      case method === 'POST' && path === '/v1/customers': { const c = { id: next('cus'), object: 'customer', name: p.name, email: p.email, metadata: p.metadata, invoice_settings: {} }; objects.set(c.id, c); return [200, c]; }
+      case method === 'POST' && /^\/v1\/customers\/[^/]+$/.test(path): return found ? [200, Object.assign(found, { invoice_settings: p.invoice_settings })] : missing();
+      case method === 'POST' && path === '/v1/checkout/sessions': {
+        const s = { id: next('cs'), object: 'checkout.session', mode: p.mode, status: 'open', payment_status: 'unpaid', url: `https://checkout.stripe.test/c/${serial}`, expires_at: Number(p.expires_at),
+          customer: p.customer, client_reference_id: p.client_reference_id, metadata: p.metadata, amount_subtotal: Number(p.line_items?.['0']?.price_data?.unit_amount ?? 0), amount_total: null,
+          payment_intent: null, invoice: null, setup_intent: null, params: p };
+        objects.set(s.id, s); return [200, s];
+      }
+      case method === 'GET' && /^\/v1\/checkout\/sessions\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'POST' && /^\/v1\/checkout\/sessions\/[^/]+\/expire$/.test(path): return found ? [200, Object.assign(found, { status: 'expired' })] : missing();
+      case method === 'GET' && /^\/v1\/payment_intents\/[^/]+$/.test(path): return found ? [200, expand(found, fields)] : missing();
+      case method === 'GET' && /^\/v1\/setup_intents\/[^/]+$/.test(path): return found ? [200, expand(found, fields)] : missing();
+      case method === 'POST' && /^\/v1\/payment_methods\/[^/]+\/detach$/.test(path): return found ? [200, Object.assign(found, { customer: null })] : missing();
+      case method === 'POST' && path === '/v1/invoices': {
+        const i = { id: next('in'), object: 'invoice', status: 'draft', customer: p.customer, metadata: p.metadata, default_payment_method: p.default_payment_method, created: now(),
+          lines: { data: [] as Json[] }, subtotal: 0, total: 0, total_excluding_tax: 0, amount_paid: 0, hosted_invoice_url: null, invoice_pdf: null, payments: { object: 'list', data: [] } };
+        objects.set(i.id, i); return [200, i];
+      }
+      case method === 'GET' && path === '/v1/invoices/search': {
+        const wanted = /metadata\['bane_attempt'\]:'([^']+)'/.exec(query.get('query') ?? '')?.[1];
+        return [200, { object: 'search_result', data: fake.invoices().filter(i => i.metadata?.bane_attempt === wanted) }];
+      }
+      case method === 'POST' && path === '/v1/invoiceitems': {
+        const i = objects.get(p.invoice); if (!i) return missing();
+        if (i.status !== 'draft') return error(400, 'invalid_request_error', 'invoice_not_editable');
+        const amount = Number(p.amount), tax = Math.round(amount * fake.taxRate);
+        i.lines.data.push({ id: next('il'), amount }); Object.assign(i, { subtotal: i.subtotal + amount, total_excluding_tax: i.total_excluding_tax + amount, total: i.total + amount + tax });
+        return [200, { id: next('ii'), object: 'invoiceitem', invoice: i.id, amount }];
+      }
+      case method === 'GET' && /^\/v1\/invoices\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'DELETE' && /^\/v1\/invoices\/[^/]+$/.test(path): if (!found) return missing(); if (found.status !== 'draft') return error(400, 'invalid_request_error', 'invoice_not_draft'); objects.delete(found.id); return [200, { id: found.id, deleted: true }];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/finalize$/.test(path): if (!found) return missing(); if (found.status === 'draft') found.status = 'open'; return [200, found];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/void$/.test(path): if (!found) return missing(); if (found.status !== 'open') return error(400, 'invalid_request_error', 'invoice_not_open'); found.status = 'void'; return [200, found];
+      case method === 'POST' && /^\/v1\/invoices\/[^/]+\/pay$/.test(path): {
+        if (!found) return missing();
+        if (found.status === 'paid') return error(400, 'invalid_request_error', 'invoice_already_paid');
+        if (found.status !== 'open') return error(400, 'invalid_request_error', 'invoice_not_open');
+        if (fake.decline) return error(402, 'card_error', fake.decline.code, { decline_code: fake.decline.decline_code });
+        const pi = fake.charge(found.total, found.customer);
+        Object.assign(found, { status: 'paid', amount_paid: found.total, hosted_invoice_url: `https://invoice.stripe.test/i/${found.id}`, invoice_pdf: `https://invoice.stripe.test/pdf/${found.id}`,
+          payments: { object: 'list', data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: pi.id } }] } });
+        return [200, found];
+      }
+      case method === 'POST' && path === '/v1/refunds': {
+        const r = { id: next('re'), object: 'refund', status: fake.refundStatus, amount: Number(p.amount), payment_intent: p.payment_intent, metadata: p.metadata ?? {} };
+        objects.set(r.id, r); return [200, r];
+      }
+      case method === 'GET' && /^\/v1\/refunds\/[^/]+$/.test(path): return found ? [200, found] : missing();
+      case method === 'GET' && path === '/v1/credit_notes/preview': {
+        const amount = Number(query.get('lines[0][amount]')); return [200, { object: 'credit_note', total: amount + Math.round(amount * fake.taxRate) }];
+      }
+      case method === 'POST' && path === '/v1/credit_notes': {
+        const invoice = objects.get(p.invoice); if (!invoice) return missing();
+        const r = { id: next('re'), object: 'refund', status: fake.refundStatus, amount: Number(p.refund_amount), payment_intent: invoice.payments.data[0]?.payment.payment_intent, metadata: {} };
+        const note = { id: next('cn'), object: 'credit_note', invoice: invoice.id, total: r.amount, metadata: p.metadata, refunds: [{ refund: r.id, amount_refunded: r.amount }] };
+        objects.set(r.id, r); objects.set(note.id, note); return [200, note];
+      }
+      default: return error(404, 'invalid_request_error', 'unrecognized_url');
+    }
+  };
+  const take = (rules: FakeRule[], line: string) => { const rule = rules.find(r => r.times > 0 && r.match.test(line)); if (rule) rule.times--; return rule; };
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    if (url.origin !== STRIPE_TEST_BASE) throw new Error(`Network is forbidden in billing scenarios: ${url.origin}`);
+    const method = init?.method ?? 'GET', path = url.pathname, headers = new Headers(init?.headers);
+    if (inTransaction()) fake.violations.push(`${method} ${path}`);
+    assert.equal(headers.get('authorization'), 'Bearer sk_test_fake');
+    assert.match(headers.get('stripe-version') ?? '', /^\d{4}-\d{2}-\d{2}\.[a-z]+$/);
+    const body = typeof init?.body === 'string' ? init.body : '', params = decodeStripeForm(new URLSearchParams(body)), key = headers.get('idempotency-key');
+    calls.push({ method, path, key, params });
+    await fake.onRequest?.(method, path);
+    const line = `${method} ${path}`;
+    if (take(fake.unavailable, line)) return Response.json({ error: { type: 'api_error', message: 'Synthetic outage.' } }, { status: 500 });
+    let status: number, json: Json;
+    const prior = key ? keys.get(key) : undefined, signature = `${line}?${body}`;
+    if (prior) {
+      if (prior.signature !== signature) [status, json] = error(400, 'idempotency_error', 'idempotency_key_in_use');
+      else ({ status, body: json } = prior);
+    } else {
+      const refusal = take(fake.refused, line);
+      [status, json] = refusal ? error(400, 'invalid_request_error', refusal.code ?? 'synthetic_refusal') : route(method, path, params, url.searchParams);
+      json = structuredClone(json);
+      if (key && status < 500) keys.set(key, { signature, status, body: json });
+    }
+    if (take(fake.lost, line)) throw new TypeError('fetch failed');
+    return Response.json(json, { status });
+  });
+  return fake;
+}
+async function signedStripeEvent(type: string, object: Json, options: { t?: number; secret?: string; livemode?: boolean; id?: string } = {}) {
+  const event = { id: options.id ?? `evt_${randomUUID().replaceAll('-', '')}`, object: 'event', type, livemode: options.livemode ?? false, created: Math.floor(Date.now() / 1000), data: { object } };
+  const body = JSON.stringify(event), t = options.t ?? Math.floor(Date.now() / 1000);
+  const v1 = createHmac('sha256', options.secret ?? STRIPE_TEST_WEBHOOK_SECRET).update(`${t}.${body}`).digest('hex');
+  return { id: event.id, body, signature: `t=${t},v1=${v1}` };
+}
+/** A Hosted runtime with Stripe test settings, one fresh workspace and the fake. Never wrapped in a transaction: the
+ * money paths commit, so the fixture records every Stripe call made inside runtime.db.transaction and fails on any. */
+async function stripeFixture(t: TestContext) {
+  assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Billing fixtures require an isolated local database.');
+  const [{ createApp }, { nodeRuntime }, { AsyncLocalStorage }, stripe, jobs] = await Promise.all([
+    import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
+  ]);
+  const db = await fixtureDatabase(t);
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false',
+    ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
+    STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
+    S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+  cleanup(t, instance.close);
+  const runtime = instance.runtime, scope = new AsyncLocalStorage<true>(), transaction = runtime.db.transaction.bind(runtime.db);
+  runtime.db.transaction = ((work: Parameters<typeof transaction>[0], config?: Parameters<typeof transaction>[1]) => transaction(tx => scope.run(true, () => work(tx)), config)) as typeof transaction;
+  const fake = fakeStripe(t, () => scope.getStore() === true);
+  const wid = `ws_${randomUUID().replaceAll('-', '')}`;
+  await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $1)', [wid, 'Billing\nfixture']);
+  // Money history outlives the workspace by design (no FK, append-only ledger); only the workspace and its jobs go.
+  cleanup(t, async () => { await db.query('DELETE FROM jobs WHERE workspace_id = $1', [wid]); await db.query('DELETE FROM workspaces WHERE id = $1', [wid]); });
+  t.after(() => assert.deepEqual(fake.violations, [], 'No Stripe request may run inside a database transaction.'));
+  const app = createApp();
+  const send = (body: string, signature?: string) => app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST',
+    headers: { ...(signature ? { 'stripe-signature': signature } : {}), 'content-type': 'application/json' }, body }), runtime);
+  const deliver = async (type: string, object: Json, options: Parameters<typeof signedStripeEvent>[2] = {}) => {
+    const event = await signedStripeEvent(type, object, options), response = await send(event.body, event.signature);
+    return { status: response.status, body: await response.json() as Json, id: event.id };
+  };
+  const account = async (workspace = wid) => (await db.query('SELECT *, balance_uc::text AS balance, promo_uc::text AS promo FROM billing_accounts WHERE workspace_id = $1', [workspace])).rows[0];
+  const attempt = async (id: string) => (await db.query('SELECT *, amount_uc::text AS amount, refunded_uc::text AS refunded FROM billing_payment_attempts WHERE id = $1', [id])).rows[0];
+  const ledger = async (workspace = wid) => (await db.query('SELECT kind, source_id, paid_uc::text AS paid, promo_uc::text AS promo, balance_after_uc::text AS after FROM billing_ledger WHERE workspace_id = $1 ORDER BY id', [workspace])).rows;
+  const post = (kind: string, source: string, paid: bigint, promo = 0n, workspace = wid) => db.query('SELECT billing_post($1, $2, $3, $4, $5, $6, $7)', [workspace, kind, source, String(paid), String(promo), '{}', 'operator:fixture']);
+  const enforcement = async (mode: 'off' | 'shadow' | 'enforce') => {
+    const previous = (await db.query('SELECT mode FROM billing_config WHERE singleton')).rows[0].mode;
+    await db.query('UPDATE billing_config SET mode = $1 WHERE singleton', [mode]);
+    cleanup(t, async () => { await db.query('UPDATE billing_config SET mode = $1 WHERE singleton', [previous]); });
+  };
+  const backdate = (id: string, ageSeconds: number) => db.query(`UPDATE billing_payment_attempts SET created_at = now() - make_interval(secs => $2), updated_at = now() - interval '6 minutes' WHERE id = $1`, [id, ageSeconds]);
+  /** Saves a card through a setup Checkout, as the dashboard does. */
+  const saveCard = async () => {
+    const setup = await stripe.createCardSetup(runtime, { workspaceId: wid, actor: 'user:fixture', billingEmail: 'owner@example.com' });
+    const session = fake.objects.get((await attempt(setup.attemptId)).stripe_checkout_session)!;
+    assert.equal((await deliver('checkout.session.completed', fake.completeSetup(session.id))).status, 200);
+    return setup.attemptId;
+  };
+  const recharge = (workspace = wid) => jobs.rechargeJob(runtime, {}, { id: `billing.recharge:${workspace}`, attempts: 1, workspaceId: workspace });
+  return { runtime, db, fake, wid, deliver, send, account, attempt, ledger, post, enforcement, backdate, saveCard, recharge, stripe, jobs };
+}
+const UC = 1_000_000n;
+
+describe('Billing: Stripe', () => {
+  test('Checkout top-up: credited once from Stripe, a duplicate or late event changes nothing, and an amount mismatch credits nothing', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 1999, actor: 'user:fixture', billingEmail: null }), { status: 422, code: 'TOP_UP_AMOUNT_INVALID' });
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 60_000, actor: 'user:fixture', billingEmail: null }), { status: 409, code: 'FIRST_TOP_UP_LIMIT' });
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: 'owner@example.com' });
+    assert.match(top.attemptId, /^bpa_[0-9a-f]{32}$/); assert.match(top.url, /^https:\/\/checkout\.stripe\.test\//);
+    const expiresIn = Date.parse(top.expiresAt) - Date.now(); assert.ok(expiresIn > 22.9 * 3600_000 && expiresIn <= 23 * 3600_000, top.expiresAt);
+    const created = fake.calls.find(c => c.path === '/v1/checkout/sessions')!;
+    assert.equal(created.key, `attempt:${top.attemptId}:checkout`);
+    assert.deepEqual({ mode: created.params.mode, amount: created.params.line_items['0'].price_data.unit_amount, tax: created.params.line_items['0'].price_data.tax_behavior,
+      future: created.params.payment_intent_data.setup_future_usage, invoice: created.params.invoice_creation.enabled, attempt: created.params.metadata.bane_attempt, workspace: created.params.metadata.bane_workspace, env: created.params.metadata.bane_env },
+      { mode: 'payment', amount: '5000', tax: 'exclusive', future: 'off_session', invoice: 'true', attempt: top.attemptId, workspace: wid, env: 'dev' });
+    assert.equal(created.params.automatic_tax, undefined, 'Tax stays off until STRIPE_AUTOMATIC_TAX is set.');
+    assert.equal([...fake.objects.values()].find(o => o.object === 'customer')!.name, 'Billing fixture', 'The customer name is one line.');
+    assert.equal((await attempt(top.attemptId)).status, 'pending');
+    assert.equal((await account())?.balance ?? '0', '0', 'Opening Checkout credits nothing.');
+
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    const first = await deliver('checkout.session.completed', session);
+    assert.deepEqual([first.status, first.body.outcome], [200, 'processed']);
+    const paid = await attempt(top.attemptId);
+    assert.deepEqual({ status: paid.status, charged: paid.charged_cents, tax: paid.tax_cents, last4: paid.card_last4, invoice: paid.invoice_url !== null, receipt: paid.receipt_url !== null },
+      { status: 'succeeded', charged: 5000, tax: 0, last4: '4242', invoice: true, receipt: true });
+    const saved = await account();
+    assert.equal(saved.balance, String(5000n * UC));
+    assert.deepEqual([saved.card_brand, saved.card_last4, saved.card_fingerprint], ['visa', '4242', fake.card.fingerprint], 'A paid Checkout saves its card for later top-ups.');
+    assert.equal(fake.objects.get(saved.stripe_customer)!.invoice_settings.default_payment_method, saved.stripe_payment_method);
+    // The same delivery again, a second event for the same payment, and Checkout's own invoice.paid: credited once.
+    const again = await deliver('checkout.session.completed', session, { id: first.id });
+    assert.deepEqual([again.status, again.body.outcome], [200, 'duplicate']);
+    assert.equal((await deliver('checkout.session.async_payment_succeeded', session)).body.outcome, 'processed');
+    assert.equal((await deliver('invoice.paid', fake.objects.get(session.invoice)!)).body.outcome, 'processed');
+    assert.equal((await deliver('payment_intent.payment_failed', { ...fake.objects.get(session.payment_intent)!, metadata: { bane_attempt: top.attemptId } })).body.outcome, 'processed');
+    assert.equal((await attempt(top.attemptId)).status, 'succeeded', 'A terminal attempt absorbs late events.');
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.source_id, r.paid]), [['topup', `attempt:${top.attemptId}`, String(5000n * UC)]]);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_gateway_events WHERE stripe_event_id = $1', [first.id])).rows[0].n, 1);
+
+    // Stripe charged a different amount than the attempt: failed, logged, no credit and no saved card from it.
+    const mismatch = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
+    const short = fake.payCheckout((await attempt(mismatch.attemptId)).stripe_checkout_session, { subtotal: 2400 });
+    const errors = t.mock.method(console, 'error', () => {});
+    try { assert.equal((await deliver('checkout.session.completed', short)).status, 200); } finally { errors.mock.restore(); }
+    assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_AMOUNT_MISMATCH')));
+    assert.deepEqual([(await attempt(mismatch.attemptId)).status, (await attempt(mismatch.attemptId)).failure_code], ['failed', 'amount_mismatch']);
+    assert.equal((await account()).balance, String(5000n * UC));
+    // A Checkout page that expired, then the hourly limit of five attempts.
+    const lapsed = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    const lapsedSession = Object.assign(fake.objects.get((await attempt(lapsed.attemptId)).stripe_checkout_session)!, { status: 'expired' });
+    await deliver('checkout.session.expired', lapsedSession);
+    assert.equal((await attempt(lapsed.attemptId)).status, 'expired');
+    await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null }), { status: 429, code: 'TOP_UP_RATE_LIMITED' });
+    assert.equal(fake.count(/^POST \/v1\/customers$/), 1, 'One Stripe customer per workspace.');
+    const listed = await stripe.listPayments(runtime.db, wid, null, 2);
+    assert.equal(listed.data.length, 2); assert.ok(listed.nextCursor);
+    const rest = await stripe.listPayments(runtime.db, wid, listed.nextCursor, 10);
+    assert.deepEqual(new Set([...listed.data, ...rest.data].map(p => p.id)).size, 5);
+    assert.deepEqual(await stripe.getPayment(runtime.db, wid, top.attemptId), { id: top.attemptId, at: paid.created_at.toISOString(), kind: 'checkout', status: 'succeeded', amountCents: 5000, taxCents: 0, totalCents: 5000,
+      card: { brand: 'visa', last4: '4242' }, invoiceUrl: paid.invoice_url, invoicePdf: paid.invoice_pdf, receiptUrl: paid.receipt_url, failure: null });
+    assert.equal(await stripe.getPayment(runtime.db, `ws_${randomUUID().replaceAll('-', '')}`, top.attemptId), null, 'Payments are read inside their workspace only.');
+  });
+
+  test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
+    const { runtime, db, deliver, send } = await stripeFixture(t);
+    const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
+    for (const [options, code] of [[{ secret: 'whsec_other' }, 'STRIPE_SIGNATURE_INVALID'], [{ t: Math.floor(Date.now() / 1000) - 301 }, 'STRIPE_SIGNATURE_INVALID'],
+      [{ t: Math.floor(Date.now() / 1000) + 301 }, 'STRIPE_SIGNATURE_INVALID'], [{ livemode: true }, 'STRIPE_LIVEMODE_MISMATCH']] as const) {
+      const reply = await deliver('checkout.session.completed', object, options);
+      assert.deepEqual([reply.status, reply.body.error?.code], [400, code], JSON.stringify(options));
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_gateway_events WHERE stripe_event_id = $1', [reply.id])).rows[0].n, 0, 'A refused delivery records nothing.');
+    }
+    const signed = await signedStripeEvent('checkout.session.completed', object);
+    assert.equal((await send(signed.body.replace('"paid"', '"unpaid"'), signed.signature)).status, 400, 'The signature covers the exact body.');
+    assert.equal((await send(signed.body)).status, 400, 'The signature header is required.');
+    // Without the Stripe keys an unsigned request is still refused at authentication; a signed one gets 503 so Stripe retries.
+    const keys = runtime.config.billing;
+    runtime.config.billing = {};
+    try {
+      assert.equal((await send(signed.body)).status, 400);
+      const waiting = await send(signed.body, signed.signature);
+      assert.deepEqual([waiting.status, ((await waiting.json()) as Json).error.code], [503, 'BILLING_NOT_CONFIGURED']);
+    } finally { runtime.config.billing = keys; }
+    assert.equal((await send(signed.body, `${signed.signature.replace(/v1=.*/, 'v1=' + '0'.repeat(64))},${signed.signature.split(',')[1]}`)).status, 200, 'Any v1 may match (secret rotation).');
+    for (const [type, foreign] of [['checkout.session.completed', object], ['customer.created', { id: 'cus_other', object: 'customer' }], ['charge.dispute.created', { id: 'dp_other', payment_intent: 'pi_console', amount: 100 }]] as const) {
+      const reply = await deliver(type, foreign);
+      assert.deepEqual([reply.status, reply.body.outcome], [200, 'ignored'], type);
+      assert.equal((await db.query('SELECT status FROM billing_gateway_events WHERE stripe_event_id = $1', [reply.id])).rows[0].status, 'ignored');
+    }
+  });
+
+  test('Stripe webhook: a failed delivery answers 500 and is retried; a processed event never reopens', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 3000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    // Stripe can't be read after the credit commits: the card isn't saved yet, so Stripe must deliver again.
+    fake.unavailable.push({ match: /^GET \/v1\/payment_intents\//, times: 3 });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    const failed = await deliver('checkout.session.completed', session);
+    warnings.mock.restore();
+    assert.deepEqual([failed.status, failed.body.error?.code, failed.body.error?.retryable], [500, 'BILLING_WEBHOOK_FAILED', true]);
+    assert.deepEqual((await db.query('SELECT status, attempts FROM billing_gateway_events WHERE stripe_event_id = $1', [failed.id])).rows[0], { status: 'failed', attempts: 1 });
+    assert.equal((await account()).balance, String(3000n * UC), 'The credit committed before the follow-up read failed.');
+    assert.equal((await account()).card_last4, null);
+    const redelivered = await deliver('checkout.session.completed', session, { id: failed.id });
+    assert.deepEqual([redelivered.status, redelivered.body.outcome], [200, 'processed']);
+    assert.equal((await account()).card_last4, '4242');
+    // Stripe is unavailable again, but the event is processed: the redelivery is answered without touching anything.
+    fake.unavailable.push({ match: /./, times: 9 });
+    const calls = fake.calls.length, late = await deliver('checkout.session.completed', session, { id: failed.id });
+    assert.deepEqual([late.status, late.body.outcome, fake.calls.length], [200, 'duplicate', calls]);
+    assert.deepEqual((await db.query('SELECT status, attempts FROM billing_gateway_events WHERE stripe_event_id = $1', [failed.id])).rows[0], { status: 'processed', attempts: 1 });
+    assert.equal((await ledger()).length, 1);
+    // The fixture's detector itself: a Stripe request inside a transaction is caught.
+    await runtime.db.transaction(async () => { await fetch(`${STRIPE_TEST_BASE}/v1/customers/cus_none`, { headers: { authorization: 'Bearer sk_test_fake', 'stripe-version': '2026-10-28.endive' } }); });
+    assert.deepEqual(fake.violations.splice(0), ['GET /v1/customers/cus_none']);
+  });
+
+  test('Auto-recharge: one charge at a time and credit on success; a decline or 3DS turns it off with exactly one notice; the monthly limit holds', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, post, enforcement, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await enforcement('enforce');
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    const setup = await saveCard();
+    assert.equal((await attempt(setup)).status, 'succeeded'); assert.equal((await account()).card_last4, '4242');
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 1999, monthlyCapCents: 5000 }), { status: 422 });
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 });
+    const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
+    // Five triggers at once with a $0 balance: one attempt, one invoice, one credit.
+    await Promise.all(Array.from({ length: 5 }, () => recharge()));
+    assert.deepEqual((await recharges()).map(r => r.status), ['succeeded']);
+    assert.deepEqual([fake.count(/^POST \/v1\/invoices$/), fake.count(/^POST \/v1\/invoices\/[^/]+\/pay$/)], [1, 1]);
+    let saved = await account();
+    assert.deepEqual([saved.balance, saved.recharge_pending_attempt, saved.recharge_month_total_uc], [String(2500n * UC), null, String(2500n * UC)]);
+    const pay = fake.calls.find(c => /\/pay$/.test(c.path))!;
+    const first = (await recharges())[0].id, charged = fake.invoices().find(i => i.metadata.bane_attempt === first)!;
+    assert.deepEqual([pay.params.off_session, charged.default_payment_method, charged.metadata.bane_workspace, pay.key], ['true', saved.stripe_payment_method, wid, `attempt:${first}:pay`]);
+    await recharge();
+    assert.equal((await recharges()).length, 1, 'Above the threshold nothing is charged.');
+    // Spend down: a second recharge fits the $50 month; a third would not.
+    await post('usage', `usage:${wid}:fixture-1`, -2000n * UC);
+    await recharge();
+    assert.deepEqual((await recharges()).map(r => r.status), ['succeeded', 'succeeded']);
+    await post('usage', `usage:${wid}:fixture-2`, -2600n * UC);
+    const info = t.mock.method(console, 'info', () => {});
+    await recharge();
+    info.mock.restore();
+    assert.equal((await recharges()).length, 2, 'The monthly limit stops a third recharge.');
+    await jobs.billingMinute(runtime);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.recharge:${wid}`])).rows[0].n, 0, 'The sweep does not queue a capped account.');
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
+    await jobs.billingMinute(runtime);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM jobs WHERE id = $1', [`billing.recharge:${wid}`])).rows[0].n, 1, 'The minute sweep queues an eligible account.');
+    // A decline: failed, the invoice voided, auto-recharge off, exactly one notice even after Stripe's own failure event.
+    fake.decline = { code: 'card_declined', decline_code: 'insufficient_funds' };
+    const warnings = t.mock.method(console, 'warn', () => {});
+    await recharge();
+    const declined = (await recharges())[2];
+    assert.deepEqual([declined.status, declined.failure_code], ['failed', 'insufficient_funds']);
+    const voided = fake.invoices().find(i => i.metadata?.bane_attempt === declined.id)!;
+    assert.equal(voided.status, 'void');
+    saved = await account();
+    assert.deepEqual([saved.recharge_enabled, saved.recharge_disabled_reason, saved.recharge_pending_attempt], [false, 'insufficient_funds', null]);
+    assert.equal((await deliver('invoice.payment_failed', voided)).body.outcome, 'processed');
+    await recharge();
+    const notices = async () => (await db.query("SELECT dedupe_key, status, data FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed' ORDER BY created_at", [wid])).rows;
+    assert.deepEqual((await notices()).map(n => [n.dedupe_key, n.status, n.data.last4, n.data.code]), [[`recharge_failed:${declined.id}`, 'pending', '4242', 'insufficient_funds']]);
+    assert.equal((await recharges()).length, 3, 'No automatic retry after a decline.');
+    // Turned back on: the reason clears. A 3DS request (authentication_required) is a failure of its own, with its own notice.
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 100_000 });
+    assert.equal((await account()).recharge_disabled_reason, null);
+    fake.decline = { code: 'authentication_required', decline_code: 'authentication_required' };
+    await recharge();
+    warnings.mock.restore();
+    assert.deepEqual((await recharges()).map(r => r.failure_code).slice(2), ['insufficient_funds', 'authentication_required']);
+    assert.equal((await notices()).length, 2);
+    assert.equal((await account()).recharge_enabled, false);
+    assert.deepEqual((await ledger()).filter(r => r.kind === 'topup').length, 2);
+    // Removing the card detaches it at Stripe and keeps auto-recharge off.
+    const pm = (await account()).stripe_payment_method;
+    await stripe.removePaymentMethod(runtime, wid);
+    assert.equal(fake.objects.get(pm)!.customer, null);
+    assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4, (await account()).recharge_enabled], [null, null, false]);
+  });
+
+  test('Reconciliation: lost answers are retried with the same keys and credited once; after 22 h Bane searches Stripe; a day-old recharge is canceled', async t => {
+    const { runtime, fake, wid, account, attempt, ledger, enforcement, backdate, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await saveCard();
+    const warnings = t.mock.method(console, 'warn', () => {});
+    // The invoice was created but every answer was lost: the attempt has no invoice yet.
+    fake.lost.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const lost = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 3000, actor: 'user:fixture' });
+    assert.deepEqual([lost.status, (await attempt(lost.attemptId)).stripe_invoice, fake.invoices().length], ['created', null, 1]);
+    await backdate(lost.attemptId, 600);
+    await jobs.reconcilePayments(runtime);
+    assert.equal((await attempt(lost.attemptId)).status, 'succeeded');
+    assert.equal(fake.invoices().length, 1, 'The retry reused the idempotency key: one invoice.');
+    assert.deepEqual([...new Set(fake.calls.filter(c => c.path === '/v1/invoices' && c.method === 'POST').map(c => c.key))], [`attempt:${lost.attemptId}:invoice`]);
+    // A Checkout whose webhook never arrived: reconciliation reads the session, credits it and saves the card.
+    const quiet = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    fake.payCheckout((await attempt(quiet.attemptId)).stripe_checkout_session);
+    await backdate(quiet.attemptId, 600);
+    assert.equal(await stripe.reconcileAttempt(runtime, quiet.attemptId), 'succeeded');
+    // Older than 22 h without a stored invoice: found by metadata and paid, so credited without re-running the charge.
+    fake.lost.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const late = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' });
+    Object.assign(fake.invoices().find(i => i.metadata.bane_attempt === late.attemptId)!, { status: 'paid', subtotal: 2000, total: 2000, total_excluding_tax: 2000, amount_paid: 2000 });
+    await backdate(late.attemptId, 23 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, late.attemptId), 'succeeded');
+    assert.equal(fake.count(/^GET \/v1\/invoices\/search$/), 1);
+    assert.equal(fake.calls.filter(c => c.key === `attempt:${late.attemptId}:item`).length, 0);
+    // Nothing at Stripe after 22 h: failed as lost (Console #5210), no credit.
+    fake.unavailable.push({ match: /^POST \/v1\/invoices$/, times: 3 });
+    const gone = await stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' });
+    await backdate(gone.attemptId, 23 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, gone.attemptId), 'failed');
+    assert.equal((await attempt(gone.attemptId)).failure_code, 'lost');
+    assert.deepEqual((await ledger()).map(r => r.source_id), [`attempt:${lost.attemptId}`, `attempt:${quiet.attemptId}`, `attempt:${late.attemptId}`]);
+    // A recharge whose payment never answered, a day later: its invoice is voided and auto-recharge is free again.
+    await enforcement('enforce');
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 10_000, amountCents: 2500, monthlyCapCents: 100_000 });
+    fake.unavailable.push({ match: /\/pay$/, times: 3 });
+    await recharge();
+    const stuck = (await account()).recharge_pending_attempt;
+    assert.ok(stuck); assert.equal((await attempt(stuck)).status, 'pending');
+    await backdate(stuck, 25 * 3600);
+    assert.equal(await stripe.reconcileAttempt(runtime, stuck), 'canceled');
+    warnings.mock.restore();
+    assert.equal(fake.invoices().find(i => i.metadata.bane_attempt === stuck)!.status, 'void');
+    assert.deepEqual([(await account()).recharge_pending_attempt, (await account()).recharge_enabled], [null, true], 'A charge that never finished is not the card\'s fault.');
+    assert.equal((await account()).balance, String(7000n * UC));
+  });
+
+  test('Refund: the hold lands before Stripe is called, a refusal releases it, and only unspent paid credit is refundable', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, post, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
+    await post('usage', `usage:${wid}:spent`, -2000n * UC);
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
+    await assert.rejects(refund(3001), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    let heldWhenCalled: string[] = [];
+    fake.onRequest = async (method, path) => { if (method === 'POST' && path === '/v1/credit_notes') heldWhenCalled = (await ledger()).map(r => r.kind); };
+    fake.refused.push({ match: /^POST \/v1\/credit_notes$/, times: 1 });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    await assert.rejects(refund(1000), { status: 502, code: 'BILLING_PROVIDER_ERROR' });
+    warnings.mock.restore();
+    assert.deepEqual(heldWhenCalled, ['topup', 'usage', 'refund_hold'], 'The amount is held before Stripe is asked.');
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.paid]).slice(2), [['refund_hold', String(-1000n * UC)], ['refund_release', String(1000n * UC)]]);
+    assert.equal((await account()).balance, String(3000n * UC));
+    // The whole refundable amount: a credit note for the invoice line, refunding its total (tax included in proportion).
+    const done = await refund();
+    assert.equal(done.status, 'succeeded');
+    const note = fake.calls.filter(c => c.path === '/v1/credit_notes' && c.method === 'POST').at(-1)!;
+    assert.deepEqual([note.params.lines['0'].amount, note.params.refund_amount, note.key], ['3000', '3000', `refund:${done.refundId}`]);
+    assert.deepEqual([(await account()).balance, (await attempt(top.attemptId)).refunded], ['0', String(3000n * UC)]);
+    assert.equal((await db.query('SELECT status FROM billing_refunds WHERE id = $1', [done.refundId])).rows[0].status, 'succeeded');
+    // Nothing paid is left; promotional credit is never refunded.
+    await post('grant', `grant:${randomUUID()}`, 0n, 1000n * UC);
+    await assert.rejects(refund(), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    // A refund Stripe settles later: its failure event returns the held amount.
+    const second = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2500, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(second.attemptId)).stripe_checkout_session));
+    fake.refundStatus = 'pending';
+    const slow = await stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: second.attemptId, amountCents: 500, basis: 'billing_error', reason: 'Synthetic refund', operator: 'operator:fixture' });
+    assert.equal(slow.status, 'pending');
+    assert.equal((await account()).balance, String(2000n * UC));
+    const stripeRefund = (await db.query('SELECT stripe_refund FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].stripe_refund;
+    assert.equal((await deliver('refund.updated', { ...fake.objects.get(stripeRefund)!, status: 'failed', failure_reason: 'expired_or_canceled_card' })).body.outcome, 'processed');
+    assert.equal((await db.query('SELECT status FROM billing_refunds WHERE id = $1', [slow.refundId])).rows[0].status, 'failed');
+    assert.deepEqual([(await account()).balance, (await attempt(second.attemptId)).refunded], [String(2500n * UC), '0']);
+  });
+
+  test('Dispute: the disputed credit is debited, the card blocked and auto-recharge stopped; a won dispute gives it back', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 4000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session);
+    await deliver('checkout.session.completed', session);
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const dispute = { id: `dp_${randomUUID().replaceAll('-', '')}`, object: 'dispute', amount: 4000, payment_intent: session.payment_intent, reason: 'fraudulent', status: 'needs_response' };
+    const errors = t.mock.method(console, 'error', () => {});
+    assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed');
+    assert.equal((await deliver('charge.dispute.created', dispute)).body.outcome, 'processed', 'A second event for the same dispute debits nothing more.');
+    assert.ok(errors.mock.calls.some(c => String(c.arguments[0]).includes('BILLING_DISPUTE_OPENED')));
+    assert.deepEqual((await ledger()).map(r => [r.kind, r.paid]), [['topup', String(4000n * UC)], ['dispute', String(-4000n * UC)]]);
+    const blocked = await account();
+    assert.deepEqual([blocked.balance, blocked.recharge_enabled, blocked.recharge_disabled_reason], ['0', false, 'dispute']);
+    assert.equal((await db.query('SELECT reason FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint])).rows[0]?.reason, 'dispute');
+    await assert.rejects(stripe.chargeSavedCardTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture' }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
+    assert.equal((await deliver('charge.dispute.closed', { ...dispute, status: 'won' })).body.outcome, 'processed');
+    assert.equal((await deliver('charge.dispute.closed', { ...dispute, status: 'won' })).body.outcome, 'processed');
+    assert.deepEqual((await ledger()).map(r => r.kind), ['topup', 'dispute', 'dispute_reversal']);
+    assert.equal((await account()).balance, String(4000n * UC));
+    // Radar's early fraud warning blocks and stops auto-recharge too; a detached card is forgotten.
+    await db.query('DELETE FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint]);
+    assert.equal((await deliver('radar.early_fraud_warning.created', { id: `issfr_${randomUUID().slice(0, 8)}`, object: 'radar.early_fraud_warning', payment_intent: session.payment_intent, fraud_type: 'made_with_stolen_card' })).body.outcome, 'processed');
+    errors.mock.restore();
+    assert.equal((await db.query('SELECT reason FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint])).rows[0]?.reason, 'early_fraud_warning');
+    assert.equal((await account()).recharge_disabled_reason, 'early_fraud_warning');
+    assert.equal((await deliver('payment_method.detached', fake.objects.get((await account()).stripe_payment_method)!)).body.outcome, 'processed');
+    assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4], [null, null]);
+    await db.query('DELETE FROM billing_blocked_cards WHERE fingerprint = $1', [fake.card.fingerprint]);
+  });
+  // Review finding 1 / POC 14: runner 1's credit waits on the account lock (another money write holds it when Stripe
+  // answers /pay) and runner 2, re-claiming the job, queues behind it. Runner 2 must decide on what runner 1 committed.
+  test('Auto-recharge under lock contention: a second runner queued behind the first one\'s credit does not charge again', async t => {
+    const { runtime, db, fake, wid, account, enforcement, saveCard, recharge, stripe } = await stripeFixture(t);
+    await enforcement('enforce');
+    await saveCard();
+    await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const holder = await fixtureDatabase(t), watcher = await fixtureDatabase(t);
+    cleanup(t, async () => { await holder.query('ROLLBACK'); });
+    const waiting = async (n: number) => {
+      for (let i = 0; i < 200; i++) {
+        const { rows: [{ count }] } = await watcher.query(`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database() AND state = 'active'
+          AND wait_event_type = 'Lock' AND query ILIKE '%FROM billing_accounts%FOR UPDATE%'`);
+        if (count >= n) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail(`expected ${n} sessions waiting on the account lock`);
+    };
+    let second: Promise<void> | undefined, released: Promise<void> | undefined;
+    fake.onRequest = async (method, path) => {
+      if (method !== 'POST' || !/\/pay$/.test(path) || released) return;
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM billing_accounts WHERE workspace_id = $1 FOR UPDATE', [wid]);
+      released = (async () => {
+        await waiting(1);                 // runner 1's credit, after /pay answered
+        second = recharge();              // runner 2 claims the job again
+        await waiting(2);
+        await holder.query('COMMIT');
+      })();
+    };
+    await recharge();
+    await released; await second;
+    fake.onRequest = undefined;
+    const rows = (await db.query("SELECT status FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge'", [wid])).rows;
+    assert.deepEqual(rows.map(r => r.status), ['succeeded'], 'One low-balance episode charges the card once.');
+    assert.deepEqual([fake.count(/^POST \/v1\/invoices\/[^/]+\/pay$/), (await account()).balance], [1, String(2500n * UC)]);
+  });
+
+  // Review finding 2: a refusal that isn't a card error must not leave auto-recharge on to open an attempt every minute.
+  test('Auto-recharge: a non-card refusal turns it off with one notice and a voided invoice, instead of a new attempt every minute', async t => {
+    const { runtime, db, fake, wid, account, enforcement, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
+    await enforcement('enforce');
+    await saveCard();
+    const on = () => stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50_000 });
+    const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
+    const notices = async () => (await db.query("SELECT count(*)::int AS n FROM billing_notices WHERE workspace_id = $1 AND kind = 'recharge_failed'", [wid])).rows[0].n;
+    const warnings = t.mock.method(console, 'warn', () => {});
+    // Refused after the invoice exists (at /pay): the open invoice is voided.
+    await on();
+    fake.refused.push({ match: /\/pay$/, times: 1, code: 'invoice_payment_intent_requires_action' });
+    await recharge();
+    const [paid] = await recharges();
+    assert.deepEqual([paid.status, paid.failure_code], ['failed', 'invoice_payment_intent_requires_action']);
+    assert.equal(fake.invoices().find(i => i.metadata.bane_attempt === paid.id)!.status, 'void');
+    assert.deepEqual([(await account()).recharge_enabled, (await account()).recharge_disabled_reason, await notices()], [false, 'invoice_payment_intent_requires_action', 1]);
+    // Every invoice create refused (Stripe Tax turned on for a card saved without an address): one attempt, then off.
+    await on();
+    fake.refused.push({ match: /^POST \/v1\/invoices$/, times: Infinity, code: 'customer_tax_location_invalid' });
+    for (let minute = 0; minute < 10; minute++) { await jobs.billingMinute(runtime); await recharge(); }
+    warnings.mock.restore();
+    assert.deepEqual((await recharges()).map(r => [r.status, r.failure_code]), [['failed', 'invoice_payment_intent_requires_action'], ['failed', 'customer_tax_location_invalid']]);
+    assert.deepEqual([(await account()).recharge_enabled, (await account()).recharge_disabled_reason, await notices()], [false, 'customer_tax_location_invalid', 2]);
+    assert.equal(fake.count(/^POST \/v1\/invoices$/), 2, 'No new invoice once auto-recharge is off.');
+  });
+
+  // Review finding 3: an hour of sends isn't settled yet; refunding it would leave the workspace in debt.
+  test('Refund: usage that is not settled yet is not refundable, so settlement never leaves the workspace in debt', async t => {
+    const { runtime, db, fake, wid, deliver, account, attempt, enforcement, stripe } = await stripeFixture(t);
+    await enforcement('enforce');
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 5000, actor: 'user:fixture', billingEmail: null });
+    await deliver('checkout.session.completed', fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session));
+    // The free tier is used up and 240,000 recipients went out an hour ago: $48 owed, not settled yet, $2 left.
+    await db.query('UPDATE billing_accounts SET free_emails_used = 3000 WHERE workspace_id = $1', [wid]);
+    await db.query(`INSERT INTO billing_usage_hourly (workspace_id, hour, meter, quantity) VALUES ($1, date_trunc('hour', now(), 'UTC') - interval '1 hour', 'send', 240000)`, [wid]);
+    assert.equal((await db.query('SELECT billing_position($1) AS p', [wid])).rows[0].p.availableUc, String(200n * UC));
+    const refund = (amountCents?: number) => stripe.refundTopUp(runtime, { workspaceId: wid, attemptId: top.attemptId, amountCents, basis: 'billing_error', reason: 'Unused credit', operator: 'operator:fixture' });
+    await assert.rejects(refund(201), { status: 409, code: 'REFUND_EXCEEDS_BALANCE' });
+    const done = await refund();
+    assert.equal(done.status, 'succeeded');
+    assert.equal((await db.query('SELECT amount_uc::text AS a FROM billing_refunds WHERE id = $1', [done.refundId])).rows[0].a, String(200n * UC));
+    await db.query(`SELECT billing_settle($1, date_trunc('hour', now(), 'UTC'))`, [wid]);
+    const settled = await account();
+    assert.deepEqual([settled.balance, settled.unpaid_since], ['0', null], 'The sends are paid for and nothing is owed.');
+  });
+
+  // Review finding 7: the hourly limit counted before the lock wait, so concurrent requests all saw the same count.
+  test('Top-up limit: 20 concurrent requests open exactly five payment pages', async t => {
+    const { runtime, fake, wid, stripe } = await stripeFixture(t);
+    const outcomes = await Promise.allSettled(Array.from({ length: 20 }, () => stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'key:fixture', billingEmail: null })));
+    assert.equal(outcomes.filter(o => o.status === 'fulfilled').length, 5);
+    assert.ok(outcomes.every(o => o.status === 'fulfilled' || (o.reason as Json).code === 'TOP_UP_RATE_LIMITED'));
+    assert.deepEqual([fake.count(/^POST \/v1\/checkout\/sessions$/), new Set(fake.calls.filter(c => c.path === '/v1/customers').map(c => c.key)).size], [5, 1]);
+  });
+});
+
 describe('Hosted unsubscribe and dispatch-time consent', () => {
   test('punycode TLDs work for contact lookup, template replies, one-click and SES unsubscribeAll',async t=>{
     await simulatedSesFixture(t,async({runtime,local,request,db})=>{
@@ -6075,6 +7798,407 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(audit.length, 2, 'Initial subscription plus first provider POST must remain the only consent decisions after repeated POST and GET.');
     assert.equal(audit.filter(row => row.source === 'rfc8058-post').length, 1);
     assert.equal(audit.filter(row => row.source === 'footer-get').length, 0, 'Later footer navigation must not relabel provider-originated consent.');
+  });
+});
+
+describe('Billing: API, MCP and notices', () => {
+  // A Hosted workspace with a shared connection; billing_config and billing_accounts start at their migration defaults.
+  async function hostedBilling(runtime: import('./src/core.js').Runtime, db: pg.Client) {
+    const wid = runtime.config.workspaceId, pool = '111122223333';
+    Object.assign(runtime.config, { multiTenant: true });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    return wid;
+  }
+  const enforcement = (db: pg.Client, mode: 'off' | 'shadow' | 'enforce') => db.query('UPDATE billing_config SET mode=$1 WHERE singleton', [mode]);
+  const credit = (db: pg.Client, wid: string, kind: string, source: string, paid: bigint, promo = 0n, detail: Json = {}) =>
+    db.query(`SELECT billing_post($1,$2,$3,$4::bigint,$5::bigint,$6::jsonb,'stripe') AS r`, [wid, kind, source, paid.toString(), promo.toString(), JSON.stringify(detail)]).then(r => r.rows[0].r);
+  const asRole = async (db: pg.Client, wid: string, role: string) => db.query('UPDATE workspace_members SET role=$3 WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId, role]);
+
+  test('permissions: amounts and ledger for owners, admins and manage credentials; money moves only from an owner or admin session', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId;
+      error(await local('GET', '/v1/billing'), 404, 'NOT_FOUND'); // Hosted only.
+      await hostedBilling(runtime, db);
+      await enforcement(db, 'enforce');
+      await credit(db, wid, 'topup', 'attempt:bpa_fixture_one', 2_500_000_000n);
+      await credit(db, wid, 'grant', 'grant:fixture-promo', 0n, 500_000_000n);
+      await db.query(`SELECT billing_post($1,'usage','usage:fixture',-1240000::bigint*20,0,'{"meters":{"send":{"quantity":1000},"receive":{"quantity":240}},"costUc":"24800000","charged":true,"from":"2026-11-12T13:00:00+00:00","to":"2026-11-12T15:00:00+00:00"}','system')`, [wid]);
+      await credit(db, wid, 'adjustment', 'adjustment:fixture-internal', 100_000_000n, 0n, { reason: 'Internal note never shown to customers', ticketRef: 'T-1' });
+      const key = (permissions: string[], domains: string[] = []) => local('POST', '/v1/api-keys', { name: unique('billing'), permissions, domains }).then(r => { const k = ok(r, 201); secrets.add(k.secret); return k.secret as string; });
+      const manage = await key(['manage']), reader = await key(['read']), scoped = await key(['manage'], ['billing.example']);
+
+      // Owner session: amounts, the ledger in plain words (operator notes stay internal), and /v1/me carries the state.
+      const owner = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([owner.enforcement, owner.mode, owner.state, owner.balance.paid, owner.balance.promo], ['enforce', 'prepaid', { sending: 'ok', receiving: 'ok', autoRecharge: 'off' }, '2575200000', '500000000']);
+      assert.deepEqual([owner.free.emails.limit, owner.prices.emailPerThousand, owner.topUpUrl], [3000, '0.20', `${PUBLIC_ORIGIN}/settings#billing`]);
+      const ledger = page(await local('GET', '/v1/billing/ledger?limit=3'));
+      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Bane'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Bane']]);
+      assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
+      const rest = ok(await local('GET', `/v1/billing/ledger?cursor=${ok(await local('GET', '/v1/billing/ledger?limit=3')).nextCursor}`));
+      assert.deepEqual([rest.data.map((e: Json) => [e.kind, e.paymentId, e.balanceAfter]), rest.nextCursor], [[['topup', 'bpa_fixture_one', '2500000000']], null]);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).billing, { enforcement: 'enforce', free: false, sending: 'ok', receiving: 'ok', autoRecharge: 'off' });
+      assert.equal(ok(await request('GET', '/v1/me', manage)).billing, null, 'Only dashboard sessions carry it.');
+
+      // A manage key reads amounts and may ask for a top-up link (Stripe isn't configured here), never charge a card.
+      assert.equal(ok(await request('GET', '/v1/billing', manage)).balance.available, owner.balance.available);
+      assert.equal(page(await request('GET', '/v1/billing/ledger', manage)).length, 4);
+      error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }), 503, 'BILLING_NOT_CONFIGURED');
+      error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 1999 }), 422, 'VALIDATION_FAILED');
+      for (const [method, path, body] of [['POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'saved_card' }], ['PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }],
+        ['POST', '/v1/billing/payment-method', undefined], ['DELETE', '/v1/billing/payment-method', undefined]] as const)
+        error(await request(method, path, manage, body), 403, 'DASHBOARD_AUTH_REQUIRED');
+      // Read-only keys see the state without amounts; domain-restricted keys see nothing.
+      const read = ok(await request('GET', '/v1/billing', reader));
+      assert.deepEqual([read.balance, read.monthToDate, read.autoRecharge, read.paymentMethod, read.state.sending], [null, null, null, null, 'ok']);
+      error(await request('GET', '/v1/billing/ledger', reader), 403, 'PERMISSION_DENIED');
+      error(await request('GET', '/v1/billing/payments', reader), 403, 'PERMISSION_DENIED');
+      error(await request('POST', '/v1/billing/top-up-links', reader, { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
+      for (const path of ['/v1/billing', '/v1/billing/usage', '/v1/billing/ledger']) error(await request('GET', path, scoped), 403, 'UNRESTRICTED_KEY_REQUIRED');
+
+      // The owner session reaches package B (not configured here); a member is refused everything that moves money.
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 2000 }), 422, 'VALIDATION_FAILED');
+      error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 503, 'BILLING_NOT_CONFIGURED');
+      error(await local('POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'checkout' }), 503, 'BILLING_NOT_CONFIGURED');
+      await asRole(db, wid, 'member');
+      try {
+        const member = ok(await local('GET', '/v1/billing'));
+        assert.deepEqual([member.balance, member.state.sending], [null, 'ok']);
+        error(await local('GET', '/v1/billing/ledger'), 403, 'PERMISSION_DENIED');
+        error(await local('POST', '/v1/billing/top-up-links', { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
+        for (const [method, path, body] of [['POST', '/v1/billing/top-ups', { amountCents: 5000, method: 'checkout' }], ['PUT', '/v1/billing/auto-recharge', { enabled: false, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }],
+          ['POST', '/v1/billing/payment-method', undefined], ['DELETE', '/v1/billing/payment-method', undefined]] as const)
+          error(await local(method, path, body), 403, 'PERMISSION_DENIED');
+      } finally { await asRole(db, wid, 'owner'); }
+
+      // The state follows the balance: debt pauses sending (enforced, prepaid) and starts the received-mail grace.
+      await db.query(`SELECT billing_post($1,'usage','usage:fixture-debt',-3000000000,-500000000,'{}','system')`, [wid]);
+      await db.query(`UPDATE billing_accounts SET free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=3000 WHERE workspace_id=$1`, [wid]);
+      const paused = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([paused.state.sending, paused.state.receiving, typeof paused.grace.receiveHoldAt], ['paused', 'grace', 'string']);
+      assert.deepEqual(ok(await local('GET', '/v1/me')).billing.sending, 'paused');
+      await enforcement(db, 'shadow');
+      assert.equal(ok(await local('GET', '/v1/billing')).state.sending, 'low', 'Shadow never pauses.');
+    });
+  });
+
+  test('money routes reach Stripe: a manage key gets a top-up link once per Idempotency-Key; the owner pays, saves the card, sets auto-recharge and removes the card', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, fetch }) => {
+      const wid = await hostedBilling(runtime, db);
+      runtime.config.billing = { stripe: { secretKey: 'sk_test_fake', webhookSecret: STRIPE_TEST_WEBHOOK_SECRET, automaticTax: false, apiBase: STRIPE_TEST_BASE } };
+      // The fixture's own fetch guard stays outside: Stripe is faked for this subtest only.
+      await t.test('through the fake Stripe', async st => {
+        const fake = fakeStripe(st, () => false);
+        const manage = ok(await local('POST', '/v1/api-keys', { name: 'Billing agent', permissions: ['manage'] }), 201).secret; secrets.add(manage);
+        const link = await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' });
+        const first = ok(link, 201);
+        assert.match(first.url, /^https:\/\/checkout\.stripe\.test\//);
+        assert.deepEqual(ok(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 5000 }, { 'Idempotency-Key': 'link-1' }), 201), first, 'A retry returns the same link.');
+        error(await request('POST', '/v1/billing/top-up-links', manage, { amountCents: 6000 }, { 'Idempotency-Key': 'link-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        assert.equal(fake.count(/^POST \/v1\/checkout\/sessions$/), 1);
+        const pending = ok(await request('GET', `/v1/billing/payments/${first.attemptId}`, manage));
+        assert.deepEqual([pending.kind, pending.status, pending.amountCents], ['checkout', 'pending', 5000]);
+        assert.equal((await db.query('SELECT created_by FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].created_by.startsWith('key:'), true);
+        // Without a saved card, auto-recharge can't be turned on.
+        error(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 50000 }), 409, 'PAYMENT_METHOD_REQUIRED');
+        // A person pays on the Checkout page; Stripe's webhook credits it and saves the card.
+        const session = (await db.query('SELECT stripe_checkout_session FROM billing_payment_attempts WHERE id=$1', [first.attemptId])).rows[0].stripe_checkout_session;
+        const event = await signedStripeEvent('checkout.session.completed', fake.payCheckout(session));
+        assert.equal((await fetch(new Request(`${PUBLIC_ORIGIN}/v1/billing/stripe`, { method: 'POST', headers: { 'stripe-signature': event.signature, 'content-type': 'application/json' }, body: event.body }))).status, 200);
+        const funded = ok(await local('GET', '/v1/billing'));
+        assert.deepEqual([funded.balance.paid, funded.paymentMethod.brand, funded.paymentMethod.last4], ['5000000000', 'visa', '4242']);
+        const [topup] = page(await local('GET', '/v1/billing/ledger'));
+        assert.deepEqual([topup.kind, topup.description, topup.paymentId, typeof topup.invoiceUrl], ['topup', 'Credit added', first.attemptId, 'string']);
+        assert.equal(topup.expiresAt.slice(0, 10), new Date(new Date(topup.at).setUTCFullYear(new Date(topup.at).getUTCFullYear() + 1)).toISOString().slice(0, 10), 'A top-up expires 12 months after purchase.');
+        const [paid] = page(await local('GET', '/v1/billing/payments'));
+        assert.deepEqual([paid.id, paid.status, paid.card.last4, typeof paid.invoiceUrl, typeof paid.receiptUrl], [first.attemptId, 'succeeded', '4242', 'string', 'string']);
+        // An operator refund: the audit row and the Idempotency-Key commit in the transaction that holds the refund
+        // (same xmin as the refund_hold ledger row); a retry returns the refund, another body is refused, and a refusal
+        // leaves no audit row.
+        await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+        const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, basis: 'billing_error', reason: 'Customer was charged for a top-up twice' };
+        const refund = ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' }));
+        assert.match(refund.refundId, /^brf_/);
+        assert.deepEqual(ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' })), refund);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900 }, 'live', { 'Idempotency-Key': 'refund-1' }), 409, 'IDEMPOTENCY_CONFLICT');
+        const [hold] = (await db.query(`SELECT xmin::text AS x,paid_uc::text AS paid FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold'`, [wid])).rows;
+        const audits = async () => (await db.query(`SELECT xmin::text AS x,reason,summary->'before'->>'balance_uc' AS before,summary->'after'->>'balance_uc' AS after,internal,retain_until>at+interval '6 years 11 months' AS kept
+          FROM audit_events WHERE workspace_id=$1 AND action='billing.refund'`, [wid])).rows;
+        assert.deepEqual([hold.paid, await audits()], ['-1000000000', [{ x: hold.x, reason: refundBody.reason, before: '5000000000', after: '4000000000', internal: true, kept: true }]]);
+        // Stripe's top-up is in the customer's Activity (the ledger trigger), kept 7 years; the operator's refund is internal.
+        assert.deepEqual((await db.query(`SELECT actor_type,via,internal,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events WHERE workspace_id=$1 AND action='billing.topup'`, [wid])).rows,
+          [{ actor_type: 'stripe', via: 'webhook', internal: false, kept: true }]);
+        assert.deepEqual(page(await local('GET', '/v1/activity?action=billing.')).map(e => e.action), ['billing.topup']);
+        error(await local('POST', refundPath, { ...refundBody, amountCents: 900_000 }), 409, 'REFUND_EXCEEDS_BALANCE');
+        assert.equal((await audits()).length, 1, 'A refused refund leaves no audit row.');
+        // Unused credit is refundable only for a billing error, a legal requirement or an account Anomaly closes.
+        error(await local('POST', refundPath, { attemptId: first.attemptId, reason: 'Customer no longer needs the credit' }), 422);
+        error(await local('POST', refundPath, { ...refundBody, basis: 'unused_credit' }), 422);
+        // Anomaly closes the account without cause: what is left of every top-up goes back to its card.
+        const closed = ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds;
+        assert.deepEqual(closed.map((r: Json) => [r.attemptId, r.amountCents]), [[first.attemptId, 4000]]);
+        assert.deepEqual(ok(await local('POST', `/v1/operator/billing/${wid}/close-refund`, { reason: 'Anomaly closed this account without cause' })).refunds, [], 'Nothing is left to refund twice.');
+        assert.deepEqual((await db.query(`SELECT detail->>'basis' AS basis FROM billing_ledger WHERE workspace_id=$1 AND kind='refund_hold' ORDER BY id`, [wid])).rows.map(r => r.basis), ['billing_error', 'account_closure']);
+        // The owner sets auto-recharge (the summary comes back), then removes the card, which turns it off.
+        const on = ok(await local('PUT', '/v1/billing/auto-recharge', { enabled: true, thresholdCents: 1500, amountCents: 3000, monthlyCapCents: 30000 }));
+        assert.deepEqual([on.state.autoRecharge, on.autoRecharge.enabled, on.autoRecharge.thresholdCents, on.autoRecharge.monthlyCapCents], ['on', true, 1500, 30000]);
+        const removed = ok(await local('DELETE', '/v1/billing/payment-method'));
+        assert.deepEqual([removed.paymentMethod, removed.autoRecharge.enabled, removed.state.autoRecharge], [null, false, 'off']);
+        assert.equal(fake.count(/^POST \/v1\/payment_methods\/[^/]+\/detach$/), 1);
+        const setup = ok(await local('POST', '/v1/billing/payment-method'), 201);
+        assert.match(setup.checkoutUrl, /^https:\/\/checkout\.stripe\.test\//);
+      });
+    });
+  });
+
+  test('usage by meter: day, hour and month totals; received mail and Omens only for credentials that may read all received mail', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), day = new Date().toISOString().slice(0, 10);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES
+        ($1,date_trunc('day',now(),'UTC'),'send',40),($1,date_trunc('day',now(),'UTC')+interval '1 hour','send',2),($1,date_trunc('day',now(),'UTC'),'receive',7),($1,date_trunc('day',now(),'UTC'),'omen',3)`, [wid]);
+      const usage = ok(await local('GET', '/v1/billing/usage')).data;
+      assert.deepEqual(usage.map((p: Json) => [p.start, p.meter, p.quantity]), [[`${day}T00:00:00Z`, 'omen', '3'], [`${day}T00:00:00Z`, 'receive', '7'], [`${day}T00:00:00Z`, 'send', '42']]);
+      assert.deepEqual(ok(await local('GET', `/v1/billing/usage?granularity=hour&meter=send&from=${day}&to=${day}`)).data.map((p: Json) => p.quantity), ['40', '2']);
+      assert.equal(ok(await local('GET', '/v1/billing/usage?granularity=month')).data.find((p: Json) => p.meter === 'send').start.slice(8), '01T00:00:00Z');
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Usage reader', permissions: ['read'] }), 201).secret; secrets.add(reader);
+      assert.deepEqual(ok(await request('GET', '/v1/billing/usage', reader)).data.map((p: Json) => p.meter), ['send']);
+      assert.deepEqual(ok(await request('GET', '/v1/billing/usage?meter=receive', reader)).data, []);
+      error(await local('GET', '/v1/billing/usage?from=2026-01-10&to=2026-01-01'), 422, 'VALIDATION_FAILED');
+      error(await local('GET', '/v1/billing/usage?granularity=hour&from=2026-01-01&to=2026-03-01'), 422, 'VALIDATION_FAILED');
+      // Plan & usage carries the combined free allowance and whether billing charges yet.
+      const plan = ok(await local('GET', '/v1/usage'));
+      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1_000_000_000 }]);
+    });
+  });
+
+  test('OpenAPI and MCP: billing reads and a top-up link are tools; nothing that charges a card is, and the webhook and operator routes are hidden', async () => {
+    const { createOpenApiApp } = await import('./src/app.js'), { buildMcpCatalog, DASHBOARD_MONEY } = await import('./src/mcp-catalog.js'), { resourceActions } = await import('./src/mcp-resources.js');
+    const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } }) as Json;
+    const ids = (path: string) => Object.values(spec.paths[path] ?? {}).map(o => (o as Json).operationId);
+    assert.deepEqual([ids('/v1/billing'), ids('/v1/billing/usage'), ids('/v1/billing/ledger'), ids('/v1/billing/payments'), ids('/v1/billing/payments/{id}'), ids('/v1/billing/top-ups'), ids('/v1/billing/top-up-links'), ids('/v1/billing/auto-recharge'), ids('/v1/billing/payment-method').sort()],
+      [['getBilling'], ['getBillingUsage'], ['listBillingLedger'], ['listBillingPayments'], ['getBillingPayment'], ['createBillingTopUp'], ['createBillingTopUpLink'], ['updateBillingAutoRecharge'], ['createBillingCardSetup', 'deleteBillingPaymentMethod']]);
+    assert.ok(!Object.keys(spec.paths).some(p => p === '/v1/billing/stripe' || p.startsWith('/v1/operator/billing')), 'The Stripe webhook and operator tools are not public.');
+    assert.equal(spec.components.schemas.MicroCents.type, 'string');
+    const catalog = buildMcpCatalog(app);
+    assert.deepEqual(resourceActions('billing'), { get: 'getBilling', usage: 'getBillingUsage', ledger: 'listBillingLedger', payments: 'listBillingPayments', payment: 'getBillingPayment', topUpLink: 'createBillingTopUpLink' });
+    for (const name of DASHBOARD_MONEY) assert.equal(catalog.get(name), undefined, `${name} is never an agent call`);
+    const ops = Object.values(resourceActions('billing')!).map(name => catalog.get(name)!);
+    assert.deepEqual(ops.map(op => [op.tool.name, op.toolset, op.permission, op.write, op.confirm]), [
+      ['getBilling', 'admin', 'read', false, false], ['getBillingUsage', 'admin', 'read', false, false], ['listBillingLedger', 'admin', 'manage', false, false],
+      ['listBillingPayments', 'admin', 'manage', false, false], ['getBillingPayment', 'admin', 'manage', false, false], ['createBillingTopUpLink', 'admin', 'manage', true, true]]);
+    assert.match(catalog.get('createBillingTopUpLink')!.tool.description!, /for a person to open and pay; agents cannot pay/);
+  });
+
+  test('owner notices: one email per episode to owners and admins; shadow and exempt are suppressed; a crashed send is retried after its lease', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = await hostedBilling(runtime, db), platform = unique('platform'), pool = '111122223333';
+      const { notifyJob, noticeEmail } = await import('./src/billing/notify.js');
+      Object.assign(runtime.config, { platformDomainWorkspace: platform, notifyFrom: 'billing@platform.example' });
+      await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+      await db.query(`UPDATE workspaces SET name=$2 WHERE id=$1`, [wid, 'Northwind\nInc']);
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [platform, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('platform.example',$1,$1,'verified')`, [platform]);
+      const notice = (kind: string, dedupe: string, data: Json = {}) => db.query('SELECT billing_notice($1,$2,$3,$4::jsonb) AS id', [wid, kind, dedupe, JSON.stringify(data)]).then(r => r.rows[0].id as string | null);
+      const run = async (id: string) => notifyJob(runtime, { noticeId: id }, { id: `billing.notify:${id}`, attempts: 1, workspaceId: wid });
+      const status = async (id: string | null) => (await db.query('SELECT status FROM billing_notices WHERE id=$1', [id])).rows[0]?.status;
+      const sent = async () => (await db.query(`SELECT to_addresses,subject,snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 ORDER BY created_at`, [platform])).rows;
+
+      // Shadow: recorded as suppressed, no job, no email.
+      await enforcement(db, 'shadow');
+      const shadow = await notice('low_balance', `low_balance:${wid}:shadow`);
+      assert.equal(await status(shadow!), 'suppressed');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1 AND type='billing.notify'`, [wid])).rows[0].n, 0);
+
+      // Enforced and prepaid: one row per dedupe key, one email however often the job runs.
+      await enforcement(db, 'enforce');
+      await credit(db, wid, 'topup', 'attempt:bpa_fixture_low', 480_000_000n);
+      const low = await notice('low_balance', `low_balance:${wid}:1`, { totalUc: '480000000' });
+      assert.equal(await notice('low_balance', `low_balance:${wid}:1`), null, 'The dedupe key is unique.');
+      await run(low!); await run(low!);
+      assert.equal(await status(low!), 'sent');
+      const [email] = await sent();
+      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Bane: Northwind Inc balance is low ($4.80)']);
+      for (const part of ['What happened', 'about 27,000 more emails', 'What Bane did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
+      assert.equal((await sent()).length, 1);
+
+      // A send that crashed mid-lease is retried once the lease runs out, under the same idempotency key.
+      const failed = await notice('recharge_failed', 'recharge_failed:bpa_fixture_declined', { code: 'insufficient_funds', last4: '4242' });
+      await db.query(`UPDATE billing_notices SET status='sending',lease_until=now()+interval '5 minutes' WHERE id=$1`, [failed]);
+      await run(failed!);
+      assert.equal((await sent()).length, 1, 'A live lease belongs to another runner.');
+      await db.query(`UPDATE billing_notices SET lease_until=now()-interval '1 second' WHERE id=$1`, [failed]);
+      await run(failed!);
+      assert.equal(await status(failed!), 'sent');
+      const declined = (await sent()).find(r => r.subject === 'Bane couldn\'t add credit to Northwind Inc');
+      assert.match(declined.text, /card ending 4242 and the charge failed: the card has insufficient funds\./);
+
+      // Exempt accounts are never emailed, even when a job is already queued.
+      const paused = await notice('sends_paused', `sends_paused:${wid}:1`);
+      await db.query(`UPDATE billing_accounts SET mode='exempt' WHERE workspace_id=$1`, [wid]);
+      await run(paused!);
+      assert.equal(await status(paused!), 'suppressed');
+      assert.equal(await notice('receive_held', `receive_held:${wid}:1`).then(status), 'suppressed');
+      assert.equal((await sent()).length, 2);
+
+      // The other bodies say what Bane did, the dates and the fix.
+      const unpaidSince = new Date('2026-11-01T10:00:00Z'), base = { workspace: 'W', link: 'https://bane.example/settings#billing', freeLeft: 0, unpaidSince, data: {} };
+      const debt = -1_240_000_000n as import('./src/billing/money.js').MicroCents;
+      assert.match(noticeEmail('sends_paused', { ...base, totalUc: debt }).text, /402 BALANCE_EXHAUSTED.*451.*accepted until Nov 8, 2026\. Nothing is deleted\./s);
+      assert.equal(noticeEmail('receive_hold_soon', { ...base, totalUc: debt }).subject, 'Received mail for W will be held on Nov 8, 2026');
+      assert.match(noticeEmail('receive_held', { ...base, totalUc: debt }).text, /owed \$12\.40 since Nov 1, 2026.*written off, but the hold stays until a top-up/s);
+    });
+  });
+
+  test('operator billing tools: credits, adjustments, write-offs and the mode are audited with the change; everyone else is refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), base = `/v1/operator/billing/${wid}`;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      error(await request('POST', `${base}/credits`, key.secret, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      error(await request('GET', base, key.secret), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic support helper']);
+      assert.equal(ok(await local('GET', base)).account, null);
+      error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }), 403, 'OPERATOR_REQUIRED');
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+
+      // A promotional credit: the ledger row and its audit row commit in the same (sub)transaction; a retry with the
+      // same Idempotency-Key returns the first answer and posts nothing.
+      const grant = ok(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage', ticketRef: 'T-42' }, 'live', { 'Idempotency-Key': 'grant-1' }));
+      assert.deepEqual([grant.applied, grant.account.promo_uc, grant.account.balance_uc], [true, '1000000000', '0']);
+      assert.deepEqual(ok(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage', ticketRef: 'T-42' }, 'live', { 'Idempotency-Key': 'grant-1' })), grant);
+      const [entry] = (await db.query(`SELECT xmin::text AS x,kind,source_id,promo_uc::text,actor FROM billing_ledger WHERE workspace_id=$1`, [wid])).rows;
+      const [audit] = (await db.query(`SELECT xmin::text AS x,action,reason,ticket_ref,actor_id AS operator_id,summary->'before'->>'promo_uc' AS before,summary->'after'->>'promo_uc' AS after
+        FROM audit_events WHERE workspace_id=$1 AND action LIKE 'billing.%' AND retain_until>at+interval '6 years 11 months'`, [wid])).rows;
+      assert.deepEqual([entry.kind, entry.source_id, entry.promo_uc, entry.actor], ['grant', `grant:${manager!.userId}:grant-1`, '1000000000', `operator:${manager!.userId}`]);
+      assert.deepEqual([audit.action, audit.reason, audit.ticket_ref, audit.operator_id, audit.before, audit.after, audit.x], ['billing.credit_promo', 'Goodwill after an outage', 'T-42', manager!.userId, '0', '1000000000', entry.x]);
+      // Paid credit, a signed adjustment and the debt they leave; a write-off clears the debt but not unpaid_since.
+      ok(await local('POST', `${base}/credits`, { amountCents: 500, bucket: 'paid', reason: 'Refund outside Stripe, ticket T-43' }));
+      ok(await local('POST', `${base}/adjustments`, { amountCents: -2000, reason: 'Drift fix for the November usage' }));
+      error(await local('POST', `${base}/adjustments`, { amountCents: 0, reason: 'Drift fix for the November usage' }), 422, 'VALIDATION_FAILED');
+      const owed = ok(await local('GET', base));
+      assert.deepEqual([owed.account.balance_uc, owed.position.balanceUc, typeof owed.account.unpaid_since], [-1_500_000_000, '-1500000000', 'string']);
+      const written = ok(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }));
+      assert.deepEqual([written.account.balance_uc, typeof written.account.unpaid_since], ['0', 'string']);
+      const before = (await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n;
+      error(await local('POST', `${base}/write-off`, { reason: 'Customer closed the account' }), 409, 'NOTHING_OWED');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1`, [wid])).rows[0].n, before, 'A refused change leaves no audit row.');
+      const mode = ok(await local('PUT', `${base}/mode`, { mode: 'exempt', reason: 'Anomaly’s own workspace' }));
+      assert.equal(mode.account.mode, 'exempt');
+      assert.deepEqual(ok(await local('GET', base)).ledger.map((l: Json) => l.kind), ['write_off', 'adjustment', 'adjustment', 'grant']);
+      error(await local('GET', '/v1/operator/billing/no-such-workspace'), 404, 'NOT_FOUND');
+    });
+  });
+
+  test('free workspaces and people: never gated or charged, usage still metered; a person’s flag binds to their identity and follows ownership; operator-only and audited', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = await hostedBilling(runtime, db), me = manager!.userId, base = `/v1/operator/billing/${wid}`;
+      await enforcement(db, 'enforce');
+      const until = new Date(Date.now() + 30 * 86_400_000).toISOString();
+      const gate = async (w = wid) => (await db.query('SELECT billing_gate($1, 10, false) AS g', [w])).rows[0].g;
+      const mode = async (w = wid) => (await db.query('SELECT mode,free_via FROM billing_accounts WHERE workspace_id=$1', [w])).rows[0] ?? { mode: 'prepaid', free_via: null };
+      await db.query(`INSERT INTO billing_accounts(workspace_id,free_month,free_emails_used) VALUES ($1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,3000)`, [wid]);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [false, true], 'A prepaid workspace at $0 past its free emails is gated.');
+      // Operators only.
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      const on = { free: true, until, reason: 'Partner workspace, courtesy of Anomaly' };
+      error(await local('PUT', `${base}/free`, on), 403, 'OPERATOR_REQUIRED');
+      error(await request('PUT', `/v1/operator/billing/people/${me}/free`, key.secret, on), 403, 'OPERATOR_REQUIRED');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      error(await local('PUT', `${base}/free`, { ...on, until: new Date(Date.now() - 1000).toISOString() }), 422, 'VALIDATION_FAILED');
+
+      // The workspace flag: free until a date, audited with the change; customers see the free plan and no gate.
+      ok(await local('PUT', `${base}/free`, on));
+      const [audit] = (await db.query(`SELECT xmin::text AS x,reason,summary->'after'->>'mode' AS mode FROM audit_events WHERE workspace_id=$1 AND action='billing.free_on'`, [wid])).rows;
+      assert.deepEqual([audit.reason, audit.mode, audit.x], [on.reason, 'exempt', (await db.query('SELECT xmin::text AS x FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].x]);
+      const free = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([free.mode, free.freePlan, free.state.sending], ['exempt', { until: until.replace(/\.\d{3}Z$/, 'Z') }, 'ok']);
+      assert.equal(ok(await local('GET', '/v1/me')).billing.free, true);
+      assert.deepEqual([(await gate()).ok, (await gate()).enforced], [true, false], 'A free workspace is never gated.');
+      // Usage is metered and settled at $0, with what it would have cost.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now())-interval '1 hour','send',2000)`, [wid]);
+      await db.query(`SELECT billing_settle($1, date_trunc('hour', now()))`, [wid]);
+      const [usage] = (await db.query(`SELECT paid_uc::text,promo_uc::text,detail->>'costUc' AS cost,detail->>'charged' AS charged FROM billing_ledger WHERE workspace_id=$1 AND kind='usage'`, [wid])).rows;
+      assert.deepEqual(usage, { paid_uc: '0', promo_uc: '0', cost: '40000000', charged: 'false' });
+      const metered = ok(await local('GET', '/v1/billing'));
+      assert.deepEqual([metered.balance.paid, metered.monthToDate.cost], ['0', '40000000'], 'The month shows what free usage would cost.');
+      // Expiry: the hourly sweep returns it to prepaid; the operator view keeps the expired flag for the record.
+      await db.query(`UPDATE billing_accounts SET free_until=now()-interval '1 second' WHERE workspace_id=$1`, [wid]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.equal((await mode()).mode, 'prepaid');
+      const expired = ok(await local('GET', base)).free;
+      assert.deepEqual([expired.free, expired.workspace.expired, expired.workspace.reason], [false, true, on.reason]);
+      assert.equal(ok(await local('GET', '/v1/billing')).freePlan, null);
+
+      // A person's flag: the workspaces they own are free, the ones they only belong to are not; it binds to their
+      // sign-in identity, so a changed email doesn't matter.
+      const other = unique('free-other'), owner2 = unique('user');
+      await db.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$1,$1)', [other]);
+      await db.query(`INSERT INTO bane_users (id,name,email,email_verified) VALUES ($1,'Second owner',$2,true)`, [owner2, `${owner2}@example.com`]);
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member')`, [unique('wm'), other, owner2, unique('wm'), me]);
+      error(await local('PUT', `/v1/operator/billing/people/${owner2}/free`, { free: true, reason: 'A friend of the company' }), 422, 'NO_SIGN_IN_IDENTITY');
+      const granted = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: true, reason: 'Anomaly staff account', ticketRef: 'OPS-1' }));
+      assert.deepEqual(granted.workspaces.map((w: Json) => [w.workspaceId, w.mode, w.via]), [[wid, 'exempt', 'account']]);
+      assert.equal((await mode(other)).mode, 'prepaid', 'A member’s workspace is not free.');
+      assert.deepEqual((await db.query(`SELECT workspace_id,user_id,action FROM audit_events WHERE action LIKE 'billing.free_%' AND actor_id=$1 AND (workspace_id=$2 OR workspace_id IS NULL AND user_id=$1) ORDER BY action`, [me, wid])).rows.map(r => [r.workspace_id, r.user_id, r.action]),
+        [[null, me, 'billing.free_account_on'], [wid, null, 'billing.free_on'], [wid, null, 'billing.free_owner_on']]);
+      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, `renamed-${me}@example.com`]);
+      await db.query('SELECT billing_free_sweep()');
+      assert.deepEqual(await mode(), { mode: 'exempt', free_via: 'account' }, 'Bound to the identity, not the email.');
+      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, AUTH_EMAIL]);
+      // Ownership transfer re-evaluates: handing the workspace to someone else ends it; taking another one over starts it.
+      await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('wm'), wid, owner2]);
+      await db.query(`UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+      assert.equal((await mode()).mode, 'prepaid');
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [other, me]);
+      assert.deepEqual(await mode(other), { mode: 'exempt', free_via: 'account' });
+      const view = ok(await local('GET', `/v1/operator/billing/${other}`)).free;
+      assert.deepEqual([view.free, view.via, view.people.find((p: Json) => p.userId === me).free.reason], [true, 'account', 'Anomaly staff account']);
+      // Removing the flag ends it everywhere they own.
+      const revoked = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: false, reason: 'Left the partner program' }));
+      assert.deepEqual(revoked.workspaces.map((w: Json) => [w.workspaceId, w.mode]), [[other, 'prepaid']].sort());
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_free_people WHERE user_id=$1', [me])).rows[0].n, 0);
+      await db.query(`UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
+
+      // The scripts: a workspace until a date, and a person by issuer subject (never an address).
+      const { setBillingFree } = await import('./scripts/set-billing-free.js');
+      await assert.rejects(setBillingFree(db, ['workspace', wid, 'on', '--until', '2020-01-01', '--reason', 'Past dates are refused']), /future date/);
+      const scripted = await setBillingFree(db, ['workspace', wid, 'on', '--until', new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), '--reason', 'Conference sponsor this week']) as { old: Json; new: Json };
+      assert.deepEqual([scripted.old.free, scripted.new.free, scripted.new.via], [false, true, 'workspace']);
+      await assert.rejects(setBillingFree(db, ['account', AUTH_SUBJECT, 'on', '--reason', 'Anomaly staff account'], ''), /ACCOUNT_ISSUER/);
+      await assert.rejects(setBillingFree(db, ['account', AUTH_EMAIL, 'on', '--reason', 'Anomaly staff account']), /No user with that subject/, 'An address is not an identity.');
+      const person = await setBillingFree(db, ['account', AUTH_SUBJECT, 'on', '--reason', 'Anomaly staff account']) as { userId: string; workspaces: Json[] };
+      assert.deepEqual([person.userId, person.workspaces.map(w => [w.workspaceId, w.via]).sort()], [me, [[other, 'account'], [wid, 'workspace']].sort()]);
+      assert.deepEqual((await db.query(`SELECT coalesce(workspace_id,'-') AS w,action,actor_type,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events
+        WHERE via='script' AND action LIKE 'billing.free%' AND (workspace_id IN ($1,$2) OR workspace_id IS NULL AND user_id=$3) ORDER BY action,w`, [wid, other, me])).rows.map(r => [r.w, r.action, r.actor_type, r.kept]).sort(),
+        [['-', 'billing.free_account_on', 'operator', true], [wid, 'billing.free_on', 'operator', true], [other, 'billing.free_owner_on', 'operator', true], [wid, 'billing.free_owner_on', 'operator', true]].sort());
+    });
+  });
+
+  test('billing scripts: the mode and the installation switch change with their audit row', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const wid = await hostedBilling(runtime, db);
+      const [{ setBillingMode }, { setBillingEnforcement }] = await Promise.all([import('./scripts/set-billing-mode.js'), import('./scripts/set-billing-enforcement.js')]);
+      await assert.rejects(setBillingMode(db, [wid, 'free', '--reason', 'Anomaly workspace exemption']), /Usage/);
+      await assert.rejects(setBillingMode(db, ['no-such-workspace', 'exempt', '--reason', 'Anomaly workspace exemption']), /No workspace/);
+      assert.deepEqual(await setBillingMode(db, [wid, 'exempt', '--reason', 'Anomaly workspace exemption']), { old: 'prepaid', new: 'exempt', reason: 'Anomaly workspace exemption', via: 'script' });
+      assert.equal((await db.query('SELECT mode FROM billing_accounts WHERE workspace_id=$1', [wid])).rows[0].mode, 'exempt');
+      await assert.rejects(setBillingEnforcement(db, ['enforce', '--receive-hold', 'yes', '--reason', 'Billing goes live']), /on or off/);
+      // Billing launches enforced (300); a rollback to shadow and back stamps enforced_at again.
+      await setBillingEnforcement(db, ['shadow', '--reason', 'Roll back before the storage notice']);
+      const live = await setBillingEnforcement(db, ['enforce', '--storage-from', '2027-02-10', '--bill-simulated', 'on', '--reason', 'Billing goes live']);
+      assert.deepEqual([live.old.mode, live.new.mode, live.new.bill_simulated, live.new.storage_billing_from, typeof live.new.enforced_at], ['shadow', 'enforce', true, '2027-02-10', 'string']);
+      await setBillingEnforcement(db, ['shadow', '--storage-from', 'none', '--reason', 'Roll back to shadow']);
+      const config = (await db.query('SELECT mode,storage_billing_from,enforced_at IS NOT NULL AS stamped FROM billing_config')).rows[0];
+      assert.deepEqual([config.mode, config.storage_billing_from, config.stamped], ['shadow', null, true]);
+      // The workspace's mode is a billing event (kept 7 years); the installation switch belongs to no workspace or person.
+      assert.deepEqual((await db.query(`SELECT summary,reason,retain_until>at+interval '6 years 11 months' AS kept FROM audit_events WHERE workspace_id=$1 AND action='billing.mode'`, [wid])).rows,
+        [{ summary: { before: { mode: 'prepaid' }, after: { mode: 'exempt' } }, reason: 'Anomaly workspace exemption', kept: true }]);
+      assert.deepEqual((await db.query(`SELECT action FROM hosted_operator_audit WHERE workspace_id='installation' AND action LIKE 'set-billing-%' ORDER BY at`)).rows.map(r => r.action),
+        ['set-billing-enforcement', 'set-billing-enforcement', 'set-billing-enforcement']);
+    });
   });
 });
 
@@ -7312,7 +9436,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Node has no DO host; provide only its base constructor, storage and waitUntil.
       const { registerHooks } = await import('node:module');
       const hook = registerHooks({ resolve(specifier, context, next) {
-        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
       } });
       const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
       const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
@@ -9075,9 +11199,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // The same limit is visible before a send hits it.
       const limit = ok(await request('GET','/v1/me',key)).connection.sendingLimit;
       assert.equal(limit.cap,100); assert.ok(limit.used>=100); assert.equal(limit.nextCap,null); assert.equal(limit.nextCapAt,null);
-      // Plan & usage shows the same limit, the step it is on and the steps above it, with pricing as information only.
+      // Plan & usage shows the same limit, the step it is on and the steps above it, the price and the combined free allowance.
       const usage = ok(await request('GET','/v1/usage',key));
-      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: false }, { currency: 'USD', perThousand: 0.2, freeSent: 3000, freeReceived: 3000 }, false]);
+      // Billing launches enforced (migration 249); the workspace-wide switch is billing_config.
+      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 3000, freeStorageBytes: 1000000000 }, false]);
       assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [100, limit.used, 0, [100, 1000, 10000]]);
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
@@ -12801,7 +14926,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
         assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
         ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
-        assert.equal((await db.query("SELECT cents FROM inbox_protocol_daily_usage((now() AT TIME ZONE 'UTC')::date) WHERE inbox_id=$1",[p.id])).rows[0]?.cents,100);
+        // Protocol access is free (migration 295): issuing a password starts no charge period.
+        assert.equal((await db.query("SELECT to_regclass('inbox_protocol_periods') AS t")).rows[0].t,null);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);
         const page=async(folder:string)=>ok(await request('GET',`${base}/messages?folder=${folder}`,token)).data;
@@ -16781,7 +18907,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         registerHooks({ resolve(specifier, context, next) {
           if (faultResolver) faultResolver(specifier);
           if (specifier === 'cloudflare:workers') {
-            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
+            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
           }
           const resolved = next(specifier, context);
           loadedModules.add(resolved.url);

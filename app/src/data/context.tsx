@@ -4,7 +4,8 @@ import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
+import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
+import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
@@ -14,8 +15,12 @@ import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
+import { SignInConsent } from '../components/LegalLinks'
 
-type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
+// The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
+type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
+  switchAccount: (id: string, path?: string, workspace?: string) => Promise<void>; addAccount: (path?: string) => void; signOutAccount: (id?: string) => Promise<void>; signOutAll: () => Promise<void>
+  notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
 const HomePage = homeChunk.page(m => m.HomePage)
@@ -33,6 +38,40 @@ export function useWorkspaceAccess() {
 export function useOnboardingStage() {
   const identity = useContext(SessionContext)?.identity
   return onboardingStage(identity, useDomainStep(identity?.workspaceId))
+}
+// What a finished sign-in (?auth=) means. account_limit only follows Add account.
+const authMessages: Record<string, string> = {
+  google_required: 'Bane requires Google sign-in. Try again and choose Google at Anomaly account.',
+  method_required: 'Sign in again using the authentication method required by this installation.',
+  interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
+  account_limit: 'This browser already has the most accounts Bane connects at once. Sign out of one to add another.',
+  error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
+}
+// The section of the current page, without a record from the previous account or workspace in it.
+export function sectionPath(pathname = window.location.pathname) {
+  const [section, child] = pathname.split('/').filter(Boolean)
+  return (section === 'audience' && ['lists', 'segments'].includes(child)) || (section === 'campaigns' && child === 'templates') ? `/${section}/${child}` : section ? `/${section}` : '/'
+}
+// /v1/me as the tab's account. A remembered workspace the account no longer belongs to falls back to the server's
+// choice; an account this browser signed out of (in another tab, or its session expired or was revoked) falls back to
+// the browser's default account.
+async function loadIdentity(signal?: AbortSignal) {
+  let result: Identity
+  try { result = await request<Identity>('/v1/me', {signal}) }
+  catch (error) {
+    if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && selectedAccount()) selectAccount(null)
+    else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace()) selectWorkspace(null)
+    else throw error
+    try { result = await request<Identity>('/v1/me', {signal}) }
+    catch (retry) {
+      if (!(retry instanceof ApiError && retry.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace())) throw retry
+      selectWorkspace(null)
+      result = await request<Identity>('/v1/me', {signal})
+    }
+  }
+  selectAccount(result.id)
+  selectWorkspace(result.multiTenant ? result.workspaceId : null)
+  return result
 }
 function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
@@ -55,10 +94,21 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
+/** Pages anyone can open, signed in or not. */
+export const isPublicPath = (path: string) => path === '/docs' || path === '/legal' || path.startsWith('/legal/')
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
-  // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
-  const publicRoute = useLocation().pathname === '/docs'
+  // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
+  const publicRoute = isPublicPath(useLocation().pathname)
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
+  // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
+  // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
+  useState(() => {
+    const url = new URL(window.location.href), account = url.searchParams.get('account')
+    if (account === null) return
+    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) selectAccount(account)
+    url.searchParams.delete('account')
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+  })
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
   const client = useMemo(() => provided ?? createLiveApi(), [provided, generation])
@@ -101,15 +151,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
       const started = performance.now()
-      let result: Identity
-      try { result = await request<Identity>('/v1/me', {signal}) }
-      catch (error) {
-        // A remembered workspace the user no longer belongs to: fall back to the server's choice.
-        if (!(error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace())) throw error
-        selectWorkspace(null)
-        result = await request<Identity>('/v1/me', {signal})
-      }
-      selectWorkspace(result.multiTenant ? result.workspaceId : null)
+      const result = await loadIdentity(signal)
       console.info('[Bane timing] Dashboard session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
@@ -136,6 +178,97 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     if (path) window.history.pushState(null, '', path)
     setGeneration(value => value + 1)
   }
+  // Act as another connected account in this tab, at once: no round trip to the account service, one /v1/me to Bane.
+  // Nothing from the previous account stays cached or mounted (the generation remounts every screen and dialog), and
+  // responses to its requests still in flight are dropped (live.ts). null: the browser's default account.
+  async function enter(account: string | null, options: { path?: string; workspace?: string } = {}) {
+    const previous = { account: selectedAccount(), workspace: selectedWorkspace() }
+    await cache.cancelQueries()
+    selectAccount(account)
+    if (options.workspace) selectWorkspace(options.workspace)
+    let next: Identity
+    try { next = await loadIdentity() }
+    catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) { selectAccount(previous.account); selectWorkspace(previous.workspace); throw error }
+      // No account is left in this browser: the signed-out page.
+      selectAccount(null); cache.clear(); setGeneration(value => value + 1); await identity.refetch(); return
+    }
+    const accounts = cache.getQueryData<AccountList>(accountsKey)
+    cache.clear()
+    if (accounts) cache.setQueryData<AccountList>(accountsKey, { ...accounts, active: next.id })
+    cache.setQueryData(['identity'], next)
+    if (options.path) window.history.pushState(null, '', options.path)
+    setGeneration(value => value + 1)
+  }
+  async function switchAccount(id: string, path?: string, workspace?: string) {
+    if (id === selectedAccount() && cache.getQueryData(['identity'])) { if (workspace) await switchWorkspace(workspace, path); return }
+    await enter(id, { path, workspace })
+    // New tabs and links opened outside the dashboard follow the latest choice.
+    void accountApi.makeDefault(id).catch(() => {})
+  }
+  async function signOutAccount(id = selectedAccount() ?? undefined) {
+    const result = await accountApi.signOut(id ? { account: id } : {})
+    if (id) announce({ type: 'signed-out', accounts: [id] })
+    if (id && id !== selectedAccount()) { void cache.invalidateQueries({ queryKey: accountsKey }); return }
+    rememberDashboardReady(selectedWorkspace(), false)
+    if (result.active) { await enter(result.active, { path: '/' }); toast('Signed out of that account', 'success'); return }
+    selectAccount(null); selectWorkspace(null); cache.clear(); await identity.refetch()
+  }
+  async function signOutAll() {
+    await accountApi.signOut({ all: true })
+    announce({ type: 'signed-out', accounts: 'all' })
+    rememberDashboardReady(selectedWorkspace(), false)
+    selectAccount(null); selectWorkspace(null); cache.clear(); await identity.refetch()
+  }
+  // Add account: the account service's chooser in a popup. The popup starts the sign-in itself and is opened with
+  // noopener, so it holds no reference to this page; it reports back over the BroadcastChannel only. The account picked
+  // there opens in this tab; Bane never learns which other accounts are signed in at the account service.
+  const adding = useRef<{ tab: string; path?: string; fallback: number } | null>(null)
+  function addAccount(path?: string) {
+    if (adding.current) window.clearTimeout(adding.current.fallback)
+    const tab = crypto.randomUUID(), start = new URL(POPUP_PATH, window.location.origin)
+    start.searchParams.set('start', '1'); start.searchParams.set('tab', tab)
+    window.open(start.href, '_blank', 'popup,noopener,noreferrer,width=480,height=720')
+    // noopener leaves no handle to tell a blocked popup apart: one that hasn't announced itself within a few seconds
+    // didn't open, so the add continues in this tab as a redirect.
+    const fallback = window.setTimeout(() => { if (adding.current?.tab === tab) { adding.current = null; void redirectAdd() } }, 4000)
+    adding.current = { tab, path, fallback }
+  }
+  async function redirectAdd() {
+    const callback = new URL(window.location.pathname, window.location.origin)
+    callback.search = window.location.search; callback.searchParams.delete('auth')
+    try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
+    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : error instanceof Error ? error.message : 'Couldn’t add an account.', 'error') }
+  }
+  useEffect(() => onAccountEvent(event => {
+    if (event.type === 'add-started') { if (event.tab && event.tab === adding.current?.tab) window.clearTimeout(adding.current.fallback); return }
+    if (event.type === 'signed-in') {
+      void cache.invalidateQueries({ queryKey: accountsKey })
+      const pending = adding.current
+      if (!event.tab || event.tab !== pending?.tab) return
+      window.clearTimeout(pending.fallback)
+      adding.current = null
+      if (event.auth || !event.account) { toast(authMessages[event.auth ?? 'error'] ?? authMessages.error, 'error'); return }
+      void switchAccount(event.account, pending.path ?? sectionPath()).then(() => toast('Account added', 'success'), () => toast('Couldn’t open the account.', 'error'))
+      return
+    }
+    // Another tab signed this tab's account out: leave it now rather than at its next request.
+    const mine = selectedAccount()
+    if (event.accounts === 'all' || (mine && event.accounts.includes(mine))) void enter(null, { path: sectionPath() }).catch(() => {})
+    else void cache.invalidateQueries({ queryKey: accountsKey })
+  }))
+  // A request answered that this tab's account is signed out in this browser (expired or revoked): move to another.
+  // Several requests can learn it at once: leave once.
+  const leaving = useRef(false)
+  useEffect(() => {
+    const gone = () => {
+      if (leaving.current) return
+      leaving.current = true
+      void enter(null, { path: sectionPath() }).then(() => toast('That account was signed out', 'info'), () => {}).finally(() => { leaving.current = false })
+    }
+    window.addEventListener('bane:account-signed-out', gone)
+    return () => window.removeEventListener('bane:account-signed-out', gone)
+  })
   // Load the region catalog alongside /v1/me rather than after it; the shell reuses this cache entry.
   // An invitation link selects its workspace first, so wait until it is accepted. Workspaces that may
   // still need onboarding wait for /v1/me, so onboarding never starts dashboard requests.
@@ -153,8 +286,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     void cache.prefetchQuery({ queryKey: ['bane', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
-  async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
+  useEffect(() => { const denied = () => { if (!isPublicPath(window.location.pathname) && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
+  async function logout() { setAuthError(null); try { await signOutAccount() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
@@ -182,7 +315,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl())) }
+    try { const url = await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl()); expectAccount(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -199,23 +332,21 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your OIDC address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This OIDC account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
-    : authResult === 'google_required' ? <Alert tone="danger">Bane requires Google sign-in. Try again and choose Google at Anomaly account.</Alert>
-    : authResult === 'method_required' ? <Alert tone="danger">Sign in again using the authentication method required by this installation.</Alert>
-    : authResult === 'interaction_required' ? <Alert tone="info">Your identity provider needs you to complete sign-in. Try again and follow its prompts.</Alert>
-    : authResult === 'error' ? <Alert tone="danger">Sign-in didn’t finish. Check that you used your invited or approved account.</Alert>
+    : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
-  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in to Bane</h2>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
+        <SignInConsent className="muted" />
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>

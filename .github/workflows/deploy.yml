@@ -5,17 +5,17 @@ name: Deploy
 # Worker config. Infra is applied first, then the Worker migrates and deploys,
 # then health and the live dev E2E run — in one run, so a Pulumi Worker-secret
 # write can never race the E2E as it could when pulumi.yml was separate.
-run-name: Deploy ${{ github.ref_name }} ${{ github.event.workflow_run.head_sha || github.sha }}
+#
+# A dev deploy starts on the push itself, alongside that push's CI. Production
+# deploys only a commit with both a passing dev push CI and a passing live dev
+# E2E (dev-proof.sh, which waits for a CI still running), and needs no
+# reviewer: the proof, the production branch's ruleset and its fast-forward
+# history gate it (docs/ci.md).
+run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
 
 on:
-  # A dev deploy waits for the push CI on the same commit, the way deploy-dev
-  # did. github.ref_name is the default branch (dev) for workflow_run events.
-  workflow_run:
-    workflows: [CI]
-    branches: [dev]
-    types: [completed]
   push:
-    branches: [production]
+    branches: [dev, production]
   workflow_dispatch:
     inputs:
       ref:
@@ -41,17 +41,10 @@ concurrency:
 
 jobs:
   authorize:
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/production') ||
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'dev' &&
-      github.event.workflow_run.path == '.github/workflows/ci.yml' &&
-      github.event.workflow_run.head_repository.full_name == github.repository)
     name: Authorize
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Production waits here for a dev push CI that is still running (up to 25 minutes).
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -61,32 +54,38 @@ jobs:
       sha: ${{ steps.pin.outputs.sha }}
       pulumi: ${{ steps.paths.outputs.pulumi }}
     steps:
-      # A dev deploy can also run as a workflow_run, whose triggering_actor is
-      # the pusher of the upstream CI run. A rerun keeps the rerunner as
-      # github.triggering_actor, so both are checked. The merge queue pushes
-      # dev as github-merge-queue[bot] on behalf of whoever added the pull
-      # request to it (its merged_by; only users allowed to push dev can), so
-      # for that pusher the pull request merged at exactly this commit must
+      # github.actor pushed or dispatched; a rerun keeps it and makes the
+      # rerunner github.triggering_actor, so both are checked. The merge queue
+      # pushes dev as github-merge-queue[bot] on behalf of whoever added the
+      # pull request to it (its merged_by; only users allowed to push dev can),
+      # so for that pusher the pull request merged at exactly this commit must
       # have been merged by an authorized actor.
       - name: Require an authorized actor
         env:
           EVENT: ${{ github.event_name }}
           ACTOR: ${{ github.triggering_actor }}
-          UPSTREAM_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
+          PUSHER: ${{ github.actor }}
+          SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           allowed='^(thdxr|R44VC0RP)$'
           enqueued_by() {
             [[ $SHA =~ ^[0-9a-f]{40}$ ]] || return 0
-            local pr
-            pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" | jq -r --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '[.[] | select(.merged_at and .base.ref == "dev" and .base.repo.full_name == $repo and .merge_commit_sha == $sha) | .number][0] // empty')
+            # GitHub links the queue's merge commit to its pull request a few
+            # seconds after the push that starts this job (#151's own deploy
+            # found none 4 s in), so retry an empty lookup for up to 2 minutes.
+            local pr='' try
+            for ((try = 1; try <= 12; try++)); do
+              pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" | jq -r --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '[.[] | select(.merged_at and .base.ref == "dev" and .base.repo.full_name == $repo and .merge_commit_sha == $sha) | .number][0] // empty')
+              [[ $pr =~ ^[0-9]+$ ]] && break
+              if ((try < 12)); then echo "No merged pull request for $SHA yet; retrying in 10 s." >&2; sleep 10; fi
+            done
             [[ $pr =~ ^[0-9]+$ ]] || return 0
             gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.merged_by.login // empty'
           }
           require() {
             [[ $2 =~ $allowed ]] && return 0
-            if [[ $EVENT == workflow_run && $2 == 'github-merge-queue[bot]' ]]; then
+            if [[ $EVENT == push && $GITHUB_REF == refs/heads/dev && $2 == 'github-merge-queue[bot]' ]]; then
               by=$(enqueued_by)
               if [[ $by =~ $allowed ]]; then echo "The merge queue pushed $SHA for $by."; return 0; fi
               echo "::error::Only thdxr and R44VC0RP may deploy (the merge queue pushed $SHA for ${by:-an unknown pull request})."
@@ -96,7 +95,7 @@ jobs:
             exit 1
           }
           require actor "$ACTOR"
-          if [[ $EVENT == workflow_run ]]; then require 'upstream actor' "$UPSTREAM_ACTOR"; fi
+          if [[ $PUSHER != "$ACTOR" ]]; then require 'original actor' "$PUSHER"; fi
 
       - id: stage
         name: Pick the stage from the branch
@@ -106,14 +105,14 @@ jobs:
             *) echo "::error::Deploy runs from the dev or production branch, not $GITHUB_REF."; exit 1 ;;
           esac
 
-      # Check the triggering commit, not workflow_run's default-branch SHA or
-      # a production rollback's explicitly authorized ancestor. Reuse this
-      # live check in each privileged job (including on failed-job reruns).
+      # Check the triggering commit, not a production rollback's explicitly
+      # authorized ancestor. Reuse this live check in each privileged job
+      # (including on failed-job reruns).
       - &stage-tip
         name: Require the triggering commit to still be the stage branch tip
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
           [[ $tip =~ ^[0-9a-f]{40}$ ]]
@@ -129,7 +128,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           STAGE: ${{ steps.stage.outputs.stage }}
           INPUT_REF: ${{ inputs.ref }}
-          EVENT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
           if [[ $EVENT == workflow_dispatch && $STAGE == production && -n $INPUT_REF && $INPUT_REF != production ]]; then
             ref=$(jq -rn --arg ref "$INPUT_REF" '$ref | @uri')
@@ -150,16 +149,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require a successful dev push CI for this commit
-        if: steps.stage.outputs.stage == 'dev'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.pin.outputs.sha }}
-        run: |
-          [[ $SHA =~ ^[0-9a-f]{40}$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=dev&head_sha=$SHA&status=success" |
-            jq -e --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" 'any(.workflow_runs[]; .head_sha == $sha and .head_repository.full_name == $repo)' || { echo 'No passing dev push CI for this SHA' >&2; exit 1; }
-
       - name: Check the production commit
         if: steps.stage.outputs.stage == 'production'
         env:
@@ -178,22 +167,16 @@ jobs:
           if ! git merge-base --is-ancestor "$SHA" origin/production; then
             echo "::error::$SHA is not reachable from origin/production; production is fast-forward only, so deploy a commit it already contains."; exit 1
           fi
-          repo="repos/$GITHUB_REPOSITORY"
-          gh api "$repo/compare/$SHA...dev?per_page=1" | jq -e --arg sha "$SHA" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$SHA is not reachable from dev"; exit 1; }
-          # The name of the dev deploy job is derived from the same immutable
-          # output as its checkout, so the E2E step proves this exact commit.
-          for ((page=1; ; page++)); do
-            runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?status=success&branch=dev&per_page=100&page=$page")
-            if [[ $(jq '.workflow_runs | length' <<< "$runs") == 0 ]]; then break; fi
-            ids=$(jq -r --arg title "Deploy dev $SHA" --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.display_title == $title and .conclusion == "success" and .head_branch == "dev" and .head_repository.full_name == $repo and (.event == "workflow_run" or .event == "workflow_dispatch")) | .id' <<< "$runs")
-            for id in $ids; do
-              jobs=$(gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100")
-              if jq -e --arg job "Deploy dev $SHA" 'any(.jobs[]; .name == $job and .conclusion == "success" and any(.steps[]; .name == "Live dev E2E" and .conclusion == "success"))' <<< "$jobs"; then
-                echo "Verified dev run $id for $SHA"; exit 0
-              fi
-            done
-          done
-          echo "::error::No successful deploy.yml dev job with a passing live E2E for exactly $SHA"; exit 1
+          gh api "repos/$GITHUB_REPOSITORY/compare/$SHA...dev?per_page=1" | jq -e --arg sha "$SHA" '.merge_base_commit.sha == $sha' >/dev/null || { echo "::error::$SHA is not reachable from dev"; exit 1; }
+
+      # The dev deploy no longer waits for dev CI, so production checks both
+      # halves of dev's proof itself, waiting for a CI that is still running.
+      - name: Require a passing dev E2E and dev push CI for this commit
+        if: steps.stage.outputs.stage == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pin.outputs.sha }}
+        run: bash .github/scripts/dev-proof.sh "$SHA"
 
       - id: paths
         name: Decide whether Pulumi has work
@@ -206,35 +189,8 @@ jobs:
           if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          # N12: compare against the commit the last applied Pulumi run deployed, not the previous
-          # tip or first parent. A superseded run stops at its tip check, so the next run would
-          # otherwise skip the infrastructure change it carried. Applied means that run's Pulumi
-          # and Worker jobs both succeeded (a preview skips the Worker job); anything else runs Pulumi.
-          repo="repos/$GITHUB_REPOSITORY"; base=
-          runs=$(gh api "$repo/actions/workflows/deploy.yml/runs?branch=$STAGE&status=success&per_page=30" |
-            jq -r --arg repo "$GITHUB_REPOSITORY" '.workflow_runs[] | select(.head_repository.full_name == $repo) | [.id, .display_title] | @tsv')
-          while IFS=$'\t' read -r id title; do
-            [[ $title =~ ^Deploy\ $STAGE\ ([0-9a-f]{40})$ ]] || continue
-            applied=${BASH_REMATCH[1]}
-            if gh api "$repo/actions/runs/$id/jobs?filter=latest&per_page=100" |
-              jq -e --arg p "Pulumi $STAGE" --arg d "Deploy $STAGE $applied" '[.jobs[] | select((.name == $p or .name == $d) and .conclusion == "success")] | length == 2' >/dev/null; then
-              base=$applied; break
-            fi
-          done <<< "$runs"
-          if [[ -z $base ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$base" "$SHA"; then
-            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
-            echo "No applied Pulumi commit is an ancestor of $SHA; running Pulumi." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$base" "$SHA")
-          # Pulumi also reads the shared mail-control documents and the receiving-set check.
-          if grep -Eq '^(infra/pulumi/|infra/aws-shared/|api/src/mail-controls\.ts$|\.github/scripts/receiving-rule-set\.sh$|\.github/workflows/(deploy|pulumi)\.yml$)' <<< "$changed"; then
-            echo 'pulumi=true' >> "$GITHUB_OUTPUT"
           else
-            echo 'pulumi=false' >> "$GITHUB_OUTPUT"
-            echo "No infrastructure changes since the last applied commit $base; skipping Pulumi." >> "$GITHUB_STEP_SUMMARY"
+            bash .github/scripts/pulumi-has-work.sh "$STAGE" "$SHA"
           fi
 
   pulumi:
@@ -462,6 +418,8 @@ jobs:
             BANE_ROOT_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
             ACCOUNT_CLIENT_PRIVATE_KEY,bane/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
+            STRIPE_SECRET_KEY,bane/${{ env.STAGE }}/STRIPE_SECRET_KEY
+            STRIPE_WEBHOOK_SECRET,bane/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
           parse-json-secrets: false
 
       # Only dev runs a live E2E, so only dev has an E2E key to read.
@@ -583,3 +541,81 @@ jobs:
           SHA: ${{ needs.authorize.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/e2e-issue.sh "$RUNNER_TEMP/e2e"
+
+  # The support Worker (support/README.md): bane-support-dev beside bane-dev, bane-support beside bane-production. It runs
+  # after Bane because its service binding needs Bane's SupportPlatform entrypoint. Off until the repository variable
+  # SUPPORT_DEPLOY is 'true': its D1 database, support address and Worker secrets are set up once by hand, and its secrets
+  # (CONSOLE_GATEWAY_KEY and the rest) are set with `wrangler secret put`, never read here.
+  support:
+    name: Deploy support ${{ needs.authorize.outputs.stage }} ${{ needs.authorize.outputs.sha }}
+    needs: [authorize, deploy]
+    if: always() && needs.deploy.result == 'success' && vars.SUPPORT_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    environment: ${{ github.ref_name }}
+    env:
+      STAGE: ${{ needs.authorize.outputs.stage }}
+      CF_ACCOUNT_ID: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}
+    steps:
+      - *unfrozen
+      - *stage-tip
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.16.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: support
+
+      - name: Configure the stage
+        run: |
+          case "$STAGE" in
+            dev) config=wrangler.dev.jsonc; database=bane-support-dev; url=https://support.dev.bane.mx ;;
+            production) config=wrangler.prod.jsonc; database=bane-support; url=https://support.bane.mx ;;
+            *) echo "::error::unknown stage $STAGE"; exit 1 ;;
+          esac
+          { echo "SUPPORT_CONFIG=$config"; echo "SUPPORT_DATABASE=$database"; echo "SUPPORT_URL=$url"; } >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
+          role-session-name: bane-${{ env.STAGE }}-support-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Mint a short-lived Cloudflare token
+        id: cloudflare
+        uses: ./.github/actions/cloudflare-token
+        with:
+          account-id: ${{ env.CF_ACCOUNT_ID }}
+
+      - *stage-tip
+
+      - name: Migrate the support database
+        working-directory: support
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+        run: ./node_modules/.bin/wrangler d1 migrations apply "$SUPPORT_DATABASE" --remote --config "$SUPPORT_CONFIG"
+
+      - name: Deploy the support Worker
+        working-directory: support
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+        run: ./node_modules/.bin/wrangler deploy --config "$SUPPORT_CONFIG" > /dev/null
+
+      - name: Health check
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 10 "$SUPPORT_URL/health" | jq -e '.status == "ok"' > /dev/null; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::$SUPPORT_URL/health did not answer ok"; exit 1

@@ -422,7 +422,20 @@ export function screenedHtml(html: string, previewText?: string): string {
   for (let i = 0; i < 2; i++) { const again = pass(copy, previewText); if (again === copy) break; copy = again; }
   return copy;
 }
-function pass(html: string, previewText?: string): string {
+/** What the probation pass read of an HTML body, for the support lint (src/deliverability.ts). */
+export type HtmlStats = { words: number; imageArea: number; images: number; hiddenWords: number; recoloredWords: number };
+/**
+ * The probation pass's own reading of an HTML body, without refusing it: visible words, images by the area a client
+ * draws them at, words hidden by markup (not displayed, invisible, zero-sized) and words drawn in their background
+ * color, and how many more words the image rule (a 200 x 200 picture free, 25 words per further 600 x 300) asks for.
+ */
+export function screenedHtmlStats(html: string) {
+  const stats: HtmlStats = { words: 0, imageArea: 0, images: 0, hiddenWords: 0, recoloredWords: 0 };
+  pass(html, undefined, stats);
+  const required = Math.max(0, Math.ceil((stats.imageArea - IMAGE_FREE_PIXELS) / IMAGE_PIXELS_PER_WORD));
+  return { ...stats, wordsRequiredByImages: required, imageRulePasses: stats.words >= required };
+}
+function pass(html: string, previewText?: string, stats?: HtmlStats): string {
   if (html.length > 512 * 1024) throw tooLarge();
   const document = boundedHtmlFragment(html, 'document');
   if (!document) throw tooLarge();
@@ -489,6 +502,7 @@ function pass(html: string, previewText?: string): string {
           seenText = true; words += wordsIn(node);
           // Text drawn in its background color is recolored so it reads as the screen read it.
           if (contrast(inherited.color, inherited.background) < READABLE) {
+            if (stats) stats.recoloredWords += wordsIn(node);
             const ink = contrast([0, 0, 0], inherited.background) >= contrast([255, 255, 255], inherited.background) ? '#000000' : '#ffffff';
             const span = defaultTreeAdapter.createElement('span', HTML, [{ name: 'style', value: `color:${ink}` }]);
             defaultTreeAdapter.insertBefore(parent, span, node); detach(node); defaultTreeAdapter.appendChild(span, node);
@@ -505,7 +519,8 @@ function pass(html: string, previewText?: string): string {
         seenText = true; i++; continue;
       }
       // Not displayed in the light scheme: left out with its content, as a client would.
-      if (node.attrs.some(a => a.name === 'hidden') || merged.find(d => d.property === 'display')?.value.trim().toLowerCase() === 'none') { detach(node); continue; }
+      if (node.attrs.some(a => a.name === 'hidden') || merged.find(d => d.property === 'display')?.value.trim().toLowerCase() === 'none') { if (stats) stats.hiddenWords += wordsIn(node); detach(node); continue; }
+      if (stats && hides(style)) stats.hiddenWords += wordsIn(node);
       const allowed = own(KEPT, node.tagName);
       if (!allowed) {
         // Unwrap: the children take the element's place and are read in turn.
@@ -523,6 +538,7 @@ function pass(html: string, previewText?: string): string {
         const side = (name: 'width' | 'height') => { const sizes = [length(declared.get(name)), length(node.attrs.find(a => a.name === name)?.value)].filter((n): n is number => n !== undefined); return sizes.length ? Math.max(...sizes) : undefined; };
         const width = side('width'), height = side('height');
         imageArea += (width ?? 600) * (height ?? (width === undefined ? 400 : Math.round(width * 2 / 3)));
+        if (stats) stats.images++;
       }
       const applied = [...declared].map(([property, value]) => `${property}:${value}`).join(';');
       if (applied) node.attrs.push({ name: 'style', value: applied });
@@ -549,7 +565,8 @@ function pass(html: string, previewText?: string): string {
   const { state, style } = styled(body, { fontPx: 16, color: [0, 0, 0], background: [255, 255, 255] }, merged);
   if (style) body.attrs.push({ name: 'style', value: style });
   clean(body, state);
-  if (imageArea > IMAGE_FREE_PIXELS + words * IMAGE_PIXELS_PER_WORD) throw imageOnly();
+  if (stats) Object.assign(stats, { words, imageArea });
+  else if (imageArea > IMAGE_FREE_PIXELS + words * IMAGE_PIXELS_PER_WORD) throw imageOnly();
   if (previewText) {
     const preheader = defaultTreeAdapter.createElement('div', HTML, [{ name: 'data-bane-preview', value: 'true' }, { name: 'data-skip-in-text', value: 'true' }, { name: 'style', value: PREHEADER_STYLE }]);
     defaultTreeAdapter.appendChild(preheader, defaultTreeAdapter.createTextNode(previewText));

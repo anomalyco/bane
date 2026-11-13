@@ -39,6 +39,8 @@
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
     "DEFAULT_SES_REGION": "us-east-2",
+    // Stripe Tax stays off until its registrations exist (api/README.md, Stripe setup). The keys are Worker secrets.
+    "STRIPE_AUTOMATIC_TAX": "false",
     // Live SES uses the shared-account key (infra/aws-shared). Sends stay denied by its IAM policy
     // until every send carries an SES TenantName.
     "ENABLE_LIVE_SES": "true",
@@ -56,7 +58,14 @@
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.
     "LEGACY_FEEDBACK_QUEUE_NAME": "bane-dev-feedback",
     // Set once to the recorded UTC cutover after fencing old producers. Empty quarantines every unsigned item.
-    "LEGACY_FEEDBACK_CUTOVER": ""
+    "LEGACY_FEEDBACK_CUTOVER": "",
+    // Support reads this Worker's own request lines from Workers Logs (GET /v1/support/requests). The token is the
+    // CF_OBSERVABILITY_TOKEN secret (api/README.md "Support integration").
+    "CF_OBSERVABILITY_ACCOUNT_ID": "d8e944f537ceef3f06a5bd3aec1d7a53",
+    "CF_OBSERVABILITY_SCRIPT": "bane-dev",
+    // The support agent (support/): "Contact support" hands off here, and staff sign-in returns to its /staff/callback.
+    // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
+    "BANE_SUPPORT_URL": "https://support.dev.bane.mx/chat"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).

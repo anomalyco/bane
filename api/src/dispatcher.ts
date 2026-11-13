@@ -595,6 +595,9 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
           -- An owner notice (sendSystemEmail): only from the configured platform workspace, about a committed standing event.
           WHEN starts_with(x.actor_key_id, 'standing:') THEN x.campaign_id IS NULL AND x.workspace_id=${runtime.config.platformDomainWorkspace ?? null}::text
             AND EXISTS (SELECT FROM standing_events s WHERE s.id=substr(x.actor_key_id,10))
+          -- A billing owner notice (billing/notify.ts): the same, about a committed billing_notices row.
+          WHEN starts_with(x.actor_key_id, 'billing:') THEN x.campaign_id IS NULL AND x.workspace_id=${runtime.config.platformDomainWorkspace ?? null}::text
+            AND EXISTS (SELECT FROM billing_notices n WHERE n.id=substr(x.actor_key_id,9))
           WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`, sql`x.campaign_id IS NULL`)})
           WHEN starts_with(x.actor_key_id, 'app_') THEN EXISTS (
             SELECT FROM (${principal(runtime, 'smtp', sql`p.id=x.actor_key_id AND b.workspace_id=x.workspace_id`)} FOR SHARE OF p,b) a

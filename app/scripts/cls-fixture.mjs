@@ -242,6 +242,29 @@ async function standing(db, workspaceId, { score, limit, step, reasons = [], sin
     [rid('stev'), workspaceId, i + 1, event.at, event.from, event.to, JSON.stringify(event.reasons ?? [])]);
 }
 
+// Billing, enforced: Northwind is funded (top-ups, a welcome credit, hourly usage, a saved card and auto-recharge on);
+// Harbor owes $12.40 after its free allowance, so sending is paused and received mail is in its 7-day grace.
+async function billing(db) {
+  const post = (wid, kind, source, paid, promo = 0n, detail = {}, who = 'system') => db.query('SELECT billing_post($1,$2,$3,$4::bigint,$5::bigint,$6::jsonb,$7)', [wid, kind, source, String(paid), String(promo), JSON.stringify(detail), who]);
+  const usage = (wid, i, send, receive, omen = 0) => {
+    const from = new Date(Math.floor(Date.now() / 3600_000) * 3600_000 - (i + 2) * 3600_000), cost = BigInt(send + receive) * 20_000n + BigInt(omen) * 10_000n;
+    return post(wid, 'usage', `usage:cls:${wid}:${i}`, -cost, 0n, { meters: { send: { quantity: send }, receive: { quantity: receive }, ...(omen ? { omen: { quantity: omen } } : {}) }, costUc: String(cost), charged: true, from: from.toISOString(), to: new Date(from.getTime() + 3600_000).toISOString() });
+  };
+  await db.query("UPDATE billing_config SET mode='enforce',enforced_at=now()");
+  await post('ws_northwind', 'topup', 'attempt:bpa_cls_first', 5_000_000_000n, 0n, {}, 'stripe');
+  await post('ws_northwind', 'grant', 'grant:cls-welcome', 0n, 1_000_000_000n, { reason: 'Welcome credit' }, 'operator:user_dana');
+  for (const [i, [send, receive, omen]] of [[412, 38, 12], [1260, 75, 30], [96, 12, 0], [884, 41, 9], [57, 3, 0], [2210, 120, 44]].entries()) await usage('ws_northwind', i, send, receive, omen);
+  await post('ws_northwind', 'topup', 'attempt:bpa_cls_recharge', 2_500_000_000n, 0n, { recharge: true }, 'stripe');
+  await db.query(`UPDATE billing_accounts SET stripe_customer='cus_cls_northwind',stripe_payment_method='pm_cls_northwind',card_brand='visa',card_last4='4242',card_exp_month=4,card_exp_year=2028,card_fingerprint='fp_cls',
+    recharge_enabled=true,free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=2140,month_spend_uc=104000000 WHERE workspace_id='ws_northwind'`);
+  await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity,settled_quantity) SELECT 'ws_northwind',date_trunc('hour',now())-make_interval(hours=>g),m.meter,m.q,m.q
+    FROM generate_series(2,7) g CROSS JOIN (VALUES ('send',820),('receive',48),('omen',16)) m(meter,q)`);
+  await db.query("INSERT INTO mail_storage_aged(workspace_id,aged_bytes,aged_through) VALUES ('ws_northwind',214000000,(now() AT TIME ZONE 'UTC')::date-91)");
+  await post('ws_harbor', 'topup', 'attempt:bpa_cls_harbor', 2_000_000_000n, 0n, {}, 'stripe');
+  await usage('ws_harbor', 0, 158_000, 4000);
+  await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '2 days',empty_since=now()-interval '2 days',free_month=date_trunc('month',now() AT TIME ZONE 'UTC')::date,free_emails_used=3000,month_spend_uc=3240000000 WHERE workspace_id='ws_harbor'`);
+}
+
 export async function seed(fx) {
   const { db } = fx;
   const dana = await fx.signIn('dana', 'dana@northwind.example', 'Dana Rivera', { id: 'ws_northwind', name: 'Northwind' });
@@ -328,13 +351,20 @@ export async function seed(fx) {
   await standing(db, 'ws_harbor', { score: 72.4, limit: 500, step: 'restrict', since: ago(2 * 24 * 60), reasons: [complaints], factors: [factor('complaints', 'Complaints', 30, 0.0021, 31.2), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.011, 86.7), factor('hygiene', 'List quality', 15, 0.034, 79.1), factor('auth', 'Authentication', 10, 0.7, 70), factor('engagement', 'Engagement', 10, 0.006, 77.8)],
     events: [{ at: ago(3 * 24 * 60), from: 'ok', to: 'warn', reasons: [{ ...complaints, code: 'COMPLAINTS_WARN', step: 'warn', count: 2, message: '2 of 1,830 accepted emails were marked as spam in 24 hours (0.11%; the warn line is 0.05% and 2).' }] }, { at: ago(2 * 24 * 60), from: 'warn', to: 'restrict', reasons: [complaints] }] });
 
+  await billing(db);
+
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
   await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
   void nia;
+  // Lumen Labs is a design partner: free (not billed) for 60 days, so its Billing page shows the free plan.
+  await db.query("SELECT billing_set_workspace_free('ws_fresh', true, 'Design partner', now()+interval '60 days', 'operator:user_dana')");
+  // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
+  const mcp = 'mcp_at_cls_fixture';
+  await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
   return {
-    restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,
   };
 }

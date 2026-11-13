@@ -252,3 +252,13 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getOverviewSetup` | `settings` · `setup` · admin |
 | `listActivity` | Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity). |
 | `contactSupport` | Human step: a signed-in person contacts Bane support from the dashboard. |
+| `getBilling` | `billing` · `get` · admin |
+| `getBillingUsage` | `billing` · `usage` · admin |
+| `listBillingLedger` | `billing` · `ledger` · admin |
+| `listBillingPayments` | `billing` · `payments` · admin |
+| `getBillingPayment` | `billing` · `payment` · admin |
+| `createBillingTopUp` | Human step: only a signed-in owner or admin charges the saved card or opens Checkout from the dashboard. Agents create a link a person pays (billing · topUpLink). |
+| `createBillingTopUpLink` | `billing` · `topUpLink` · admin |
+| `updateBillingAutoRecharge` | Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard. |
+| `createBillingCardSetup` | Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach Bane or an agent. |
+| `deleteBillingPaymentMethod` | Human step: a signed-in owner or admin removes the saved card in the dashboard. |

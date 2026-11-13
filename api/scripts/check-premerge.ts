@@ -4,6 +4,7 @@
 // Locally it defaults to the merge-base with dev. Set GH_TOKEN, GITHUB_REPOSITORY and PR_NUMBER to also compare
 // migration numbers with other open pull requests. docs/ci.md explains each failure and how to fix it.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from 'node:module';
 import { isDeepStrictEqual } from 'node:util';
@@ -64,8 +65,8 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   }
   const [dev, prod] = [configs['wrangler.dev.jsonc'], configs['wrangler.prod.jsonc']];
   if (dev && prod && !isDeepStrictEqual(dev.assets, prod.assets)) fail('Worker routes', 'The assets block differs between api/wrangler.dev.jsonc and api/wrangler.prod.jsonc. dev is the only place production routing is tested before release: keep them identical.', 'api/wrangler.prod.jsonc');
-  // The Worker module imports cloudflare:workers for its Durable Object; give Node an empty stand-in.
-  register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s,c,n){return s==='cloudflare:workers'?{url:'data:text/javascript,export class DurableObject{}',shortCircuit:true}:n(s,c)}`));
+  // The Worker module imports cloudflare:workers for its Durable Object and the SupportPlatform entrypoint; give Node empty stand-ins.
+  register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s,c,n){return s==='cloudflare:workers'?{url:'data:text/javascript,export class DurableObject{};export class WorkerEntrypoint{}',shortCircuit:true}:n(s,c)}`));
   const worker = (await import('../src/worker.js')).default as { fetch(request: Request, env: unknown, ctx: unknown): Promise<Response> };
   const env = { ASSETS: { fetch: async () => new Response('static asset', { headers: { 'x-premerge-asset': '1' } }) }, ADMISSION: { limit: async () => ({ success: false }) } };
   // An API path ends at admission (refused here, so nothing else loads); only the outcome matters, not its log line.
@@ -113,16 +114,20 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     const get = async (path: string) => {
       const response = await fetch(`https://api.github.com/${path}`, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' } });
       if (!response.ok) throw new Error(`GitHub ${path}: HTTP ${response.status}`);
-      return response.json() as Promise<{ number: number; filename: string; status: string }[]>;
+      return response.json() as Promise<{ number: number; filename: string; status: string; sha: string }[]>;
     };
+    // A stacked PR (one built on this one) carries this PR's migration files unchanged: the same blob is the same
+    // migration, not a second PR claiming its number.
+    const blob = (name: string) => { const bytes = readFileSync(new URL(`migrations/${name}`, api)); return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'); };
+    const ours = new Map(added.map(name => [name, blob(name)]));
     const pulls: { number: number }[] = [];
     for (let page = 1; ; page++) { const rows = await get(`repos/${repo}/pulls?state=open&base=dev&per_page=100&page=${page}`); pulls.push(...rows); if (rows.length < 100) break; }
     await Promise.all(pulls.filter(p => p.number !== pr).map(async p => {
       for (let page = 1; page <= 30; page++) {
         const files = await get(`repos/${repo}/pulls/${p.number}/files?per_page=100&page=${page}`);
         for (const f of files) {
-          const n = f.status === 'added' && f.filename.startsWith(`${dir}/`) ? number(f.filename.slice(dir.length + 1)) : undefined;
-          if (n && (!claimed.has(n) || claimed.get(n)! > p.number)) claimed.set(n, p.number);
+          const name = f.filename.slice(dir.length + 1), n = f.status === 'added' && f.filename.startsWith(`${dir}/`) ? number(name) : undefined;
+          if (n && ours.get(name) !== f.sha && (!claimed.has(n) || claimed.get(n)! > p.number)) claimed.set(n, p.number);
         }
         if (files.length < 100) break;
       }

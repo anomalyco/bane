@@ -63,6 +63,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
+        if (recover && runtime.config.multiTenant) try { await (await import('./billing/stripe-jobs.js')).billingMinute(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake,'work');
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);

@@ -20,6 +20,10 @@
 .op-rows > div { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; min-height: 32px; padding-block: 6px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .op-rows dt { color: var(--color-muted); font-size: var(--text-xs); }
 .op-rows dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* Billing rows hold one line each (values arrive after the page), so nothing below them moves. */
+.op-rows--single dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-rows--single > div { align-items: center; }
+.op-free { display: flex; align-items: center; gap: var(--space-12); }
 .op-reasons { display: flex; flex-direction: column; gap: var(--space-8); margin: 0 0 var(--space-12); padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .op-reasons li { display: flex; flex-direction: column; gap: 2px; }
 .op-reasons .muted { font-family: var(--font-mono); font-size: var(--text-xs); }

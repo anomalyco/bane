@@ -75,6 +75,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   logs: { label: 'Mail records: all lists sent and received mail together (received content is untrusted)', actions: {
     all: 'listLogs', list: 'listEmails', get: 'getEmail', detail: 'getEmailDetail', content: 'getEmailContent', events: 'listEmailEvents',
   } },
+  billing: { label: 'Billing balance and usage', actions: {
+    get: 'getBilling', usage: 'getBillingUsage', ledger: 'listBillingLedger', payments: 'listBillingPayments', payment: 'getBillingPayment', topUpLink: 'createBillingTopUpLink',
+  } },
   usage: { label: 'Sending and engagement metrics, plan and limits', actions: { metrics: 'getMetrics', senderScore: 'getSenderScore', plan: 'getUsage' } },
   settings: { label: 'Workspace settings', actions: {
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
@@ -99,6 +102,7 @@ const actionSummaries: Record<string, string> = {
   replyToInboundThread: 'reply to a reviewed message with confirmed To/Cc/Bcc, content and send time',
   waitForMessage: 'wait for the next inbox message',
   createApiKey: 'create an API key (secret returned once)',
+  createBillingTopUpLink: 'create a Stripe Checkout link a person pays (agents cannot pay)',
 };
 function actionSummary(id: string) {
   return actionSummaries[id] ?? id.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();

@@ -24,6 +24,8 @@ import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { assertHostedAllowance, bulkFlags, hostedAllowance, hostedCost, marketingHeld, type HostedAllowance } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
+import { assertBilling, billingGate } from './billing/gate.js';
+import type { BillingGate } from './billing/types.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
@@ -87,7 +89,9 @@ export function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, clai
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0, incoming = 1, marketingRows = 0) => sql`SELECT projected, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
+// billable: every recipient of the submission, even when the installation simulates SES (billing_gate prices those only
+// with bill_simulated). The billing column is NULL off Hosted and for the platform's own workspace.
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0, incoming = 1, marketingRows = 0, billable = cost, sim = false) => sql`SELECT projected, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted, ${billingGate(runtime.config, a.workspaceId, billable, sim)} AS billing,
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.kind = 'byo')` : sql``}) AS quota
   FROM direct_pending_load(${a.workspaceId},${incoming},${marketingRows})`;
@@ -97,8 +101,9 @@ function assertPending(counts: { projected: number; quota: number | string | nul
 }
 /** Caller holds the admission lock (sendFromMailbox takes it before its sender check). */
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number, marketingStream = false) {
-  const charge = isSimulatedSes(runtime) ? 0 : cost, marketing = marketingStream ? charge : 0;
-  const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge, marketing));
+  const sim = isSimulatedSes(runtime), charge = sim ? 0 : cost, marketing = marketingStream ? charge : 0;
+  const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null; billing: BillingGate | null }>(pendingCounts(runtime, a, charge, marketing, 1, 0, cost, sim));
+  assertBilling(counts!.billing, counts!.hosted, { workspaceId: a.workspaceId, config: runtime.config });
   assertHostedAllowance(counts!.hosted, charge, marketing);
   assertPending(counts!);
   return (counts?.hosted?.used??0)+charge>=5000;
@@ -161,7 +166,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: typeof campaigns.$inferSelect) {
   if (!row.reviewId) return null;
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
@@ -176,6 +181,43 @@ const CampaignStats = z.object({
   totals: z.object({ accepted: z.number().int(), delivered: z.number().int(), bounced: z.number().int(), complained: z.number().int(), opened: z.number().int(), clicked: z.number().int(), failed: z.number().int(), deliveryDelayed: z.number().int(), simulated: z.number().int() }).describe('Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.'),
   rates: z.object({ delivery: CampaignRate.describe('Delivered / accepted. Receiving-server acceptance, not inbox placement.'), bounce: CampaignRate.describe('Bounced / accepted.'), complaint: CampaignRate.describe('Complained / accepted.'), open: CampaignRate.describe('Unique opened emails / delivered.'), click: CampaignRate.describe('Unique clicked emails / delivered, not click-to-open rate.') }),
 }).describe('Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.').openapi('CampaignStats');
+/**
+ * Lifetime statistics of campaigns (GET /v1/campaigns/{id}/stats, and the support reads in src/support-deliverability.ts):
+ * one statement over the campaign and per-email event indexes for all of them. Grouping by current status keeps
+ * progress and lifetime outcomes in the same snapshot without loading mail bodies.
+ */
+export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
+  const result = new Map<string, z.infer<typeof CampaignStats>>();
+  if (!rows.length) return result;
+  const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
+  const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
+  const grouped = await db.select({
+    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
+    accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
+    delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
+    opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
+    failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
+    deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
+  }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId)))
+    .where(and(scope(emails, a), rows.length === 1 ? eq(emails.campaignId, rows[0]!.id) : inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status, emails.simulated);
+  for (const row of rows) {
+    const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
+    const counts = emptyCounts(), totals = { ...real, simulated: 0 };
+    for (const item of grouped) {
+      if (item.campaignId !== row.id) continue;
+      counts.byStatus[item.status] += item.count; counts.total += item.count;
+      if (item.simulated) totals.simulated += item.count;
+      for (const key of Object.keys(real) as (keyof typeof real)[]) {
+        totals[key] += item[key];
+        if (!item.simulated) real[key] += item[key];
+      }
+    }
+    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
+    result.set(row.id, { id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
+      rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) } });
+  }
+  return result;
+}
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
@@ -773,7 +815,7 @@ function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
   const target = targets.get(region) ?? { count: 0, priority: false };
   target.count++; target.priority ||= kind === 'transactional'; targets.set(region, target);
 }
-type AdmissionState = { projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; routes?: Record<string,SenderRoute>; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
+type AdmissionState = { projected: number; quota: number | null; hosted: HostedAllowance | null; billing?: BillingGate | null; default_region: string | null; enabled_regions: string[]; verified: string[]; routes?: Record<string,SenderRoute>; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
 function checkCapacity(state: AdmissionState, cost: number, marketing: number) {
   assertHostedAllowance(state.hosted, cost, marketing);
   assertPending(state);
@@ -821,7 +863,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   const hash=key===undefined?null:await digest(canonical(input)),sim=isSimulatedSes(c.env),regional=regionalSending(c.env);
   const data=mails.map(()=>({id:id('email'),status:'queued' as const,simulated:sim})),receipt=batch?{data}:data[0]!;
   const rows:{id:string;snapshot:EmailSnapshot;hash?:string;email?:string}[]=[],wanted=[];
-  let prepError:unknown,cost=0,marketing=0,expanded=0;
+  let prepError:unknown,cost=0,marketing=0,expanded=0,billable=0;
   const bulk=bulkFlags(mails);
   for(const [i,m] of mails.entries()){
     const snapshot=structuredSnapshot({...m,region:m.region??''});let token:{hash:string;email:string}|undefined;
@@ -841,7 +883,7 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     }catch(e){if(e instanceof ModuleLoadError)throw e;prepError??=e;}
     rows.push({id:data[i]!.id,snapshot,...token});
     wanted.push({host:m.from.split('@')[1]!.toLowerCase(),region:m.region,kind:m.kind,attachments:m.attachments,bodyBytes:Buffer.byteLength((snapshot.html??'')+(snapshot.text??'')+snapshot.subject)});
-    const n=sim?0:hostedCost(m.to,m.cc,m.bcc);cost+=n;if(m.kind==='marketing'||bulk[i])marketing+=n;
+    const all=hostedCost(m.to,m.cc,m.bcc),n=sim?0:all;cost+=n;billable+=all;if(m.kind==='marketing'||bulk[i])marketing+=n;
   }
   const assetIds=[...new Set(mails.flatMap(m=>m.attachments))],cfg=c.env.config,caps=cfg.hostedSendCaps;
   const requestedAssets = sql`${JSON.stringify(assetIds)}::jsonb`;
@@ -859,7 +901,8 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
   const {rows:[result]}=await c.env.db.execute<{id:string;workspace_id:string;permissions:Actor['permissions'];domains:string[];used:number;max_requests:number;s:State|{previous:typeof receipt;hash:string}|null}>(sql`WITH ${'credential' in identity?sql`${identity.credential},`:sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN
       key_admission_decision(k.workspace_id,k.id,k.domains,${c.req.path},${key??null},${hash},${JSON.stringify(receipt)}::jsonb,${JSON.stringify(wanted)}::jsonb,${admissibleAssets},
-        ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError},${platformPolicy(cfg)}::jsonb) END s FROM (${principal}) k
+        ${sim},${cost},${marketing},${caps.firstWeek},${caps.secondWeek},${caps.mature},${cfg.dispatch.dailyHeadroomPercent},${regional},${!!cfg.trustedPool},${!!cfg.requireDmarcForBulk},${!prepError},${platformPolicy(cfg)}::jsonb,
+        CASE WHEN k.workspace_id IS NOT DISTINCT FROM ${cfg.platformDomainWorkspace??null}::text THEN 0 ELSE ${billable}::int END) END s FROM (${principal}) k
     ), submitted AS MATERIALIZED (SELECT workspace_id,k.id AS actor_id,m.id,m.hash,m.email,
       ${regional?sql`m.snapshot||jsonb_build_object('region',r->>'region','binding',r->'binding')`:sql`jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region')))`} snapshot
       FROM state k,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb)
@@ -879,6 +922,8 @@ async function atomicAdmission(c:Ctx,input:SendRequest|{emails:SendRequest[]},id
     if(!state.previous)throw new ApiError(500,'IDEMPOTENCY_RESULT_MISSING','The stored idempotency result is unavailable.');
     return state.previous;
   }
+  // Billing first: an enforced empty balance is a 402 whatever else failed; shadow only logs the would-be denial.
+  assertBilling(state.billing,state.hosted,{workspaceId:a.workspaceId,config:cfg});
   if(!state.allowed){
     // Only report a denial here; the server-local savepoint already rolled back.
     checkCapacity(state,cost,marketing);
@@ -909,10 +954,10 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
   const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
   const regional=regionalSending(c.env), hosts=mails.map(m=>m.from.split('@')[1]!.toLowerCase());
   const bulk=bulkColumns(c.env,a.workspaceId,hosts);
-  let cost = 0, marketing = 0;
+  let cost = 0, marketing = 0, billable = 0;
   const bulkMail = bulkFlags(mails);
-  if (mx && !simulated) for (const [i, mail] of mails.entries()) {
-    const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing' || bulkMail[i]) marketing += n;
+  if (mx) for (const [i, mail] of mails.entries()) {
+    const all = hostedCost(mail.to, mail.cc, mail.bcc), n = simulated ? 0 : all; cost += n; billable += all; if (mail.kind === 'marketing' || bulkMail[i]) marketing += n;
   }
   return idempotent(c, a, input, async db => {
     const attachmentIds = assetIds.filter(id => !id.includes('\0'));
@@ -937,7 +982,8 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection'];bulk?:BulkFacts}>(sql`
       WITH ${lockedSettings(a.workspaceId)}
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(c.env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
-      FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+      FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length, billable, simulated)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    assertBilling(state.billing, state.hosted, { workspaceId: a.workspaceId, config: c.env.config });
     checkCapacity(state, cost, marketing);
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
@@ -1246,32 +1292,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
-    const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
-    // Aggregate in the database, using the campaign and per-email event indexes. Grouping by
-    // current status keeps progress and lifetime outcomes in the same snapshot without loading mail bodies.
-    const grouped = await c.env.db.select({
-      status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
-      accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
-      delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
-      opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
-      failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
-      deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
-    }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId))).where(and(scope(emails, a), eq(emails.campaignId, row.id))).groupBy(emails.status, emails.simulated);
-    const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
-    const counts = emptyCounts(), totals = { ...real, simulated: 0 };
-    for (const item of grouped) {
-      counts.byStatus[item.status] += item.count; counts.total += item.count;
-      if (item.simulated) totals.simulated += item.count;
-      for (const key of Object.keys(real) as (keyof typeof real)[]) {
-        totals[key] += item[key];
-        if (!item.simulated) real[key] += item[key];
-      }
-    }
-    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
-    return c.json(CampaignStats.parse({ id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
-      rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) },
-    }), 200);
+    return c.json(CampaignStats.parse((await campaignStats(c.env.db, a, [row])).get(row.id)!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
     actor(c);
@@ -1529,6 +1550,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
       FROM provider_connections pc LEFT JOIN sender_standing s ON s.workspace_id=pc.workspace_id
       WHERE pc.workspace_id=${a.workspaceId} AND pc.kind='shared' AND hosted_marketing_held(pc.workspace_id)`)).rows;
     if (held) throw marketingHeld(held.reason);
+    // An empty enforced balance refuses the launch (402), so the owner learns before the campaign starts waiting.
+    const [bill] = (await db.execute<{ b: BillingGate | null }>(sql`SELECT ${billingGate(runtime.config, a.workspaceId, 1, isSimulatedSes(runtime))} AS b`)).rows;
+    assertBilling(bill?.b, true, { workspaceId: a.workspaceId, config: runtime.config });
   }
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
   const rendered = await renderCampaignContent(runtime, draft);
@@ -2078,6 +2102,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (draft.binding) await assertReviewBinding(runtime,db,a,draft); // Fence the actual insert against disable/reclaim after the precheck.
     const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
       hosted: hostedAllowance(runtime.config, a.workspaceId, campaign.simulated ? 0 : 1),
+      billing: sql<BillingGate | null>`${billingGate(runtime.config, a.workspaceId, 0, campaign.simulated)}`,
       rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits_} WHERE workspace_id=${a.workspaceId} AND region=${draft.region}),0)`,
     }).from(emails).where(and(scope(emails, a), isNotNull(emails.campaignId), inArray(emails.status, ['queued', 'attempting'])));
     // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release).
@@ -2107,12 +2132,30 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       if (send && recipients.length >= affordable) break;
       processed.push(r); if (send) recipients.push(r);
     }
-    let hostedUntil: string | null = null;
+    let hostedUntil: string | null = null, balanceUntil: string | null = null;
     if (processed.length < chunk.length) {
       hostedUntil = allowance!.nextChangeAt;
       if (!processed.length) {
         await db.execute(holdCampaign(ref, 'hosted_daily_quota', hostedUntil));
-        return {count:0, completed:false, hostedUntil};
+        return {count:0, completed:false, hostedUntil, balanceUntil: null as string | null};
+      }
+    }
+    // Billing (Hosted, enforced prepaid): release only what the balance and the free allowance cover; with nothing
+    // covered the campaign waits on 'balance' until a credit (billing.restored wakes it) or an hour passes.
+    const bill = buffer!.billing;
+    if (allowance && bill && bill.mode === 'prepaid' && bill.enforcement !== 'off') {
+      const available = BigInt(bill.availableUc), affordable = available < 0n ? 0 : bill.freeEmailsLeft + Number(available / 20000n);
+      if (affordable < recipients.length && !bill.enforced) log('info', { code: 'BILLING_SHADOW_DENY', workspaceId: a.workspaceId, campaignId: campaign.id, requiredUc: String(20000 * Math.max(0, recipients.length - bill.freeEmailsLeft)), availableUc: bill.availableUc });
+      else if (affordable < recipients.length) {
+        const until = new Date(Date.now() + 3_600_000).toISOString();
+        if (affordable === 0) {
+          await db.execute(holdCampaign(ref, 'balance', until));
+          return { count: 0, completed: false, hostedUntil: null, balanceUntil: until };
+        }
+        // Keep the prefix through the last recipient the balance covers (skipped ones before it stay processed).
+        processed.splice(processed.indexOf(recipients[affordable - 1]!) + 1);
+        recipients.splice(affordable);
+        hostedUntil = null; balanceUntil = until;
       }
     }
     // The review owns its assets. Only one variable-size bind per release page; no
@@ -2123,16 +2166,18 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       SELECT p.id,${a.workspaceId},${a.keyId},${draft.region},${campaign.id},${campaign.reviewId},p.ordinal,${draft.from},jsonb_build_array(p.address),'[]','[]',p.subject,${JSON.stringify(stub)}::jsonb,${campaign.simulated},${campaign.scheduledAt}
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) p(id text,ordinal int,address text,subject text)`);
     const expanded = processed[processed.length - 1]!.ordinal, skipped = processed.length - recipients.length;
-    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length, hostedUntil, skipped));
+    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length, balanceUntil ?? hostedUntil, skipped, balanceUntil ? 'balance' : 'hosted_daily_quota'));
     if (skipped) log('info', { code: 'CAMPAIGN_RECIPIENTS_SKIPPED', campaignId: campaign.id, skipped, reason: 'not_delivered_before' });
     log('info', { code: 'CAMPAIGN_RELEASED', campaignId: campaign.id, released: prepared.length, expanded, total: campaign.total, capacity, buffered: buffer!.campaign, workspaceBuffered: buffer!.total, rate: buffer!.rate });
-    return { count: prepared.length, completed: expanded === campaign.total, hostedUntil };
+    return { count: prepared.length, completed: expanded === campaign.total, hostedUntil, balanceUntil };
   });
   if (!released) return 'done';
   if (released === 'quota') return hold('ses_daily_quota', quotaUntil);
   // Released rows are claimed directly by the region dispatcher.
   if (released.count) try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   // Usually the oldest bucket expires first. Also notice an earlier refund or operator raise.
+  // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
+  if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
   if (released.completed) return 'done';
   if (sesCapacity <= buffered!.total + released.count) return hold('ses_daily_quota', quotaUntil);
@@ -2187,12 +2232,15 @@ export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':ca
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
  */
 /**
- * An internal notice from the platform workspace about one committed standing event. Its origin, standing:<event id>,
- * dispatches only from the configured platform workspace and only while that event exists (the dispatcher's claim);
+ * An internal notice from the platform workspace about one committed standing event or billing notice. Its origin,
+ * standing:<event id> or billing:<notice id>, dispatches only from the configured platform workspace and only while that
+ * row exists (the dispatcher's claim);
  * it is not a general system bypass. Idempotent per event.
  */
-export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string; standingEvent: string }) {
-  const a: Actor = { workspaceId, keyId: `standing:${mail.standingEvent}`, permissions: ['send'], domains: [], credential: 'apiKey' };
+export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string })) {
+  // The origin names the committed row the notice is about: a standing event, or a billing notice (billing_notices).
+  const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : `billing:${mail.billingNotice}`;
+  const a: Actor = { workspaceId, keyId: origin, permissions: ['send'], domains: [], credential: 'apiKey' };
   const values = new Map<string, unknown>([['actor', a]]);
   const c = { env: runtime, req: { path: '/v1/emails/batch', header: (name: string) => name.toLowerCase() === 'idempotency-key' ? mail.idempotencyKey : undefined },
     get: (key: string) => values.get(key), set: (key: string, value: unknown) => { values.set(key, value); } } as unknown as Ctx;

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
+import { total, usd } from '../../data/billing'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { ApiError, campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
@@ -564,6 +566,12 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
   const recipients = audience.data ? `${number(audience.data.eligible)} eligible ${audience.data.eligible === 1 ? 'recipient' : 'recipients'}` : 'the eligible recipients'
   const audienceName = `${listName ? ` in ${listName}` : ''}`
+  // Hosted and enforced: what the send costs beyond the free allowance, against the balance, read while the page opens.
+  const billing = useApiDef(queries.billing(), { enabled: draft && multiTenant && canAdminister }).data
+  const cost = billing && billing.enforcement === 'enforce' && billing.mode === 'prepaid' && billing.balance && audience.data ? (() => {
+    const beyond = Math.max(0, audience.data.eligible - billing.free.emails.left), uc = BigInt(beyond) * 20_000n
+    return ` Estimated cost ${usd(uc)} (${number(beyond)} ${beyond === 1 ? 'recipient' : 'recipients'} beyond your free allowance). Balance ${usd(total(billing.balance))}.${BigInt(billing.balance.available) < uc ? ' The campaign pauses when the balance runs out and resumes after you add credit.' : ''}`
+  })() : ''
   function requestConfirmation() {
     if (!draft || sendMutation.isPending) return
     if (readinessError) { setError(readinessError); return }
@@ -652,7 +660,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)} You can reschedule or unschedule it until it starts sending.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)} Consent is checked again as each email sends. You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost} You can reschedule or unschedule it until it starts sending.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends. You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
   </div>
 }

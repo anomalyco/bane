@@ -174,8 +174,9 @@ export type OperatorIdentity = { id: string; role: OperatorRole; via: 'console' 
 /**
  * Who the operator is, for the audit and support routes and the /v1/operator/* gate (support.ts operatorGate). There is
  * one operator check: a signed-in dashboard session goes through #115's operatorActor (src/operator.ts, which reads the
- * role through src/operator-identity.ts). The only other operator is the support platform's server with its own
- * read-only credential (BANE_SUPPORT_PLATFORM_TOKEN). Never a workspace role: owners get 403.
+ * role through src/operator-identity.ts). The only other operator is the support platform's Worker, through the
+ * SupportPlatform service binding (src/support-platform.ts), read-only and on the support routes only. Never a
+ * workspace role: owners get 403.
  */
 export async function requireOperator(c: Ctx, level: OperatorRole): Promise<OperatorIdentity> {
   const a = c.get('actor');
@@ -276,7 +277,7 @@ export async function customerTrail(db: DbExecutor, workspaceIds: string[], f: F
 // They are read through to_jsonb(row), so only id, workspace_id and the time column are assumed.
 let sources: Promise<{ standing: boolean; billing: boolean }> | undefined;
 const optionalSources = (db: DbExecutor) => sources ??= db.execute<{ standing: boolean; billing: boolean; operator_audit: boolean }>(sql`SELECT
-    to_regclass('standing_events') IS NOT NULL AS standing, to_regclass('billing_transactions') IS NOT NULL AS billing`)
+    to_regclass('standing_events') IS NOT NULL AS standing, to_regclass('billing_ledger') IS NOT NULL AS billing`)
   .then(r => ({ standing: !!r.rows[0]?.standing, billing: !!r.rows[0]?.billing }))
   .catch(error => { sources = undefined; throw error; });
 
@@ -291,9 +292,10 @@ async function operatorTrail(c: Ctx, operator: OperatorIdentity, scope: { worksp
   if (wid && include.includes('enforcement') && available.standing) parts.push(extra(sql`'enf_' || x.id`, sql`x.at`, sql`'standing.' || coalesce(x.kind, 'event')`, sql`coalesce(x.detail #>> '{actor,kind}', 'system')`,
     sql`(SELECT s.id::text AS id, s.at, s.kind, to_jsonb(s) - 'workspace_id' AS detail FROM standing_events s WHERE s.workspace_id = ${wid}) x`));
   // Operator actions (hosted_operator_audit) are already in audit_events: migration 262 mirrors and backfilled them.
+  // Billing's money movements are already audit rows (the billing_ledger_audit trigger, migration 302); this adds the
+  // hourly usage rows, which are not events.
   if (wid && include.includes('billing') && available.billing) parts.push(extra(sql`'bill_' || x.id`, sql`x.at`, sql`'billing.' || coalesce(x.kind, 'entry')`, sql`'system'`,
-    sql`(SELECT b.id::text AS id, coalesce((to_jsonb(b) ->> 'effective_at')::timestamptz, (to_jsonb(b) ->> 'created_at')::timestamptz) AS at, to_jsonb(b) ->> 'kind' AS kind, to_jsonb(b) - 'workspace_id' AS detail
-      FROM billing_transactions b WHERE b.workspace_id = ${wid}) x`));
+    sql`(SELECT b.id::text AS id, b.created_at AS at, b.kind, to_jsonb(b) - 'workspace_id' AS detail FROM billing_ledger b WHERE b.workspace_id = ${wid} AND b.kind = 'usage') x`));
   const all = sql`(${sql.join(parts, sql` UNION ALL `)})`;
   const outer = { at: sql`t.at`, uid: sql`t.uid`, action: sql`t.action`, actorType: sql`t.actor_type`, actorId: sql`t.actor_id`, requestId: sql`t.request_id` };
   const context = operatorContext(c, operator);

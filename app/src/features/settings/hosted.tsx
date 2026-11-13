@@ -14,6 +14,7 @@ import { openScoreAbout } from '../../lib/score-about'
 import { AdminOnly } from './admin-only'
 import { MutationError } from './shared'
 import { PlanUsage } from './usage'
+import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
 import { ActivitySection } from './activity'
 import { ContactSupportDialog } from '../../components/ContactSupport'
@@ -23,11 +24,11 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
-type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'account'
+type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }] },
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -56,13 +57,14 @@ export function HostedSettings() {
           {section === 'webhooks' && <WebhooksSection note={false} />}
           {section === 'activity' && <ActivitySection />}
           {section === 'usage' && <PlanUsage row={Row} />}
+          {section === 'billing' && <BillingSection row={Row} />}
           {section === 'account' && <><SectionHeader title="Account" /><AccountRows /></>}
         </>}
     </div>
   </div>
 }
 
-function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {
+export function Row({ title, hint, children }: { title: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return <div className="settings-row"><div className="settings-row__label"><span>{title}</span>{hint && <span className="muted">{hint}</span>}</div><div className="settings-row__control">{children}</div></div>
 }
 
@@ -140,8 +142,8 @@ function AccountRows() {
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
-    <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
-    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={app.name||app.clientId} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
+    <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
+    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
       :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
     {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
     <MutationError error={revoke.error}/>
@@ -149,16 +151,19 @@ function AccountRows() {
     {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
+// A client's name and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of one client
+// are easy to tell apart. The label is display only.
+export const connectionTitle = (app: Pick<McpConnection, 'name' | 'clientId' | 'profile'>) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
 // Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools
 // need an owner or admin there. Save keeps its place whether or not it is shown, so choosing never moves the row.
-function McpApproval({ app, workspaces, onRevoke }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void }) {
+export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
   const [receiving, setReceiving] = useState(app.receiving ?? false)
   const bind = useApiMutation((api, input: { workspaceId: string; receiving: boolean }) => api.credentials.bindMcpConnection(app.id, input), 'Saved')
   const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
   const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
-  const name = app.name || app.clientId
-  return <Row title={name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
+  const name = connectionTitle(app)
+  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
     <span className="settings-mcp">
       <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}
         options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={id => { setWorkspaceId(id); if (!admin(id)) setReceiving(false) }} />
