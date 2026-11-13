@@ -24,6 +24,12 @@ function parseSender(text: string): Sender | null {
   return validName(sender.name) && validEmail(sender.email) ? sender : null
 }
 
+// The saved address on each other verified domain, so the domain can change without retyping.
+function otherDomains(sender: Sender, domains: string[]): Sender[] {
+  const [local, current] = sender.email.split('@')
+  return domains.filter(domain => domain !== current.toLowerCase()).map(domain => ({ name: sender.name, email: `${local}@${domain}` })).filter(item => validEmail(item.email))
+}
+
 function suggestSenders(text: string, domains: string[]): Sender[] {
   if (/[\x00-\x1f\x7f]/.test(text)) return []
   const value = text.trim()
@@ -56,8 +62,9 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   const verified = [...new Set(domains.map(domain => domain.trim().toLowerCase()))]
   const allowed = (sender: Sender) => verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
   const parsed = parseSender(draft)
-  const candidates = parsed ? (allowed(parsed) ? [parsed] : []) : suggestSenders(draft, verified)
-  const expanded = open && !disabled && candidates.length > 0
+  const candidates = parsed ? (allowed(parsed) ? [parsed, ...otherDomains(parsed, verified)] : []) : suggestSenders(draft, verified)
+  // A lone suggestion that is the field's own value says nothing new.
+  const expanded = open && !disabled && candidates.length > (parsed ? 1 : 0)
   const activeIndex = expanded && active < candidates.length ? active : -1
   const error = draftName(draft).length > 200 ? 'Sender name: 200 characters maximum.'
     : !validName(draftName(draft)) ? 'Remove control characters from the name.'
@@ -98,16 +105,16 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
     if (parsed && allowed(parsed)) choose(parsed, false)
   }}>
     <Input ref={input} id="campaign-from-email" role="combobox" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false}
-      placeholder="Name <sender@example.com>" value={draft} maxLength={458} disabled={disabled} required
+      placeholder={`Name <sender@${verified[0] ?? 'example.com'}>`} value={draft} maxLength={458} disabled={disabled} required
       aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={activeIndex >= 0 ? `${listId}-${activeIndex}` : undefined}
-      aria-invalid={showError || undefined} aria-describedby={showError ? errorId : undefined}
+      title={draft || undefined} aria-invalid={showError || undefined} aria-describedby={showError ? errorId : undefined}
       onFocus={() => setOpen(true)}
       onChange={event => { setDraft(event.target.value); publish(event.target.value); setTouched(false); setOpen(true); setActive(-1) }}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-          if (!candidates.length) return
+          if (candidates.length <= (parsed ? 1 : 0)) return
           event.preventDefault()
           setOpen(true)
           setActive(event.key === 'ArrowDown' ? (activeIndex + 1) % candidates.length : activeIndex <= 0 ? candidates.length - 1 : activeIndex - 1)

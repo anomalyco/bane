@@ -8,6 +8,7 @@ import './attachments.css'
 
 export type CampaignAttachmentsRef = { open: () => void }
 type Props = { ids: string[]; persisted: string[]; attachmentApi?: AttachmentApi; onChange: (ids: string[]) => void; onBusy: (busy: boolean) => void; disabled: boolean }
+const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 
 export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(function CampaignAttachments({ ids, persisted, attachmentApi: providedAttachmentApi, onChange, onBusy, disabled }, ref) {
@@ -53,7 +54,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
   const files = ids.map(id => metadata.data?.find(item => item.id === id) ?? known.current.get(id)).filter((item): item is Attachment => Boolean(item && item.disposition !== 'inline'))
   return <>
     {files.length > 0 && <ul className="campaign-file-blocks" aria-label="File attachments" aria-busy={busy || undefined}>{files.map(item => <li key={item.id} title={`${item.filename} · ${item.contentType} · ${number(item.size)} bytes`}>
-      <Paperclip size={16} aria-hidden="true" /><span className="campaign-file-name">{item.filename}</span><span className="campaign-file-size" aria-label={`${number(item.size)} bytes`}>{number(item.size)} B</span>
+      <Paperclip size={16} aria-hidden="true" /><span className="campaign-file-name">{item.filename}</span><span className="campaign-file-size" aria-label={`${number(item.size)} bytes`}>{size(item.size)}</span>
       <IconButton label={`Remove ${item.filename}`} disabled={busy || disabled} onClick={() => void remove(item.id)}><X size={16} aria-hidden="true" /></IconButton>
     </li>)}</ul>}
     {busy && <span className="sr-only" role="status">Updating attachments…</span>}
