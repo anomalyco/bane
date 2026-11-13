@@ -1,0 +1,515 @@
+{
+ "about": "Density lint: each page’s score and findings accepted so far (app/scripts/density.mjs). A new finding or a score more than 5% higher fails; a local run lowers these as pages improve. Regenerate with: node scripts/density.mjs --update-baseline",
+ "pages": {
+  "API keys · create key dialog · desktop": {
+   "score": 13,
+   "findings": []
+  },
+  "API keys · create key dialog · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "API keys · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "API keys · phone": {
+   "score": 16,
+   "findings": []
+  },
+  "Audience · desktop": {
+   "score": 16,
+   "findings": []
+  },
+  "Audience · import dialog · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Audience · phone": {
+   "score": 13,
+   "findings": []
+  },
+  "Campaign editor · desktop": {
+   "score": 75,
+   "findings": [
+    "dup-value|###|sendability|size"
+   ]
+  },
+  "Campaign review · desktop": {
+   "score": 20,
+   "findings": []
+  },
+  "Campaign review · phone": {
+   "score": 18,
+   "findings": []
+  },
+  "Campaigns · desktop": {
+   "score": 5,
+   "findings": []
+  },
+  "Campaigns · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "Campaigns · restricted · desktop": {
+   "score": 20,
+   "findings": []
+  },
+  "Campaigns · restricted · phone": {
+   "score": 19,
+   "findings": []
+  },
+  "Contact · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Domain · desktop": {
+   "score": 46,
+   "findings": []
+  },
+  "Domain · phone": {
+   "score": 53,
+   "findings": [
+    "dup-label|cname",
+    "dup-label|txt"
+   ]
+  },
+  "Domains · add domain dialog · desktop": {
+   "score": 3,
+   "findings": []
+  },
+  "Domains · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Domains · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "List · desktop": {
+   "score": 17,
+   "findings": []
+  },
+  "Lists · desktop": {
+   "score": 13,
+   "findings": []
+  },
+  "Lists · phone": {
+   "score": 6,
+   "findings": []
+  },
+  "Logs · desktop": {
+   "score": 9,
+   "findings": []
+  },
+  "Logs · phone": {
+   "score": 32,
+   "findings": []
+  },
+  "Logs · received · desktop": {
+   "score": 7,
+   "findings": []
+  },
+  "New campaign · desktop": {
+   "score": 24,
+   "findings": []
+  },
+  "Onboarding · desktop": {
+   "score": 17,
+   "findings": []
+  },
+  "Onboarding · phone": {
+   "score": 18,
+   "findings": []
+  },
+  "Operator · desktop": {
+   "score": 8,
+   "findings": []
+  },
+  "Operator · phone": {
+   "score": 6,
+   "findings": []
+  },
+  "Operator · workspace · desktop": {
+   "score": 46,
+   "findings": [
+    "dup-value|###|day|a day score",
+    "dup-value|##.#|score|→ target quality"
+   ]
+  },
+  "Operator · workspace · phone": {
+   "score": 47,
+   "findings": [
+    "dup-value|###|day|a day score",
+    "dup-value|##.#|score|→ target quality",
+    "inert|# of #,### accepted emails were marked a"
+   ]
+  },
+  "Overview · desktop": {
+   "score": 82,
+   "findings": [
+    "dup-value|####|limit day next at|daily limit",
+    "dup-value|###|emails|daily limit",
+    "dup-value|##|helps most authentication ( )|authentication",
+    "dup-value|##|in days|days",
+    "dup-value|##|sender score|sender score"
+   ]
+  },
+  "Overview · phone": {
+   "score": 72,
+   "findings": [
+    "dup-value|####|limit day next at|daily limit",
+    "dup-value|###|emails|daily limit",
+    "dup-value|##|helps most authentication ( )|authentication",
+    "dup-value|##|in days|days"
+   ]
+  },
+  "Overview · restricted · desktop": {
+   "score": 124,
+   "findings": [
+    "dup-text|# of #,# accepted emails were marked as spam in # hours (#.#%; the restrict line",
+    "dup-text|marketing is held; receipts and resets still send.",
+    "dup-value|###|emails|daily limit",
+    "dup-value|###|limit day next at|daily limit",
+    "dup-value|##|in days|days",
+    "dup-value|##|sender score|sender score",
+    "dup-value|#.##|helps most complaints ( )|complaints"
+   ]
+  },
+  "Overview · restricted · phone": {
+   "score": 111,
+   "findings": [
+    "dup-text|# of #,# accepted emails were marked as spam in # hours (#.#%; the restrict line",
+    "dup-text|marketing is held; receipts and resets still send.",
+    "dup-value|###|emails|daily limit",
+    "dup-value|###|limit day next at|daily limit",
+    "dup-value|##|in days|days",
+    "dup-value|#.##|helps most complaints ( )|complaints"
+   ]
+  },
+  "Overview · sender score dialog · desktop": {
+   "score": 76,
+   "findings": [
+    "long-block|a #–### grade of how healthy your sendin",
+    "long-block|each part below scores #–###, from a ris",
+    "long-block|every email you send, except simulated s"
+   ]
+  },
+  "Overview · sender score dialog · phone": {
+   "score": 74,
+   "findings": [
+    "long-block|a #–### grade of how healthy your sendin",
+    "long-block|each part below scores #–###, from a ris",
+    "long-block|every email you send, except simulated s"
+   ]
+  },
+  "Overview · sending limits dialog · desktop": {
+   "score": 106,
+   "findings": [
+    "inert|a pause caused only by transactional bou",
+    "inert|after ## hours an owner or admin can rel",
+    "inert|all sending stops. receiving, inboxes an",
+    "inert|hard bounces ≥ #% and ≥ ## in ## hours, ",
+    "inert|the daily limit stops rising and owners ",
+    "long-block|a pause caused only by transactional bou",
+    "long-block|campaigns to more than ### recipients se",
+    "long-block|checked every ## minutes. a line needs b",
+    "long-block|the score moves at most # points up or #"
+   ]
+  },
+  "Overview · sending limits dialog · phone": {
+   "score": 90,
+   "findings": [
+    "long-block|a pause caused only by transactional bou",
+    "long-block|campaigns to more than ### recipients se",
+    "long-block|checked every ## minutes. a line needs b",
+    "long-block|the score moves at most # points up or #"
+   ]
+  },
+  "Overview · setup · desktop": {
+   "score": 55,
+   "findings": [
+    "dup-value|###|after emails|daily limit",
+    "dup-value|###|of real emails|daily limit"
+   ]
+  },
+  "Received email · desktop": {
+   "score": 10,
+   "findings": []
+  },
+  "Received email · phone": {
+   "score": 10,
+   "findings": []
+  },
+  "Receiving · address · desktop": {
+   "score": 50,
+   "findings": []
+  },
+  "Receiving · address · phone": {
+   "score": 39,
+   "findings": []
+  },
+  "Receiving · agent inbox · desktop": {
+   "score": 43,
+   "findings": [
+    "inert|create one with connect an agent. it com",
+    "long-block|after it expires, new mail is held for #"
+   ]
+  },
+  "Receiving · agent inboxes · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Receiving · agent inboxes · phone": {
+   "score": 4,
+   "findings": []
+  },
+  "Receiving · desktop": {
+   "score": 20,
+   "findings": []
+  },
+  "Receiving · endpoints · desktop": {
+   "score": 17,
+   "findings": []
+  },
+  "Receiving · inbox · desktop": {
+   "score": 74,
+   "findings": []
+  },
+  "Receiving · inbox · phone": {
+   "score": 71,
+   "findings": []
+  },
+  "Receiving · new address dialog · desktop": {
+   "score": 11,
+   "findings": []
+  },
+  "Receiving · new address dialog · phone": {
+   "score": 11,
+   "findings": []
+  },
+  "Receiving · new agent inbox dialog · desktop": {
+   "score": 35,
+   "findings": [
+    "long-block|then it holds new mail for # more day wi"
+   ]
+  },
+  "Receiving · phone": {
+   "score": 15,
+   "findings": []
+  },
+  "Receiving · rituals · agent · desktop": {
+   "score": 73,
+   "findings": [
+    "long-block|attach a ritual to an address or alias; ",
+    "long-block|questions a ritual asks brand’s ai about ",
+    "long-block|runs triage as written, as if attached t"
+   ]
+  },
+  "Receiving · rituals · desktop": {
+   "score": 79,
+   "findings": [
+    "long-block|attach a ritual to an address or alias; ",
+    "long-block|questions a ritual asks brand’s ai about ",
+    "long-block|runs triage as written, as if attached t"
+   ]
+  },
+  "Receiving · rituals · no agent · desktop": {
+   "score": 76,
+   "findings": [
+    "long-block|attach a ritual to an address or alias; ",
+    "long-block|questions a ritual asks brand’s ai about ",
+    "long-block|runs triage as written, as if attached t"
+   ]
+  },
+  "Receiving · trace · desktop": {
+   "score": 37,
+   "findings": []
+  },
+  "Receiving · webhook · desktop": {
+   "score": 28,
+   "findings": []
+  },
+  "Receiving · webhooks · desktop": {
+   "score": 9,
+   "findings": []
+  },
+  "Receiving · webhooks · phone": {
+   "score": 9,
+   "findings": []
+  },
+  "Segment · desktop": {
+   "score": 23,
+   "findings": []
+  },
+  "Segments · desktop": {
+   "score": 4,
+   "findings": []
+  },
+  "Sent email · desktop": {
+   "score": 58,
+   "findings": [
+    "dup-value|###|sendability|content"
+   ]
+  },
+  "Sent email · junk-like · desktop": {
+   "score": 98,
+   "findings": [
+    "dup-value|###|sendability|size"
+   ]
+  },
+  "Sent email · junk-like · phone": {
+   "score": 91,
+   "findings": [
+    "dup-value|###|sendability|size"
+   ]
+  },
+  "Sent email · phone": {
+   "score": 51,
+   "findings": [
+    "dup-value|###|sendability|content"
+   ]
+  },
+  "Settings · MCP connection · desktop": {
+   "score": 19,
+   "findings": []
+  },
+  "Settings · MCP connection · phone": {
+   "score": 19,
+   "findings": []
+  },
+  "Settings · account · desktop": {
+   "score": 14,
+   "findings": []
+  },
+  "Settings · activity · desktop": {
+   "score": 27,
+   "findings": []
+  },
+  "Settings · activity · phone": {
+   "score": 26,
+   "findings": []
+  },
+  "Settings · add credit dialog · desktop": {
+   "score": 14,
+   "findings": []
+  },
+  "Settings · add credit dialog · phone": {
+   "score": 14,
+   "findings": []
+  },
+  "Settings · billing · desktop": {
+   "score": 42,
+   "findings": [
+    "long-block|brand charges your saved card when the ba"
+   ]
+  },
+  "Settings · billing · free · desktop": {
+   "score": 17,
+   "findings": []
+  },
+  "Settings · billing · free · phone": {
+   "score": 16,
+   "findings": []
+  },
+  "Settings · billing · owed · desktop": {
+   "score": 60,
+   "findings": [
+    "long-block|brand charges your saved card when the ba"
+   ]
+  },
+  "Settings · billing · owed · phone": {
+   "score": 56,
+   "findings": [
+    "inert|then it’s held until you add credit. the",
+    "long-block|brand charges your saved card when the ba"
+   ]
+  },
+  "Settings · billing · phone": {
+   "score": 41,
+   "findings": [
+    "long-block|brand charges your saved card when the ba"
+   ]
+  },
+  "Settings · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Settings · invite dialog · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Settings · invite dialog · phone": {
+   "score": 17,
+   "findings": []
+  },
+  "Settings · members · desktop": {
+   "score": 15,
+   "findings": []
+  },
+  "Settings · members · phone": {
+   "score": 16,
+   "findings": []
+  },
+  "Settings · new webhook · desktop": {
+   "score": 23,
+   "findings": []
+  },
+  "Settings · phone": {
+   "score": 6,
+   "findings": []
+  },
+  "Settings · plan & usage · desktop": {
+   "score": 58,
+   "findings": [
+    "inert|# days after connecting sending, with at",
+    "inert|## days after connecting sending, with a",
+    "inert|new workspaces start small so one mistak",
+    "long-block|new workspaces start small so one mistak"
+   ]
+  },
+  "Settings · plan & usage · phone": {
+   "score": 45,
+   "findings": [
+    "inert|## days after connecting sending, with a",
+    "long-block|new workspaces start small so one mistak"
+   ]
+  },
+  "Settings · sending · desktop": {
+   "score": 25,
+   "findings": [
+    "dup-value|##|sender score|sender score"
+   ]
+  },
+  "Settings · webhook · desktop": {
+   "score": 43,
+   "findings": [
+    "long-block|brand signs every delivery with this secr"
+   ]
+  },
+  "Settings · webhook · phone": {
+   "score": 35,
+   "findings": [
+    "long-block|brand signs every delivery with this secr"
+   ]
+  },
+  "Settings · webhooks · desktop": {
+   "score": 17,
+   "findings": [
+    "long-block|brand calls your url when email you send "
+   ]
+  },
+  "Template · desktop": {
+   "score": 18,
+   "findings": []
+  },
+  "Templates · desktop": {
+   "score": 6,
+   "findings": []
+  },
+  "Templates · phone": {
+   "score": 5,
+   "findings": []
+  }
+ }
+}
