@@ -9,6 +9,7 @@ import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
 import { routeChunks } from './data/prefetch'
 import { chunk, ChunkFallback } from './lib/preloadable'
 import { composer } from './features/campaigns/composer-chunk'
+import { DocsStandalone, useDocsAudience } from './features/docs/frame'
 const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
 const logs = chunk(() => import('./features/logs'))
@@ -74,6 +75,8 @@ const noop = () => {}
 const initialPath = window.location.pathname
 if (initialPath === '/legal' || initialPath.startsWith('/legal/')) loadLegal().catch(noop)
 else if (initialPath === '/onboarding') loadOnboarding().catch(noop)
+// The docs are public: signed out or in, their code loads alongside /v1/me.
+else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
 else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') loadHome().catch(noop) /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
 else if (initialPath === '/') loadOverview().catch(noop)
 else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
@@ -84,7 +87,6 @@ else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))
 }
 else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
-else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
 else if (['/receiving', '/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
 else if (initialPath.startsWith('/operator')) loadOperator().catch(noop)
 
@@ -94,9 +96,14 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
   componentDidCatch(_error: Error, _info: ErrorInfo) { /* A production reporter can be injected here; never log message bodies. */ }
   render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
 }
-// /v1/me alone decides whether the workspace still needs onboarding, before any dashboard chrome or data.
+// /v1/me alone decides whether the workspace still needs onboarding, before any dashboard chrome or data. The docs are
+// public: in the dashboard for a signed-in, ready workspace (the shell stays mounted on the way in and out), on their
+// own for everyone else.
 function DashboardGate() {
   const stage = useOnboardingStage()
+  const docs = useDocsAudience()
+  if (docs === 'checking') return <BootLoader />
+  if (docs === 'standalone') return <DocsStandalone />
   return stage ? <Navigate to="/onboarding" replace /> : <AppShell />
 }
 function OnboardingRoute() {
@@ -117,7 +124,7 @@ function useRememberDashboardReady() {
 }
 export function App() {
   useRememberDashboardReady()
-  return <AppErrorBoundary><Routes><Route path="docs" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><DocsPage /></Suspense></ChunkFallback.Provider>} /><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
+  return <AppErrorBoundary><Routes><Route path="legal/:doc?" element={<ChunkFallback.Provider value={<BootLoader />}><Suspense fallback={<BootLoader />}><LegalPage /></Suspense></ChunkFallback.Provider>} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<Moved to={params => `/logs/${encodeURIComponent(params.id ?? '')}`} />} /><Route path="logs/:id" element={<LogDetailPage />} />
     <Route path="receiving/endpoints" element={<Navigate replace to="/receiving?tab=endpoints" />}/><Route path="receiving/rituals" element={<RitualsPage />} /><Route path="receiving/routing" element={<Navigate replace to="/receiving" />} /><Route path="receiving/trace" element={<TracePage />} /><Route path="receiving" element={<ReceivingPage />} /><Route path="receiving/inbox" element={<InboundPage />} /><Route path="receiving/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="receiving/webhooks" element={<InboundWebhooksPage />} /><Route path="receiving/webhooks/:id" element={<InboundWebhookDetailPage />} />
@@ -136,7 +143,7 @@ export function App() {
     <Route path="lists" element={<Moved to={() => '/audience/lists'} />} /><Route path="lists/:id" element={<Moved to={params => `/audience/lists/${id(params)}`} />} />
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
-    <Route path="developer" element={<Moved to={() => '/docs'} />} />
+    <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
     <Route path="operator" element={<OperatorPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>

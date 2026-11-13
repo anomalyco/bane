@@ -31,12 +31,12 @@ export const concepts = {
 
 // Where each concept is explained in full: the guides in Docs.
 export const guides = {
-  receiving: '/docs#guide-receiving',
-  rituals: '/docs#guide-rituals',
-  endpoints: '/docs#guide-endpoints',
-  inboxes: '/docs#guide-inboxes',
-  mcp: '/docs#guide-mcp',
-  keys: '/docs#guide-keys',
+  receiving: '/docs/receiving',
+  rituals: '/docs/rituals',
+  endpoints: '/docs/endpoints',
+  inboxes: '/docs/inboxes',
+  mcp: '/docs/mcp',
+  keys: '/docs/keys',
 } as const
 
 export type KindFilter = 'all' | 'address' | 'pattern' | 'catch_all' | 'inbox' | 'auto'
