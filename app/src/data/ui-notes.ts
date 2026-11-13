@@ -54,7 +54,7 @@ export const uiNotesApi = {
   async screenshot(noteId: string, shot: { blob: Blob; width: number; height: number }) {
     const account = selectedAccount()
     const response = await fetch(`${base}/${id(noteId)}/screenshot?width=${shot.width}&height=${shot.height}`, { method: 'PUT', credentials: 'include', body: shot.blob,
-      headers: { Accept: 'application/json', 'Content-Type': shot.blob.type, ...(account ? { 'X-Bane-Account': account } : {}) } })
+      headers: { Accept: 'application/json', 'Content-Type': shot.blob.type, ...(account ? { 'X-Nightmail-Account': account } : {}) } })
     const data = await response.json().catch(() => null)
     if (!response.ok) throw new ApiError(data?.error?.message ?? 'Couldn’t upload the screenshot.', data?.error?.code ?? `HTTP_${response.status}`, {}, data?.error?.requestId, response.status)
     return data as UiNote

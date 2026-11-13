@@ -143,10 +143,10 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 export function registerWorkspaces(app: App) {
   // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
-    description: 'Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.',
+    description: 'Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Nightmail-Workspace; without it, the most recent selection is used.',
     responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Bane-Workspace.`,
+    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
     const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {

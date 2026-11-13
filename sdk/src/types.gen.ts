@@ -6112,7 +6112,7 @@ export type GetCurrentIdentityResponses = {
         host: string;
         connection: ConnectionSummary;
         /**
-         * A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted.
+         * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
         workspaces: Array<Workspace> | null;
         /**

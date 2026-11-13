@@ -12,7 +12,7 @@ import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
-import { productName } from './brand.js';
+import { headerPrefix, productName, requestHeaderNames } from './brand.js';
 
 type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
@@ -152,8 +152,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: `A ${productName} API key. Credentials never belong in URLs.` });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Bane-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Bane-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account.' });
   } else {
     const rawOpenapi = app.openapi;
     app.openapi = ((route, handler, hook) => allowPath && !allowPath(route.path) ? app : rawOpenapi({ ...route, hide: true }, handler, hook)) as typeof app.openapi;
@@ -188,7 +188,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   });
   // After the request line's middleware, so a refused request is logged like any other.
   app.use('*', (c, next) => {
-    if ([c.req.header('X-Bane-Environment'), c.req.header('X-OpenSend-Environment')].some(v => v !== undefined && v.trim().toLowerCase() !== 'live')) throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-Bane-Environment. SES simulation is configured for the deployment, not the request.');
+    if (requestHeaderNames('environment').some(name => { const v = c.req.raw.headers.get(name); return v !== null && v.trim().toLowerCase() !== 'live'; })) throw new ApiError(400, 'ENVIRONMENT_REMOVED', `Remove ${headerPrefix}Environment. SES simulation is configured for the deployment, not the request.`);
     return next();
   });
   app.use('/v1/*', async (c, next) => {

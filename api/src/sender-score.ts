@@ -175,7 +175,7 @@ export function registerSenderScore(app: App) {
     // once, on every isolate, instead of after the minute. One indexed read.
     const { rows: [standing] } = await c.env.db.execute<{ v: string | null }>(sql`SELECT version||'.'||sequence AS v FROM sender_standing WHERE workspace_id=${a.workspaceId}`);
     const body = await dashboardRead(c, ['sender-score', a.workspaceId, standing?.v ?? '-', Math.floor(Date.now() / 60_000)].join('|'), compute);
-    c.header('x-bane-sender-score-cache', body.cache);
+    c.header('x-nightmail-sender-score-cache', body.cache);
     return c.json(body.value, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/sender-score/release', operationId: 'releaseSenderStanding', tags: ['Metrics'], security: dashboardSecurity,

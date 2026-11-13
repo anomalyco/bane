@@ -35,7 +35,7 @@ import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js'
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
-import { productName, webhookUserAgent } from './brand.js';
+import { productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -46,7 +46,7 @@ const loadSendingOps = lazyModule(() => import('./sending.js'));
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: SuppressionEventData }).openapi('Event');
-const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|bane-test|opensend-test)$|^proxy-/i;
+const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|nightmail-test|bane-test|opensend-test)$|^proxy-/i;
 export const WebhookHeaders = z.array(z.object({
   name: z.string().min(1).max(64).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).refine(name => !reservedHeader.test(name), 'Reserved webhook header.'),
   value: z.string().max(2048).regex(/^[\t\x20-\x7e\x80-\xff]*$/, 'Use single-line HTTP field bytes.'),
@@ -997,9 +997,9 @@ export function registerOperations(app: App) {
     const back=(account?:string)=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}${account?`?account=${encodeURIComponent(account)}`:''}`,303);
     if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
     // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
-    // The return is a navigation without the tab's X-Bane-Account: act as the initiating account's own session.
+    // The return is a navigation without the tab's X-Nightmail-Account: act as the initiating account's own session.
     const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
-    const headers=new Headers(c.req.raw.headers); headers.set('x-bane-account',claim.userId);
+    const headers=new Headers(c.req.raw.headers); headers.set(requestHeaderNames('account')[0]!,claim.userId);
     const user=await verifiedDashboardUser(c.env,headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
     if(!user || claim.userId!==user.userId) return back();
     const {userId}=user;
@@ -1527,7 +1527,7 @@ function registerMetrics(app: App) {
     // Cached until the workspace's next email or email event, so a send or delivery shows on the next read, the same
     // moment Logs lists it, instead of up to a minute later.
     const body = await dashboardRead(c, ['metrics', a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
-    c.header('x-bane-metrics-cache', body.cache);
+    c.header('x-nightmail-metrics-cache', body.cache);
     return c.json(body.value, 200);
   });
 }
@@ -1550,7 +1550,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
     const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': webhookUserAgent, ...(delivery.synthetic ? { 'Bane-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': webhookUserAgent, ...(delivery.synthetic ? Object.fromEntries(webhookTestHeaders.map(name => [name, 'true'])) : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { if(e instanceof JobDeferred)throw e; error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < WEBHOOK_ATTEMPTS;

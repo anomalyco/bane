@@ -345,7 +345,7 @@ stateDiagram-v2
 - **The workspace cannot confirm for the recipient.** The confirmation email is sealed: the copy in the workspace's sent mail, thread view and email content API shows the link as withheld.
 - **Scanners cannot confirm.** Opening the link only shows the request; a same-origin form POST records the choice.
 - **Abuse limits.** 20 requests per workspace per day, 3 per address per workspace per day and 5 per address per day across all workspaces. Declining, or the stop link in any forwarded message, blocks that workspace from asking the address again for 30 days.
-- **What is forwarded.** Only mail that passed the virus scan, is not junk, automated or a mailing list, and did not fail DMARC; loops are refused (any `X-Bane-Loop`), and each message is forwarded once per endpoint. The forward is plain text from the receiving address, with the original sender in the display name, a 1,000 a day workspace budget and 200 an hour per endpoint.
+- **What is forwarded.** Only mail that passed the virus scan, is not junk, automated or a mailing list, and did not fail DMARC; loops are refused (any `X-Nightmail-Loop`, or the earlier `X-Bane-Loop`), and each message is forwarded once per endpoint. The forward is plain text from the receiving address, with the original sender in the display name, a 1,000 a day workspace budget and 200 an hour per endpoint.
 
 ### Retries and rate limits
 

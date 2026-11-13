@@ -324,7 +324,7 @@ async function devBoundaries() {
   check((await api('updateWorkspaceSettings',{body:{name:'E2E'}})).name === 'E2E','idempotent workspace update failed');
   const existing = await api('createDomain',{body:{name:domain}});
   check('id' in existing && existing.id === domainId,'re-adding the verified claim allocated another domain');
-  await denied('getCurrentIdentity',{headers:{'X-Bane-Environment':'test','X-OpenSend-Environment':'test'}},400,'ENVIRONMENT_REMOVED');
+  await denied('getCurrentIdentity',{headers:{'X-Nightmail-Environment':'test','X-Bane-Environment':'test','X-OpenSend-Environment':'test'}},400,'ENVIRONMENT_REMOVED');
   await denied('createContact',{body:{email:'not-an-email'}},422,'VALIDATION_FAILED');
 }
 
