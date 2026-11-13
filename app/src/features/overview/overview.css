@@ -59,6 +59,7 @@
   .ov-latest .ui-section-header { height: 44px; margin-bottom: 0; }
   .ov-latest .ui-section-header :is(a, button).ui-button { height: 44px; }
   .ov-controls .ui-tab { min-width: 44px; }
+  .ov-facts dd > .ov-spark-stack { flex-basis: 44px; }
 }
 
 @media (max-width: 1200px) {
