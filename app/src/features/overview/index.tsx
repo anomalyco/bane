@@ -1,25 +1,27 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
-import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, ReportCard, StandingCard, useNextSteps, useSenderScore } from '../score'
 // `logColumns` here are Overview's compact set of Logs' columns (skeletons.tsx).
-import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns as logColumns, recentCampaignColumns, RegionStatus } from './skeletons'
+import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns as logColumns, RegionStatus } from './skeletons'
+import { useLatestRowCount } from './latest'
 import { logHref, useLogRowIntent } from '../logs/rows'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
 import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
 import { useMediaQuery } from '../../lib/media'
 
-// Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
-// on the right with setup (until the first email), the sender score and up to three next steps.
+// Overview: four facts with their own series, the activity chart and the latest emails (down to the card's bottom) on
+// the left; a detail column on the right with setup (until the first email), the sender score, up to three next steps
+// and the recent campaigns.
 // Every async block reserves its final size, and refetches keep the previous data on screen. A new range or stream keeps
 // the old figures up (dimmed if the new ones take over 100 ms), then numbers tween and charts morph or crossfade.
 export function OverviewPage() {
@@ -51,7 +53,8 @@ export function OverviewPage() {
   if (data && !query.isPlaceholderData && shownRange !== range) setShownRange(range)
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
-  const latest = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true })
+  const count = useLatestRowCount()
+  const latest = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: count }), { interval: 60_000, keepPrevious: true })
   const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
   const seen = useRef<string | undefined>(undefined)
   const refetch = query.refetch
@@ -66,18 +69,18 @@ export function OverviewPage() {
             {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
             {data && !held ? <Chart data={data} range={shownRange} live={live} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
           </>}
-          <LatestEmails held={held} />
-          {data && !held && data.recentCampaigns.length > 0 && <Campaigns data={data} />}
+          <LatestEmails count={count} held={held} />
         </Fragment>
       </div>
-      <Aside setup={setup} showSetup={!stacked} />
+      <Aside setup={setup} showSetup={!stacked} campaigns={data?.recentCampaigns} />
     </div>
   </>
 }
 
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
-// The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash.
-function Aside({ setup, showSetup }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean }) {
+// The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
+// campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
+function Aside({ setup, showSetup, campaigns }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean; campaigns?: Overview['recentCampaigns'] }) {
   const score = useSenderScore()
   const next = useNextSteps(score.data)
   const ready = Boolean((score.data || score.isError) && !setup.loading && next.ready)
@@ -93,6 +96,7 @@ function Aside({ setup, showSetup }: { setup: ReturnType<typeof useSetupSteps>; 
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : <ReportCard report={score.data} />}
     <SendingLimitRow />
     {!setup.steps && <NextSteps items={next.items} />}
+    {campaigns && campaigns.length > 0 && <Campaigns rows={campaigns.slice(0, 3)} />}
   </>}</aside>
 }
 
@@ -132,22 +136,27 @@ function Chart({ data, range, live, stale }: { data: Overview; range: TimeRange;
   </section>
 }
 
-// The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact, seven rows
-// always reserved so loading, short and full lists are the same height. A new email or outcome crossfades the rows.
-function LatestEmails({ held }: { held: boolean }) {
-  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
+// The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact. `count`
+// rows fill the column (latest.ts) and are always reserved, so loading, short and full lists are the same height; a new
+// count after a resize keeps the old rows up until the new page arrives. A new email or outcome crossfades the rows.
+function LatestEmails({ count, held }: { count: number; held: boolean }) {
+  const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: count }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
-  const rows = logs.data?.items ?? []
+  const rows = (logs.data?.items ?? []).slice(0, count)
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={7} minRows={7} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={count} minRows={count} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }
-function Campaigns({ data }: { data: Overview }) {
-  const navigate = useNavigate()
+// Up to three, in the detail column's list style: the name, then how it went (or its status while not sent).
+function Campaigns({ rows }: { rows: Overview['recentCampaigns'] }) {
   const warm = usePrefetchQueries()
-  return <section className="ov-latest"><SectionHeader title="Campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>All <ArrowUpRight size={16} /></Button>} />
-    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} rowHref={row => `/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }} columns={[{ ...recentCampaignColumns[0], render: row => <span className="ov-campaign"><span className="ov-campaign__name" title={row.name}>{row.name}</span><span className="muted">{['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span>, cardRender: row => <span title={row.name}>{row.name}</span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), cardRender: row => `${number(row.recipients)} ${row.recipients === 1 ? 'recipient' : 'recipients'}`, align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', cardRender: row => ['sent', 'done'].includes(row.status) ? `${percent(row.recipients ? row.delivered / row.recipients : 0, 0)} delivered` : label(row.status), align: 'right' }]} />
-  </section>
+  return <nav className="next-steps ov-campaigns" aria-label="Recent campaigns">
+    <div className="ov-campaigns__head"><h2 className="next-steps__title">Campaigns</h2><Link className="ui-button ui-button--ghost ui-button--sm" to="/campaigns">All <ArrowUpRight size={16} /></Link></div>
+    <ul>{rows.map((row, i) => { const sent = ['sent', 'done'].includes(row.status), intent = () => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }
+      return <li key={row.id} style={{ '--i': i } as CSSProperties}><Link to={`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`} title={row.name} onPointerEnter={intent} onFocus={intent}>
+        <span>{row.name}</span><span className="muted">{sent ? `${date(row.updatedAt, { month: 'short', day: 'numeric' })} · ${percent(row.recipients ? row.delivered / row.recipients : 0, 0)} delivered` : label(row.status)}</span><ArrowUpRight size={14} aria-hidden="true" />
+      </Link></li> })}</ul>
+  </nav>
 }
 
 const severity = { neutral: 0, info: 0, success: 1, warning: 2, danger: 3 } as const
