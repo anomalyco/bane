@@ -116,7 +116,7 @@ END $$;
 --    into refundable cash.
 ALTER TABLE billing_accounts ADD COLUMN promo_spent_uc bigint NOT NULL DEFAULT 0 CHECK (promo_spent_uc >= 0);
 
--- billing_settle: 287's version with review 4 and 5, and usage rows taken SKIP LOCKED (a row a writer holds settles
+-- billing_settle: 299's version with review 4 and 5, and usage rows taken SKIP LOCKED (a row a writer holds settles
 -- next run, so the settler never waits on a writer).
 CREATE OR REPLACE FUNCTION billing_settle(wid text, cutoff timestamptz) RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE a billing_accounts; cfg billing_config; r record; delta bigint; before bigint; after bigint; payable numeric;

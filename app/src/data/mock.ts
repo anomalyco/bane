@@ -964,6 +964,7 @@ export function createMockApi(): BaneApi {
       agentTokens: (includeInactive = false, signal) => run(signal, false, s => (s.agentTokens ??= []).filter(token => includeInactive || !token.revokedAt && Date.parse(token.expiresAt) > Date.now())),
       revokeAgentToken: (tokenId, signal) => run(signal, true, s => { const token = find(s.agentTokens ??= [], tokenId, 'Agent token'); token.revokedAt ??= now() }),
       mcpConnections: signal => run(signal, false, s => s.mcpConnections ??= []),
+      mcpConnection: (connectionId, signal) => run(signal, false, s => find(s.mcpConnections ??= [], connectionId, 'MCP connection')),
       revokeMcpConnection: (connectionId, signal) => run(signal, true, s => {
         const connection = find(s.mcpConnections ??= [], connectionId, 'MCP connection')
         s.mcpConnections.splice(s.mcpConnections.indexOf(connection), 1)

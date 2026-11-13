@@ -770,7 +770,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
   // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
   providerName='google';providerHd='example.org';providerVerified=true;verified=false;
-  const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  // The dashboard reopens as the account that just signed in (a browser can hold several).
+  const landed=(response:Response)=>{const url=new URL(response.headers.get('location')!);assert.match(url.searchParams.get('account')??'',/^[0-9a-f-]{36}$/);url.searchParams.delete('account');return url.href;};
+  const result=await login();assert.equal(landed(result),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
@@ -799,7 +801,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await login('interaction_required')).headers.get('location'),origin+'/?auth=interaction_required');
   assert.equal(await sessionCount(),before);
   tokenAcr=googleAcr;
-  const accepted=await login();assert.equal(accepted.headers.get('location'),origin+'/');
+  const accepted=await login();assert.equal(landed(accepted),origin+'/');
   assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
@@ -825,7 +827,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
   await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
   await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
-  const seated=await login();assert.equal(seated.headers.get('location'),origin+'/');
+  const seated=await login();assert.equal(landed(seated),origin+'/');
   const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
   const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
   assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
@@ -834,6 +836,280 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Workspace creation follows the sign-in's staff status, not the address.
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
   assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+});
+
+// Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
+// exactly one of them (X-Bane-Account, else the browser default), and nothing of one account reaches another.
+test('Account switcher: two accounts in one browser switch, stay apart on every route and sign out alone', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const origin = 'https://dashboard.example.org', issuer = 'https://accounts-switch.example.org', googleAcr = 'urn:anomaly:acr:google';
+  const keys = generateKeyPairSync('ec',{namedCurve:'P-256'}), rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:googleAcr, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  type Person = { subject: string; email: string; id?: string; workspace?: string };
+  let person: Person = {subject:'', email:''}, nonce = '', tokenAcr = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
+  // The account service's DPoP rules, as in the OIDC callback test: every code exchange, adds included, proves a fresh
+  // ES256 key carrying the server's nonce, and gets a DPoP-bound token.
+  const dpopNonce = randomUUID(), proved = new Set<string>();
+  const proofKey = (init: RequestInit | undefined) => {
+    const jwt = new Headers(init?.headers).get('dpop'); if (!jwt) return null;
+    const [h, p, sig] = jwt.split('.'), header = JSON.parse(Buffer.from(h!, 'base64url').toString()), payload = JSON.parse(Buffer.from(p!, 'base64url').toString());
+    assert.ok(header.typ === 'dpop+jwt' && header.alg === 'ES256' && !('d' in header.jwk), 'DPoP header');
+    assert.ok(verifySignature('sha256', Buffer.from(h + '.' + p), { key: createPublicKey({ key: header.jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, Buffer.from(sig!, 'base64url')), 'DPoP signature');
+    assert.ok(payload.htu === issuer+'/token' && payload.htm === 'POST' && typeof payload.jti === 'string', 'DPoP claims');
+    return { key: JSON.stringify([header.jwk.x, header.jwk.y]), nonce: payload.nonce as string | undefined };
+  };
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',pushed_authorization_request_endpoint:issuer+'/par',response_modes_supported:['query'],dpop_signing_alg_values_supported:['ES256']});
+      case '/par': pushed = new URLSearchParams(String(init?.body)); return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const proof = proofKey(init);
+        if (!proof) return Response.json({error:'invalid_dpop_proof'},{status:400});
+        if (proof.nonce !== dpopNonce) return Response.json({error:'use_dpop_nonce'},{status:400,headers:{'dpop-nonce':dpopNonce}});
+        assert.ok(!proved.has(proof.key), 'Each sign-in proves its own key'); proved.add(proof.key);
+        const now=Math.floor(Date.now()/1000),upstream={[PROVIDER_IDENTITY_CLAIM]:{provider:'google',sub:'g-'+person.subject,email:person.email,email_verified:true,hd:'example.org'}};
+        const body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:person.subject,nonce,acr:tokenAcr,name:person.email.split('@')[0],email:person.email,email_verified:true,...upstream}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'DPoP',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  const people: Person[] = [];
+  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,people.map(p=>p.subject)]);});
+  const someone = (name: string): Person => { const p = {subject:randomUUID(), email:`${name}-${randomUUID()}@example.org`}; people.push(p); return p; };
+  // One browser: its cookie jar, as Set-Cookie leaves it.
+  const jar = new Map<string,string>();
+  const store = (response: Response) => { for (const line of response.headers.getSetCookie()) { const [pair] = line.split(';'), name = pair!.slice(0,pair!.indexOf('=')), value = pair!.slice(name.length+1); if (!value || /max-age=0/i.test(line)) jar.delete(name); else jar.set(name,value); } return response; };
+  const cookie = () => [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
+  const request = (path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => app.fetch(new Request(origin+path,{method,
+    headers:{origin,cookie:cookie(),'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
+  const as = (p: Person, extra: Record<string,string> = {}) => ({'x-bane-account':p.id!,...extra});
+  const code = async (response: Response) => ((await response.json()) as {error?:{code:string}}).error?.code;
+  // A sign-in in two halves: started here, finished when the account service redirects back (a cross-site GET).
+  async function begin(p: Person, add = false, callbackURL = origin+'/') {
+    peer++;
+    const start = store(await request('/api/auth/sign-in/account','POST',{callbackURL,...(add?{prompt:'select_account'}:{})}));
+    assert.equal(start.status,200);
+    // Add account asks the account service for its chooser; every sign-in, adds included, requires Google again.
+    assert.equal(pushed!.get('prompt'), add ? 'select_account' : null);
+    assert.deepEqual(JSON.parse(pushed!.get('claims')!).id_token.acr,{essential:true,values:[googleAcr]});
+    const flowNonce = pushed!.get('nonce')!, state = pushed!.get('state')!, binding = jar.get('__Host-bane.login')!;
+    return async () => {
+      person = p; nonce = flowNonce; jar.set('__Host-bane.login',binding);
+      const before = proved.size, done = store(await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state,iss:issuer}),{headers:{cookie:cookie(),'sec-fetch-site':'cross-site'}}),runtime));
+      if (done.headers.get('location')?.includes('account=')) assert.equal(proved.size,before+1,'The exchange proved a DPoP key');
+      return done;
+    };
+  }
+  const signIn = async (p: Person, add = false, callbackURL = origin+'/') => (await begin(p, add, callbackURL))();
+  async function connect(p: Person, add: boolean) {
+    const done = await signIn(p, add);
+    const location = new URL(done.headers.get('location')!);
+    assert.equal(location.pathname,'/');
+    p.id = location.searchParams.get('account')!;
+    const me = await (await request('/v1/me','GET',undefined,as(p))).json() as {id:string;workspaceId:string;email:string};
+    assert.deepEqual([me.id,me.email],[p.id,p.email]);
+    p.workspace = me.workspaceId;
+    return p;
+  }
+  const personal = await connect(someone('personal'), false);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token']);
+  const work = await connect(someone('work'), true);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token','__Host-bane.session_token.1']);
+  assert.notEqual(personal.workspace, work.workspace);
+  // Without a tab's account the browser default (the one added last) answers; with one, exactly that account.
+  const who = async (headers: Record<string,string> = {}) => ((await store(await request('/v1/me','GET',undefined,headers)).json()) as {id:string}).id;
+  assert.equal(await who(), work.id);
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(await who(as(work)), work.id);
+  // Another account's workspace is refused, not served as the tab's account.
+  const crossed = await request('/v1/me','GET',undefined,as(personal,{'x-bane-workspace':work.workspace!}));
+  assert.equal(crossed.status,403); assert.equal(await code(crossed),'WORKSPACE_ACCESS_DENIED');
+  for (const forged of ['someone-else', 'bad value', '']) {
+    const refused = await request('/v1/me','GET',undefined,{'x-bane-account':forged});
+    assert.equal(refused.status,401,forged); assert.equal(await code(refused),'ACCOUNT_SIGNED_OUT');
+  }
+  // The browser's account list: only the accounts connected here, each with its own workspaces.
+  const listed = await (await request('/api/auth/accounts','GET',undefined,as(personal))).json() as {accounts:{id:string;email:string;workspaces:{id:string}[]}[];active:string;limit:number};
+  assert.deepEqual(listed.accounts.map(a=>[a.id,a.email,a.workspaces.map(w=>w.id)]),[[personal.id,personal.email,[personal.workspace]],[work.id,work.email,[work.workspace]]]);
+  assert.deepEqual([listed.active,listed.limit],[personal.id,5]);
+
+  // No route answers one account with the other's data. Each account creates marked records, then every GET route
+  // without a path parameter is read as each account, with and without the other's workspace named.
+  const markers = new Map<string,string[]>();
+  for (const p of [personal, work]) {
+    const tag = `marker-${randomUUID()}`, contact = `${tag}@example.net`;
+    assert.equal((await request('/v1/api-keys','POST',{name:tag,permissions:['read']},as(p))).status,201);
+    assert.equal((await request('/v1/contacts','POST',{email:contact},as(p))).status,201);
+    markers.set(p.id!,[tag,contact,p.email,p.workspace!]);
+  }
+  const document = JSON.parse(await readFile(new URL('./openapi.json',import.meta.url),'utf8')) as {paths:Record<string,{get?:unknown}>};
+  const routes = Object.entries(document.paths).filter(([path,ops])=>ops.get && !path.includes('{')).map(([path])=>path);
+  assert.ok(routes.length >= 40, 'every parameterless GET route');
+  for (const [self, other] of [[personal, work], [work, personal]] as const) for (const path of routes) {
+    const response = await Promise.race([request(path,'GET',undefined,as(self)), new Promise<Response>((_,reject)=>setTimeout(()=>reject(Error(`${path} timed out`)),10_000))]);
+    const text = await response.text();
+    for (const marker of markers.get(other.id!)!) assert.ok(!text.includes(marker),`${path} as ${self.email} returned the other account's ${marker}`);
+  }
+
+  // Switching the browser default needs the dashboard's Origin, and only to an account connected here.
+  for (const foreign of [undefined,'https://attacker.invalid']) {
+    const forged = await app.fetch(new Request(origin+'/api/auth/accounts/switch',{method:'POST',headers:{cookie:cookie(),'content-type':'application/json',...(foreign?{origin:foreign}:{})},body:JSON.stringify({account:personal.id})}),runtime);
+    assert.equal(forged.status,403); assert.equal(await code(forged),'CSRF_ORIGIN_INVALID');
+    assert.equal(await who(), work.id, 'A forged switch changes nothing');
+  }
+  const unknown = await request('/api/auth/accounts/switch','POST',{account:'not-connected-here'});
+  assert.equal(unknown.status,401);
+  const switched = store(await request('/api/auth/accounts/switch','POST',{account:personal.id}));
+  assert.equal(switched.status,200); assert.equal(await who(), personal.id);
+
+  // Signing out of one account keeps the other.
+  const out = store(await request('/api/auth/sign-out','POST',{account:work.id},as(personal)));
+  assert.deepEqual(await out.json(),{success:true,accounts:[personal.id],active:personal.id});
+  assert.ok(!jar.has('__Host-bane.session_token.1'));
+  const gone = await request('/v1/me','GET',undefined,as(work));
+  assert.equal(gone.status,401); assert.equal(await code(gone),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1',[work.id])).rows[0].n,0);
+
+  // A session revoked on the server, or expired, drops only that account; the list clears just its cookie.
+  await connect(work, true);
+  assert.equal(jar.get('__Host-bane.account'), work.id);
+  await db.query('DELETE FROM bane_sessions WHERE user_id=$1',[work.id]);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(jar.get('__Host-bane.account'), work.id, 'A tab naming its account leaves the default alone');
+  // Without a tab's account the stale default falls to a live account once, and the default then names that account.
+  assert.equal(await who(), personal.id);
+  assert.equal(jar.get('__Host-bane.account'), personal.id, 'The stale default is replaced, not left to fall through again');
+  const pruned = store(await request('/api/auth/accounts','GET',undefined,as(personal)));
+  assert.deepEqual(((await pruned.json()) as {accounts:{id:string}[]}).accounts.map(a=>a.id),[personal.id]);
+  assert.deepEqual([...jar.keys()].filter(k=>k.includes('session_token')),['__Host-bane.session_token']);
+  await connect(work, true);
+  await db.query("UPDATE bane_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[personal.id]);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(work)), work.id);
+  assert.equal(await who(), work.id, 'The default falls to a live account');
+  await connect(personal, true);
+
+  // An add that doesn't meet the required authentication changes no session.
+  const before = (await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows;
+  tokenAcr = 'urn:anomaly:acr:passkey';
+  assert.equal((await signIn(someone('passkey'), true)).headers.get('location'), origin+'/?auth=google_required');
+  tokenAcr = googleAcr;
+  assert.deepEqual((await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows,before);
+  assert.equal(await who(as(personal)), personal.id);
+  // An add in a popup returns to the popup page, which tells the tab that opened it; so does a refused one.
+  const popup = await signIn(someone('popup'), true, origin+'/signed-in/?tab=fixture');
+  const added = new URL(popup.headers.get('location')!);
+  assert.deepEqual([added.pathname,added.searchParams.get('tab'),added.searchParams.get('account')?.length! > 0],['/signed-in/','fixture',true]);
+  tokenAcr = 'urn:anomaly:acr:passkey';
+  assert.equal((await signIn(someone('popup-refused'), true, origin+'/signed-in/?tab=fixture')).headers.get('location'),origin+'/signed-in/?tab=fixture&auth=google_required');
+  tokenAcr = googleAcr;
+
+  // Signing in again as a connected account replaces its own session, in its own slot.
+  const previous = jar.get('__Host-bane.session_token'), size = jar.size;
+  const again = await signIn(personal);
+  assert.equal(new URL(again.headers.get('location')!).searchParams.get('account'), personal.id);
+  assert.notEqual(jar.get('__Host-bane.session_token'), previous, 'Signing in again replaces the account’s own session, in its own slot');
+  assert.equal(jar.size, size);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1 AND expires_at>now()',[personal.id])).rows[0].n,1);
+  // At most five accounts. A sign-in started at four that finishes after a fifth was added is refused at the callback,
+  // and nothing of it is kept; at five, every sign-in is refused before the account service is asked.
+  await connect(someone('fourth'), true);
+  const sixth = someone('sixth'), late = await begin(sixth, true);
+  await connect(someone('fifth'), true);
+  assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length, 5);
+  assert.equal((await late()).headers.get('location'), origin+'/?auth=account_limit');
+  assert.equal((await db.query('SELECT FROM bane_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,sixth.subject])).rowCount,0,'Nothing of a refused sixth account is kept');
+  for (const prompt of [{prompt:'select_account'},{}]) {
+    const full = await request('/api/auth/sign-in/account','POST',{callbackURL:origin+'/',...prompt});
+    assert.equal(full.status,409); assert.equal(await code(full),'ACCOUNT_LIMIT');
+  }
+
+  // An empty sign-out (earlier dashboards) leaves the account this request acts as; sign out of all leaves every one.
+  assert.equal((store(await request('/api/auth/sign-out','POST',undefined,as(work)))).status,200);
+  assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
+  assert.equal(await who(as(personal)), personal.id);
+  assert.equal(store(await request('/api/auth/sign-out','POST',{all:true})).status,200);
+  assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length,0);
+  assert.equal((await request('/v1/me')).status,401);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE issuer=$1 AND expires_at>now()',[issuer])).rows[0].n,0);
+});
+
+// MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
+// approvals, each acting only in its own account's workspace; `?profile=` is a label and never selects anything.
+test('MCP profiles: one client signed in as two accounts gets two approvals that stay apart', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {authorizeResource} = await import('./src/oidc-resource.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const issuer = 'https://mcp-profiles.example.org', origin = 'https://bane.example.org', resource = origin+'/mcp';
+  const runtime: import('./src/core.js').Runtime = { config:{...loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_ROOT_SECRET:'fixture-only-'.repeat(4)}),accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}},
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
+  const signer = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  t.mock.method(globalThis,'fetch',async (url: string|URL) => {
+    assert.equal(new URL(url).origin,issuer);
+    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) : Response.json({issuer,jwks_uri:issuer+'/keys'});
+  });
+  const now = Math.floor(Date.now()/1000);
+  let tick = 0;
+  const token = (subject: string) => {
+    const body = [{alg:'ES256',typ:'at+jwt',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:'opencode',iat:now+tick++,exp:now+300,jti:randomUUID(),scope:'bane:read bane:send',acr:'urn:anomaly:acr:google'}].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
+    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  };
+  const mcp = async (subject: string, profile?: string) => {
+    const response = await authorizeResource(runtime,new Request(resource+(profile?`?profile=${encodeURIComponent(profile)}`:''),{method:'POST',headers:{authorization:`Bearer ${token(subject)}`}}),async a=>Response.json({workspaceId:a.workspaceId,keyId:a.keyId}));
+    return {status:response.status,body:await response.json() as {workspaceId:string;keyId:string}};
+  };
+  // Two accounts, each in its own workspace, both signed in to one browser.
+  const jar: string[] = [], accounts: {user:string;subject:string;workspace:string}[] = [];
+  await db.query('BEGIN');
+  try {
+    for (const [slot,name] of ['personal','work'].entries()) {
+      const user = unique('mcp-profile'), workspace = unique('mcp-profile-ws'), session = createHash('sha256').update(randomUUID()).digest('base64url');
+      await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,name,`${user}@example.org`]);
+      await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[issuer,user]);
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[workspace]);
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),user,workspace]);
+      await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
+      jar.push(`__Host-bane.session_token${slot?'.'+slot:''}=${session}`);
+      accounts.push({user,subject:user,workspace});
+    }
+    const [personal, work] = accounts as [typeof accounts[number], typeof accounts[number]];
+    // Each entry's token acts in its own account's workspace, whatever its label says.
+    const first = await mcp(personal.subject,'personal'), second = await mcp(work.subject,'work');
+    assert.deepEqual([first.status,first.body.workspaceId,second.status,second.body.workspaceId],[200,personal.workspace,200,work.workspace]);
+    assert.notEqual(first.body.keyId,second.body.keyId);
+    const swapped = await mcp(personal.subject,'work');
+    assert.deepEqual([swapped.status,swapped.body.workspaceId,swapped.body.keyId],[200,personal.workspace,first.body.keyId],'A label never selects another approval');
+    const grants = (await db.query('SELECT user_id,profile FROM bane_resource_grants WHERE client_id=$1 AND user_id=ANY($2)',['opencode',[personal.user,work.user]])).rows;
+    assert.equal(grants.length,2,'One approval per account and client');
+    assert.deepEqual(Object.fromEntries(grants.map(g=>[g.user_id,g.profile])),{[personal.user]:'work',[work.user]:'work'},'The label follows the entry that last connected; it is not part of the approval');
+    // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
+    await mcp(work.subject,'  Work <script>  laptop  ');
+    const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
+    const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
+    assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',work.workspace]]);
+    assert.deepEqual((await list(personal)).map(c=>[c.id,c.workspaceId]),[[first.body.keyId,personal.workspace]]);
+    // The approval page learns which connected account owns a connection, so it acts as that account.
+    const owner = (await (await browser(`/api/auth/accounts?connection=${second.body.keyId}`,personal)).json()) as {connection:{account:string}};
+    assert.equal(owner.connection.account,work.user);
+    // Revoking one entry, as its own account, leaves the other entry working; the wrong account can't revoke it.
+    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,personal,'POST')).status,404);
+    assert.equal((await browser(`/v1/mcp-connections/${second.body.keyId}/revoke`,work,'POST')).status,200);
+    assert.equal((await mcp(work.subject,'work')).status,403);
+    assert.deepEqual([(await mcp(personal.subject,'personal')).status,(await mcp(personal.subject)).body.workspaceId],[200,personal.workspace]);
+  } finally { await db.query('ROLLBACK'); }
 });
 
 test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
@@ -915,7 +1191,7 @@ test('MCP account resource validates issuer JWT, workspace scope and single-use 
     const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
     const pending=await run(multi());
     assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
-    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:'Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/account'},id:null});
+    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:`Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/mcp/${(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id}`},id:null});
     const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
     assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
     const multiId=unbound.rows[0].id as string;
@@ -1855,7 +2131,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND status='completed' AND available_at>now()",[vjob.id])).rowCount,1);
           ok(await local('GET','/v1/me',undefined,b.cookie,select(a.org.id)));
           const success=await local('GET',ret.pathname,undefined,b.cookie); // No workspace header or state from Cloudflare.
-          assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}`);
+          assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}?account=${encodeURIComponent(me.id)}`,'The page reopens as the account that started the setup');
           assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,b.org.id);
           assert.equal((await local('GET',ret.pathname+`?state=${token}`,undefined,b.cookie)).status,303,'Replays may only request the same throttled recheck.');
           // The harness runner can claim the recheck between the callback and this read. The old completed job was due tomorrow.
@@ -4689,7 +4965,7 @@ describe('Billing: metering, gate and settlement', () => {
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt, invoiced and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
-      // Billing launches enforced (288); a workspace created since is prepaid. Off, the kill-switch: sends are metered
+      // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
       // from the first one, recipients counted, in the same statement.
       assert.deepEqual((await db.query(`SELECT mode FROM billing_config WHERE singleton`)).rows[0].mode, 'enforce');
       assert.equal((await f.position()).mode, 'prepaid');
@@ -13174,7 +13450,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const issued=ok(await local('POST',base+'/app-passwords',{name:'Phone',protocols:['imap','smtp']}),201);
         assert.ok(issued.password);const listed=ok(await local('GET',base+'/app-passwords'));assert.equal(listed.data[0].id,issued.id);assert.equal(listed.data[0].password,undefined);
         ok(await local('DELETE',base+'/app-passwords/'+issued.id));assert.equal(ok(await local('GET',base+'/app-passwords')).data.length,0);
-        // Protocol access is free (migration 283): issuing a password starts no charge period.
+        // Protocol access is free (migration 295): issuing a password starts no charge period.
         assert.equal((await db.query("SELECT to_regclass('inbox_protocol_periods') AS t")).rows[0].t,null);
         const m=await deliver('kept-two',[p.address,other.address],true,true,'kept-two',false,{dmarcVerdict:{status:'PASS'}});
         assert.equal(m.lifecycle,'kept');assert.equal(m.raw_key,`k/${wid}/${m.id}.eml`);assert.equal(stored.get(m.raw_key)!.length,m.size_bytes);

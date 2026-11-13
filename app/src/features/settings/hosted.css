@@ -73,3 +73,9 @@
 @media (max-width: 640px) {
   .settings-mcp__workspace { flex: 1 0 100%; width: auto; }
 }
+
+/* The MCP connection page (mcp-approval.tsx): one 53px row per connected account, a radio to pick it. */
+.mcp-approval { max-width: 760px; }
+.mcp-approval__account { cursor: pointer; }
+.mcp-approval__who { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
+.mcp-approval__who input { flex: none; margin: 0; accent-color: var(--color-accent); }

@@ -500,7 +500,7 @@ Hosted installations (`MULTI_TENANT=true`) bill a prepaid USD balance per worksp
 
 | Mode | Meters | Settlement | 402 gate, campaign waits, notices, auto-recharge |
 | --- | --- | --- | --- |
-| `enforce` (the default since migration 288) | record | hourly; usage is taken from promotional credit, then paid credit | live |
+| `enforce` (the default since migration 300) | record | hourly; usage is taken from promotional credit, then paid credit | live |
 | `shadow` (kill-switch) | record | hourly; usage rows post $0 with the would-be cost in `detail.costUc` | would-be denials log `BILLING_SHADOW_DENY`; notices are not sent |
 | `off` (kill-switch) | record | none | none |
 

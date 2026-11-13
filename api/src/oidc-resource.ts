@@ -25,6 +25,12 @@ async function authority(issuer: string) {
   return metadata;
 }
 
+// At most 40 characters of letters, digits, spaces and . _ - ( ), trimmed; anything else (or nothing left) is no label.
+export function profileLabel(value: string | null) {
+  const label = value?.normalize('NFKC').replace(/[^\p{L}\p{N} ._()-]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  return Array.from(label ?? '').slice(0, 40).join('').trim() || null;
+}
+
 export async function externalMcpGrant(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
   const { rows: [grant] } = await db.execute<{workspace_id: string; role: string; permissions: Permission[]; receiving:boolean}>(sql`
     SELECT g.workspace_id, m.role, g.permissions,g.receiving FROM bane_resource_grants g
@@ -82,7 +88,10 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const identity = await runtime.db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub}`);
   const userId=identity.rows[0]?.user_id;
   if (!userId) return denied(403);
+  // One approval per account and client: the same client used by two accounts (a personal and a work entry) gets two.
   const keyId = 'mcp_at_' + await digest(JSON.stringify([userId,claims.client_id]));
+  // `?profile=` on the MCP URL is only a label for that entry, shown in Bane; it never selects or authorizes anything.
+  const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
   // The first approval binds to the user's only workspace. With several, it waits unbound (workspace_id NULL)
   // until the user chooses one in Bane; an unbound approval (or one whose workspace was deleted) binds by
   // itself once one membership remains, without receiving: that consent named the old workspace. A bound approval
@@ -93,11 +102,11 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   ), target AS (
     SELECT workspace_id, role FROM memberships WHERE (SELECT count(*) FROM memberships)=1
     UNION ALL SELECT NULL, NULL WHERE (SELECT count(*) FROM memberships)=2
-  ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at)
+  ) INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile)
     SELECT ${keyId},${claims.iss},${claims.sub},${userId},${claims.client_id},workspace_id,
       CASE WHEN role='member' THEN array_remove(${sql.param(allowed)}::text[],'manage') ELSE ${sql.param(allowed)}::text[] END,
-      to_timestamp(${claims.exp}),${claims.iat} FROM target
-    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,
+      to_timestamp(${claims.exp}),${claims.iat},${profile} FROM target
+    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,bane_resource_grants.profile),
       issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,workspace_id=excluded.workspace_id,
       receiving=bane_resource_grants.receiving AND bane_resource_grants.workspace_id IS NOT NULL
     WHERE NOT bane_resource_grants.revoked AND (bane_resource_grants.workspace_id IS NULL OR bane_resource_grants.workspace_id=excluded.workspace_id)
@@ -108,7 +117,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const actor = await externalMcpGrant(runtime, keyId);
   if (!actor) {
     const { rows: [pending] } = await runtime.db.execute(sql`SELECT FROM bane_resource_grants WHERE id=${keyId} AND workspace_id IS NULL AND NOT revoked`);
-    return pending ? denied(403, undefined, '', `Choose a workspace for this MCP client in Bane: ${new URL('/settings/account', runtime.config.publicUrl).href}`) : denied(403);
+    return pending ? denied(403, undefined, '', `Choose a workspace for this MCP client in Bane: ${new URL(`/settings/mcp/${keyId}`, runtime.config.publicUrl).href}`) : denied(403);
   }
   const granted=actor.permissions.filter(permission=>allowed.includes(permission));
   return granted.length ? handler({...actor,permissions:granted}) : denied(403);

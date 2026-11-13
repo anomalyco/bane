@@ -137,7 +137,7 @@ export function registerMailGateway(app: App) {
         const {bytes,end}=await objectProjection(runtime,v.w,v);
         return new Response(bytes.subarray(0,end),{headers:{'content-type':'application/octet-stream'}});
       }
-      // Fair-use download allowance (285): a full body counts its size against the inbox's day and month. 509 tells the
+      // Fair-use download allowance (297): a full body counts its size against the inbox's day and month. 509 tells the
       // gateway to answer NO [LIMIT]; headers-only fetches are free.
       const {rows:[allowed]}=await runtime.db.execute<{ok:boolean}>(sql`SELECT inbox_protocol_download(${p.kid},${v.size}) AS ok`);
       if(!allowed?.ok)throw new ApiError(509,'DOWNLOAD_LIMIT','This inbox reached its daily or monthly IMAP download allowance.',undefined,true);
