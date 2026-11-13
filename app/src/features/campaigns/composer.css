@@ -64,31 +64,16 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 @media (max-width: 700px) {
   .composer-toolbar { margin-inline: calc(-1 * var(--space-12)); padding-inline: var(--space-12); }
 }
-/* One row that scrolls sideways (edge fade, no scrollbar) instead of two wrapped rows: the toolbar stays pinned above the keyboard and takes 44 px, not 97. */
-@media (max-width: 640px) {
+/* One row that scrolls sideways (edge fade, no scrollbar) instead of two wrapped rows: the toolbar stays pinned above the keyboard. On touch every control is a full 44 px target. */
+@media (max-width: 640px), (pointer: coarse) {
   .composer-tools { flex-wrap: nowrap; overflow-x: auto; margin: calc(-1 * var(--space-4)) calc(-1 * var(--space-12)); padding: var(--space-4); --fade-pad-x: var(--space-4); --fade-pad-y: var(--space-4); }
   .composer-tools > * { flex-shrink: 0; }
 }
-:root {
-  --re-bg: var(--color-surface);
-  --re-text: var(--color-text);
-  --re-text-muted: var(--color-muted);
-  --re-border: var(--color-border);
-  --re-hover: var(--color-canvas);
-  --re-active: var(--color-border);
-  --re-pressed: var(--color-border);
-  --re-bg-active: var(--color-canvas);
-  --re-separator: var(--color-border);
-  --re-danger-hover: color-mix(in srgb, var(--color-danger) 12%, var(--color-surface));
-  --re-danger: var(--color-danger);
-  --re-shadow: var(--shadow-popover);
-  --re-radius: var(--radius-sm);
-  --re-radius-sm: var(--radius-sm);
+@media (pointer: coarse) {
+  .composer-tools .ui-button.ui-button--sm { height: 44px; }
+  .composer-tools .ui-icon-button.ui-button--sm { width: 44px; }
+  .composer-tools .ui-button--sm::after { display: none; }
 }
-[data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form] { font-family: var(--font-body); font-size: var(--text-sm); z-index: 60; }
-[data-re-bubble-menu] *, [data-re-slash-command] *, [data-re-node-selector-content] *, [data-re-link-bm-form] *, [data-re-btn-bm-form] *, [data-re-img-bm-form] * { font-family: var(--font-body); }
-[data-re-slash-command-category] { text-transform: none; letter-spacing: normal; }
-[data-re-slash-command] { max-height: 320px; overflow-y: auto; }
 /* The library's floating menus are sized for a mouse: on touch the buttons grow to the shared 36 px (44 px with the slash menu rows) and the bubble menu wraps instead of running off a phone, and fields are 16 px so iOS never zooms in. */
 @media (pointer: coarse), (max-width: 899px) {
   [data-re-bubble-menu] { flex-wrap: wrap; max-width: calc(100vw - 16px); }

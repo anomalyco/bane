@@ -4,3 +4,9 @@
 .campaign-sender-error { top: auto; bottom: calc(100% + var(--space-4)); color: var(--color-danger); padding: var(--space-6) var(--space-8); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .campaign-sender-option { display: flex; align-items: center; width: 100%; min-height: var(--control-height); padding: var(--space-6) var(--space-8); border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; font: inherit; line-height: var(--leading-sm); text-align: left; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
 .campaign-sender-option[aria-selected='true'] { background: color-mix(in srgb, currentColor 8%, var(--campaign-menu-surface, var(--color-surface))); }
+.campaign-sender-mask { display: flex; align-items: center; cursor: text; overflow: hidden; }
+.campaign-sender-mask[aria-disabled] { cursor: not-allowed; color: var(--color-muted); }
+.campaign-sender-mask__text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.campaign-sender-mask:focus-visible { outline: 0; }
+.campaign-sender .ui-input[hidden] { display: none; }
+.campaign-sender-mask, .campaign-sender-mask:hover { background: transparent; }
