@@ -27,7 +27,7 @@ import './receiving.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { RitualAgentCard } from './ritual-agent'
-import { AddressSelect } from './shared'
+import { addressOption } from './shared'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -510,11 +510,11 @@ export function RitualsPage() {
         <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
           empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
         <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><AddressSelect value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => ({ value: t.value, address: t.label }))]} /></Field>
+          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select className="address-select-trigger" menuClassName="address-select" value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => addressOption(t.value, t.label))]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
-          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key} to ${targetName(target)}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
+          <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
-        {attached && <p className="muted ritual-attach__note">{key} already runs on {targetName(target)}.</p>}
+        {attached && <p className="muted ritual-attach__note">{key} already runs on <PrivateAddress value={targetName(target)} />.</p>}
       </section>
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">

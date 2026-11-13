@@ -12,6 +12,7 @@ import { ApiError } from '../../data/types'
 import { concepts, outcomes } from './concepts'
 import { useOverview, type Overview } from './overview'
 import { ConceptLine, Match, RitualIcon, TargetIcon } from './parts'
+import { MaskedText } from '../docs/agent-setup'
 import { when } from './shared'
 import { ownRecipient, receivedTo, type ReceivedRecipients } from '../../lib/private-address'
 import './receiving.css'
@@ -71,7 +72,7 @@ export function EmailPicker({ value, onChange, addresses, preferredTo }: { value
             <Input id="trace-sample-to" list="trace-addresses" value={value.to} onChange={e => onChange({ mode: 'sample', to: e.target.value })} placeholder="support@acme.com" autoComplete="off" />
           </Field>
           <datalist id="trace-addresses">{addresses.map(a => <option key={a} value={a} />)}</datalist>
-          <pre className="trace-sample__mime">{sampleMime(value.to || 'support@acme.com').replace(/\r\n/g, '\n')}</pre>
+          <pre className="trace-sample__mime"><MaskedText text={sampleMime(value.to || 'support@acme.com').replace(/\r\n/g, '\n')} /></pre>
         </div>
         : <Field label="Message" htmlFor="trace-paste" hint="The full message with its headers. Its To and Cc addresses are traced."><Textarea id="trace-paste" rows={8} spellCheck={false} value={value.mime} onChange={e => onChange({ mode: 'paste', mime: e.target.value })} placeholder={'From: ana@example.org\nTo: support@acme.com\nSubject: Invoice\n\nHello'} /></Field>}
       {none && value.mode === 'sample' && <p className="muted trace-picker__note">No mail yet, so a sample email stands in. Paste a message to trace your own.</p>}
@@ -114,11 +115,11 @@ function Code({ source, steps, active, revealed }: { source: string; steps: Time
     for (const m of here) {
       const start = m.s.column - 1, end = m.s.endColumn - 1
       if (start < from) continue
-      parts.push(text.slice(from, start))
-      parts.push(<mark key={m.i} className="trace-cond" data-state={m.i < revealed ? (m.s.result ? 'true' : 'false') : 'idle'}>{text.slice(start, end)}</mark>)
+      parts.push(<MaskedText key={`t${m.i}`} text={text.slice(from, start)} />)
+      parts.push(<mark key={m.i} className="trace-cond" data-state={m.i < revealed ? (m.s.result ? 'true' : 'false') : 'idle'}><MaskedText text={text.slice(start, end)} /></mark>)
       from = end
     }
-    parts.push(text.slice(from))
+    parts.push(<MaskedText key="rest" text={text.slice(from)} />)
     return <li key={line} data-active={activeLine === line || undefined}><span className="trace-code__n">{line}</span><code>{parts}</code></li>
   })}</ol>
 }
@@ -160,7 +161,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
                   const state = i < reveal ? (i === active ? 'active' : 'done') : 'pending'
                   return <li key={i} className="trace-step" data-kind={s.kind} data-state={state}>
                     <span className="trace-step__line">L{s.line}</span>
-                    {s.kind === 'condition' ? <><code className="trace-step__code">{conditionText(sources[row.key] ?? '', s) || 'condition'}</code><span className="trace-bool" data-value={String(s.result)}>{String(s.result)}</span></>
+                    {s.kind === 'condition' ? <><code className="trace-step__code"><MaskedText text={conditionText(sources[row.key] ?? '', s) || 'condition'} /></code><span className="trace-bool" data-value={String(s.result)}>{String(s.result)}</span></>
                       : s.kind === 'omens' ? <div className="trace-omens">{Object.entries(s.scores).map(([name, value]) => <div key={name} className="trace-omen"><code>{name}</code>
                         {typeof value === 'number' ? <span className="trace-omen__bar"><span style={{ transform: `scaleX(${state === 'pending' ? 0 : Math.max(0, Math.min(1, value))})` }} /></span> : <span className="trace-bool" data-value={String(value)}>{String(value)}</span>}
                         <span className="trace-omen__value">{typeof value === 'number' ? value.toFixed(2) : ''}</span></div>)}</div>
@@ -169,7 +170,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
                   </li>
                 })}
                 {!row.timeline.length && <li className="trace-step" data-state={position(r, -1) <= at ? 'done' : 'pending'}><span className="muted">Nothing to evaluate; no actions.</span></li>}
-                {row.error && <li className="trace-step trace-step--error" data-state={shown ? 'done' : 'pending'}>{row.error}. The mail is marked junk.</li>}
+                {row.error && <li className="trace-step trace-step--error" data-state={shown ? 'done' : 'pending'}><MaskedText text={row.error} />. The mail is marked junk.</li>}
               </ol>
             </div>
           </article>
@@ -184,7 +185,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
               {!rcpt.inboxes?.length && !rcpt.webhooks?.length && <span className="trace-chip"><TargetIcon type="store" size={13} />{outcomes.store}</span>}
               {(rcpt.labels ?? []).map(l => <span key={l} className="trace-chip trace-chip--label">{l}</span>)}
             </>}
-            {(rcpt.warnings ?? []).map(w => <span key={w} className="trace-warning">{w}</span>)}
+            {(rcpt.warnings ?? []).map(w => <span key={w} className="trace-warning"><MaskedText text={w} /></span>)}
           </span>
         </footer>
       </section>

@@ -23,7 +23,7 @@ export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as co
 // direction and stream columns stay for phone cards only. Every address then gets room to read in full.
 const logColumn = (key: string) => logColumns.find(column => column.key === key)!
 export const latestColumnDefs: SkeletonColumn[] = logColumnDefs.map(column => column.key === 'direction' || column.key === 'from' || column.key === 'stream' ? { ...column, table: false as const }
-  : column.key === 'status' ? { ...column, width: 124 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: '32%' } : column)
+  : column.key === 'status' ? { ...column, width: 160 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: '32%' } : column)
 export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => ({ ...logColumn(column.key === 'contact' ? 'to' : column.key), ...column, render: column.key === 'contact' ? (row: LogEntry) => (row.direction === 'sent' ? logColumn('to') : logColumn('from')).render(row) : logColumn(column.key).render }))
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.

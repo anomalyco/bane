@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { MoreHorizontal } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import { ApiError, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
-import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
+import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
@@ -169,10 +170,11 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const upToDate = template.publishedRevision === template.revision && !dirty
   return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>
-      <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} data-actionable={error ? true : undefined} role="status" title={error || 'Changes save automatically. Publish to use them in new campaigns.'}><span className="campaign-sync-dot" aria-hidden="true" />{error ? <Button variant="ghost" size="sm" disabled={saving} onClick={() => void save()}>Save failed · Retry</Button> : <span>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : archived ? 'Archived' : 'Saved'}</span>}</div>
+      {!phone && <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} data-actionable={error ? true : undefined} role="status" title={error || 'Changes save automatically. Publish to use them in new campaigns.'}><span className="campaign-sync-dot" aria-hidden="true" />{error ? <Button variant="ghost" size="sm" disabled={saving} onClick={() => void save()}>Save failed · Retry</Button> : <span>{saving ? 'Saving…' : dirty ? 'Unsaved changes' : archived ? 'Archived' : 'Saved'}</span>}</div>}
       {phone ? <>
         <Button variant="primary" disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
-        <DropdownMenu items={[
+        <DropdownMenu trigger={<IconButton label={error ? 'More actions. Save failed' : 'More actions'} className="campaign-menu-trigger" data-state={error ? 'offline' : undefined}><MoreHorizontal size={16} /></IconButton>} items={[
+          ...(error ? [{ label: 'Save failed · Retry', hint: error, disabled: saving, onSelect: () => void save() }] : []),
           { label: 'Preview', disabled: saving || dirty || !draft.html, onSelect: () => setPreviewOpen(true) },
           { label: 'Use template', disabled: !published || starting !== null || unavailable, hint: published ? undefined : archived ? 'Restore it first' : 'Publish this template first', onSelect: () => void start({ id: template.id, name: template.published?.name ?? template.draft.name }) },
           { label: archived ? 'Restore' : 'Archive', disabled: saving, onSelect: () => void archive() },

@@ -66,6 +66,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getTemplateAsset` | `assets` · `get` · sending |
 | `deleteTemplateAsset` | `assets` · `delete` · sending |
 | `getTemplateAssetContent` | `assets` · `content` · sending |
+| `checkEmail` | `send` · `check` · sending |
 | `sendEmail` | `send` · `single` · sending |
 | `sendEmailBatch` | `send` · `batch` · sending |
 | `previewEmail` | `send` · `preview` · sending |

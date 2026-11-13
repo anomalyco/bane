@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ChevronRight } from 'lucide-react'
+import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router'
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -10,7 +10,7 @@ import { useRegionCatalog } from '../../data/regions'
 import { ApiError, campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, Checkbox, ConfirmDialog, Dialog, DropdownMenu, ErrorState,
-  Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
+  Field, IconButton, Input, PageHeader, SectionHeader, Select, SkeletonText,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
@@ -217,6 +217,10 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     finally { if (!controller.signal.aborted) { setLoadingLatest(false); busyRef.current = false } }
   }
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
+  const syncActionable = Boolean(remote || error || autosavePaused || sync.connection === 'offline')
+  const syncState = error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection
+  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available. Your unsaved changes are safe.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')
+  function syncAction() { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }
   function reportError(value: string) { setError(value); toast(value, 'error') }
   async function save(next: 'auto' | 'edit' | 'review' | 'test') {
     if (guard.current || pending || !readyRef.current || readOnly) return
@@ -293,14 +297,18 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   }
   return <div className="campaign-compose-page">
     <PageHeader title={accepted ? 'Edit campaign' : 'Create campaign'} backTo="/campaigns" actions={<>
-      <div className="campaign-sync-status" role="status" data-state={error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection} data-actionable={remote || error || autosavePaused || sync.connection === 'offline' || undefined} title={error || sync.error?.message || (remote ? 'A newer version is available. Your unsaved changes are safe.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')}>
+      {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
         <span className="campaign-sync-dot" aria-hidden="true" />
-        {remote || error || autosavePaused || sync.connection === 'offline' ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }}>{syncLabel}</Button> : <span>{syncLabel}</span>}
-      </div>
+        {syncActionable ? <Button variant="ghost" size="sm" disabled={pending} onClick={syncAction}>{syncLabel}</Button> : <span>{syncLabel}</span>}
+      </div>}
       <div className="campaign-compose-actions">
         {phone ? <>
           <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')}>Review</Button>
-          <DropdownMenu items={[...(accepted ? [] : [{ label: 'Use a template', disabled: pending, onSelect: () => setTemplatesOpen(true) }]), { label: 'Send test', disabled: !accepted || saveDisabled || pending || autosavePaused, hint: accepted ? undefined : 'Name the campaign first; it saves automatically', onSelect: () => void save('test') }]} />
+          <DropdownMenu label="More actions" trigger={<IconButton label={syncActionable ? `More actions. ${syncLabel}` : 'More actions'} className="campaign-menu-trigger" data-state={syncActionable ? syncState : undefined}><MoreHorizontal size={16} /></IconButton>} items={[
+            ...(syncActionable ? [{ label: `${syncLabel} · ${remote ? 'Load latest' : error && !autosavePaused ? 'Details' : 'Retry'}`, hint: syncTitle, disabled: pending, onSelect: syncAction }] : []),
+            ...(accepted ? [] : [{ label: 'Use a template', disabled: pending, onSelect: () => setTemplatesOpen(true) }]),
+            { label: 'Send test', disabled: !accepted || saveDisabled || pending || autosavePaused, hint: accepted ? undefined : 'Name the campaign first; it saves automatically', onSelect: () => void save('test') },
+          ]} />
         </> : <>
           {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
           <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Name the campaign first; it saves automatically' : undefined} onClick={() => save('test')}>Send test</Button>

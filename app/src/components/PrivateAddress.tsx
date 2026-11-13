@@ -13,15 +13,17 @@ import { useMasking } from '../lib/privacy'
 
 // What reveals a masked address besides its own hover: keyboard focus on a control or row that holds it, as before.
 // A row with a link (DataTable rowHref, or a card on a phone) is focused through that link.
-const ROW = '.ui-table__linked, .ui-card', TABBABLE = 'a[href], button, [tabindex]:not([tabindex="-1"]), .ui-table__clickable'
+const ROW = '.ui-table__linked, .ui-card', TABBABLE = 'a[href], button, [role="option"], [role="menuitem"], [tabindex]:not([tabindex="-1"]), .ui-table__clickable'
 const focusHolds = (element: Element | null) => {
   const focused = document.activeElement
   if (!element || !focused || focused === document.body || focused === element || !focused.matches(':focus-visible')) return false
   return focused.contains(element) || focused.matches('.ui-row-link') && !!focused.closest(ROW)?.contains(element)
 }
 const focusListeners = new Set<() => void>()
-// focusout runs before the next element has focus: look again once it has settled.
-const focusMoved = () => queueMicrotask(() => { for (const listener of focusListeners) listener() })
+// focusout runs before the next element has focus: look again once focus has landed (a task later, not a microtask, which
+// still sees document.body focused). Un-revealing in between swaps the address's text while nothing has focus, and a Radix
+// dialog's focus scope answers a DOM change with nothing focused by pulling focus back to the dialog: Tab would never leave.
+const focusMoved = () => setTimeout(() => { for (const listener of focusListeners) listener() }, 0)
 let listening = false
 const subscribeFocus = (listener: () => void) => {
   if (!listening) { listening = true; document.addEventListener('focusin', focusMoved, true); document.addEventListener('focusout', focusMoved, true) }
@@ -36,8 +38,10 @@ const subscribeFocus = (listener: () => void) => {
  */
 export function useMasked(text: string) {
   const root = useRef<HTMLSpanElement>(null), box = useRef<HTMLSpanElement>(null)
-  const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), [alone, setAlone] = useState(false)
+  const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), [alone, setAlone] = useState(false), [clipped, setClipped] = useState(false)
   const held = useSyncExternalStore(subscribeFocus, () => focusHolds(root.current))
+  const blurred = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(blurred.current), [])
   const masking = useMasking()
   const revealed = !masking || hovered || focused || held
   useLayoutEffect(() => {
@@ -45,6 +49,16 @@ export function useMasked(text: string) {
     reserve()
     return onRulerChange(reserve)
   }, [text])
+  // A revealed address that its cell cuts short (privacy mode on or off) says the whole of it on hover, and follows the cell as it resizes.
+  useLayoutEffect(() => {
+    const element = box.current
+    if (!revealed || !element) { setClipped(false); return }
+    const check = () => setClipped(element.scrollWidth > element.clientWidth + 1)
+    check()
+    const observer = new ResizeObserver(check)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [revealed, text])
   useEffect(() => {
     if (!hovered) return
     // Revealing replaces what is under the pointer, and some browsers then never report the pointer leaving.
@@ -59,14 +73,14 @@ export function useMasked(text: string) {
   return {
     revealed, box: box as RefObject<HTMLSpanElement>,
     root: {
-      ref: root as RefObject<HTMLSpanElement>, title: revealed ? undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
+      ref: root as RefObject<HTMLSpanElement>, title: revealed ? clipped ? text : undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
       // A mouse or pen reveals by hovering. A finger has no hover: it reveals an address that takes focus by tapping it
       // (not every browser moves focus on a tap, so the click does).
       onPointerEnter: (event: PointerEvent) => { if (event.pointerType !== 'touch') setHovered(true) },
       onPointerLeave: () => setHovered(false),
       onClick: alone && masking ? (event: MouseEvent<HTMLElement>) => event.currentTarget.focus() : undefined,
-      onFocus: (event: FocusEvent) => { if (event.target === event.currentTarget) setFocused(true) },
-      onBlur: (event: FocusEvent) => { if (event.target === event.currentTarget) setFocused(false) },
+      onFocus: (event: FocusEvent) => { if (event.target === event.currentTarget) { clearTimeout(blurred.current); setFocused(true) } },
+      onBlur: (event: FocusEvent) => { if (event.target === event.currentTarget) { clearTimeout(blurred.current); blurred.current = setTimeout(() => setFocused(false), 0) } },
     },
   }
 }

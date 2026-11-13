@@ -139,7 +139,6 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .logs-page > .data-toolbar { padding-bottom: var(--space-12); }
 .logs-table { --table-row-height: 34px; }
 .logs-table .ui-table { font-size: var(--text-xs); }
-.logs-page .logs-table .ui-table { min-width: 980px; }
 /* The direction tabs sit in the page header, at control height, like Overview's range. */
 .logs-controls { flex-wrap: nowrap; gap: var(--space-12); }
 .logs-controls .ui-tabs { min-height: var(--control-height); border-bottom: 0; }
@@ -278,7 +277,7 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
   /* Here the box never runs past its line: masked, the run is cut there; revealed, a longer address wraps inside it. */
   :is(.ui-page-header h1, dd, .email-metadata) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
   :is(.ui-page-header h1, dd, .email-metadata) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
-  .ui-page-header > .cluster:last-child { flex-wrap: wrap; }
+  .ui-page-header > .cluster:last-child:not(:first-child) { flex-wrap: wrap; }
   .data-toolbar > .cluster { width: 100%; }
   .data-toolbar .ui-select-trigger { flex: 1 1 0; width: auto; min-width: 0; max-width: none; }
   .search-box, .search-box.search-box--list { flex: 1 1 100%; width: 100%; min-width: 0; }

@@ -35,7 +35,7 @@ const FALLBACK = new Set(['iframe', 'noembed', 'noframes']);
  *    that reads what is shown does not.
  * A serializer writes these nodes as they came.
  */
-export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' = 'fragment', { clients = false } = {}) {
+export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' = 'fragment', { clients = false, onParseError }: { clients?: boolean; onParseError?: (error: {code: string}) => void } = {}) {
   const started = performance.now(), depth = new WeakMap<object, number>();
   // base: the tree depth of the node whose data is being parsed, so markup inside it counts from there.
   let nodes = 0, open = 0, attributeBytes = 0, base = 0;
@@ -69,7 +69,7 @@ export function boundedHtmlFragment(html: string, mode: 'fragment' | 'document' 
   function parse(source: string, as: 'fragment'): Fragment;
   function parse(source: string, as: 'fragment' | 'document') {
     open = 0;
-    const options = { treeAdapter, scriptingEnabled: false };
+    const options = { treeAdapter, scriptingEnabled: false, onParseError };
     const parser = as === 'document' ? new Parser(options) : Parser.getFragmentParser(null, options);
     const tokenizer = new BoundedTokenizer(parser.options, parser);
     tokenizer.state = parser.tokenizer.state;

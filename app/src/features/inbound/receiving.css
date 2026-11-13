@@ -197,7 +197,8 @@ li + li > .trace-recent__row { border-top: 1px solid var(--color-border-muted); 
 /* Phone: a recent message in Trace reads as two lines, subject and time, then from and to. */
 @media (max-width: 640px) {
   .trace-recent__row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'subject time' 'from to'; gap: 2px var(--space-12); min-height: 56px; padding-block: var(--space-8); }
-  .trace-recent__subject { grid-area: subject; }
+  /* A long subject wraps so it can be read in full; the row grows by a line instead of cutting it. */
+  .trace-recent__row .trace-recent__subject { grid-area: subject; white-space: normal; overflow-wrap: anywhere; }
   .trace-recent__time { grid-area: time; }
   .trace-recent__from { grid-area: from; color: var(--color-muted); }
   .trace-recent__to { grid-area: to; max-width: 160px; justify-self: end; }

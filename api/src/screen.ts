@@ -8,7 +8,7 @@ import { formattedSender } from './sending.js';
 // gambling ad set as a workspace name in an invitation). The dispatcher decides what to do with the score.
 
 const MAX_BODY = 8000;
-const MAX_SCREEN_BYTES = 24 * 1024;
+export const MAX_SCREEN_BYTES = 24 * 1024;
 const MAX_CHUNKS = 4;
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
@@ -64,7 +64,7 @@ const INLINE=new Set(['a','abbr','b','bdi','bdo','big','cite','code','data','del
  * An HTML body as the screen reads it: the text a client lays out, every host it links or loads, anchors whose text
  * names another host than their href, and its links and images (for the support lint, src/deliverability.ts).
  */
-export async function readHtml(html: string) {
+export async function readHtml(html: string, visit?: (tag: string) => void) {
   const { boundedHtmlFragment } = await import('./bounded-html.js');
   if (html.length>512*1024) throw tooLarge();
   const fragment=boundedHtmlFragment(html,'fragment',{clients:true});
@@ -88,6 +88,7 @@ export async function readHtml(html: string) {
     const children='childNodes' in node ? node.childNodes : [];
     if (!('tagName' in node)) { for (const child of children) walk(child,anchor); return; }
     const tag=node.tagName;
+    visit?.(tag);
     if (['style','script','template','head','title','xml'].includes(tag)) return;
     let display='';
     for (const a of node.attrs) {
@@ -112,25 +113,24 @@ export async function readHtml(html: string) {
   flush();
   return { text: [...lines,...aside].join('\n'), hosts, mismatches, links, images };
 }
-async function body(snapshot: EmailSnapshot) {
+export function screenTextSignals(visible: string, text?: string, rawPart?: string) {
   // Preserve order and repetitions in mandatory input; deduplicating sentences
   // could change the meaning or make an over-limit message appear to fit.
   const project=(s='')=>normalize(s).replace(/\s+/g,' ').trim();
-  const plain=project(snapshot.text), raw=project(snapshot.raw);
-  let rendered='', hosts=new Set<string>(), mismatches=new Set<string>();
-  if (snapshot.html) {
-    const read=await readHtml(snapshot.html);
-    rendered=project(read.text); hosts=read.hosts; mismatches=read.mismatches;
-  }
-  const signals=[...mismatches,...hosts];
-  if(signals.length>60) throw tooLarge();
-  const links=signals.join('\n');
+  const plain=project(text), raw=project(rawPart), rendered=project(visible);
   const words=(v:string)=>new Set(v.toLowerCase().match(VISIBLE_WORDS));
   function overlap(text:string, html:string) {
     const a=words(text), b=words(html), common=[...a].filter(w=>b.has(w)).length;
     return a.size && b.size ? common/(a.size+b.size-common) : undefined;
   }
-  return { bodies:completeBodies([rendered,plain,raw].filter(Boolean).join('\n'),links), textHtmlOverlap:overlap(plain,rendered) };
+  return { content:[rendered,plain,raw].filter(Boolean).join('\n'), textHtmlOverlap:overlap(plain,rendered) };
+}
+async function body(snapshot: EmailSnapshot) {
+  const read=snapshot.html ? await readHtml(snapshot.html) : undefined;
+  const signals=read ? [...read.mismatches,...read.hosts] : [];
+  if(signals.length>60) throw tooLarge();
+  const {content,textHtmlOverlap}=screenTextSignals(read?.text ?? '',snapshot.text,snapshot.raw);
+  return { bodies:completeBodies(content,signals.join('\n')), textHtmlOverlap };
 }
 export async function jevQuestions(endpoint:string,apiKey:string,model:string,state:unknown,questions:unknown,deadline:number):Promise<unknown> {
   // The deadline includes reading the response body. Never retry inside a send lease.
