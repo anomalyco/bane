@@ -7,7 +7,7 @@ import { queries } from '../../data/queries'
 import type { InboundAddress, InboundWebhook, MailRoute } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { CreatedEndpointDialog, NewEndpointDialog, type Endpoint } from './ritual-connections'
+import { CreatedEndpointDialog, EndpointDialog, type Endpoint } from './ritual-connections'
 import '../settings/settings.css'
 import './inbound.css'
 type Destination = { id: string; name: string; detail: string; kind: 'inbox' | 'webhook'; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook }
@@ -95,7 +95,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
       </form>
     </Dialog>
-    <NewEndpointDialog open={creating} onOpenChange={setCreating} types={['webhook']} onCreated={async endpoint => {
+    <EndpointDialog open={creating} onOpenChange={setCreating} types={['webhook']} onCreated={async endpoint => {
       setCreating(false); setCreated(endpoint)
       const hook = (await refreshWebhooks()).find(h => h.key === endpoint.name)
       if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
