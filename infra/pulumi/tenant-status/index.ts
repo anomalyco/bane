@@ -11,7 +11,7 @@ if (!account) throw new Error('Expected the stage deploy-role ARN');
 for (const region of ['us-east-2', 'us-east-1'] as const) {
   const trusted = region === 'us-east-1';
   if (trusted && String(config['bane:trustedFeedbackPublish']) !== 'true') continue;
-  const provider = new aws.Provider(region, { region, allowedAccountIds: [account] });
+  const provider = new aws.Provider(region, { region, allowedAccountIds: [account], assumeRoles: [{ roleArn: config['bane:deployRoleArn'] }] });
   const opts = { provider, protect: true };
   const name = 'bane-tenant-sending-status';
   const topic = `arn:aws:sns:${region}:${account}:${trusted ? 'bane-trusted' : 'bane'}-feedback`;
@@ -20,15 +20,8 @@ for (const region of ['us-east-2', 'us-east-1'] as const) {
     'detail-type': ['Sending Status Disabled', 'Sending Status Enabled'],
     resources: [{ prefix: `arn:aws:ses:${region}:${account}:tenant/bane-` }],
   }) }, opts);
-  // An execution role limits the publisher to this exact rule. The SNS policy stays
-  // unchanged (the Worker checks it); no unconditioned events.amazonaws.com grant.
-  const role = new aws.iam.Role(region, { name: `${name}-${region}`, assumeRolePolicy: rule.arn.apply(arn => JSON.stringify({
-    Version: '2012-10-17', Statement: [{ Effect: 'Allow', Principal: { Service: 'events.amazonaws.com' }, Action: 'sts:AssumeRole',
-      Condition: { ArnEquals: { 'aws:SourceArn': arn }, StringEquals: { 'aws:SourceAccount': account } } }],
-  })) }, opts);
-  const publish = new aws.iam.RolePolicy(region, { name: 'publish-feedback', role: role.name, policy: JSON.stringify({
-    Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sns:Publish', Resource: topic }],
-  }) }, opts);
+  // Independently provisioned: CI may pass this role to EventBridge but cannot edit its trust or grant.
+  const roleArn = `arn:aws:iam::${account}:role/${name}-${region}`;
   // Leave input untouched: #115 consumes the EventBridge envelope inside the signed SNS Message.
-  new aws.cloudwatch.EventTarget(region, { rule: rule.name, targetId: 'feedback', arn: topic, roleArn: role.arn }, { ...opts, dependsOn: [publish] });
+  new aws.cloudwatch.EventTarget(region, { rule: rule.name, targetId: 'feedback', arn: topic, roleArn }, opts);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""First-install rehearsal. No remote stack init, refresh, apply or cloud writes."""
+"""Read-only IAM and intake preflight. CI owns the real Pulumi preview."""
 import argparse, json, os, shutil, subprocess, tempfile
 from pathlib import Path
 
@@ -43,19 +43,10 @@ print(f'  ~ boundary: after #76 only, add {action} (tenant resource type); size 
 assert len(json.dumps(boundary,separators=(',',':')))<=6144
 
 with tempfile.TemporaryDirectory(prefix='bane-tenant-plan-') as tmp:
-    root=Path(tmp); program=root/'program'/'tenant-status'; program.mkdir(parents=True)
-    for name in ['index.ts','Pulumi.yaml']: shutil.copy(here/name,program/name)
-    shutil.copy(here.parent/f'Pulumi.{stage}.yaml',program.parent/f'Pulumi.{stage}.yaml')
-    (program/'node_modules').symlink_to(here.parent/'node_modules',target_is_directory=True)
-    (root/'state').mkdir(); os.umask(0o077)
-    env=dict(os.environ, AWS_PROFILE=profile, AWS_REGION='us-east-2',PULUMI_BACKEND_URL=(root/'state').as_uri(),PULUMI_CONFIG_PASSPHRASE=os.urandom(32).hex(),PULUMI_SKIP_UPDATE_CHECK='true')
+    root=Path(tmp); os.umask(0o077)
     for region in ['us-east-2','us-east-1']:
         trusted=region=='us-east-1'
         if trusted and str(cfg['bane:trustedFeedbackPublish']).lower()!='true': continue
-        role='bane-tenant-sending-status-'+region
-        rules=aws(region,'events','list-rules','--name-prefix','bane-tenant-sending-status')['Rules']
-        roles=aws(region,'iam','list-roles','--query',f"Roles[?RoleName=='{role}'].RoleName")
-        if roles or any(r['Name']=='bane-tenant-sending-status' for r in rules): raise SystemExit('Resources exist: use the established operator stack and pulumi preview --refresh; do not recreate')
         topic='bane-trusted-feedback' if trusted else 'bane-feedback'; arn=f'arn:aws:sns:{region}:{account}:{topic}'
         routes=aws(region,'sns','list-subscriptions-by-topic','--topic-arn',arn)['Subscriptions']
         assert any(r['Protocol']=='https' and r['Endpoint']==origin+'/v1/events/ses' and r['SubscriptionArn'].startswith(arn+':') for r in routes), 'missing confirmed intake'
@@ -69,6 +60,4 @@ with tempfile.TemporaryDirectory(prefix='bane-tenant-plan-') as tmp:
             (root/'request.json').write_text(json.dumps(request))
             result=aws(region,'iam','simulate-custom-policy','--cli-input-json',f'file://{root}/request.json')['EvaluationResults']
             assert len(result)==1 and (result[0]['EvalDecision']=='allowed')==allowed, 'unexpected simulation decision'
-        print(f'  + {region}: rule + target + rule-scoped role + publish policy → {topic} → confirmed HTTPS; proposed IAM simulations pass')
-    run('pulumi','stack','init',stage,'--non-interactive',cwd=program,env=env)
-    print(run('pulumi','preview','--diff','--stack',stage,'--non-interactive','--color','never',cwd=program,env=env))
+        print(f'  {region}: {topic} → confirmed HTTPS; proposed IAM simulations pass. CI previews the rule and target.')

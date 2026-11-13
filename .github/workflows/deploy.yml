@@ -53,6 +53,7 @@ jobs:
       stage: ${{ steps.stage.outputs.stage }}
       sha: ${{ steps.pin.outputs.sha }}
       pulumi: ${{ steps.paths.outputs.pulumi }}
+      tenant_status: ${{ steps.paths.outputs.tenant_status }}
     steps:
       # github.actor pushed or dispatched; a rerun keeps it and makes the
       # rerunner github.triggering_actor, so both are checked. The merge queue
@@ -188,6 +189,7 @@ jobs:
         run: |
           if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+            echo 'tenant_status=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
           else
             bash .github/scripts/pulumi-has-work.sh "$STAGE" "$SHA"
@@ -347,6 +349,16 @@ jobs:
           cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
           pulumi-version: 3.274.1
           suppress-progress: true
+
+      - *stage-tip
+
+      - name: Preview and deploy SES tenant status rules
+        if: steps.guard.outputs.skip != 'true' && needs.authorize.outputs.tenant_status == 'true'
+        working-directory: infra/pulumi/tenant-status
+        env:
+          PREVIEW_ONLY: ${{ inputs.preview || false }}
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+        run: bash ../../../.github/scripts/tenant-status-deploy.sh
 
   deploy:
     name: Deploy ${{ needs.authorize.outputs.stage }} ${{ needs.authorize.outputs.sha }}
