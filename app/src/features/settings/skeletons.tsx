@@ -28,6 +28,8 @@ export const settingsColumns = {
     { key: 'receiving', label: 'Receiving', width: '32%', card: 'line' },
     { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
     { key: 'region', label: 'Region', card: 'hide' },
+    // What sending still waits for (a card has no room for it beside the status); the table shows it in the Sending cell.
+    { key: 'note', label: 'Setup', table: false, card: 'line' },
   ],
   dns: [
     { key: 'type', label: 'Type', width: 80 },
@@ -89,8 +91,9 @@ export const settingsColumns = {
   ],
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
-const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
-export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: multiTenant ? '30%' : '26%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '22%' }, { ...domainReceiving, width: multiTenant ? '34%' : '30%' }, domainAddresses, ...multiTenant ? [] : [domainRegion]]
+const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion, domainNote] = settingsColumns.domains
+// The widths the loaded table forces (domain-records.css), so the skeleton and the list agree.
+export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, domainAddresses, ...multiTenant ? [] : [domainRegion], domainNote]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
 const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '54%' }, settingsColumns.webhooks[1], { ...settingsColumns.webhooks[3], width: '16%' }, { ...settingsColumns.webhooks[4], width: '12%' }, settingsColumns.webhooks[5]]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
@@ -152,7 +155,7 @@ export function DomainDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
   return <LoadingRegion className="stack" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <dl className="settings-facts domain-facts">{(multiTenant ? ['Status'] : ['Status', 'Region']).map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
+    <dl className="settings-facts domain-facts">{(multiTenant ? ['Sending', 'Receiving'] : ['Sending', 'Region']).map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
     <div className="domain-sections"><section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><SkeletonText width={420} /></div><ControlSkeleton width={120} /></div><div className="stack domain-group"><div className="ui-section-header"><div className="domain-group-title"><h3>Sending</h3><SkeletonText width={220} /></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section></div>
   </LoadingRegion>
 }
