@@ -3702,6 +3702,223 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      // Grants come from an operator's dashboard session (the support platform mints them the same way).
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
+      const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
+      const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
+      const plain = await mint({ userId: manager!.userId, ticketRef: 'D-2', verification: 'dmarc', workspaceIds: [wid] });
+      const both = await mint({ userId: manager!.userId, ticketRef: 'D-3', verification: 'dmarc' });
+      const theirs = await mint({ userId: outsider.userId, ticketRef: 'D-4', verification: 'magic_link' });
+      assert.deepEqual([content.contentWorkspaceId, plain.contentWorkspaceId, both.workspaceIds.length], [wid, null, 2]);
+      const support = bearer(content.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+
+      // Synthetic mail of one workspace over the last days: providers, outcomes, a campaign, screen refusals, a simulated email.
+      const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst');
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [domainId, wid, domain, REGION]);
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,identity,created_at) VALUES ($1,$2,$1,'verified',$3,now() - interval '5 days')`, [wid, domain, JSON.stringify({ proven: true, mx: null, note: null,
+        ses: { DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true }, MailFromAttributes: { MailFromDomain: mailFrom, MailFromDomainStatus: 'SUCCESS' } },
+        dmarc: { status: 'none', record: 'v=DMARC1; p=none', source: domain, adkim: 'r', aspf: 'r', checkedAt: Date.now(), recommend: false, alignedMailFrom: mailFrom } })]);
+      type Mail = { id: string; to: string; status: string; outcomes: number; campaign?: string; kind?: string; subject?: string; error?: string; days?: number; simulated?: boolean; html?: string; text?: string };
+      const mails: Mail[] = [];
+      const mail = (n: number, m: Omit<Mail, 'id' | 'to'> & { to: (i: number) => string }) => { const made = Array.from({ length: n }, (_, i) => ({ ...m, id: unique('email'), to: m.to(i) })); mails.push(...made); return made; };
+      mail(36, { to: i => `reader${i}@gmail.com`, status: 'delivered', outcomes: 3, days: 2 });
+      const opens = mail(3, { to: i => `opener${i}@gmail.com`, status: 'delivered', outcomes: 3 | 16, days: 2 });
+      mail(1, { to: () => 'clicker@googlemail.com', status: 'delivered', outcomes: 3 | 16 | 32, days: 2 });
+      const complaints = mail(2, { to: i => `annoyed${i}@gmail.com`, status: 'complained', outcomes: 3 | 8, days: 1 });
+      const bounces = mail(4, { to: i => `gone${i}@outlook.com`, status: 'bounced', outcomes: 1 | 4, days: 1 });
+      mail(6, { to: i => `kept${i}@hotmail.co.uk`, status: 'delivered', outcomes: 3, days: 1 });
+      mail(5, { to: i => `staff${i}@corp-${tag}.example.org`, status: 'delivered', outcomes: 3, days: 1 });
+      const rejected = mail(2, { to: i => `promo${i}@gmail.com`, status: 'rejected', outcomes: 0, error: 'CONTENT_REJECTED_SPAM', subject: 'WIN A PRIZE '.repeat(20), days: 1 });
+      mail(1, { to: () => 'test@example.org', status: 'delivered', outcomes: 3, simulated: true, days: 1 });
+      const campaignMail = mail(20, { to: i => `fan${i}@yahoo.com`, status: 'delivered', outcomes: 3, campaign: campaignId, kind: 'marketing', days: 3 });
+      for (const m of campaignMail.slice(0, 2)) Object.assign(m, { status: 'bounced', outcomes: 1 | 4 });
+      const [lintable] = mail(1, { to: () => 'friend@icloud.com', status: 'delivered', outcomes: 3, subject: 'RE: hello', days: 1,
+        html: '<p>Hi {{name}}, your order shipped.</p><div style="display:none">secret words for filters only</div><a href="https://bit.ly/abc">www.shop.example.com</a> <a href="http://localhost:3000/track">track</a>', text: 'Hi {{name}}' });
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, error_code, event_outcomes, campaign_id, provider_id, created_at)
+        SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', m.subject, m.status, m.snapshot, m.simulated, m.error, m.outcomes, m.campaign, CASE WHEN m.outcomes & 1 <> 0 THEN 'ses-' || m.id END,
+          now() - make_interval(days => m.days) FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text, subject text, status text, snapshot jsonb, simulated boolean, error text, outcomes int, campaign text, days int)`,
+        [wid, REGION, `hello@${domain}`, JSON.stringify(mails.map(m => ({ id: m.id, to_address: m.to, subject: m.subject ?? 'Weekly news', status: m.status, simulated: !!m.simulated, error: m.error ?? null, outcomes: m.outcomes, campaign: m.campaign ?? null, days: m.days ?? 1,
+          snapshot: { from: `hello@${domain}`, to: [m.to], cc: [], bcc: [], replyTo: [], region: REGION, kind: m.kind ?? 'transactional', subject: m.subject ?? 'Weekly news', html: m.html ?? '<p>Weekly news</p>', text: m.text, attachments: [], tracking: true, headers: [] } })))]);
+      const event = (email: string, type: string, data: Json, simulated = false) => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at) VALUES ($1,$2,$3,$4,$5,$6,now() - interval '20 hours')`, [unique('event'), wid, email, type, JSON.stringify(data), simulated]);
+      for (const m of bounces) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'General', status: '5.7.515',
+        diagnosticCode: `smtp; 550 5.7.515 Access denied, ${domain} does not meet the required authentication level for ${m.to} from 192.0.2.${m.id.length % 200}` });
+      for (const m of campaignMail.slice(0, 2)) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'NoEmail', status: '5.1.1', diagnosticCode: `smtp; 550 5.1.1 <${m.to}>: user unknown` });
+      for (const m of complaints) await event(m.id, 'complaint', { complaintFeedbackType: 'abuse' });
+      await event(opens[0]!.id, 'open', { isBotEvent: 'Likely' }); await event(opens[1]!.id, 'open', { isBotEvent: false }); await event(opens[2]!.id, 'open', {});
+      for (const m of rejected) await event(m.id, 'reject', { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.97, model: 'jev-fixture', threshold: 0.9 } });
+      await db.query(`INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour,screened,rejected) VALUES ($1,'-infinity',date_trunc('hour',now()) - interval '20 hours',50,2)`, [wid]);
+      await db.query(`INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,occurred_at) VALUES ($1,$2,'con_x','gone@outlook.com','unsubscribed','rfc8058-post',now() - interval '1 day')`, [unique('cns'), wid]);
+      // Standing: 15 days at 92, no ladder step; a limit request up to 25,000 qualifies.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at) VALUES ($1,'graded',100,92,92,95,10000,10000,'ok',now())`, [wid]);
+      await db.query(`INSERT INTO sender_score_daily(workspace_id,day,accepted,bounced,complained,score,quality,target,daily_limit,step)
+        SELECT $1,(now() AT TIME ZONE 'UTC')::date - n,100,1,0,92,95,92,10000,'ok' FROM generate_series(0,14) n`, [wid]);
+      // Audience: one list with role, mistyped and stale addresses, and an import whose contacts bounced since.
+      await db.query(`INSERT INTO audience_lists(id,workspace_id,name) VALUES ($1,$2,'Newsletter')`, [listId, wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,suppression_reason,suppressed_at,observed_since,last_open_at)
+        SELECT 'con_'||$2||'_'||n, $1, CASE WHEN n <= 10 THEN 'info@corp'||n||'.example.org' WHEN n <= 12 THEN 'person'||n||'@gmial.com' ELSE 'person'||n||'@gmail.com' END,
+          CASE WHEN n <= 100 THEN 'subscribed' ELSE 'unknown' END, n BETWEEN 13 AND 16, CASE WHEN n BETWEEN 13 AND 15 THEN 'hard_bounce' WHEN n = 16 THEN 'complaint' END,
+          CASE WHEN n BETWEEN 13 AND 16 THEN now() - interval '1 day' END, CASE WHEN n <= 110 THEN now() - interval '200 days' END,
+          CASE WHEN n <= 50 THEN now() - interval '190 days' WHEN n <= 110 THEN now() - interval '3 days' END FROM generate_series(1,120) n`, [wid, tag]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1`, [wid, listId]);
+      await db.query(`INSERT INTO audience_imports(id,workspace_id,list_id,status,rows,errors,imported,created_at) VALUES ($1,$2,$3,'committed',
+        (SELECT jsonb_agg(jsonb_build_object('row',n,'email','person'||n||'@'||CASE WHEN n <= 12 THEN 'gmial.com' ELSE 'gmail.com' END,'properties','{}'::jsonb)) FROM generate_series(11,40) n),'[{"row":41,"field":"email","message":"invalid"}]',30,now() - interval '5 days')`, [unique('imp'), wid, listId]);
+      // A campaign whose draft breaks the screen's rules.
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total,prepared,expanded,created_at) VALUES ($1,$2,$3,'done',20,20,20,now() - interval '3 days')`, [campaignId, wid, JSON.stringify({ name: 'Early access', from: `hello@${domain}`, subject: 'SALE!!! EVERYTHING MUST GO',
+        region: REGION, tracking: true, attachments: [], audience: { listId }, defaults: { firstName: 'there' }, previewText: 'Big news',
+        html: '<p>Hi {{firstName}} {{plan}}, click here</p><img src="https://cdn.example.com/hero.png" width="600" height="1800"><a href="https://bit.ly/x">www.shop.example.com</a><a href="http://staging.shop.example.com/offer">Offer</a>' })]);
+
+      // Public DNS for the domain health read, answered here (no network): count the lookups it makes.
+      const dohRecords: Record<string, string[]> = { [`${domain}|TXT`]: ['"v=spf1 include:_spf.google.com include:amazonses.com ~all"'], [`_dmarc.${domain}|TXT`]: ['"v=DMARC1; p=none"'],
+        [`default._bimi.${domain}|TXT`]: ['"v=BIMI1; l=https://example.com/logo.svg"'], [`${mailFrom}|MX`]: [`10 feedback-smtp.${REGION}.amazonses.com.`], [`${mailFrom}|TXT`]: ['"v=spf1 include:amazonses.com ~all"'] };
+      const previous = globalThis.fetch, lookups: string[] = [];
+      t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'cloudflare-dns.com') return previous(input, init);
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!; lookups.push(`${name}|${type}`);
+        return Response.json({ Status: 0, Answer: (dohRecords[`${name}|${type}`] ?? []).map(data => ({ name: `${name}.`, type: type === 'MX' ? 15 : 16, data })) });
+      });
+
+      // Route 8: standing history and the limit request rule.
+      const standing = (await get(`/v1/support/standing?requestedLimit=20000`)).data[0];
+      assert.equal(standing.history.days.length, 15); assert.deepEqual(Object.keys(standing.history.days[0]).sort(), ['accepted', 'bounced', 'complained', 'day', 'limit', 'quality', 'rejected', 'score', 'step']);
+      assert.deepEqual(standing.limitRequest, { eligibleForAutoApproval: true, reasons: [], maxAuto: 25000, requested: 20000 });
+      assert.deepEqual((await get('/v1/support/standing?requestedLimit=30000')).data[0].limitRequest.reasons.map((r: Json) => r.code), ['OVER_AUTO_MAXIMUM']);
+      await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) VALUES ($1,$2,1,now() - interval '10 days','step','ok','warn','{"kind":"system"}')`, [unique('stev'), wid]);
+      await db.query(`UPDATE sender_score_daily SET score = 88 WHERE workspace_id = $1 AND day = (now() AT TIME ZONE 'UTC')::date - 3`, [wid]);
+      const refused = (await get('/v1/support/standing')).data[0];
+      assert.deepEqual(refused.limitRequest.reasons.map((r: Json) => r.code), ['SCORE_BELOW_90', 'RECENT_LADDER_STEP']);
+      assert.deepEqual(refused.history.changes.map((x: Json) => [x.kind, x.from, x.to]), [['step', 'ok', 'warn']]);
+
+      // Route 1: metrics, totals with numerators and denominators; per provider (gmail, microsoft, yahoo, apple, the corp domain).
+      const metrics = await get(`/v1/support/deliverability/metrics?since=${new Date(Date.now() - 7 * 86_400_000).toISOString()}`);
+      const real = mails.filter(m => !m.simulated);
+      assert.equal(metrics.workspaceId, wid); assert.ok(Date.parse(metrics.computedAt) > Date.now() - 60_000);
+      assert.deepEqual([metrics.totals.emails, metrics.totals.simulated, metrics.totals.hardBounced, metrics.totals.complained, metrics.totals.opened, metrics.totals.openedHuman, metrics.totals.clicked, metrics.totals.screenRejected, metrics.totals.unsubscribed],
+        [real.length, 1, 6, 2, 4, 2, 1, 2, 1]);
+      const accepted = real.filter(m => m.outcomes & 1).length;
+      assert.deepEqual(metrics.totals.rates.complaint, { numerator: 2, denominator: accepted, value: Math.round(2 / accepted * 1e6) / 1e6 });
+      assert.deepEqual(metrics.totals.rates.open, { numerator: 4, denominator: metrics.totals.delivered, value: Math.round(4 / metrics.totals.delivered * 1e6) / 1e6 });
+      assert.deepEqual(metrics.screen, { screened: 50, rejected: 2 });
+      assert.ok(metrics.buckets.every((b: Json) => /^\d{4}-\d{2}-\d{2}$/.test(b.at)) && metrics.groups === null);
+      const byProvider = await get(`/v1/support/deliverability/metrics?groupBy=provider`);
+      const group = (key: string) => byProvider.groups.find((g: Json) => g.key === key);
+      assert.deepEqual([group('gmail').complained, group('gmail').provider, group('microsoft').hardBounced, group('yahoo').emails, group(`corp-${tag}.example.org`).provider], [2, 'gmail', 4, 20, 'other']);
+      assert.ok(byProvider.findings.some((f: Json) => f.code === 'COMPLAINT_RATE' && f.scope === 'gmail' && f.evidence.complained === 2), JSON.stringify(byProvider.findings));
+      assert.ok(byProvider.findings.some((f: Json) => f.code === 'HARD_BOUNCE_RATE' && f.scope === 'microsoft' && f.severity === 'critical'));
+      const byStream = await get(`/v1/support/deliverability/metrics?groupBy=stream`);
+      assert.deepEqual(byStream.groups.map((g: Json) => [g.key, g.emails]).sort(), [['marketing', 20], ['transactional', real.length - 20]]);
+      assert.equal((await get(`/v1/support/deliverability/metrics?campaignId=${campaignId}`)).totals.hardBounced, 2);
+      assert.equal((await get(`/v1/support/deliverability/metrics?granularity=hour&groupBy=campaign`)).groups.find((g: Json) => g.key === campaignId), undefined, 'Hourly reads cover 48 hours by default.');
+      // At most 20 groups plus other: 25 recipient domains.
+      const many = Array.from({ length: 25 }, (_, i) => ({ id: unique('email'), to: `x@d${i}-${tag}.example.net` }));
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, created_at)
+        SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', 'Hi', 'queued', '{"kind":"transactional"}', false, now() - interval '12 hours' FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text)`,
+        [wid, REGION, `hello@${domain}`, JSON.stringify(many.map(m => ({ id: m.id, to_address: m.to })))]);
+      const capped = await get(`/v1/support/deliverability/metrics?groupBy=provider&since=${new Date(Date.now() - 8 * 86_400_000).toISOString()}`);
+      assert.equal(capped.groups.length, 21); assert.equal(capped.groups.at(-1).key, 'other'); assert.ok(capped.groups.at(-1).other && capped.groups.at(-1).emails > 0);
+      // Never an address in an aggregate.
+      const address = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
+      for (const body of [metrics, byProvider, capped]) assert.ok(!address.test(JSON.stringify(body)), 'Aggregates name domains, never addresses.');
+      error(await send('GET', '/v1/support/deliverability/metrics?granularity=hour&since=' + new Date(Date.now() - 4 * 86_400_000).toISOString(), support), 422, 'WINDOW_TOO_LONG');
+      error(await send('GET', '/v1/support/deliverability/metrics?since=' + new Date(Date.now() - 40 * 86_400_000).toISOString(), support), 422);
+
+      // Route 2: bounce reasons, grouped and redacted; the first-send rate; authentication findings.
+      const reasons = await get('/v1/support/deliverability/bounces');
+      const auth = reasons.groups.find((g: Json) => g.status === '5.7.515');
+      assert.deepEqual([auth.provider, auth.class, auth.subtype, auth.count, auth.campaigns], ['microsoft', 'bounce', 'Permanent/General', 4, []]);
+      assert.match(auth.diagnostic, /<address> from <ip>$/); assert.ok(auth.diagnostic.length <= 160);
+      assert.deepEqual(reasons.groups.find((g: Json) => g.status === '5.1.1').campaigns, [campaignId]);
+      assert.deepEqual(reasons.complaints, [{ feedbackType: 'abuse', count: 2 }]);
+      assert.deepEqual([reasons.firstSend.numerator, reasons.firstSend.denominator], [2, 20]);
+      assert.deepEqual(reasons.findings.map((f: Json) => f.code).sort(), ['AUTHENTICATION_REJECTED', 'FIRST_SEND_BOUNCES']);
+      assert.ok(!address.test(JSON.stringify(reasons)) && !/192\.0\.2\./.test(JSON.stringify(reasons)), 'Diagnostics are redacted.');
+      assert.deepEqual((await get('/v1/support/deliverability/bounces?provider=yahoo&type=bounce')).groups.map((g: Json) => g.status), ['5.1.1']);
+
+      // Route 3: domain health with one budgeted live DNS read (5 labels), then the 5-minute cache.
+      const health = await get(`/v1/support/domains/${domainId}/health`);
+      assert.deepEqual(lookups.sort(), Object.keys(dohRecords).sort());
+      assert.deepEqual([health.claim.sending, health.claim.dkim, health.claim.mailFrom.domain, health.claim.connection, health.alignment.verdict, health.alignment.returnPath], ['verified', 'SUCCESS', mailFrom, { kind: 'shared', region: REGION }, 'aligned', mailFrom]);
+      assert.deepEqual([health.dns.complete, health.dns.spf.includesAmazonSes, health.dns.spf.lookups, health.dns.spf.all, health.dns.dmarc.p, health.dns.dmarc.rua, health.dns.dmarc.source, health.dns.bimi.logo, health.dns.bimi.authority],
+        [true, true, 2, '~all', 'none', false, 'live', true, false]);
+      assert.deepEqual([health.dns.mailFrom.mx, health.volume.warmupAgeDays, health.streams.campaign], [[`feedback-smtp.${REGION}.amazonses.com`], 3, 20]);
+      assert.deepEqual(health.findings.map((f: Json) => f.code).sort(), ['BIMI_NOT_READY', 'DMARC_NO_REPORTS']);
+      assert.equal((await get(`/v1/support/domains/${domainId}/health`, bearer(plain.token))).computedAt, health.computedAt, 'Results are cached 60 seconds per workspace and parameters.');
+      lookups.length = 0;
+      const { liveDns } = await import('./src/deliverability.js');
+      assert.equal((await liveDns(domain, { domain: mailFrom, region: REGION }, null)).checkedAt, health.dns.checkedAt);
+      assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
+      error(await send('GET', `/v1/support/domains/${domainId}/health`, bearer(theirs.token)), 404);
+
+      // Route 4: the screen, with spam scores and subjects capped at 120 characters.
+      const screen = await get('/v1/support/screen');
+      assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].spamScore, screen.rejections[0].model, screen.rejections[0].subject.length], [50, 2, 2, 0.97, 'jev-fixture', 120]);
+
+      // Route 5: campaigns with the campaign stats computation; content only with consent.
+      const campaigns = await get('/v1/support/campaigns');
+      const listed = campaigns.data.find((x: Json) => x.id === campaignId);
+      assert.deepEqual([listed.audience.listName, listed.stats.rates.bounce, listed.previewTextLength, 'content' in listed], ['Newsletter', { numerator: 2, denominator: 20, value: 0.1 }, 8, false]);
+      const detail = await get(`/v1/support/campaigns/${campaignId}`);
+      assert.match(detail.content.html, /hero\.png/); assert.equal((await get(`/v1/support/campaigns/${campaignId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
+      error(await send('GET', `/v1/support/campaigns/${campaignId}`, bearer(theirs.token)), 404);
+
+      // Route 6: lint; metadata always, content checks with consent (the probation screen's own HTML pass).
+      const emailLint = await get(`/v1/support/emails/${lintable!.id}/lint`);
+      assert.deepEqual([emailLint.metadata.subject.replyWithoutThread, emailLint.metadata.alignment.dkimAligned, emailLint.content.hiddenWords, emailLint.content.links.shorteners, emailLint.content.links.localOrStaging, emailLint.content.unresolvedTokens],
+        [true, true, 5, ['bit.ly'], ['localhost'], ['name']]);
+      assert.deepEqual(emailLint.findings.map((f: Json) => f.code).filter((code: string) => ['MISLEADING_REPLY_PREFIX', 'URL_SHORTENER', 'LINK_TEXT_MISMATCH', 'HIDDEN_TEXT', 'STAGING_LINKS', 'UNRESOLVED_TOKENS'].includes(code)).sort(),
+        ['HIDDEN_TEXT', 'LINK_TEXT_MISMATCH', 'MISLEADING_REPLY_PREFIX', 'STAGING_LINKS', 'UNRESOLVED_TOKENS', 'URL_SHORTENER']);
+      const metadataOnly = ok(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(plain.token)));
+      assert.deepEqual([metadataOnly.contentShared, metadataOnly.content], [false, null]); assert.ok(!JSON.stringify(metadataOnly).includes('bit.ly'));
+      const campaignLint = await get(`/v1/support/campaigns/${campaignId}/lint`);
+      assert.deepEqual([campaignLint.content.images.rulePasses, campaignLint.content.unresolvedTokens, campaignLint.content.links.plainHttp, campaignLint.metadata.listUnsubscribe], [false, ['plan'], 1, true]);
+      assert.ok(['IMAGE_TEXT_RATIO', 'URL_SHORTENER', 'STAGING_LINKS', 'SUBJECT_CAPITALS', 'SUBJECT_PUNCTUATION'].every(code => campaignLint.findings.some((f: Json) => f.code === code)), JSON.stringify(campaignLint.findings.map((f: Json) => f.code)));
+
+      // Route 7: audience health, counts only.
+      const audience = await get('/v1/support/audience/health');
+      const newsletter = audience.lists[0];
+      assert.deepEqual([newsletter.name, newsletter.contacts, newsletter.role, newsletter.typoDomains, newsletter.stale, newsletter.neverObserved, newsletter.suppressedBy, newsletter.subscribed], ['Newsletter', 120, 10, 2, 50, 10, { hard_bounce: 3, complaint: 1 }, 100]);
+      assert.deepEqual([audience.imports[0].imported, audience.imports[0].errors, audience.imports[0].contacts, audience.imports[0].hardBounce.numerator], [30, 1, 30, 3]);
+      assert.ok(['STALE_CONTACTS', 'ROLE_ADDRESSES', 'TYPO_DOMAINS', 'IMPORT_BOUNCES'].every(code => audience.findings.some((f: Json) => f.code === code)));
+      assert.ok(!address.test(JSON.stringify(audience)), 'Audience health never shows an address.');
+
+      // One workspace per aggregate; another customer's workspace is invisible; every read sets the 3-second timeout.
+      error(await send('GET', '/v1/support/deliverability/metrics', bearer(both.token)), 422, 'WORKSPACE_REQUIRED');
+      ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, bearer(both.token)));
+      error(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${other}`, support), 404);
+      error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(theirs.token)), 404);
+      assert.equal(ok(await send('GET', '/v1/support/audience/health', bearer(theirs.token))).lists.length, 0);
+      // budgetedRead runs inside the fixture's transaction as a savepoint, so its SET LOCAL is still visible here.
+      assert.equal((await db.query('SHOW statement_timeout')).rows[0].statement_timeout, '3s');
+      // Each aggregate costs 5 of the grant's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
+      const fresh = await mint({ userId: manager!.userId, ticketRef: 'D-5', verification: 'dmarc', workspaceIds: [wid] });
+      for (let i = 0; i < 24; i++) ok(await send('GET', '/v1/support/screen', bearer(fresh.token)));
+      assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+      error(await send('GET', '/v1/support/screen', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+      error(await send('GET', '/v1/support/workspaces', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+      await db.query('UPDATE support_grants SET used = 119 WHERE id = $1', [fresh.id]);
+      ok(await send('GET', '/v1/support/workspaces', bearer(fresh.token)));
+      // Every read is audited like the other support routes.
+      assert.ok((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND summary->>'route' = '/v1/support/deliverability/metrics'`, [content.id])).rows[0].n >= 8);
+    });
+  });
+
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
