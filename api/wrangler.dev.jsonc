@@ -60,7 +60,10 @@
     // Support reads this Worker's own request lines from Workers Logs (GET /v1/support/requests). The token is the
     // CF_OBSERVABILITY_TOKEN secret (api/README.md "Support integration").
     "CF_OBSERVABILITY_ACCOUNT_ID": "d8e944f537ceef3f06a5bd3aec1d7a53",
-    "CF_OBSERVABILITY_SCRIPT": "bane-dev"
+    "CF_OBSERVABILITY_SCRIPT": "bane-dev",
+    // The support agent (support/): "Contact support" hands off here, and staff sign-in returns to its /staff/callback.
+    // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
+    "BANE_SUPPORT_URL": "https://support.dev.bane.mx/chat"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   // Run HTTP requests next to the bane-dev database (PlanetScale aws-us-east-2).
