@@ -1,7 +1,7 @@
-import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
-import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, LogOut, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, SecretCode, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
@@ -70,7 +70,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />
-        <Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button>
+        <Button variant="ghost" className="onboarding-signout" title="Sign out" onClick={() => void session?.logout()}><LogOut size={16} aria-hidden /><span className="onboarding-signout-label">Sign out</span></Button>
       </div>
     </header>
     <main id="main-content" className="page-surface onboarding-surface" tabIndex={-1}>
@@ -81,7 +81,6 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 }
 
 type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'admin' | 'error'
-const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, connect: 2, domain: 3, imported: 3, records: 4, agent: 5 }
 const hostedSteps = ['Choose', 'Add domain', 'First email']
 const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'First email']
 // The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
@@ -197,11 +196,11 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     content = <ImportedDomains count={imported} onContinue={id => setDomainStep(workspaceId, agentStep(id))} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
   }
   else { view = 'domain'; content = domainForm() }
-  // Steps slide in the direction of travel; the first paint and the loader stay still.
+  // A step fades in; the first paint and the loader stay still.
   const [frame, setFrame] = useState<{ view: View; previous: View | null }>({ view, previous: null })
   if (frame.view !== view) setFrame({ view, previous: frame.view })
   const previous = frame.view === view ? frame.previous : frame.view
-  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || view === 'error' || view === 'admin' ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
+  const motion = previous === null || view === 'loading' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   const aws = flow === 'byo'
   const step = stepOf(view, aws, choosingDomain)
@@ -268,8 +267,15 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
-    {error ? <Alert tone="danger">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert> : null}
+    {error ? <ChooseError error={error} /> : null}
   </div>
+}
+
+// Below the cards, so on a phone it is scrolled into view when a choice fails.
+function ChooseError({ error }: { error: unknown }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => { ref.current?.scrollIntoView({ block: 'nearest' }) }, [error])
+  return <div ref={ref}><Alert tone="danger">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert></div>
 }
 
 // The AWS mark: the wordmark follows the text colour, the smile stays AWS orange in both themes.
