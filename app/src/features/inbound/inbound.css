@@ -6,10 +6,12 @@
 .mailbox-layout { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); }
 .mailbox-list { display: flex; flex-direction: column; min-height: 0; padding-right: var(--space-16); border-right: 1px solid var(--color-border-muted); }
 .mailbox-list .ui-tabs { flex: none; padding-top: var(--space-8); }
+.address-select { width: var(--radix-select-trigger-width); max-width: 100%; }
+.address-select .ui-select-item > span:first-child, .address-select .ui-action-sheet__label { min-width: 0; flex: 1; }
+:is(.address-select, .address-select-trigger) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.ui-action-sheet__items.address-select { width: auto; }
 .inbound-filter { padding-top: var(--space-12); }
 .inbound-filter .ui-select-trigger { width: 100%; }
-/* The chosen address is blurred until hover or focus, like every address. */
-html:not([data-privacy='off']) .inbound-filter[data-address] .ui-select-trigger:not(:hover, :focus-visible) > span:first-child { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
 .mailbox-search { width: 100%; min-width: 0; margin: var(--space-12) 0 var(--space-8); }
 .mailbox-search .ui-input { width: 100%; }
 .mailbox-list__summary { margin: 0 0 var(--space-4); font-size: var(--text-xs); }
