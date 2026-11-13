@@ -70,6 +70,11 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-tab { position: relative; transition: color var(--motion-duration); }
 .ui-tab::after { content: ''; position: absolute; inset: auto 0 0; height: 1px; background: var(--color-faint); opacity: 0; transform: scaleX(.4); transition: transform 200ms var(--ease-out-strong), opacity 160ms ease-out; pointer-events: none; }
 .ui-tab[aria-selected='true']::after, .ui-tab[aria-current='page']::after { opacity: 1; transform: none; }
+/* Tabs (role=tablist) draw one marker that slides to the selected tab instead of each tab's own underline. */
+.ui-tabs--marker { position: relative; }
+.ui-tabs--marker > .ui-tab::after { content: none; }
+.ui-tabs__marker { position: absolute; top: 0; left: 0; width: 1px; height: 1px; background: var(--color-faint); opacity: 0; transform-origin: 0 0; pointer-events: none; }
+.ui-tabs__marker[data-animate] { transition: transform 200ms var(--ease-swap); }
 a.ui-tab { text-decoration: none; }
 .ui-tab:hover:not([aria-selected='true'], [aria-current='page']) { color: var(--color-text); }
 .ui-tab__count { font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
