@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { id, log, type JobHandler, type Runtime } from '../core.js';
-import { chargeSavedCard, insertAttempt, lockAccount, reconcileAttempt, reconcileRefund, StripeError } from './stripe.js';
+import { chargeSavedCard, insertAttempt, lockAccount, reconcileAttempt, reconcileRefund, stripeErrorFields } from './stripe.js';
 
 /** Hosted and configured: the minute sweep and the recharge job do nothing on an installation without Stripe keys. */
 const configured = (runtime: Runtime) => runtime.config.multiTenant && !!runtime.config.billing?.stripe;
@@ -58,7 +58,7 @@ export async function reconcilePayments(runtime: Runtime, budgetMs = RECONCILE_B
       try { await work(runtime, rowId); done++; }
       catch (error) {
         failed++;
-        log('warn', { code: 'BILLING_RECONCILE_FAILED', kind, id: rowId, reason: error instanceof StripeError ? error.reason : error instanceof Error ? error.name : 'error' });
+        log('warn', { code: 'BILLING_RECONCILE_FAILED', kind, id: rowId, ...stripeErrorFields(error) });
         // Move it behind the rest of the backlog so one stubborn row can't hold up the others.
         if (kind === 'attempt') await runtime.db.execute(sql`UPDATE billing_payment_attempts SET updated_at=now() WHERE id=${rowId} AND status IN ('created','pending','requires_action')`);
       }
