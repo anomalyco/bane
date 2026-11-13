@@ -48,7 +48,7 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first (see above).
@@ -106,6 +106,11 @@ const pages = ids => [
   ['Docs', '/docs', { from: '/' }],
   ['Operator', '/operator', { from: '/' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
+  ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
+  // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
+  ['Overview · UI notes mode', '/', { from: '/logs', notes: true }],
+  // An operator outside UI_NOTES_SUBJECTS with the mode forced on: no tab, toggle, pill or pins, and the API says 404.
+  ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
   // The docs: inside the dashboard signed in (a guide from the contents, an operation, a deep-linked overview section),
@@ -131,7 +136,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -279,6 +284,8 @@ async function measure(browser, job, fx) {
     if (job.mode === 'in-app') await context.addInitScript(() => { if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true }); });
     // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
     if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
+    // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
+    if (job.notes) await context.addInitScript(() => localStorage.setItem('bane.ui-notes', 'on'));
     await context.route(url => url.origin !== origin, route => { problems.push(`external request ${route.request().url()}`); return route.abort(); });
     await context.route(url => url.origin === origin && url.pathname.startsWith('/v1/'), async route => {
       const url = new URL(route.request().url());
@@ -354,6 +361,11 @@ async function measure(browser, job, fx) {
       await settle(page, net);
       if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
     }
+    if (job.user === 'rae') {
+      const leak = await page.evaluate(async () => [document.querySelector('.uin-pill, .uin-pin, .uin-layer') && 'the notes layer', [...document.querySelectorAll('[role=tab], [role=menuitem]')].some(el => el.textContent.startsWith('UI notes')) && 'a UI notes control',
+        await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
+      for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
+    }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
@@ -415,11 +427,11 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, notes }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, device, support, live, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    jobs.push({ name, path, user, scheme, device, support, live, notes, mode: 'load', slug: slug + '-load' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });

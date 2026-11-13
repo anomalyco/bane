@@ -153,6 +153,7 @@ export function auditContext(c: Ctx): AuditContext {
   else if (a?.credential === 'apiKey') actor = { type: 'api_key', id: a.keyId, via: 'api', grantId: a.grantId ? `mcp_${a.grantId}` : null };
   else if (a?.credential === 'mcp') actor = { type: 'mcp_grant', id: a.keyId, via: 'mcp', grantId: a.keyId };
   else if (a?.credential === 'agentToken') actor = { type: 'agent_token', id: a.tokenId ?? null, via: 'api', grantId: a.keyId };
+  else if (a?.credential === 'uiNotesKey') actor = { type: 'operator', id: a.userId ?? null, userId: a.userId ?? null, via: 'script', label: `UI notes key ${a.keyId}` };
   else if (box) actor = { type: 'inbox_key', id: box.keyId, via: box.grantId ? 'mcp' : 'api' };
   else if (a?.credential === 'operatorService') actor = { type: 'operator', id: a.keyId, via: 'support' };
   else actor = { type: 'system', id: null, via: 'job' };

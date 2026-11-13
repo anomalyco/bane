@@ -44,7 +44,7 @@ const authMessages: Record<string, string> = {
   google_required: 'Bane requires Google sign-in. Try again and choose Google at Anomaly account.',
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
-  account_limit: 'This browser already has the most accounts Bane connects at once. Sign out of one to add another.',
+  account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
   error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
 }
 // The section of the current page, without a record from the previous account or workspace in it.
@@ -74,7 +74,7 @@ async function loadIdentity(signal?: AbortSignal) {
   return result
 }
 function invitationError(error: unknown) {
-  if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
+  if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for another email address. Ask for a new one.'
   return `Couldn’t open the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -331,7 +331,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const authResult = new URLSearchParams(window.location.search).get('auth')
   // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your OIDC address as a request for access. If someone invited you, open their invitation link and sign in again.' : 'This OIDC account isn’t approved for this installation. Ask an administrator to add it.'}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an administrator to add it.'}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>

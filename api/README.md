@@ -441,6 +441,21 @@ Every account has one append-only trail, `audit_events` (migration 260): who act
 - **Writers:** `recordAudit(tx, c, event)` inside the change's own transaction, or `auditInsert(...)` composed into the change's single statement (no extra round trip). Send admission never writes here; sending activity is in the sending logs. Operator scripts, the operator API, hosted pauses and limit overrides reach the trail through SQL triggers (migration 262).
 - **Readers:** owners and admins see their workspace's customer-visible rows in Settings → Activity (`GET /v1/activity`). Operators see everything through `GET /v1/operator/workspaces/{id}/audit` and `GET /v1/operator/users/{id}/audit` (filter by `since`, `until`, `action`, `actorType`, `actorId`, `requestId`; cursor pages; `include=enforcement,billing` joins the standing events and billing ledger where those tables exist). Each operator read is itself written to the trail.
 
+## UI notes
+
+Bane staff with the operator role leave design and bug notes on the dashboard itself (hosted only), and agents fix them.
+
+- **Leaving notes:** turn on UI notes in the account menu or with `⇧N`, then ⌘-click (Ctrl-click off a Mac) any element, or long-press it on a phone. Each note records the page and route pattern, viewport, theme, device, build, a locator (CSS path, test IDs, the nearest `data-component`, text), the element's box and computed styles, and a screenshot crop with the element outlined. Addresses are masked in all of it, the screenshot included. Open notes show as numbered pins on the page; `/operator/notes` lists them all.
+- **Storage:** `ui_notes` (migration 304), global to the deployment. Screenshots are private objects in the attachments bucket (`ui-notes/<note id>`), served only through signed links that expire after five minutes (`GET /v1/ui-notes/screenshots/<token>`). Every change is an internal audit row (`ui_note.*`, `ui_note_key.*`).
+- **Agents:** an operator makes a UI notes key for themself on `/operator/notes` → Agent keys (up to 90 days). It can only list and read notes and set their status, PR link and resolution, and only while that person still has the operator role. Every other operator route still refuses any bearer token. Use it with `scripts/ui-notes.ts`:
+
+  ```sh
+  BANE_URL=https://bane.mx BANE_UI_NOTES_KEY=bane_notes_… node --import tsx scripts/ui-notes.ts list --status open --json --screenshots ./ui-notes
+  node --import tsx scripts/ui-notes.ts get <id> --screenshot ./note.webp
+  node --import tsx scripts/ui-notes.ts set-status <id> in_progress
+  node --import tsx scripts/ui-notes.ts set-status <id> fixed --pr https://github.com/anomalyco/bane/pull/<n>
+  ```
+
 ## Support integration
 
 Internal: these routes serve Bane's operators and its support platform, never customers. `/v1/operator/*` answers only an operator and `/v1/support/*` only a support grant; every customer credential (any dashboard role, API keys, MCP grants, agent tokens, inbox keys, app passwords) gets the same `403` with no data on every path there, real or not. Neither appears as an MCP tool, and `/v1/support/*` is marked `x-internal` in `/openapi.json` and left out of `/docs`, `/docs.md` and `/llms.txt`. It stays in the SDK for the support platform.

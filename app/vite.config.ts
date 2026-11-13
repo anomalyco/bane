@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,6 +50,13 @@ const legalMarkdown: Plugin = {
   },
 }
 
+// The commit a build was made from, recorded with each UI note (features/ui-notes). Only that lazy chunk reads it.
+const buildSha = (() => {
+  const named = process.env.BANE_BUILD_SHA ?? process.env.GITHUB_SHA
+  if (named) return named.slice(0, 12)
+  try { return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return 'unknown' }
+})()
+
 // Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name bane.mx.
 const publicOrigin: Plugin = {
   name: 'bane:public-origin',
@@ -56,6 +64,7 @@ const publicOrigin: Plugin = {
 }
 
 export default defineConfig({
+  define: { __BANE_BUILD__: JSON.stringify(buildSha) },
   plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders(), publicOrigin],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,

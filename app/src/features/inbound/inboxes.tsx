@@ -3,7 +3,7 @@ import type { McpClient } from '../../../../api/src/mcp-clients'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
-import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, SecretCode, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain, MailboxKey } from '../../data/types'
@@ -58,12 +58,12 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const close = () => onOpenChange(false)
   // Created: the address, its key (shown once) already set up for each MCP client, so nothing more has to be minted.
   if (created) return <>
-    <Dialog open={open && !connecting} onOpenChange={next => { if (!next) close() }} title="Agent inbox created" className="connect-agent-dialog" footer={<><Button onClick={close}>Done</Button>{!created.credential && <Button onClick={() => setConnecting(true)}>Connect an agent</Button>}<Button variant="primary" onClick={() => { close(); navigate(`${route}/${created.id}`) }}>Open inbox</Button></>}>
+    <Dialog sensitive={Boolean(created.credential)} open={open && !connecting} onOpenChange={next => { if (!next) close() }} title="Agent inbox created" className="connect-agent-dialog" footer={<><Button onClick={close}>Done</Button>{!created.credential && <Button onClick={() => setConnecting(true)}>Connect an agent</Button>}<Button variant="primary" onClick={() => { close(); navigate(`${route}/${created.id}`) }}>Open inbox</Button></>}>
       <div className="stack">
         <Field label="Address" hint={`Receives until ${date(created.expiresAt)}. ${created.type === 'sandbox' ? 'A sandbox address only gets test mail: use Send test mail on its page, or POST /v1/inboxes/{id}/simulate.' : 'Mail sent to it shows up on its page and through the API.'}`}><div className="settings-copy-cell"><code><PrivateAddress value={created.address} /></code><CopyButton value={created.address} label="Copy address" /></div></Field>
         {created.credential && <>
           <Field label="Inbox key" hint="Copy it now; it won’t be shown again. It reads and manages only this inbox, over the API or MCP, and stops working when the inbox is deleted.">
-            <div className="settings-copy-cell"><code>{created.credential.secret}</code><CopyButton value={created.credential.secret} label="Copy inbox key" /></div>
+            <div className="settings-copy-cell"><SecretCode>{created.credential.secret}</SecretCode><CopyButton value={created.credential.secret} label="Copy inbox key" /></div>
           </Field>
           <div className="stack"><strong className="connect-agent__title">Use it with an agent</strong><McpClientSetup client={client} onClient={setClient} url={url} auth={{ bearer: created.credential.secret }} label="Agent" /></div>
         </>}
