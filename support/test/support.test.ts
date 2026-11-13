@@ -4,7 +4,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, describe, test } from 'vitest';
 import { control, FAKE_BANE, fakeGateway, GRANT_TOKEN, recorded } from './fakes.js';
-import { gate } from '../src/gate.js';
+import { gate, LINK_ORIGINS } from '../src/gate.js';
+import { ticketEmail } from '../src/tickets.js';
 import { project, toolResult } from '../src/agent/projection.js';
 import { chatToken, confirmToken, readChatToken, readConfirmToken } from '../src/tokens.js';
 import { cleanImage, ImageRejected } from '../src/image.js';
@@ -15,7 +16,7 @@ import { jpegWithMetadata, pngWithMetadata, SECRET_TEXT, webpWithMetadata } from
 // gateway URL. OpenCode really runs inside the Durable Object; only the model and Bane are fakes. No network.
 
 const ORIGIN = 'https://dev.bane.mx', SUPPORT = 'https://support.dev.bane.mx';
-const ROOT = randomBytes(32).toString('hex'), WEBHOOK_SECRET = `whsec_${randomBytes(32).toString('base64')}`;
+const ROOT = randomBytes(32).toString('hex'), WEBHOOK_SECRET = `whsec_${randomBytes(32).toString('base64')}`, INTAKE_SECRET = `whsec_${randomBytes(32).toString('base64')}`;
 const GATEWAY_KEY = `oc_sk_test_${randomBytes(12).toString('hex')}`;
 let mf: Miniflare;
 const text = (value: string) => ({ type: 'text' as const, value });
@@ -27,7 +28,7 @@ function worker(name: string, env: Record<string, unknown>) {
     else if (file.endsWith('.md') && file !== 'README.md') modules[file] = { type: 'text', contents: readFileSync(`dist/${file}`, 'utf8') };
   }
   return { config: { name, compatibilityDate: '2026-09-08', compatibilityFlags: ['nodejs_compat'], manifest: { mainModule: 'worker.js', modules }, env,
-    exports: { SupportConversation: { type: 'durable-object' as const, storage: 'sqlite' as const } } } };
+    exports: { SupportConversation: { type: 'durable-object' as const, storage: 'sqlite' as const }, SupportIntake: { type: 'durable-object' as const, storage: 'sqlite' as const } } } };
 }
 
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
@@ -35,6 +36,10 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
   CONSOLE_GATEWAY_KEY: text(GATEWAY_KEY), SUPPORT_ROOT_SECRET: text(ROOT), BANE_INBOUND_WEBHOOK_SECRET: text(WEBHOOK_SECRET), BANE_SUPPORT_INBOX_KEY: text(`bane_mbx_${'7'.repeat(64)}`),
   CONVERSATION: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportConversation' },
+  INTAKE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportIntake' },
+  INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
+  // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -66,7 +71,7 @@ async function migrate(instance: Miniflare) {
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   mf.dispatchFetch(`${SUPPORT}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN, ...headers }, body: JSON.stringify(body) })
     .then(async r => ({ status: r.status, body: await r.json().catch(() => null) as any, headers: r.headers }));
-const fakeCalls = async () => (await (await (await mf.getWorker('fake-bane')).fetch('http://fake-bane/__calls')).json()) as any[];
+const fakeCalls = async (instance: Miniflare = mf) => (await (await (await instance.getWorker('fake-bane')).fetch('http://fake-bane/__calls')).json()) as any[];
 let handoffs = 0;
 const handoff = (user = 'usr_ada', share = false) => `handoff:sho_${String(++handoffs).padStart(32, '0')}:${user}:ws_acme:${share ? 'share' : 'no'}`;
 
@@ -91,13 +96,16 @@ async function connect(socketUrl: string) {
   return { ws, frames, until, send: (m: unknown) => ws.send(JSON.stringify(m)) };
 }
 
-/** Bane's inbound webhook for one message, signed with the test secret. */
-function signedHook(messageId: string, threadId: string, from = 'ada@acme.test') {
-  const body = JSON.stringify({ type: 'message.received', data: { messageId, message: { id: messageId, threadId, direction: 'inbound', from: { address: from } } } });
-  const id = `wh_${randomBytes(8).toString('hex')}`, ts = String(Math.floor(Date.now() / 1000));
-  const signature = `v1,${createHmac('sha256', Buffer.from(WEBHOOK_SECRET.slice(6), 'base64')).update(`${id}.${ts}.${body}`).digest('base64')}`;
-  return mf.dispatchFetch(`${SUPPORT}/hooks/bane-inbound`, { method: 'POST', body, headers: { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': signature } });
+/** Bane's inbound webhook for one message, signed with the test secret (support@, or the intake addresses). */
+function signedHook(messageId: string, threadId: string, from = 'ada@acme.test', options: { to?: string; intake?: boolean; instance?: Miniflare } = {}) {
+  const body = JSON.stringify({ type: 'message.received', data: { messageId, message: { id: messageId, threadId, direction: 'inbound', from: { address: from }, to: [{ address: options.to ?? 'support@dev.bane.mx' }] } } });
+  const id = `wh_${randomBytes(8).toString('hex')}`, ts = String(Math.floor(Date.now() / 1000)), secret = options.intake ? INTAKE_SECRET : WEBHOOK_SECRET;
+  const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${id}.${ts}.${body}`).digest('base64')}`;
+  return (options.instance ?? mf).dispatchFetch(`${SUPPORT}/hooks/${options.intake ? 'bane-intake' : 'bane-inbound'}`, { method: 'POST', body, headers: { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': signature } });
 }
+const CONFIRM_TEMPLATE = /^Hi,\n\nThanks for writing to Bane support\. Before I can look at a Bane account, I need to confirm that this email came from you\. Open this link and press Confirm \(it works once, within 24 hours\):\n\nhttps:\/\/support\.dev\.bane\.mx\/confirm\/\S+\n\nOr sign in to Bane and press Help\.\n\nIf you didn't write to Bane support, ignore this email\.\n\nBane support \(AI\)$/;
+const NO_ACCOUNT = 'Hi,\n\nThanks for writing to Bane support. I couldn’t find a Bane account for this email address, so I can’t look anything up. Please write from the address you sign in to Bane with, or sign in and press Help.\n\nBane support (AI)';
+const replies = async (thread: string, instance?: Miniflare) => (await fakeCalls(instance)).filter(c => c[0] === 'api' && c[2] === `/v1/inbound/threads/${thread}/reply`);
 async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): Promise<T | undefined> {
   for (let waited = 0; waited < ms; waited += 250) { const value = await read(); if (value) return value; await new Promise(r => setTimeout(r, 250)); }
   return undefined;
@@ -252,7 +260,7 @@ describe('support Worker', () => {
     assert.equal(reply[3].text, 'Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nBane support (AI)');
     const calls = await fakeCalls();
     const verify = calls.find(c => c[0] === 'verifyEmail' && c[1].email === 'ada@acme.test');
-    assert.deepEqual(verify[1].evidence, { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<m1@acme.test>' });
+    assert.deepEqual(verify[1].evidence, { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<msg_mail_1@mail.test>' });
     assert.ok(calls.some(c => c[0] === 'mintGrant' && c[1].verification === 'dmarc' && JSON.stringify(c[1].workspaceIds) === '["ws_acme"]'));
     assert.equal(calls.filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_mail_1/reply').length, 1, 'One reply per inbound message.');
   }, 180_000);
@@ -261,12 +269,18 @@ describe('support Worker', () => {
     assert.equal((await signedHook('msg_nodmarc_1', 'thr_nodmarc')).status, 200);
     const first = await eventually(async () => (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_nodmarc/reply'));
     assert.ok(first, 'The sender got a reply.');
+    // M4: a fixed reply (no model text), with our confirm link as its only URL and a subject that echoes nothing.
+    assert.match(first[3].text, CONFIRM_TEMPLATE);
+    assert.equal(first[3].subject, 'Re: your message to Bane support');
     const link = String(first[3].text).match(/https:\/\/support\.dev\.bane\.mx\/confirm\/(\S+)/)?.[1];
     assert.ok(link, `The reply carries the confirm link: ${first[3].text}`);
+    assert.ok(!recorded.some(r => JSON.stringify(r.body?.messages ?? []).includes('thr_nodmarc')), 'No model turn for an unverified sender.');
     assert.ok(!(await fakeCalls()).some(c => c[0] === 'verifyEmail' && c[1].evidence?.kind === 'dmarc' && c[1].email === 'ada@acme.test' && c[1].ticketRef?.includes('nodmarc')), 'No DMARC verification without a pass.');
     // A mail scanner's GET shows the button and confirms nothing; the person's POST does, once.
     const page = await mf.dispatchFetch(`${SUPPORT}/confirm/${link}`);
-    assert.equal(page.status, 200); assert.match(await page.text(), /<form method="post">/);
+    const pageText = await page.text();
+    assert.equal(page.status, 200); assert.match(pageText, /<form method="post">/);
+    assert.ok(!pageText.includes('Bounces from Gmail'), 'The confirm page shows nothing from the email (M4).');
     assert.ok(!(await fakeCalls()).some(c => c[0] === 'verifyEmail' && c[1].evidence?.kind === 'magic_link'));
     const confirmed = await mf.dispatchFetch(`${SUPPORT}/confirm/${link}`, { method: 'POST' });
     assert.match(await confirmed.text(), /that’s confirmed/);
@@ -286,6 +300,144 @@ describe('support Worker', () => {
     assert.ok(calls.some(c => c[0] === 'api' && c[1] === 'GET' && c[2] === '/v1/inbound/messages/msg_auto_1'), 'It was read.');
     assert.ok(!calls.some(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_auto/reply'), 'No reply to an auto-reply.');
   }, 60_000);
+
+  test('M1, M2: a verified thread binds its address and account; a spoof or another sender never reaches its session', async () => {
+    // msg_mail_1 verified ada in thr_mail_1 (the email test above). A message from her address with DMARC FAIL:
+    const before = recorded.length, verifies = (await fakeCalls()).filter(c => c[0] === 'verifyEmail').length, reads = (await fakeCalls()).filter(c => c[0] === 'read').length;
+    const replied = (await replies('thr_mail_1')).length;
+    assert.equal((await signedHook('msg_nodmarc_spoof', 'thr_mail_1')).status, 200);
+    const spoofReply = await eventually(async () => (await replies('thr_mail_1')).find(c => c[3].replyToMessageId === 'msg_nodmarc_spoof'));
+    assert.ok(spoofReply, 'The spoof gets a reply from its own, unverified conversation.');
+    assert.match(spoofReply[3].text, CONFIRM_TEMPLATE, 'Only the fixed confirm reply, never account data.');
+    assert.equal(recorded.length, before, 'No model turn for the spoofed message (M1).');
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'read').length, reads, 'No grant read for it.');
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'verifyEmail').length, verifies, 'A DMARC failure is never sent for verification.');
+    const db = await mf.getD1Database('DB', 'support');
+    assert.ok((await db.prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_mail_1#%'").first<{ n: number }>())!.n >= 1, 'Routed to a conversation of its own.');
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM tickets WHERE ask LIKE '%refund my top-up%'").first<{ n: number }>())!.n, 0, 'No ticket in the customer’s name.');
+    // M2: another sender (DMARC PASS on their own domain, no Bane account) in the same thread.
+    assert.equal((await signedHook('msg_stranger_1', 'thr_mail_1', 'stranger@else.test')).status, 200);
+    const strangerReply = await eventually(async () => (await replies('thr_mail_1')).find(c => c[3].replyToMessageId === 'msg_stranger_1'));
+    assert.deepEqual([strangerReply?.[3].to, strangerReply?.[3].text], [['stranger@else.test'], NO_ACCOUNT]);
+    assert.equal(recorded.length, before, 'The stranger never gets a model turn, let alone on the customer’s session.');
+    assert.ok(!(await replies('thr_mail_1')).some(c => c[3].to[0] === 'stranger@else.test' && /61 of 1,000/.test(c[3].text)));
+    // The verified customer, passing DMARC again, still gets her own session: re-verified, then a model turn.
+    assert.equal((await signedHook('msg_mail_2', 'thr_mail_1')).status, 200);
+    const again = await eventually(async () => (await replies('thr_mail_1')).find(c => c[3].replyToMessageId === 'msg_mail_2'));
+    assert.match(again[3].text, /Gmail hard-bounced 61 of 1,000/);
+    assert.ok((await fakeCalls()).some(c => c[0] === 'verifyEmail' && c[1].evidence.messageId === '<msg_mail_2@mail.test>'), 'Every message is verified again.');
+    assert.equal((await replies('thr_mail_1')).length, replied + 3);
+  }, 180_000);
+
+  test('M3: a ticket from an unverified sender names no customer and says so first', () => {
+    const base = { conversationId: 'conv_x', channel: 'email' as const, threadId: 'thr', costUsd: 0, model: 'm', attachments: [], customer: { userId: null, email: null, name: null, role: null, workspaces: [] } };
+    const input = { type: 'billing' as const, title: 'Refund', severity: 'P3' as const, summary: 's', ask: 'refund', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
+    const unverified = ticketEmail({ PUBLIC_URL: SUPPORT }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
+    assert.ok(unverified.text.startsWith('UNVERIFIED SENDER (DMARC FAIL): not a confirmed customer.'), unverified.text);
+    assert.ok(!unverified.text.includes('Customer:') && unverified.text.includes('Sender (unverified): victim@acme.test'));
+    assert.equal(unverified.subject, '[Bane billing] [UNVERIFIED] tkt_x: Refund (P3)');
+    const verified = ticketEmail({ PUBLIC_URL: SUPPORT }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    assert.ok(verified.text.includes('Verified: dmarc (DMARC PASS)') && verified.text.includes('Customer: Ada <ada@acme.test>, owner') && !verified.text.includes('UNVERIFIED'));
+  });
+
+  test('M4: a verified email reply with a link outside Bane is held; the gate refuses foreign links in email', async () => {
+    assert.ok(!gate('Reset it here: https://bane-mx-security.example/reset', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
+    assert.ok(gate('Open https://bane.mx/domains and press Check now.', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
+    assert.equal((await signedHook('msg_phish_1', 'thr_phish')).status, 200);
+    const reply = await eventually(async () => (await replies('thr_phish'))[0]);
+    assert.ok(reply && !reply[3].text.includes('bane-mx-security') && /passed this to the Bane team to check/.test(reply[3].text), reply?.[3].text);
+    const db = await mf.getD1Database('DB', 'support');
+    assert.ok(await db.prepare("SELECT id FROM tickets WHERE title = 'Email reply held by the output gate' AND recommendation LIKE '%reply to the customer%'").first());
+  }, 120_000);
+
+  test('M5: daily caps on turns, tickets, mail and confirm links; unverified email gets no model turn; the team is alerted once', async () => {
+    const caps = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('4'), LIMIT_TICKETS_PER_PERSON: text('1'), LIMIT_MAIL_PER_SENDER: text('2'), LIMIT_CONFIRMS_PER_ADDRESS: text('1') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(caps);
+      const open = async () => {
+        const start = await caps.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff() }) });
+        const socket = await caps.dispatchFetch(((await start.json()) as any).socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+        const ws = (socket as any).webSocket; ws.accept();
+        const frames: any[] = []; ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
+        const until = async (match: (f: any) => boolean) => { for (let i = 0; i < 600 && !frames.some(match); i++) await new Promise(r => setTimeout(r, 100)); return frames.find(match); };
+        return { ws, frames, until, send: (m: unknown) => ws.send(JSON.stringify(m)) };
+      };
+      const one = await open();
+      await one.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'));                    // turn 1
+      one.send({ type: 'user.message', clientMessageId: 'r1', text: 'refund please' });
+      assert.ok(await one.until(f => f.type === 'ticket.filed'), 'The first ticket today is filed.');      // turn 2
+      await one.until(f => f.type === 'message.end' && f.kind !== 'first' && f.text?.length);
+      const two = await open();
+      await two.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'));                    // turn 3
+      two.send({ type: 'user.message', clientMessageId: 'r2', text: 'refund please' });                   // turn 4
+      const refused = await two.until(f => f.type === 'tool.end' && f.label === 'Passed this to the Bane team');
+      assert.equal(refused.ok, false, 'A second ticket today for the same person is refused.');
+      await two.until(f => f.type === 'message.end' && f.text?.includes('passed this'));
+      assert.ok(!two.frames.some(f => f.type === 'ticket.filed'));
+      two.send({ type: 'user.message', clientMessageId: 'r3', text: 'hello?' });                         // turn 5 > 4
+      const busy = await two.until(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED');
+      assert.match(busy.message, /a lot of questions today/);
+      two.send({ type: 'user.message', clientMessageId: 'r4', text: 'hello again?' });
+      await new Promise(r => setTimeout(r, 1500));
+      const alerts = (await fakeCalls(caps)).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /Daily model-turn budget reached \(4\)/.test(c[3].subject ?? ''));
+      assert.equal(alerts.length, 1, 'The team is alerted once a day.');
+      assert.deepEqual(alerts[0][3].to, ['ryan@anoma.ly']);
+      // Mail per sender: the third message from one address today is dropped (the fixed replies go to the first two).
+      for (const n of [1, 2, 3]) assert.equal((await signedHook(`msg_stranger_cap_${n}`, `thr_cap_${n}`, 'stranger@else.test', { instance: caps })).status, 200);
+      await eventually(async () => (await replies('thr_cap_2', caps))[0]);
+      await new Promise(r => setTimeout(r, 1500));
+      assert.deepEqual([(await replies('thr_cap_1', caps)).length, (await replies('thr_cap_2', caps)).length, (await replies('thr_cap_3', caps)).length], [1, 1, 0]);
+      // Confirm links: one per address a day; unverified mail never costs a model turn.
+      const models = recorded.length;
+      for (const n of [1, 2]) assert.equal((await signedHook(`msg_nodmarc_c${n}`, `thr_c${n}`, 'ada@acme.test', { instance: caps })).status, 200);
+      await eventually(async () => (await replies('thr_c1', caps))[0]);
+      await new Promise(r => setTimeout(r, 1500));
+      assert.deepEqual([(await replies('thr_c1', caps)).length, (await replies('thr_c2', caps)).length], [1, 0]);
+      assert.equal(recorded.length, models, 'No model turn for unverified email.');
+      one.ws.close(); two.ws.close();
+    } finally { await caps.dispose(); }
+  }, 180_000);
+
+  test('abuse@, privacy@, legal@: straight to typed tickets, no model, the team emailed, one fixed acknowledgement', async () => {
+    const before = recorded.length;
+    assert.equal((await signedHook('msg_abuse_1', 'thr_abuse', 'reporter@isp.test', { intake: true, to: 'abuse@dev.bane.mx' })).status, 200);
+    const ack = await eventually(async () => (await replies('thr_abuse'))[0]);
+    assert.ok(ack, 'The reporter is acknowledged.');
+    const db = await mf.getD1Database('DB', 'support');
+    const ticket = await db.prepare("SELECT * FROM tickets WHERE type = 'abuse_report' ORDER BY created_at DESC").first<any>();
+    assert.deepEqual([ticket.title, ticket.severity, JSON.parse(ticket.details).topic, JSON.parse(ticket.customer)], ['Spam from your customer', 'P3', 'abuse', { verified: false, sender: 'reporter@isp.test', dmarc: 'PASS' }]);
+    assert.equal(ack[3].text, `Hi,\n\nThanks for writing to abuse@bane.mx. We've received your message and logged it as ${ticket.id}. A person at Bane will reply by email.\n\nBane`);
+    assert.equal(ack[3].subject, 'Re: your message to abuse@bane.mx'); assert.equal(ack[3].addressId, undefined, 'Replies from the address it came in on.');
+    assert.equal(ack[4], `Bearer bane_mbx_${'8'.repeat(64)}`, 'With the intake key, not the support key.');
+    const team = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject === `[Bane abuse] ${ticket.id}: Spam from your customer (P3)`);
+    assert.ok(team, 'The team gets "[Bane abuse] …".');
+    assert.ok(team[3].text.startsWith('NOT A CUSTOMER (DMARC PASS)') && team[3].text.includes('Sender (DMARC pass, no account): reporter@isp.test') && team[3].text.includes('invoice.pdf (application/pdf, 1 KB)') && /bounce screenshot\.png \(image\/png/.test(team[3].text), team[3].text);
+    const stored = await (await mf.getR2Bucket('UPLOADS', 'support')).list({ prefix: `conversations/${ticket.conversation_id}/` });
+    assert.equal(stored.objects.length, 1, 'The image is stored (checked and stripped); the PDF is not.');
+    // Same thread, same sender: added to the ticket, no second acknowledgement.
+    assert.equal((await signedHook('msg_abuse_2', 'thr_abuse', 'reporter@isp.test', { intake: true, to: 'abuse@dev.bane.mx' })).status, 200);
+    await eventually(async () => JSON.parse((await db.prepare('SELECT notes FROM tickets WHERE id = ?').bind(ticket.id).first<{ notes: string }>())!.notes).length > 0 || undefined);
+    assert.equal((await replies('thr_abuse')).length, 1);
+    // legal@ without a DMARC pass: P2, marked unverified everywhere.
+    assert.equal((await signedHook('msg_legal_nodmarc_1', 'thr_legal', 'lawyer@firm.test', { intake: true, to: 'legal@dev.bane.mx' })).status, 200);
+    const legalAck = await eventually(async () => (await replies('thr_legal'))[0]);
+    assert.match(legalAck[3].text, /^Hi,\n\nThanks for writing to legal@bane\.mx\./);
+    const legal = await db.prepare("SELECT * FROM tickets WHERE type = 'legal'").first<any>();
+    assert.equal(legal.severity, 'P2');
+    const legalMail = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject === `[Bane legal] [UNVERIFIED] ${legal.id}: Subpoena (P2)`);
+    assert.ok(legalMail && legalMail[3].text.startsWith('UNVERIFIED SENDER (DMARC FAIL)'));
+    // Automatic mail (a feedback loop) still becomes a ticket, but is never acknowledged.
+    assert.equal((await signedHook('msg_abuse_auto_1', 'thr_abuse_auto', 'fbl@isp.test', { intake: true, to: 'abuse@dev.bane.mx' })).status, 200);
+    await eventually(async () => db.prepare("SELECT id FROM tickets WHERE title = 'Abuse report'").first());
+    await new Promise(r => setTimeout(r, 1000));
+    assert.equal((await replies('thr_abuse_auto')).length, 0);
+    assert.equal(recorded.length, before, 'No model call for any intake address.');
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM conversations WHERE thread_id IN ('thr_abuse', 'thr_legal')").first<{ n: number }>())!.n, 0, 'Never a support conversation.');
+    // The support webhook's secret doesn't open the intake endpoint, and vice versa.
+    const wrong = await mf.dispatchFetch(`${SUPPORT}/hooks/bane-intake`, { method: 'POST', body: '{}', headers: { 'webhook-id': 'x', 'webhook-timestamp': String(Math.floor(Date.now() / 1000)), 'webhook-signature': `v1,${createHmac('sha256', Buffer.from(WEBHOOK_SECRET.slice(6), 'base64')).update(`x.${Math.floor(Date.now() / 1000)}.{}`).digest('base64')}` } });
+    assert.equal(wrong.status, 401);
+  }, 120_000);
 
   test('image checks: the bytes decide the type, metadata is removed, damage and oversize are refused', () => {
     for (const [bytes, type, size] of [[pngWithMetadata(64, 32), 'image/png', [64, 32]], [jpegWithMetadata(40, 20), 'image/jpeg', [40, 20]], [webpWithMetadata(30, 10), 'image/webp', [30, 10]]] as const) {

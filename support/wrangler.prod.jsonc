@@ -14,8 +14,8 @@
   "minify": true,
   // The system prompt and the voice guide are Markdown files bundled as text.
   "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
-  "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }],
+  "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }, { "name": "INTAKE", "class_name": "SupportIntake" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }, { "tag": "v2", "new_sqlite_classes": ["SupportIntake"] }],
   // Create once: wrangler d1 create bane-support, then put its id here (see support/README.md).
   "d1_databases": [{ "binding": "DB", "database_name": "bane-support", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
   // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
@@ -31,6 +31,7 @@
   // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
   "ratelimits": [
     { "name": "CHAT_START", "namespace_id": "8794101", "simple": { "limit": 5, "period": 60 } },
+    // Per sender address, and the "global" key across all of them (the Worker answers 503 so Bane retries later).
     { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } }
   ],
   "triggers": { "crons": [] },
@@ -43,11 +44,14 @@
     // The inbound address ID (adr_…) of SUPPORT_ADDRESS in the platform workspace (ws_90b0…); set after creating it.
     "SUPPORT_ADDRESS_ID": "",
     "TICKET_TO": "ryan@anoma.ly",
+    // Straight to tickets, never to the agent (src/intake.ts): their own webhook and inbox key.
+    "INTAKE_ADDRESSES": "abuse@bane.mx,privacy@bane.mx,legal@bane.mx",
     // Console's inference gateway (Anthropic Messages API). The key is the CONSOLE_GATEWAY_KEY secret.
     "GATEWAY_URL": "https://opencode.ai/inference/anthropic/v1"
   },
   // Secrets, set with `wrangler secret put <NAME> --config wrangler.prod.jsonc` (never through CI):
-  // CONSOLE_GATEWAY_KEY, SUPPORT_ROOT_SECRET, BANE_INBOUND_WEBHOOK_SECRET, BANE_SUPPORT_INBOX_KEY.
+  // CONSOLE_GATEWAY_KEY, SUPPORT_ROOT_SECRET, BANE_INBOUND_WEBHOOK_SECRET, BANE_SUPPORT_INBOX_KEY,
+  // BANE_INTAKE_WEBHOOK_SECRET, BANE_INTAKE_INBOX_KEY.
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

@@ -70,19 +70,29 @@ export default {
     if (url.pathname === '/__calls') return Response.json(calls);
     const body = request.method === 'POST' ? await request.json() : null;
     calls.push(['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')]);
-    if (request.method === 'GET' && url.pathname === '/v1/inbound/messages/msg_image_1/parts/part_png') {
+    if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/') && url.pathname.endsWith('/parts/part_png')) {
       // Bane redirects to signed storage; the fake answers with the bytes directly.
       return new Response(Uint8Array.from(atob('${EMAIL_PNG}'), c => c.charCodeAt(0)), { headers: { 'content-type': 'image/png' } });
     }
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/')) {
       const id = url.pathname.split('/').pop();
+      // id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
+      const table = {
+        msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
+        msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
+        msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
+        msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],
+        msg_nodmarc_c1: ['thr_c1', null, 'FAIL'], msg_nodmarc_c2: ['thr_c2', null, 'FAIL'],
+        msg_abuse_1: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Spam from your customer', 'Your customer sends us spam. Headers attached.'],
+        msg_abuse_2: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Re: Spam from your customer', 'More of it today.'],
+        msg_abuse_auto_1: ['thr_abuse_auto', 'fbl@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Abuse report', 'Feedback loop report'],
+        msg_legal_nodmarc_1: ['thr_legal', 'lawyer@firm.test', 'FAIL', 'legal@dev.bane.mx', 'Subpoena', 'Please preserve records for account X.'],
+      }[id] ?? [];
+      const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = table.map(v => v ?? undefined);
       const auto = id.includes('auto');
-      const threadId = ({ msg_mail_1: 'thr_mail_1', msg_nodmarc_1: 'thr_nodmarc', msg_auto_1: 'thr_auto', msg_image_1: 'thr_image' })[id] ?? 'thr_other';
-      const attachments = id === 'msg_image_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
-      return Response.json({ id, threadId, direction: 'inbound', subject: 'Bounces from Gmail?', from: { name: 'Ada', address: id.includes('stranger') ? 'stranger@else.test' : 'ada@acme.test' },
-        text: 'Why are Gmail bounces up this week?', replyText: 'Why are Gmail bounces up this week?', messageId: '<m1@acme.test>',
-        headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: 'Bounces from Gmail?' }], verdicts: { dmarc: id.includes('nodmarc') ? 'FAIL' : 'PASS', spf: 'PASS' }, attachments });
-
+      const attachments = id === 'msg_image_1' || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
+      return Response.json({ id, threadId, direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>',
+        headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: subject }], verdicts: { dmarc, spf: 'PASS' }, attachments });
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });
@@ -129,6 +139,7 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
+  if (said.includes('A support email arrived') && said.includes('reset link')) return text(['Hi Ada,\n\nReset it here: https://bane-mx-security.example/reset\n\nBane support (AI)']);
   if (said.includes('A support email arrived') && sawImage) return text(['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nBane support (AI)']);
   if (said.includes('screenshot')) return text([sawImage ? 'I can see your screenshot.' : 'I can’t see a screenshot.']);
   if (said.includes('webhook test fails')) {

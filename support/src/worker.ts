@@ -5,6 +5,8 @@ import { readAttachmentLink, readCapped, serveAttachment } from './attachments.j
 import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 export { SupportConversation } from './conversation.js';
+export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
+import { INTAKE, type Mailbox } from './intake.js';
 
 // The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Bane's inbound webhook
 // for support@bane.mx, and the "Confirm it's me" page. Every conversation is one SupportConversation Durable Object,
@@ -120,17 +122,28 @@ async function upload(request: Request, env: Env, conversationId: string): Promi
   return added.ok ? json({ attachment: added.attachment }, 201, headers) : fail(added.status, added.code, added.message, headers);
 }
 
-/** Bane's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
-async function inbound(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (!env.BANE_INBOUND_WEBHOOK_SECRET) throw new MissingSecret('BANE_INBOUND_WEBHOOK_SECRET');
+type Hook = { type?: string; data?: { messageId?: string; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string }; to?: unknown } } };
+
+/** A verified, parsed Bane webhook delivery, deduplicated by webhook-id (after parsing, so a malformed one is retried). */
+async function delivery(request: Request, env: Env, secret: string | undefined, name: string): Promise<{ event: Hook; deliveryId: string } | Response> {
+  if (!secret) throw new MissingSecret(name);
   const body = await request.text();
-  if (body.length > 1_000_000 || !(await verifyWebhook(body, request.headers, env.BANE_INBOUND_WEBHOOK_SECRET))) return new Response(null, { status: 401 });
+  if (body.length > 1_000_000 || !(await verifyWebhook(body, request.headers, secret))) return new Response(null, { status: 401 });
+  let event: Hook;
+  try { event = JSON.parse(body); } catch { return new Response(null, { status: 400 }); }
+  // A global brake before anything is recorded: Bane retries a 503 later (review M5).
+  if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: 'global' })).success) return new Response(null, { status: 503, headers: { 'retry-after': '60' } });
   const deliveryId = request.headers.get('webhook-id')!;
   const fresh = await env.DB.prepare('INSERT INTO webhook_deliveries (id, received_at) VALUES (?, ?) ON CONFLICT (id) DO NOTHING').bind(deliveryId, Date.now()).run();
   if (!fresh.meta.changes) return new Response(null, { status: 200 });
-  let event: { type?: string; data?: { messageId?: string; message?: { id?: string; threadId?: string | null; direction?: string; from?: { address?: string } } } };
-  try { event = JSON.parse(body); } catch { return new Response(null, { status: 400 }); }
-  const message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
+  return { event, deliveryId };
+}
+
+/** Bane's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
+async function inbound(request: Request, env: Env): Promise<Response> {
+  const got = await delivery(request, env, env.BANE_INBOUND_WEBHOOK_SECRET, 'BANE_INBOUND_WEBHOOK_SECRET');
+  if (got instanceof Response) return got;
+  const { event, deliveryId } = got, message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
   if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
   const threadId = message?.threadId ?? messageId, sender = message?.from?.address?.toLowerCase() ?? 'unknown';
   if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: `sender:${await addressHash(sender)}` })).success) return new Response(null, { status: 200 });
@@ -148,6 +161,20 @@ async function inbound(request: Request, env: Env, ctx: ExecutionContext): Promi
   return new Response(null, { status: 200 });
 }
 
+/** abuse@, privacy@, legal@ (route → webhook:support-intake): tickets only, never the agent (intake.ts). */
+async function intake(request: Request, env: Env): Promise<Response> {
+  const got = await delivery(request, env, env.BANE_INTAKE_WEBHOOK_SECRET, 'BANE_INTAKE_WEBHOOK_SECRET');
+  if (got instanceof Response) return got;
+  const { event } = got, message = event.data?.message, messageId = message?.id ?? event.data?.messageId;
+  if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
+  const recipients = JSON.stringify(message?.to ?? '').toLowerCase();
+  const mailbox = env.INTAKE_ADDRESSES.split(',').map(a => a.trim().toLowerCase()).filter(a => a && recipients.includes(a)).map(a => a.split('@')[0] as Mailbox).find(m => m in INTAKE);
+  if (!mailbox) return new Response(null, { status: 200 });
+  const threadId = message?.threadId ?? messageId;
+  await env.INTAKE.get(env.INTAKE.idFromName(threadId)).enqueue({ threadId, messageId, mailbox });
+  return new Response(null, { status: 200 });
+}
+
 const page = (title: string, body: string, status = 200) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.25rem;color:#111}button{font:inherit;padding:.6rem 1.1rem;border-radius:.5rem;border:1px solid #111;background:#111;color:#fff;cursor:pointer}p.muted{color:#666;font-size:.9rem}</style></head><body>${body}</body></html>`,
   { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY' } });
@@ -158,9 +185,9 @@ async function confirm(request: Request, env: Env, token: string): Promise<Respo
   const read = await readConfirmToken(env.SUPPORT_ROOT_SECRET, token);
   if (!read) return page('Link expired', '<h1>This link has expired</h1><p>Reply to the support email again and we’ll send a new one, or sign in to Bane and press Help.</p>', 410);
   if (request.method === 'GET') {
-    const subject = await conversation(env, read.conversationId).confirmationSubject(read.addressHash);
-    if (subject === null) return page('Link expired', '<h1>This link has expired</h1><p>Sign in to Bane and press Help instead.</p>', 410);
-    return page('Confirm it’s you', `<h1>Confirm it’s you</h1><p>Bane support will read your account to answer your email${subject ? ` “${escape(subject)}”` : ''}. Only press this if you sent it.</p>
+    // Nothing from the email (its subject or text) is shown here: the sender may not be who they say (review M4).
+    if (!(await conversation(env, read.conversationId).confirmationPending(read.addressHash))) return page('Link expired', '<h1>This link has expired</h1><p>Sign in to Bane and press Help instead.</p>', 410);
+    return page('Confirm it’s you', `<h1>Confirm it’s you</h1><p>Bane support will read your Bane account to answer the email you sent to Bane support. Only press this if you wrote to Bane support yourself.</p>
 <form method="post"><button type="submit">Confirm it’s me</button></form><p class="muted">Didn’t write to Bane support? Close this page; nothing happens.</p>`);
   }
   const used = await env.DB.prepare('INSERT INTO confirmations (nonce, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (nonce) DO NOTHING').bind(read.nonce, read.conversationId, Date.now()).run();
@@ -185,7 +212,8 @@ export default {
       const file = path.match(/^\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})$/);
       if (file && request.method === 'GET') return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? await serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
       if (path === '/staff' || path.startsWith('/staff/')) return await staff(request, env);
-      if (request.method === 'POST' && path === '/hooks/bane-inbound') return await inbound(request, env, ctx);
+      if (request.method === 'POST' && path === '/hooks/bane-inbound') return await inbound(request, env);
+      if (request.method === 'POST' && path === '/hooks/bane-intake') return await intake(request, env);
       const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
       if (link && (request.method === 'GET' || request.method === 'POST')) return await confirm(request, env, link[1]!);
       return new Response(null, { status: 404 });

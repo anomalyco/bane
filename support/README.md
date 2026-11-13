@@ -61,12 +61,18 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
    - create an inbox key for that address only, with read and send: this is `BANE_SUPPORT_INBOX_KEY`;
    - create a webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-inbound` (dev: `support.dev.bane.mx`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
    - add a route for the address to `["inbox:support", "webhook:<that webhook>"]`. Keep the root catch-all at `store`.
-5. **Secrets**, set with `wrangler secret put <NAME> --config wrangler.<stage>.jsonc` and never through CI:
+5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`):
+   - create the three inbound addresses, and one inbox key covering only those three, with read and send. This is `BANE_INTAKE_INBOX_KEY`;
+   - create a second webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
+   - add a route for the three addresses to `["inbox:intake", "webhook:<that webhook>"]`. The team reads full messages and non-image attachments in that inbox;
+   - `INTAKE_ADDRESSES` in the wrangler config lists them.
+6. **Secrets**, set with `wrangler secret put <NAME> --config wrangler.<stage>.jsonc` and never through CI:
    - `CONSOLE_GATEWAY_KEY`: the Console service key (`models:request`, budgeted). Without it, chat turns refuse with "isn't fully set up" and emails wait in the inbox.
    - `SUPPORT_ROOT_SECRET`: 32+ random bytes as hex (`openssl rand -hex 32`). It's the root for the chat-token and confirm-link keys.
-   - `BANE_INBOUND_WEBHOOK_SECRET` and `BANE_SUPPORT_INBOX_KEY`, from step 3.
-6. **Deploy.** CI deploys after Bane (below) once the repository variable `SUPPORT_DEPLOY` is `true`. By hand: `wrangler deploy --config wrangler.<stage>.jsonc`. Deploy Bane first: the binding needs Bane's `SupportPlatform` entrypoint.
-7. **Point the dashboard at it:** set Bane's `BANE_SUPPORT_URL` to `https://support.bane.mx/chat` (dev: `support.dev.bane.mx`).
+   - `BANE_INBOUND_WEBHOOK_SECRET` and `BANE_SUPPORT_INBOX_KEY`, from step 4.
+   - `BANE_INTAKE_WEBHOOK_SECRET` and `BANE_INTAKE_INBOX_KEY`, from step 5.
+7. **Deploy.** CI deploys after Bane (below) once the repository variable `SUPPORT_DEPLOY` is `true`. By hand: `wrangler deploy --config wrangler.<stage>.jsonc`. Deploy Bane first: the binding needs Bane's `SupportPlatform` entrypoint.
+8. **Point the dashboard at it:** set Bane's `BANE_SUPPORT_URL` to `https://support.bane.mx/chat` (dev: `support.dev.bane.mx`).
 
 ## Staff ticket page
 
@@ -101,8 +107,25 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 
 They make no network or model calls. `test/*.local.ts` scripts, which are git-ignored, are for a few real turns against the gateway with a key read from a file.
 
+## Email: who gets a turn
+
+Each email conversation is bound to the first address that writes in it, and once verified, to that address's Bane account.
+
+- **Every later message is checked again.** It must come from that address, pass DMARC, and still map to the same account. Anything else goes to a conversation of its own and never touches the session, its context or its grant: another sender, a DMARC failure, or a changed account.
+- **No model turn until a sender is verified.**
+  - Without a DMARC pass, the sender gets a fixed reply with a confirm link, at most once a day per address.
+  - With a DMARC pass but no account, the sender gets a fixed "no account" reply.
+- **Tickets from unverified senders** lead with "UNVERIFIED SENDER" and name no customer.
+- **Links in email replies** must point to Bane's own sites, or the reply is held.
+
 ## Limits and retention
 
+- **Daily caps** (`src/limits.ts`, override each with a `LIMIT_*` var):
+  - model turns: 1,500 a day in total, and 100 per person;
+  - tickets: 60 a day in total, and 3 per person or sender;
+  - support mail: 2,000 a day in total, and 20 per sender;
+  - confirm links: 1 per address a day.
+  The first time a global cap is hit each day, the team gets one email. Past a cap, chats say support is busy, and emails get a fixed reply with no model call.
 - **Per conversation:** 60 turns, and 500K tokens weighted by cost (cache reads count a tenth). Past either, the conversation files a ticket.
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.

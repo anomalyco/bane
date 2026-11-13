@@ -35,11 +35,14 @@ export class BaneError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly requestId: string | null = null) { super(message); }
 }
 
-/** Bane's public API with the support address's inbox key, over the BANE_API binding. */
-export function baneApi(env: Env) {
-  const key = env.BANE_SUPPORT_INBOX_KEY;
+/**
+ * Bane's public API over the BANE_API binding, with the support address's inbox key, or (`intake`) the key for the
+ * abuse@, privacy@ and legal@ addresses.
+ */
+export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
+  const key = which === 'intake' ? env.BANE_INTAKE_INBOX_KEY : env.BANE_SUPPORT_INBOX_KEY, secret = which === 'intake' ? 'BANE_INTAKE_INBOX_KEY' : 'BANE_SUPPORT_INBOX_KEY';
   async function call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
-    if (!key) throw new MissingSecret('BANE_SUPPORT_INBOX_KEY');
+    if (!key) throw new MissingSecret(secret);
     const headers: Record<string, string> = { authorization: `Bearer ${key}`, accept: 'application/json', 'user-agent': 'bane-support' };
     if (body !== undefined) headers['content-type'] = 'application/json';
     if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
@@ -57,7 +60,7 @@ export function baneApi(env: Env) {
     message: (messageId: string) => call<InboundMessage>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}?includeDelivery=true`),
     /** One attachment's bytes (≤ limit, else null). Bane answers 307 to a signed storage URL, which is fetched directly. */
     async part(messageId: string, partId: string, limit: number): Promise<Uint8Array | null> {
-      if (!key) throw new MissingSecret('BANE_SUPPORT_INBOX_KEY');
+      if (!key) throw new MissingSecret(secret);
       const path = `/v1/inbound/messages/${encodeURIComponent(messageId)}/parts/${encodeURIComponent(partId)}`;
       let response = await env.BANE_API.fetch(`${env.BANE_ORIGIN}${path}`, { headers: { authorization: `Bearer ${key}`, 'user-agent': 'bane-support' }, redirect: 'manual' });
       const location = response.headers.get('location');
@@ -70,9 +73,11 @@ export function baneApi(env: Env) {
     startThread: (input: { to: string[]; subject: string; text: string; replyTo?: string[] }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', '/v1/inbound/threads', { addressId: env.SUPPORT_ADDRESS_ID, ...input }, idempotencyKey),
     /** A reply in an email conversation, only to the reviewed recipients (Bane refuses a reply whose recipients changed). */
-    reply: (threadId: string, input: { replyToMessageId: string; text: string; to: string }, idempotencyKey: string) =>
+    /** addressId null: the address the message came in on (the intake key sees three). */
+    reply: (threadId: string, input: { replyToMessageId: string; text: string; to: string; subject?: string; addressId?: string | null }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', `/v1/inbound/threads/${encodeURIComponent(threadId)}/reply`, {
-        addressId: env.SUPPORT_ADDRESS_ID, replyToMessageId: input.replyToMessageId, text: input.text, to: [input.to], cc: [], expectedRecipients: { to: [input.to], cc: [], bcc: [] },
+        ...(input.addressId === null ? {} : { addressId: input.addressId ?? env.SUPPORT_ADDRESS_ID }), replyToMessageId: input.replyToMessageId, text: input.text, to: [input.to], cc: [], expectedRecipients: { to: [input.to], cc: [], bcc: [] },
+        ...(input.subject ? { subject: input.subject } : {}),
       }, idempotencyKey),
   };
 }

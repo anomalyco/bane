@@ -12,6 +12,8 @@ export type GateScope = {
   /** Strings that only exist in the system prompt (a few distinctive phrases). */
   promptFragments: string[];
   supportAddress: string;
+  /** Email: links must point here (a URL elsewhere holds the reply). The chat panel enforces this itself. */
+  linkOrigins?: readonly string[];
 };
 export type GateResult = { ok: true } | { ok: false; reasons: string[] };
 
@@ -36,6 +38,12 @@ export function gate(text: string, scope: GateScope): GateResult {
   for (const id of text.match(INTERNAL_ID) ?? []) if (!allowedIds.has(id)) reasons.push('ID outside the grant');
   if (STAFF.test(text)) reasons.push('internal name');
   if (FENCE.test(text)) reasons.push('harness markup');
+  if (scope.linkOrigins) {
+    for (const url of text.match(/\b(?:https?:\/\/|www\.)[^\s<>()"']+/gi) ?? []) {
+      const ok = /^https:\/\//i.test(url) && scope.linkOrigins.some(origin => url === origin || url.startsWith(`${origin}/`) || url.startsWith(`${origin}?`));
+      if (!ok) { reasons.push('link outside Bane'); break; }
+    }
+  }
   const lower = text.toLowerCase();
   for (const fragment of scope.promptFragments) if (fragment.length >= 24 && lower.includes(fragment.toLowerCase())) { reasons.push('system prompt text'); break; }
   return reasons.length ? { ok: false, reasons: [...new Set(reasons)] } : { ok: true };

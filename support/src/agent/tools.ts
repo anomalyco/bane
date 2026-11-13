@@ -28,7 +28,7 @@ export interface ToolHost {
   requestContentAccess(workspaceId: string, why: string): Promise<string>;
   fileTicket(input: TicketInput): Promise<string>;
 }
-export const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'feature_request', 'other'] as const;
+export const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'privacy', 'legal', 'feature_request', 'other'] as const;
 export type TicketType = typeof TICKET_TYPES[number];
 export const TICKET_TOPICS = ['refund', 'billing_dispute', 'charge', 'credit', 'plan', 'account_closure', 'limit_increase', 'enforcement_review', 'access', 'security', 'legal', 'human_requested', 'guardrail', 'other'] as const;
 /** The structured part of a ticket, by type (a bug's reproduction; a feature's use case). */
@@ -141,7 +141,7 @@ export const TOOLS: ToolSpec[] = [
     label: fixed('Asking for content access…', 'Asked for content access'), execute: (a, h) => h.requestContentAccess(String(a.workspaceId ?? h.workspaceId() ?? ''), String(a.why ?? '')) },
   { name: 'file_ticket', description: 'Pass this conversation to the Bane team. One per conversation; calling again adds facts to the same ticket. Pick the type that fits and fill its fields: a bug needs reproSteps and affected (plus the request IDs and error codes you saw).',
     params: {
-      type: { type: 'enum', values: TICKET_TYPES, description: 'billing (refunds, disputes, charges, credit), bug (Bane software misbehaving), deliverability (inboxing, bounces, reputation, limits from sending quality), account (access, closure, limits, enforcement, legal, security), abuse_report, feature_request, other' },
+      type: { type: 'enum', values: TICKET_TYPES, description: 'billing (refunds, disputes, charges, credit), bug (Bane software misbehaving), deliverability (inboxing, bounces, reputation, limits from sending quality), account (access, closure, limits, enforcement, security), abuse_report, privacy (GDPR/CCPA requests, data deletion or export), legal (DPA, subpoenas, law enforcement, sanctions), feature_request, other' },
       title: { type: 'string', description: 'A short subject line for the team, ≤ 80 characters, e.g. "Webhook test returns 500 for every endpoint"', max: 80 },
       severity: { type: 'enum', values: ['P1', 'P2', 'P3'], description: 'P1: security or sending fully down; P2: legal, pause review, degraded sending, a bug blocking work; P3: everything else' },
       topic: { type: 'enum', values: TICKET_TOPICS, description: 'The specific ask within the type, e.g. refund, limit_increase, enforcement_review, human_requested', optional: true },

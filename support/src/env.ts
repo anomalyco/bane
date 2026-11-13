@@ -1,9 +1,12 @@
 import type { SupportPlatform } from './bane.js';
 import type { SupportConversation } from './conversation.js';
+import type { SupportIntake } from './intake.js';
 
 /** The support Worker's bindings (wrangler.dev.jsonc / wrangler.prod.jsonc). */
 export interface Env {
   CONVERSATION: DurableObjectNamespace<SupportConversation>;
+  /** abuse@, privacy@, legal@: one object per thread, tickets only, no agent (intake.ts). */
+  INTAKE: DurableObjectNamespace<SupportIntake>;
   DB: D1Database;
   /** Bane's SupportPlatform entrypoint (RPC). */
   BANE: Service & SupportPlatform;
@@ -29,6 +32,8 @@ export interface Env {
   /** support@bane.mx and its inbound address ID in the platform workspace. */
   SUPPORT_ADDRESS: string;
   SUPPORT_ADDRESS_ID: string;
+  /** The intake addresses, e.g. "abuse@bane.mx,privacy@bane.mx,legal@bane.mx" (local part = the mailbox). */
+  INTAKE_ADDRESSES: string;
   /** Where tickets are emailed. */
   TICKET_TO: string;
   /** Console's inference gateway, Anthropic Messages API base (https://opencode.ai/inference/anthropic/v1). The model is pinned in code (agent/opencode.ts). */
@@ -39,4 +44,7 @@ export interface Env {
   SUPPORT_ROOT_SECRET?: string;
   BANE_INBOUND_WEBHOOK_SECRET?: string;
   BANE_SUPPORT_INBOX_KEY?: string;
+  /** The intake addresses' webhook secret and inbox key (read and send on those three addresses only). */
+  BANE_INTAKE_WEBHOOK_SECRET?: string;
+  BANE_INTAKE_INBOX_KEY?: string;
 }
