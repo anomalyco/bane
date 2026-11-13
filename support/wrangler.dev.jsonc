@@ -1,0 +1,54 @@
+// Bane support, dev (support.dev.bane.mx): the support agent's Worker beside bane-dev in anomaly-dev. Service bindings
+// only work inside one account, so dev binds bane-dev and production binds bane-production. See support/README.md for
+// the one-time setup (D1 database, address, webhook, secrets) and the deploy.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bane-support-dev",
+  "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "support.dev.bane.mx", "custom_domain": true }],
+  "minify": true,
+  // The system prompt and the voice guide are Markdown files bundled as text.
+  "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
+  "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }],
+  // Create once: wrangler d1 create bane-support-dev, then put its id here (see support/README.md).
+  "d1_databases": [{ "binding": "DB", "database_name": "bane-support-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
+  "services": [
+    // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
+    { "binding": "BANE", "service": "bane-dev", "entrypoint": "SupportPlatform" },
+    // Bane's public API, called with the support address's inbox key.
+    { "binding": "BANE_API", "service": "bane-dev" }
+  ],
+  // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
+  "ratelimits": [
+    { "name": "CHAT_START", "namespace_id": "8794101", "simple": { "limit": 5, "period": 60 } },
+    { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } }
+  ],
+  "triggers": { "crons": [] },
+  "vars": {
+    "STAGE": "dev",
+    "PUBLIC_URL": "https://support.dev.bane.mx",
+    "DASHBOARD_ORIGINS": "https://dev.bane.mx,http://localhost:5173",
+    "BANE_ORIGIN": "https://dev.bane.mx",
+    "SUPPORT_ADDRESS": "support@dev.bane.mx",
+    // The inbound address ID (adr_…) of SUPPORT_ADDRESS in dev's platform workspace; set after creating it.
+    "SUPPORT_ADDRESS_ID": "",
+    "TICKET_TO": "ryan@anoma.ly",
+    // Console's inference gateway (Anthropic Messages API). The key is the CONSOLE_GATEWAY_KEY secret.
+    "GATEWAY_URL": "https://opencode.ai/inference/anthropic/v1"
+  },
+  // Secrets, set with `wrangler secret put <NAME> --config wrangler.dev.jsonc` (never through CI):
+  // CONSOLE_GATEWAY_KEY, SUPPORT_ROOT_SECRET, BANE_INBOUND_WEBHOOK_SECRET, BANE_SUPPORT_INBOX_KEY.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
+}
