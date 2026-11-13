@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { ApiError, id, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
+import { legacySlugs, productSlug } from './brand.js';
 
 // Every MX entity has one explicit state column, and this module is the only writer of those columns.
 // Readers use the predicates below instead of spelling out state names; transitions are pure
@@ -60,6 +61,12 @@ export type IdentityFacts = {
   /** Immutable operator-attested SES fingerprint. Only the operator can restore a revoked adoption. */
   adopted?: {arn:string;fingerprint:string};
 };
+/** Labels of the ownership TXT record (`_<label>.<domain>`), current first. A claim shows the one it was made with
+ * (domain_claims.proof_label: claims from before the rename keep `_bane`), and any of them proves any claim. */
+export const PROOF_LABELS = [productSlug, ...legacySlugs] as const; // legacySlugs: remove after rename cleanup (pre-rename claims then republish as _nightmail)
+export type ProofLabel = typeof PROOF_LABELS[number];
+export const proofRecordName = (label: ProofLabel, domain: string) => `_${label}.${domain}`;
+export const isProofRecord = (name: string, domain: string) => PROOF_LABELS.some(label => name === proofRecordName(label, domain));
 export type ClaimState = { sending_state: SendingState; receiving_state: ReceivingState; receiving_host: string | null; lost_since: string | null; receiving_lost_since: string | null };
 export type ClaimEvidence = {
   /** DKIM signed, ownership proven and SES verified for sending; undefined when SES was not read (MX-only upkeep). */
@@ -72,7 +79,7 @@ export type ClaimEvidence = {
   definitive?: boolean;
   /** SES VerificationStatus SUCCESS (receiving needs the identity, not DKIM). */
   identityVerified: boolean;
-  /** The `_bane` TXT proof (or, for BYO, the identity verification) was observed. */
+  /** The ownership TXT proof (or, for BYO, the identity verification) was observed. */
   proven: boolean;
   /** The region can receive at all: the pool's catch-all is ready, or the connection is BYO. */
   regionReceives: boolean;
