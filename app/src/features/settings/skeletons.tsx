@@ -15,11 +15,11 @@ export const settingsColumns = {
     { key: 'last', label: 'Last used', card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} />, card: 'end' },
   ],
-  // A domain's card: its name and sending status, then receiving (or what setup still waits for).
+  // A domain's card: its name and sending status, then the host it receives at (or Off). Every cell is one line.
   domains: [
     { key: 'name', label: 'Domain', width: '40%', card: 'title' },
-    { key: 'status', label: 'Status', width: '30%', skeleton: twoLines, card: 'aside' },
-    { key: 'receiving', label: 'Receiving', width: '28%', card: 'line' },
+    { key: 'status', label: 'Status', width: '30%', card: 'aside' },
+    { key: 'receiving', label: 'Receiving', width: '32%', card: 'line' },
     { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
     { key: 'region', label: 'Region', card: 'hide' },
   ],
@@ -70,7 +70,7 @@ export const settingsColumns = {
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
 const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
-export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: multiTenant ? '30%' : '26%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '24%' }, domainReceiving, domainAddresses, ...multiTenant ? [] : [domainRegion]]
+export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => [{ ...domainName, width: multiTenant ? '30%' : '26%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '22%' }, { ...domainReceiving, width: multiTenant ? '34%' : '30%' }, domainAddresses, ...multiTenant ? [] : [domainRegion]]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
 const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '56%' }, settingsColumns.webhooks[1], ...settingsColumns.webhooks.slice(3)]
 const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
@@ -136,5 +136,5 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
   if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={89} /></>} /><div className="keys-sections"><section className="section stack"><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
-  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
+  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }
