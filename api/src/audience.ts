@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, AudienceSpec, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
 import { enqueue } from './jobs.js';
@@ -275,7 +276,7 @@ export function registerAudience(app: App) {
     });
     return c.json({ id: contactId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.', request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: `Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; ${productName} records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.`, request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json');
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const source = input.source ?? (identity.credential === 'dashboard' ? 'dashboard' : identity.credential === 'mcp' ? 'mcp' : identity.credential === 'agentToken' ? 'agent-token' : 'api');

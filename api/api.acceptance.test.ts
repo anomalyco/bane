@@ -1231,7 +1231,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
   try {
     assert.ok(manager);
     await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
-    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Bane',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
+    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Nightmail',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
     assert.deepEqual(await (await run(token())).json(),['read']);
     for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
     assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
@@ -4955,7 +4955,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const traced = await get(`/v1/support/requests/${ids[0]}`);
         assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
         assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
-        assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.']);
+        assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Nightmail stores: see logs for its route, status and error code.']);
         assert.deepEqual(traced.logs[0], { at: new Date(events[0]!.timestamp).toISOString(), route: '/v1/emails', method: 'POST', status: 422, code: 'VALIDATION_FAILED', durationMs: 12.3, principal: 'apiKey', workspaceId: wid });
         assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
         assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
@@ -8570,7 +8570,7 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual([owner.enforcement, owner.mode, owner.state, owner.balance.paid, owner.balance.promo], ['enforce', 'prepaid', { sending: 'ok', receiving: 'ok', autoRecharge: 'off' }, '2575200000', '500000000']);
       assert.deepEqual([owner.free.emails.limit, owner.prices.emailPerThousand, owner.topUpUrl], [3000, '0.20', `${PUBLIC_ORIGIN}/settings#billing`]);
       const ledger = page(await local('GET', '/v1/billing/ledger?limit=3'));
-      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Bane'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Bane']]);
+      assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Nightmail'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Nightmail']]);
       assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
       const rest = ok(await local('GET', `/v1/billing/ledger?cursor=${ok(await local('GET', '/v1/billing/ledger?limit=3')).nextCursor}`));
       assert.deepEqual([rest.data.map((e: Json) => [e.kind, e.paymentId, e.balanceAfter]), rest.nextCursor], [[['topup', 'bpa_fixture_one', '2500000000']], null]);
@@ -11581,7 +11581,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // No recipient, subject or body is accepted: extra fields are ignored and the server picks the signed-in user.
       const sent = ok(await local('POST', `/v1/domains/${domain}/test-send`, { to: ['someone-else@example.net'], subject: 'Not this' }, 'live', { 'idempotency-key': unique('test-send') }), 202);
       const row = (await db.query('SELECT from_address, to_addresses, cc_addresses, bcc_addresses, subject FROM sending_emails WHERE id=$1', [sent.id])).rows[0];
-      assert.deepEqual(row, { from_address: 'hello@example.com', to_addresses: [manager!.email], cc_addresses: [], bcc_addresses: [], subject: 'Test email from Bane' });
+      assert.deepEqual(row, { from_address: 'hello@example.com', to_addresses: [manager!.email], cc_addresses: [], bcc_addresses: [], subject: 'Test email from Nightmail' });
       // An API key, even with send permission, can't use it: only a dashboard session has a "yourself".
       const key = ok(await local('POST', '/v1/api-keys', { name: unique('test-send-key'), permissions: ['send'] }), 201).secret;
       error(await local('POST', `/v1/domains/${domain}/test-send`, undefined, 'live', { authorization: `Bearer ${key}` }), 403, 'DASHBOARD_SESSION_REQUIRED');
@@ -11759,8 +11759,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           (e: Json) => e.code === '23505' && e.constraint === 'domain_claims_receiving_host');
         await db.query('ROLLBACK TO SAVEPOINT duplicate_host');
         await recheck(d); const checked = await read(d);
-        assert.equal(receiving(checked).name, `inbound.${d.name}`); assert.match(receiving(checked).note, /reply\..* already receives mail in another Bane workspace/);
-        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_TAKEN').message, /already receives mail in another Bane workspace\. Use inbound\./);
+        assert.equal(receiving(checked).name, `inbound.${d.name}`); assert.match(receiving(checked).note, /reply\..* already receives mail in another Nightmail workspace/);
+        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_TAKEN').message, /already receives mail in another Nightmail workspace\. Use inbound\./);
       });
 
       await t.test('a host another workspace claimed, or delegated to its own name servers, is never suggested, chosen or kept', async () => {
@@ -11773,8 +11773,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         zone.set(`inbound.${d.name}`, { mx: ['10 mx.other.example.'] });
         await recheck(d); const suggested = receiving(await read(d));
         assert.equal(suggested.name, `inbox.${d.name}`);
-        assert.match(suggested.note, new RegExp(`reply\\.${esc(d.name)} is claimed by another Bane workspace`)); assert.match(suggested.note, new RegExp(`mail\\.${esc(d.name)} is a delegated zone`));
-        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_CLAIMED').message, new RegExp(`is claimed by another Bane workspace.*Use inbox\\.${esc(d.name)}`));
+        assert.match(suggested.note, new RegExp(`reply\\.${esc(d.name)} is claimed by another Nightmail workspace`)); assert.match(suggested.note, new RegExp(`mail\\.${esc(d.name)} is a delegated zone`));
+        assert.match(error(await choose(d, `reply.${d.name}`), 409, 'RECEIVING_HOST_CLAIMED').message, new RegExp(`is claimed by another Nightmail workspace.*Use inbox\\.${esc(d.name)}`));
         // A name below another workspace's claim is theirs as well.
         assert.match(error(await choose(d, `x.reply.${d.name}`), 409, 'RECEIVING_HOST_CLAIMED').message, new RegExp(`^reply\\.${esc(d.name)}, which contains x\\.reply\\.`));
         assert.match(error(await choose(d, `mail.${d.name}`), 409, 'RECEIVING_HOST_DELEGATED').message, /delegated zone with its own name servers/);
@@ -11815,7 +11815,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await job; // Completes: the unique violation is reported, not retried as an internal error.
           const raced = await read(d);
           assert.deepEqual([raced.receivingIssue.code, raced.receivingIssue.host], ['host_taken', `reply.${name}`]);
-          assert.match(raced.receivingIssue.message, /already receives mail in another Bane workspace/);
+          assert.match(raced.receivingIssue.message, /already receives mail in another Nightmail workspace/);
           assert.deepEqual((await db.query('SELECT receiving_state, receiving_host FROM domain_claims WHERE name=$1', [name])).rows, [{ receiving_state: 'pending', receiving_host: null }]);
         } finally { await rival.query('ROLLBACK').catch(() => undefined); await rival.query('DELETE FROM workspaces WHERE id=$1', [ws]); }
       });
@@ -12425,7 +12425,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const legacy = 'Hosted marketing held: high hard-bounce volume in the last 24 hours. Transactional mail keeps sending.';
       await db.query(`UPDATE provider_connections SET marketing_held_at=now(),marketing_hold_reason=$2 WHERE id=$1`, [f.wid, legacy]);
       const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: f.from, to: 'reader@example.net', subject: 'Fixture', text: 'Fixture', kind });
-      assert.equal(error(await send('marketing'), 409, 'MARKETING_HELD').message, `${legacy} Remove the addresses that bounced; Bane reviews the hold.`);
+      assert.equal(error(await send('marketing'), 409, 'MARKETING_HELD').message, `${legacy} Remove the addresses that bounced; Nightmail reviews the hold.`);
       ok(await send('transactional'), 202);
       await checkHostedHealth(runtime);
       const standing = (await db.query('SELECT step,reasons FROM sender_standing WHERE workspace_id=$1', [f.wid])).rows[0];
@@ -12466,7 +12466,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => { assert.equal(String(url), 'https://hooks.slack.invalid/fixture'); posted.push(JSON.parse(String(init!.body)).text); return new Response('ok'); });
         runtime.config.reputationAlertUrl = 'https://hooks.slack.invalid/fixture';
         try { await reputationAlertJobs['reputation.alert'](runtime, alert, { id: 'job_alert', workspaceId: f.wid, attempts: 1 }); } finally { runtime.config.reputationAlertUrl = undefined; }
-        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Bane did not pause its sending[\\s\\S]*/operator/workspaces/${f.wid}`));
+        assert.match(posted[0]!, new RegExp(`First-party workspace over the spam complaints line.*${f.wid}[\\s\\S]*Nightmail did not pause its sending[\\s\\S]*/operator/workspaces/${f.wid}`));
       });
       // Only an operator pauses it, and only with a reason.
       await assert.rejects(pauseHosted(db, [f.wid, '--reason', 'short']), /at least 10 characters/);
@@ -13813,7 +13813,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(ok(await pause()), paused, 'The same key returns the first result.');
       error(await local('POST', `${base}/pause`, { reason: 'A different reason entirely' }, 'live', { 'Idempotency-Key': 'pause-1' }), 409, 'IDEMPOTENCY_CONFLICT');
       error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }), 409, 'ALREADY_PAUSED');
-      assert.match(ok(await local('GET', '/v1/me')).connection.sendingPause.reason, /paused by Bane after a review\./);
+      assert.match(ok(await local('GET', '/v1/me')).connection.sendingPause.reason, /paused by Nightmail after a review\./);
       assert.ok(!ok(await local('GET', '/v1/me')).connection.sendingPause.reason.includes('Confirmed abuse'), 'The operator\'s reason stays in the audit.');
       assert.equal((await db.query(`SELECT status FROM jobs WHERE id=$1`, [`hosted.tenantStatus:${wid}`])).rows[0].status, 'pending');
       const [audit] = (await db.query(`SELECT operator_id,via,reason,ticket_ref,before,after,request_id FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-pause'`, [wid])).rows;

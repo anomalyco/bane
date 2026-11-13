@@ -2,7 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { AttachmentContentType, AttachmentFilename, mailAddress, senderDisplayName } from './outbound-content.js';
 import { GRADES } from './standing-model.js';
 
-// Use Bane's bare address + fromName form or a single display mailbox, never an address list.
+// Use Nightmail's bare address + fromName form or a single display mailbox, never an address list.
 export function splitMailbox(from: string) {
   const display = /^([^<>]*)<([^<>]+)>$/.exec(from.trim());
   return { address: (display?.[2] ?? from).trim(), name: display?.[1]?.trim().replace(/^"(.*)"$/, '$1') };

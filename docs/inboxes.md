@@ -20,7 +20,7 @@ The same operations are available through the plain `inboxes` and `messages` MCP
 - [Demos](#demos): [curl](#curl), [SDK](#sdk), [MCP session](#mcp-session), [sandbox](#sandbox)
 - [Dashboard](#dashboard)
 
-**Defaults and limits.** Lease 24 hours (60 seconds to 30 days), then 24 hours of grace (0–168). Per inbox: 200 messages and 25 MiB, after which new mail is held, never dropped. Per workspace: 60 creates a minute and 1,000 retained inboxes. A long poll waits up to 30 seconds (25 over MCP). On hosted Bane, inboxes are available once the R2 mail store is on (`BANE_MAIL_STORE=r2`); before that, creates answer `503 INBOXES_UNAVAILABLE`.
+**Defaults and limits.** Lease 24 hours (60 seconds to 30 days), then 24 hours of grace (0–168). Per inbox: 200 messages and 25 MiB, after which new mail is held, never dropped. Per workspace: 60 creates a minute and 1,000 retained inboxes. A long poll waits up to 30 seconds (25 over MCP). On hosted Nightmail, inboxes are available once the R2 mail store is on (`BANE_MAIL_STORE=r2`); before that, creates answer `503 INBOXES_UNAVAILABLE`.
 
 ## What an inbox is
 
@@ -105,7 +105,7 @@ stateDiagram-v2
 
 ## Demos
 
-Every snippet here was run against a local Bane on 2026-11-11 (isolated harness database, simulated SES), and the outputs are from those runs. Locally, the curl and MCP messages were delivered through the same store function SES ingest calls; the sandbox demo uses the public `simulate` endpoint. Values are synthetic.
+Every snippet here was run against a local Nightmail on 2026-11-11 (isolated harness database, simulated SES), and the outputs are from those runs. Locally, the curl and MCP messages were delivered through the same store function SES ingest calls; the sandbox demo uses the public `simulate` endpoint. Values are synthetic.
 
 ### curl
 
@@ -203,7 +203,7 @@ curl -sS "$BANE_URL/v1/api-keys" -H "$AUTH" -H 'Content-Type: application/json' 
 
 ### MCP session
 
-Point an MCP client at hosted Bane with an API key that creates inboxes, or one for a single inbox, as the bearer token. For OpenCode:
+Point an MCP client at hosted Nightmail with an API key that creates inboxes, or one for a single inbox, as the bearer token. For OpenCode:
 
 ```json
 {"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}

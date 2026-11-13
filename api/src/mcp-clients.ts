@@ -1,5 +1,5 @@
 /**
- * How each MCP client connects to Bane's hosted MCP server. One builder for createInboxConnection and the dashboard
+ * How each MCP client connects to Nightmail's hosted MCP server. One builder for createInboxConnection and the dashboard
  * (Docs and Connect an agent), so every place hands out the same config. No runtime imports: it ships to browsers.
  *
  * Shapes, as each client documents them:

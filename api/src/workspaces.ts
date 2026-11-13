@@ -7,6 +7,7 @@ import { workspaceMembers, workspaces } from './db/workspaces.js';
 import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
 import { accountSessionPolicy } from './account-login.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
+import { productName } from './brand.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -55,7 +56,7 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // created with no membership; its session can only review and accept that invitation.
 export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null) {
   if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || 'Bane').slice(0, 105)}'s workspace`, region);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region);
   return true;
 }
 
@@ -82,7 +83,7 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 const maxOwnedWorkspaces = 10;
 
 /** Every workspace the user belongs to, with their role, by name: one statement. Read by GET /v1/me and the deprecated GET /v1/workspaces. */
-/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Bane operator role (if any). */
+/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
 export async function sessionMemberships(db: DbExecutor, userId: string) {
   // One row even with no memberships, so an operator who belongs to no workspace still gets the role.
   const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,

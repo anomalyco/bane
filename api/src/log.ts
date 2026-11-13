@@ -1,4 +1,4 @@
-// Bane's structured logging, with no dependencies so the support Worker (support/) bundles the same fields, sampling and
+// Nightmail's structured logging, with no dependencies so the support Worker (support/) bundles the same fields, sampling and
 // redaction. core.ts re-exports it and adds logError, which knows ApiError and SQLSTATEs.
 // Structured logs: one JSON object per line. The Worker's lines go to Workers Logs, the Node API and runner's to
 // stdout (CloudWatch on Fargate); the mail gateway writes the same fields. Every request writes one `event: 'request'`
@@ -87,7 +87,7 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
 // database error quotes its SQL parameters, and a name is just a property (PR #131 review). So neither is trusted and
 // no line is counted: the stack must start with that exact header text, character for character, and frames are read
 // only after it (V8 formats the header from the current name and message on first access). Every line after it must be
-// a frame; only frames in Bane's own code (the Worker bundle, or src/ or dist/ outside node_modules) are kept, rebuilt
+// a frame; only frames in Nightmail's own code (the Worker bundle, or src/ or dist/ outside node_modules) are kept, rebuilt
 // from the function name and file:line:column. Anything else fails closed: no frames. The one case this cannot see is
 // code that shortens a message after something already read the stack; no request can do that.
 const FRAME = /^ {4}at (?:async )?(?:(?:new )?([\w$.<>[\]]{1,80}(?: \[as [\w$]{1,40}\])?) \()?(?:file:\/\/)?([^\s()]{1,300}):(\d{1,7}):(\d{1,7})\)?$/;

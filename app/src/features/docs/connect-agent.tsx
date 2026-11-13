@@ -10,6 +10,7 @@ import { ApiError } from '../../data/types'
 import { mcpClientNames, mcpClients, mcpClientSteps, mcpServerUrl, mcpSnippet, type McpClient } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { useSingleFlight } from '../../lib/single-flight'
+import { productName } from '../../../../api/src/brand'
 
 /** What an agent signed in with OAuth asks for. Only OpenCode lets the config choose; other clients ask for read. */
 export const mcpAccess = [
@@ -89,7 +90,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const keyName = box?.name ? `${box.name} · ${mcpClientNames[result?.client ?? client]}` : null
   const close = () => { if (!busy) onOpenChange(false) }
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Connect an agent" className="connect-agent-dialog"
-    description="Let an AI agent such as OpenCode, Claude Code or Cursor work with Bane over MCP."
+    description={`Let an AI agent such as OpenCode, Claude Code or Cursor work with ${productName} over MCP.`}
     footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       {!result && <>

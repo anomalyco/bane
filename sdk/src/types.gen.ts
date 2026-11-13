@@ -480,7 +480,7 @@ export type CampaignTemplateDraft = {
     fromName?: string;
     replyTo?: Array<string>;
     /**
-     * Concrete Bane block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
+     * Concrete Nightmail block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
      */
     html?: string;
     attachments?: Array<string>;
@@ -621,7 +621,7 @@ export type SendEmailInput = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
+     * Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -643,7 +643,7 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -687,7 +687,7 @@ export type BatchSendEmailItem = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
+     * Usually omitted: hosted Nightmail sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -709,7 +709,7 @@ export type BatchSendEmailItem = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1470,7 +1470,7 @@ export type DomainReadiness = {
      */
     receivingIssue?: {
         /**
-         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
+         * cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.
          */
         code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale';
         host: string;
@@ -1564,7 +1564,7 @@ export type CreateWebhook = {
     regions?: Array<string> | null;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -1579,7 +1579,7 @@ export type UpdateWebhook = {
     regions?: Array<string> | null;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -2480,7 +2480,7 @@ export type CreateEndpoint = {
      */
     url: string;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -2968,7 +2968,7 @@ export type InboundDomainList = {
 
 export type InboundDomain = {
     /**
-     * Bane domain ID.
+     * Nightmail domain ID.
      */
     id: string;
     name: string;
@@ -3067,7 +3067,7 @@ export type InboundSubdomain = {
      */
     name: string;
     /**
-     * Bane domain ID of the parent.
+     * Nightmail domain ID of the parent.
      */
     parentDomainId: string;
     parentName: string;
@@ -3295,7 +3295,7 @@ export type InboundMessage = {
     suppressionReason?: string | null;
     emailId: string | null;
     /**
-     * RFC Message-ID, not the Bane message ID (id).
+     * RFC Message-ID, not the Nightmail message ID (id).
      */
     messageId: string | null;
     inReplyTo: string | null;
@@ -3372,7 +3372,7 @@ export type InboundMessageDetail = InboundMessage & {
     automated?: boolean;
     html: string | null;
     /**
-     * With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.
+     * With includeHtml=true: the HTML has more elements or deeper nesting than Nightmail parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.
      */
     htmlTooComplex: boolean;
     attachments: Array<{
@@ -3637,7 +3637,7 @@ export type InboundOverviewEndpoint = {
 
 export type InboundOverviewDomain = {
     /**
-     * Bane domain ID.
+     * Nightmail domain ID.
      */
     id: string;
     /**
@@ -3664,7 +3664,7 @@ export type UpdateInboundThread = {
 
 export type CreateInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Nightmail for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -3675,7 +3675,7 @@ export type CreateInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -3706,14 +3706,14 @@ export type InboundAttachmentInput = {
     contentId?: string;
 } | {
     /**
-     * A received attachment in this mailbox (matt_…) or a Bane attachment upload (attachment_…).
+     * A received attachment in this mailbox (matt_…) or a Nightmail attachment upload (attachment_…).
      */
     id: string;
 };
 
 export type ReplyToInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Bane for the receiving region; replies still return to whatever address the recipient answers.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in Nightmail for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -3724,7 +3724,7 @@ export type ReplyToInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     * Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Nightmail controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -3739,7 +3739,7 @@ export type ReplyToInboundThread = {
      */
     addressId?: string;
     /**
-     * Bane message ID (msg_…) of a visible message in this thread.
+     * Nightmail message ID (msg_…) of a visible message in this thread.
      */
     replyToMessageId?: string;
     /**
@@ -3865,7 +3865,7 @@ export type InboundWebhook = {
      */
     name: string | null;
     /**
-     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
      */
     format: 'bane' | 'inbound';
     /**
@@ -3896,7 +3896,7 @@ export type CreateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
      */
     format?: 'bane' | 'inbound';
     /**
@@ -3923,7 +3923,7 @@ export type CreateInboundWebhook = {
     eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -3950,7 +3950,7 @@ export type UpdateInboundWebhook = {
      */
     name?: string | null;
     /**
-     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
      */
     format?: 'bane' | 'inbound';
     /**
@@ -3977,7 +3977,7 @@ export type UpdateInboundWebhook = {
     eventTypes?: Array<'message.received' | 'message.junk' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted' | 'inbox.created' | 'inbox.deleted' | 'message.held' | 'inbox.quota_exceeded'>;
     paused?: boolean;
     /**
-     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Bane delivery headers are reserved.
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and Nightmail delivery headers are reserved.
      */
     headers?: Array<{
         name: string;
@@ -3995,7 +3995,7 @@ export type InboundWebhookTestResult = {
 
 export type TestInboundWebhook = {
     /**
-     * bane (default): Bane's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Bane's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
+     * bane (default): Nightmail's thin signed event. inbound: inbound.new's email.received body with its X-Webhook-Verification-Token, X-Endpoint-ID, X-Webhook-Event and X-Webhook-Timestamp headers, plus Nightmail's signature headers. Attachment downloadUrl and rawUrl need an admin API key.
      */
     format?: 'bane' | 'inbound';
     overrideUrl?: string;
@@ -4281,7 +4281,7 @@ export type AuditEntry = {
     action: string;
     actor: {
         /**
-         * member is a signed-in person; support is Bane support reading with your permission; system is Bane itself.
+         * member is a signed-in person; support is Nightmail support reading with your permission; system is Nightmail itself.
          */
         type: 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe';
         /**
@@ -4309,7 +4309,7 @@ export type AuditEntry = {
         id: string | null;
     } | null;
     /**
-     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Bane support in.
+     * The member the event concerns when it is not the actor: the member whose role changed or whose support request let Nightmail support in.
      */
     subject: {
         userId: string;
@@ -4402,7 +4402,7 @@ export type SupportContext = {
             [key: string]: unknown;
         }>;
         /**
-         * Bane does not store failed sign-ins or rejected API keys; look up a request ID instead.
+         * Nightmail does not store failed sign-ins or rejected API keys; look up a request ID instead.
          */
         authErrors: null;
     };
@@ -4451,7 +4451,7 @@ export type SupportWorkspace = {
      */
     sending: {
         /**
-         * shared (Bane Hosted) or byo (their own AWS).
+         * shared (Nightmail Hosted) or byo (their own AWS).
          */
         kind: string;
         region: string;
@@ -4699,7 +4699,7 @@ export type SupportRequestGroup = {
     method: string;
     status: number;
     /**
-     * The error code Bane answered with.
+     * The error code Nightmail answered with.
      */
     code: string | null;
     /**
@@ -4718,7 +4718,7 @@ export type SupportRequestGroup = {
 export type SupportRequestTrace = {
     requestId: string;
     /**
-     * Whether Bane logged or stored anything about this request for this customer.
+     * Whether Nightmail logged or stored anything about this request for this customer.
      */
     found: boolean;
     /**
@@ -5062,7 +5062,7 @@ export type SupportDomainHealth = {
         createdAt: string | null;
     };
     /**
-     * What Bane stored at the last verification.
+     * What Nightmail stored at the last verification.
      */
     claim: {
         sending: string | null;
@@ -5081,7 +5081,7 @@ export type SupportDomainHealth = {
         receiving: string | null;
         lostSince: string | null;
         /**
-         * shared (Bane Hosted pool) or byo.
+         * shared (Nightmail Hosted pool) or byo.
          */
         connection: {
             kind: string;
@@ -5588,7 +5588,7 @@ export type BillingSummary = {
         monthlyCapCents: number;
         monthTotalCents: number;
         /**
-         * Why Bane turned auto-recharge off (a card decline code, dispute or a removed card).
+         * Why Nightmail turned auto-recharge off (a card decline code, dispute or a removed card).
          */
         disabledReason: string | null;
         pending: boolean;
@@ -6116,11 +6116,11 @@ export type GetCurrentIdentityResponses = {
          */
         workspaces: Array<Workspace> | null;
         /**
-         * Bane staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.
+         * Nightmail staff only: the platform operator role of this dashboard session (it opens /operator). Null for everyone else.
          */
         operator?: 'operator' | 'operator:read' | null;
         /**
-         * Bane staff only: this session may use staff UI notes. False for everyone else.
+         * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */
         uiNotes?: boolean;
         /**

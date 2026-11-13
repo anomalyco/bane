@@ -3,6 +3,7 @@ import type { DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
 import { checkMx, delegatedZone } from './mailbox-dns.js';
 import type { IdentityFacts } from './states.js';
+import { productName } from './brand.js';
 
 /**
  * Hosted receiving hosts. A domain receives on its root only when the root already points at SES (or the
@@ -17,7 +18,7 @@ export type ReceivingIssue = { code: ReceivingIssueCode; host: string; blocking:
 export type ReceivingObservation = { mx: MxReport; note?: string; issue: ReceivingIssue | null };
 type Ses = IdentityFacts['ses'] | undefined;
 
-/** The records Bane itself publishes for a domain. The receiving MX may never share a name with one of them. */
+/** The records Nightmail itself publishes for a domain. The receiving MX may never share a name with one of them. */
 export function baneRecordUse(host: string, domain: string, ses: Ses): string | null {
   const name = host.toLowerCase().replace(/\.$/, '');
   if (name === ses?.MailFromAttributes?.MailFromDomain?.toLowerCase()) return 'custom MAIL FROM subdomain';
@@ -29,11 +30,11 @@ export function baneRecordUse(host: string, domain: string, ses: Ses): string | 
 export function baneRecordIssue(host: string, domain: string, ses: Ses, region: string, suggestion: string | null): ReceivingIssue | null {
   const use = baneRecordUse(host, domain, ses);
   if (!use) return null;
-  const why = use === 'custom MAIL FROM subdomain' ? `${host} is ${domain}’s custom MAIL FROM subdomain, so its MX must point to feedback-smtp.${region}.amazonses.com for bounces` : `${host} holds Bane’s ${use} for ${domain}`;
+  const why = use === 'custom MAIL FROM subdomain' ? `${host} is ${domain}’s custom MAIL FROM subdomain, so its MX must point to feedback-smtp.${region}.amazonses.com for bounces` : `${host} holds ${productName}’s ${use} for ${domain}`;
   return { code: 'bane_record', host, blocking: true, suggestion, message: `${why}; it can’t also receive mail.${suggestion ? ` Use ${suggestion} for receiving instead.` : ''}` };
 }
 
-/** The suggestion before any DNS check (record generation): the first candidate that isn't one of Bane's own names. */
+/** The suggestion before any DNS check (record generation): the first candidate that isn't one of Nightmail's own names. */
 export function defaultReceivingHost(domain: string, ses: Ses) {
   return receivingCandidates(domain).find(host => !baneRecordUse(host, domain, ses)) ?? `reply.${domain}`;
 }
@@ -45,11 +46,11 @@ export function issueFor(host: string, mx: MxReport, suggestion: string | null, 
   switch (mx.state) {
     case 'cname': return { code: 'cname', host, blocking: true, target: mx.target ?? null, suggestion, message: `${host} is a CNAME${mx.target ? ` to ${mx.target}` : ''}, so it can’t also have an MX record (RFC 1034).${instead}` };
     case 'conflict': return { code: 'foreign_mx', host, blocking: false, provider: providerOf(mx), suggestion,
-      message: `${providerOf(mx) ?? 'Another mail server'} receives mail for ${host}${mx.split ? ` through ${mx.records.length} MX records` : ''}. Publishing Bane’s MX there moves that mail to Bane; remove the other MX records only if that’s what you want.${instead}` };
+      message: `${providerOf(mx) ?? 'Another mail server'} receives mail for ${host}${mx.split ? ` through ${mx.records.length} MX records` : ''}. Publishing ${productName}’s MX there moves that mail to ${productName}; remove the other MX records only if that’s what you want.${instead}` };
     case 'mixed': return { code: 'split', host, blocking: false, provider: providerOf(mx), suggestion: null, message: mx.message };
     case 'wrong_region': return { code: 'wrong_region', host, blocking: false, suggestion: null, message: mx.message };
     case 'null_mx': return { code: 'null_mx', host, blocking: false, suggestion, message: `${host} publishes a null MX, which tells senders it accepts no mail.${instead || ` Replace it with ${mx.expected.value}.`}` };
-    case 'missing': return established ? { code: 'mx_missing', host, blocking: false, suggestion: null, message: `The MX record on ${host} is gone, so mail to it isn’t reaching Bane. Publish it again: ${mx.expected.value}, priority ${mx.expected.priority}.` } : null;
+    case 'missing': return established ? { code: 'mx_missing', host, blocking: false, suggestion: null, message: `The MX record on ${host} is gone, so mail to it isn’t reaching ${productName}. Publish it again: ${mx.expected.value}, priority ${mx.expected.priority}.` } : null;
     default: return null;
   }
 }
@@ -81,15 +82,15 @@ async function hostOwners(db: Pick<DbExecutor, 'execute'>, hosts: string[], wid:
 type Owners = Awaited<ReturnType<typeof hostOwners>>;
 const instead = (suggestion: string | null) => suggestion ? ` Use ${suggestion} for receiving instead.` : '';
 export function takenIssue(host: string, owner: { own: boolean; name: string }, suggestion: string | null): ReceivingIssue {
-  return { code: 'host_taken', host, blocking: true, suggestion, message: `${host} already receives mail ${owner.own ? `through ${owner.name} in this workspace` : 'in another Bane workspace'}.${instead(suggestion)}` };
+  return { code: 'host_taken', host, blocking: true, suggestion, message: `${host} already receives mail ${owner.own ? `through ${owner.name} in this workspace` : `in another ${productName} workspace`}.${instead(suggestion)}` };
 }
 export function claimedIssue(host: string, claimed: string, suggestion: string | null): ReceivingIssue {
-  return { code: 'claimed', host, blocking: true, suggestion, message: `${claimed === host ? host : `${claimed}, which contains ${host},`} is claimed by another Bane workspace, so its mail can’t be received here.${instead(suggestion)}` };
+  return { code: 'claimed', host, blocking: true, suggestion, message: `${claimed === host ? host : `${claimed}, which contains ${host},`} is claimed by another ${productName} workspace, so its mail can’t be received here.${instead(suggestion)}` };
 }
 export function delegatedIssue(host: string, suggestion: string | null): ReceivingIssue {
   return { code: 'delegated', host, blocking: true, suggestion, message: `${host} is a delegated zone with its own name servers, so it’s managed separately and its mail can’t be received through this domain.${instead(suggestion)}` };
 }
-/** Bane's own names first, then other claims and delegation: the reason a host can never receive here, or null. */
+/** Nightmail's own names first, then other claims and delegation: the reason a host can never receive here, or null. */
 function refusal(host: string, domain: string, ses: Ses, region: string, owners: Owners, delegated: boolean, suggestion: string | null) {
   const owner = owners.taken.get(host), claimed = owners.claimed.get(host);
   return baneRecordIssue(host, domain, ses, region, suggestion) ?? (owner ? takenIssue(host, owner, suggestion) : claimed ? claimedIssue(host, claimed, suggestion) : delegated ? delegatedIssue(host, suggestion) : null);
@@ -169,7 +170,7 @@ export async function observeReceiving(db: Pick<DbExecutor, 'execute'>, row: Hos
     for (const host of order) {
       const use = baneRecordUse(host, domain, ses), owner = owners.taken.get(host), claimed = owners.claimed.get(host);
       if (use || owner || claimed) {
-        reasons.push(use ? `${host} is the ${use}.` : owner ? `${host} already receives mail ${owner.own ? `through ${owner.name}` : 'in another Bane workspace'}.` : `${claimed === host ? host : claimed} is claimed by another Bane workspace.`);
+        reasons.push(use ? `${host} is the ${use}.` : owner ? `${host} already receives mail ${owner.own ? `through ${owner.name}` : `in another ${productName} workspace`}.` : `${claimed === host ? host : claimed} is claimed by another ${productName} workspace.`);
         continue;
       }
       const { mx, delegated } = await probes.get(host)!;
@@ -193,7 +194,7 @@ export async function observeReceiving(db: Pick<DbExecutor, 'execute'>, row: Hos
 export function wildcardIssue(host: string, domain: string, wildcard: MxReport): ReceivingIssue {
   const what = wildcard.state === 'cname' ? `a wildcard CNAME (*.${domain} to ${wildcard.target})` : `a wildcard MX (*.${domain}, ${providerOf(wildcard) ?? wildcard.records.map(r => r.host).join(', ')})`;
   return { code: 'wildcard', host, blocking: false, provider: wildcard.state === 'cname' ? null : providerOf(wildcard), target: wildcard.target ?? null, suggestion: null,
-    message: `${host} has no records of its own, but ${what} answers for it. Publishing Bane’s MX on ${host} gives it its own records, so the wildcard no longer applies to it${wildcard.state === 'cname' ? '' : ' and mail for it moves to Bane'}.` };
+    message: `${host} has no records of its own, but ${what} answers for it. Publishing ${productName}’s MX on ${host} gives it its own records, so the wildcard no longer applies to it${wildcard.state === 'cname' ? '' : ` and mail for it moves to ${productName}`}.` };
 }
 
 /** The first candidate with no MX, no CNAME, no delegation and no other use, checked in DNS in parallel. Null when every one is taken. */
@@ -209,7 +210,7 @@ export async function freeReceivingHost(db: Pick<DbExecutor, 'execute'>, row: Ho
 }
 
 /**
- * The checks for a host the owner chooses explicitly (POST /v1/domains/{id}/receiving-host): Bane's own names,
+ * The checks for a host the owner chooses explicitly (POST /v1/domains/{id}/receiving-host): Nightmail's own names,
  * another claim or a name another workspace claimed, delegation, then public DNS. A synthesized wildcard answer is
  * not the host's own record, so it only flags. All lookups share one DNS budget.
  */

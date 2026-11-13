@@ -6,11 +6,11 @@
 
 A successful send response means SES accepted a message for processing, not that it reached a mailbox. Template rendering, virus scanning, suppression, remote SMTP rejection, retries and complaints can happen afterwards. A delivery event means acceptance by the recipient's mail server, not inbox placement or human reading. [E1][E2]
 
-**Recommended Bane model:** store immutable send attempts and an append-only event history, with separate delivery, engagement and consent projections. Do not implement one strictly linear status enum: a complaint may arrive after delivery, a delivery delay may precede eventual success, and an open may come from automation. Associate the provider message ID with the exact account, region, connection and optional SES tenant. A missing event is `unknown`, not proof of failure or success.
+**Recommended Nightmail model:** store immutable send attempts and an append-only event history, with separate delivery, engagement and consent projections. Do not implement one strictly linear status enum: a complaint may arrive after delivery, a delivery delay may precede eventual success, and an open may come from automation. Associate the provider message ID with the exact account, region, connection and optional SES tenant. A missing event is `unknown`, not proof of failure or success.
 
 ## Choose an event ingestion path
 
-| AWS mechanism | What it supplies | Bane implication |
+| AWS mechanism | What it supplies | Nightmail implication |
 | --- | --- | --- |
 | Configuration-set event destination | Sends, rendering failures, rejects, deliveries, bounces, complaints, delays, subscriptions, opens and clicks | Preferred message lifecycle feed; attach the intended configuration set on every send or explicitly verify the identity default |
 | Identity SNS feedback notifications | Bounce, complaint and delivery feedback per identity/region | Useful for existing customer infrastructure; format differs from event publishing |
@@ -21,7 +21,7 @@ A successful send response means SES accepted a message for processing, not that
 
 Sources: destination types and matching event types [E1]; identity feedback [E3]; EventBridge service delivery semantics [E4]. The list of events a destination supports is not identical for every destination: SES documents that Pinpoint excludes delivery delays and subscriptions. Do not infer a subscription EventBridge `detail-type` from the API enum without checking that destination's schema.
 
-**Recommended default:** customer-owned regional SNS topic → SQS standard queue → Bane consumer, or verified SNS HTTPS delivery when operating outside AWS. Choose one first rather than maintaining several independently authoritative streams. Durable queueing, retries and dead-letter handling improve downstream reliability; do not advertise end-to-end exactly-once or lossless SES telemetry. Existing customer event destinations must not be overwritten.
+**Recommended default:** customer-owned regional SNS topic → SQS standard queue → Nightmail consumer, or verified SNS HTTPS delivery when operating outside AWS. Choose one first rather than maintaining several independently authoritative streams. Durable queueing, retries and dead-letter handling improve downstream reliability; do not advertise end-to-end exactly-once or lossless SES telemetry. Existing customer event destinations must not be overwritten.
 
 ## Event types and meaning
 
@@ -31,7 +31,7 @@ Sources: destination types and matching event types [E1]; identity feedback [E3]
 | `RENDERING_FAILURE` | Template could not render | Persist template/version and error; do not blindly retry same data |
 | `REJECT` | SES accepted but refused further processing, e.g. virus detection | Distinguish from synchronous API rejection |
 | `DELIVERY` | Recipient mail server accepted | Save recipients, processing time, remote response where provided |
-| `DELIVERY_DELAY` | Temporary delivery issue | SES may still retry; do not immediately resubmit from Bane |
+| `DELIVERY_DELAY` | Temporary delivery issue | SES may still retry; do not immediately resubmit from Nightmail |
 | `BOUNCE` | Permanent/transient/undetermined outcomes with subtypes | Apply policy to affected recipients, not every address in the original request |
 | `COMPLAINT` | Feedback or suppression-related complaint subtype | Suppress appropriately and preserve raw classification |
 | `OPEN` | Tracking pixel request | Engagement signal, not a reliable unique-human count |
@@ -50,7 +50,7 @@ API enum spelling is not the payload spelling. SNS configuration-set payloads us
 
 **New in August 2026:** Open and Click notifications have `isBotEvent` values **`Likely` / `Unlikely`**, not a boolean. It is a likelihood signal, not a guarantee. Existing historical events may lack it. Store raw and bot-filtered engagement separately; never translate missing to `Unlikely`. [E5]
 
-## Secure ingestion and deduplication (Bane recommendations)
+## Secure ingestion and deduplication (Nightmail recommendations)
 
 1. Authenticate the source before processing. For SNS HTTPS, verify signatures and allowlist the expected topic ARN; validate HTTPS signing-certificate URLs and their origin/chain, not an arbitrary URL supplied in the body. Verify confirmation messages too. Do not blindly follow `SubscribeURL` from an untrusted POST. AWS supports SNS signature versions 1 and 2 and recommends SHA-256 version 2. [E6]
 2. Persist the incoming envelope before acknowledging it. Apply body-size limits, schema validation, encryption and retention. With SNS→SQS, choose and document whether raw message delivery is enabled; this changes the envelope. Lock down topic/queue/KMS resource policies.
@@ -71,7 +71,7 @@ AWS requires a way to receive bounce/complaint notifications. If feedback forwar
 | Question | Source | Caveat |
 | --- | --- | --- |
 | How much can this account-region send now? | `GetAccount.SendQuota` | Regional rolling recipient quota, not a campaign dashboard |
-| How much did Bane enqueue/attempt/accept? | Bane send ledger | Does not automatically include sends outside Bane |
+| How much did Nightmail enqueue/attempt/accept? | Nightmail send ledger | Does not automatically include sends outside Nightmail |
 | What happened to a particular message? | Event ledger; optionally `GetMessageInsights` | Event collection must be configured; VDM has coverage/history limits |
 | How healthy is sending? | CloudWatch, SES reputation, VDM | Aggregation windows and denominators differ |
 | Did it land in the inbox? | Optional placement testing/global deliverability | SMTP delivery alone cannot answer |

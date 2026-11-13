@@ -9,6 +9,7 @@ import { estimatedMimeBytes, MAX_ENCODED_MESSAGE } from './sending.js';
 import { gradeOf, marketingHourFor } from './standing-model.js';
 import { categories, splitMailbox, type CheckMail, type CheckReport } from './sendability-schema.js';
 import type { CheckContext } from './sendability-context.js';
+import { productName } from './brand.js';
 
 type Finding = CheckReport['findings'][number];
 type Category = Finding['category'];
@@ -58,8 +59,8 @@ function compliance(mail:CheckMail, headers:Map<string,string>, copy:string, uns
   if (date!==undefined && (!Number.isFinite(Date.parse(date)) || Date.parse(date)>Date.now()+86400_000)) add('date','warning',15,'Invalid or future Date','The supplied Date cannot be parsed or is over a day in the future.','Let the transport set Date at send time.');
   if (mail.stream!=='marketing') return;
   const list=headers.get('list-unsubscribe')??'';
-  if (!mail.generatedUnsubscribe && !/<https:\/\/[^<>\s]+>/i.test(list)) add('unsubscribe-header','error',30,'No HTTPS List-Unsubscribe target','Marketing mail needs an HTTPS endpoint for one-click unsubscribe.','Use Bane marketing sending or supply an RFC 8058 HTTPS endpoint.');
-  if (!mail.generatedUnsubscribe && headers.get('list-unsubscribe-post')?.trim().toLowerCase()!=='list-unsubscribe=one-click') add('unsubscribe-post','error',20,'One-click POST not declared','The RFC 8058 opt-out POST header is absent or invalid.','Use Bane marketing sending or add List-Unsubscribe-Post: List-Unsubscribe=One-Click.');
+  if (!mail.generatedUnsubscribe && !/<https:\/\/[^<>\s]+>/i.test(list)) add('unsubscribe-header','error',30,'No HTTPS List-Unsubscribe target','Marketing mail needs an HTTPS endpoint for one-click unsubscribe.',`Use ${productName} marketing sending or supply an RFC 8058 HTTPS endpoint.`);
+  if (!mail.generatedUnsubscribe && headers.get('list-unsubscribe-post')?.trim().toLowerCase()!=='list-unsubscribe=one-click') add('unsubscribe-post','error',20,'One-click POST not declared','The RFC 8058 opt-out POST header is absent or invalid.',`Use ${productName} marketing sending or add List-Unsubscribe-Post: List-Unsubscribe=One-Click.`);
   if (!mail.generatedUnsubscribe && !unsub) add('unsubscribe-link','error',25,'No recognizable opt-out link','No HTTP unsubscribe, opt-out or preference link was recognized in the body.','Add a visible, clearly labeled unsubscribe link in the footer.');
   if (!/\b(?:p\.?\s*o\.?\s*box\s+\d+|\d{1,6}\s+(?:[\p{L}\d.'-]+\s+){0,5}(?:street|st|road|rd|avenue|ave|lane|ln|drive|dr|way|boulevard|blvd|suite))\b/iu.test(copy)) add('postal-address','warning',18,'Check the mailing address','No recognizable postal address was found. The heuristic is English-oriented, not a legal determination.','Include your current valid postal address in the marketing footer.');
 }
@@ -131,7 +132,7 @@ export async function checkMail(mail:CheckMail, ctx:CheckContext={}): Promise<Ch
     const screenedBytes=Buffer.byteLength(measured), left=MAX_SCREEN_BYTES-screenedBytes, near=left<MAX_SCREEN_BYTES*0.1;
     size('screen-bytes',left<0?'error':near?'warning':'info',left<0?100:near?20:0,'Hosted screened-text budget',`${screenedBytes} of ${MAX_SCREEN_BYTES} UTF-8 bytes (${Math.abs(left)} bytes ${left<0?'over':'remaining'}; ${basis}).`,left<0?'Shorten the HTML copy or text alternative before hosted sending.':'Keep room for personalization and the final footer.',{screenedBytes,limitBytes:MAX_SCREEN_BYTES,remainingBytes:left});
     const mime=estimatedMimeBytes(mail,mail.attachments??[]), over=mime>MAX_ENCODED_MESSAGE;
-    size('mime-size',over?'error':'info',over?100:0,'Estimated total MIME size',`Bane’s conservative estimate is ${mime} bytes including transfer encoding and headers; not an observed wire size.`, 'Reduce attachments or link to large documents if near the 16 MiB limit.',{estimatedBytes:mime,limitBytes:MAX_ENCODED_MESSAGE});
+    size('mime-size',over?'error':'info',over?100:0,'Estimated total MIME size',`${productName}’s conservative estimate is ${mime} bytes including transfer encoding and headers; not an observed wire size.`, 'Reduce attachments or link to large documents if near the 16 MiB limit.',{estimatedBytes:mime,limitBytes:MAX_ENCODED_MESSAGE});
   } catch (e) { if (e instanceof PreviewLimitError || (e instanceof ApiError && e.code==='CONTENT_TOO_LARGE_TO_SCREEN')) throw new ApiError(413,'EMAIL_CHECK_LIMIT_EXCEEDED','Simplify the HTML to fit the offline checker’s byte, tree and style budgets.'); throw e; }
   reputation(mail,ctx,category('reputation'));
   const parts=categories.map(id=>({id,score:Math.max(0,100-(deductions.get(id)??0)),weight:(id==='reputation' && !ctx.standing) || (id==='authentication' && !ctx.domain && !deductions.get(id)) ? 0 : weights[id]}));

@@ -15,6 +15,7 @@ import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, AudienceSpec, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, lazyModule, log, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
+import { productName } from './brand.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { checkRoute, lockedSettings, platformPolicy, regionalSender, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
 import { dmarcView } from './dmarc.js';
@@ -125,7 +126,7 @@ const AttachmentIds = z.array(z.string().min(1).max(120)).max(20).default([]);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
-  region: Region.optional().describe('Usually omitted: hosted Bane sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
+  region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
   screen: z.boolean().optional().describe('Request Jev screening for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Probation and marketing mail defer on classifier outages; trusted transactional mail can proceed. Simulated mail is not screened. A positive reject verdict records CONTENT_REJECTED_SPAM before calling SES.'),
@@ -505,7 +506,7 @@ async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.
   // App-owned capabilities only, not a general sanitizer for transactional bearer links.
   // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
   const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
-  // Sealed Bane notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
+  // Sealed Nightmail notices (forward confirmations) carry a capability meant only for the recipient: withheld from every reader.
   if (row.snapshot.sealed) { const { sealCapabilities } = await import('./mailbox-send.js'); return EmailContent.parse({ untrustedContent, subject: s.subject, html: s.html === undefined ? null : sealCapabilities(s.html), text: s.text === undefined ? null : sealCapabilities(s.text), raw: null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }); }
   return EmailContent.parse({ untrustedContent, subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
 }
@@ -770,7 +771,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
     snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
   }
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
-  // Keep caller headers; the unsubscribe pair is always Bane's own.
+  // Keep caller headers; the unsubscribe pair is always Nightmail's own.
   snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
@@ -1167,12 +1168,12 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 /** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only. */
 export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
   const from = `hello@${domain}`;
-  return Receipt.parse(await admitEmails(c, a, SingleSendInput.parse({ from, to: [to], subject: 'Test email from Bane', text: `This is a test email from the Bane dashboard, sent from ${from}. You can reply to it or ignore it.` })));
+  return Receipt.parse(await admitEmails(c, a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` })));
 }
 
 export function registerSending(app: App) {
   app.openapi(createRoute({method:'post',path:'/v1/emails/check',operationId:'checkEmail',tags:['Emails'],security,
-    summary:'Check email sendability without sending', description:'Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Bane generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.',
+    summary:'Check email sendability without sending', description:`Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; ${productName} generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.`,
     request:{body:json(CheckInput)},responses:{200:response(CheckResult),...errors}}),async c=>{
     const a=actor(c,'read'), input=c.req.valid('json'); let mail:CheckMail;
     if ('emailId' in input) {
@@ -2294,7 +2295,7 @@ const retiredDispatchJob: JobHandler = async () => {};
 // Job rows of the previous release's prepare/expand/finish chain continue as runs of the same campaign.
 export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':cancelPageJob, 'email.dispatch': retiredDispatchJob, 'campaign.run': runCampaign, 'campaign.prepare': runCampaign, 'campaign.expand': runCampaign, 'campaign.finish': runCampaign };
 /**
- * Bane's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
+ * Nightmail's own notices (standing changes) from a platform workspace, through the ordinary admission path: one
  * transactional email per recipient, deduplicated by the idempotency key, charged to that workspace like any send.
  */
 /**

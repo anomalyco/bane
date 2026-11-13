@@ -1,14 +1,14 @@
 # Marketing, consent and suppression
 
-[Hub](README.md) · Researched 2026-09-08 · AWS facts below are sourced; Bane recommendations are design proposals, not implemented behavior.
+[Hub](README.md) · Researched 2026-09-08 · AWS facts below are sourced; Nightmail recommendations are design proposals, not implemented behavior.
 
-**Selected initial scope:** Bane owns consent and provides an immediate hosted footer unsubscribe across all marketing in the workspace, plus the separate RFC 8058 POST mechanism. The user selected a single click with no confirmation; this supersedes the safe-GET preference-page recommendation below for the footer action. Scanner-triggered opt-outs are a known tradeoff. See [root TODO](../../todo.md) for the current contract; SES-managed subscription remains a researched alternative, not the initial implementation.
+**Selected initial scope:** Nightmail owns consent and provides an immediate hosted footer unsubscribe across all marketing in the workspace, plus the separate RFC 8058 POST mechanism. The user selected a single click with no confirmation; this supersedes the safe-GET preference-page recommendation below for the footer action. Scanner-triggered opt-outs are a known tradeoff. See [root TODO](../../todo.md) for the current contract; SES-managed subscription remains a researched alternative, not the initial implementation.
 
 ## SES is transport plus some list management—not a campaign platform
 
 SES provides contact lists, topics, contact preferences, list imports and managed subscription handling. It does not turn a contact list into a scheduled campaign by itself. `ListContacts` can retrieve topic subscribers; the application submits send requests. [M1]
 
-**Bane should own:** campaign scheduling, immutable audience snapshots, per-recipient jobs, template versions, consent evidence, segmentation, deduplication, pause/cancel, suppression across connected regions, campaign attribution and customer webhooks. Those are proposed responsibilities, not additional AWS API capabilities.
+**Nightmail should own:** campaign scheduling, immutable audience snapshots, per-recipient jobs, template versions, consent evidence, segmentation, deduplication, pause/cancel, suppression across connected regions, campaign attribution and customer webhooks. Those are proposed responsibilities, not additional AWS API capabilities.
 
 Keep marketing permission separate from delivery safety. Unsubscribing from product news must not necessarily suppress a requested password reset; a hard bounce may justify blocking both. Deleting an SES suppression entry does not confer marketing consent.
 
@@ -19,10 +19,10 @@ Keep marketing permission separate from delivery safety. Unsubscribing from prod
 | Approach | Benefit | Responsibility / limitation |
 | --- | --- | --- |
 | One recipient per `SendEmail` + `ListManagementOptions` | SES manages preference page and future topic/list blocking | More individual requests; configure list/topic, DKIM and event handling |
-| `SendBulkEmail` + Bane-managed consent/unsubscribe | Batching and recipient personalization | Bane must create RFC-compliant headers/footer links, process unsubscribe, recheck consent and prevent future sends |
-| One recipient per `SendEmail`, all consent owned by Bane | Consistent custom preference model across providers/regions | Bane handles the same consent responsibilities without SES list management |
+| `SendBulkEmail` + Nightmail-managed consent/unsubscribe | Batching and recipient personalization | Nightmail must create RFC-compliant headers/footer links, process unsubscribe, recheck consent and prevent future sends |
+| One recipient per `SendEmail`, all consent owned by Nightmail | Consistent custom preference model across providers/regions | Nightmail handles the same consent responsibilities without SES list management |
 
-**Recommendation:** explicitly select one consent authority per sending workflow. Avoid a silently divergent SES list plus Bane list. If syncing both, define conflict resolution with opt-out winning, authenticated re-subscription, periodic reconciliation and event replay.
+**Recommendation:** explicitly select one consent authority per sending workflow. Avoid a silently divergent SES list plus Nightmail list. If syncing both, define conflict resolution with opt-out winning, authenticated re-subscription, periodic reconciliation and event replay.
 
 The AWS one-click guide describes compliant custom `List-Unsubscribe` and `List-Unsubscribe-Post` headers as an alternative to managed subscription handling. Validate actual delivered headers/signatures before launch. [M4]
 
@@ -50,7 +50,7 @@ AWS's current guide says: [M2]
 
 SES overrides existing `List-Unsubscribe` / `List-Unsubscribe-Post` headers when its managed subscription handling is used. Omitting `ListManagementOptions` for a transactional message bypasses this subscription feature—it is not a general bypass of delivery suppression. AWS issues a bounce event if sending to an unsubscribed contact with list management, so do not assume an immediate API validation error. [M1][M2]
 
-**Recommended implementation details:** preview reserved SES placeholders without consuming them in Bane's renderer; send one recipient; distinguish template render errors from missing consent; recheck consent immediately before dispatch, including after retries and queue delays.
+**Recommended implementation details:** preview reserved SES placeholders without consuming them in Nightmail's renderer; send one recipient; distinguish template render errors from missing consent; recheck consent immediately before dispatch, including after retries and queue delays.
 
 ## Suppression has multiple scopes
 
@@ -58,11 +58,11 @@ SES overrides existing `List-Unsubscribe` / `List-Unsubscribe-Post` headers when
 | --- | --- | --- |
 | Global suppression | SES-managed shared protection | Not customer-queryable/editable; no global-list removal API |
 | Account suppression | Customer AWS account + region | Not automatically global across regions/accounts |
-| Tenant suppression | One SES tenant + region | Not enabled merely by creating a Bane workspace |
+| Tenant suppression | One SES tenant + region | Not enabled merely by creating a Nightmail workspace |
 | Configuration-set suppression | Override of effective scope/reasons | Not a separately stored third list of addresses |
 | Contact/topic unsubscribe | Marketing preferences in a contact list | Not the account bounce/complaint suppression list |
 | Auto Validation | Delivery-likelihood filtering | Not an unsubscribe or proof of consent |
-| Bane policy | Recommended application-level safety/consent checks | Must not silently weaken provider protections |
+| Nightmail policy | Recommended application-level safety/consent checks | Must not silently weaken provider protections |
 
 Sources: [M5][M6][M7][M8][M9].
 
@@ -88,7 +88,7 @@ Effective precedence is **configuration set → tenant → account**. Configurat
 | `TENANT` | Tenant list only, matching enabled reasons; **skips account list** | Tenant list; hard bounces also enter SES global suppression |
 | Either scope, empty reasons | No suppression-list checking | No suppression-list recording |
 
-Existing and new tenants default to `ACCOUNT`. Tenant settings require scope and reasons together, or both null to clear settings. A tenant-scoped account-list entry does **not** act as a universal block. Bane must keep its own safety policy if it promises organization-wide suppression. [M6]
+Existing and new tenants default to `ACCOUNT`. Tenant settings require scope and reasons together, or both null to clear settings. A tenant-scoped account-list entry does **not** act as a universal block. Nightmail must keep its own safety policy if it promises organization-wide suppression. [M6]
 
 Additional details from [M6]:
 
@@ -111,7 +111,7 @@ Account suppression bulk import uses S3 CSV or newline-delimited JSON and `Creat
 
 Do not infer that account suppression bulk-import support extends to tenants just because individual operations accept `TenantName`; verify `ImportDestination` and target support against the installed SDK/API model. The parent research did not establish tenant bulk import parity.
 
-Bane should snapshot scope, original-case addresses and reason before approved removals; paginate every list endpoint; handle missing/expired cursors and concurrent updates; never run a bulk unsuppress just to improve a send-completion percentage.
+Nightmail should snapshot scope, original-case addresses and reason before approved removals; paginate every list endpoint; handle missing/expired cursors and concurrent updates; never run a bulk unsuppress just to improve a send-completion percentage.
 
 ## Email Validation: explicitly priced, probabilistic
 

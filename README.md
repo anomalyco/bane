@@ -7,7 +7,7 @@
 
 Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, OIDC sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
-![Bane dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
+![Nightmail dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
 
 <p>
   <a href="docs/images/campaign-composer.png"><img src="docs/images/campaign-composer.png" alt="Campaign composer with visual email editing and audience selection" width="49%" /></a>
@@ -26,7 +26,7 @@ Self-hosted transactional email, newsletters, campaigns, and inbound conversatio
 2. Open the repo in your coding agent and paste:
 
    ```text
-   Help me set up Bane for my use case. Explore this repo and read
+   Help me set up Nightmail for my use case. Explore this repo and read
    api/README.md first. Ask what I want to send, whether I prefer Docker
    or Cloudflare, and what infrastructure I already have. Recommend the
    simplest setup and explain the plan before making changes. Use my own

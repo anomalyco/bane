@@ -92,7 +92,7 @@ export const revokeMcpConnection = <ThrowOnError extends boolean = false>(option
 /**
  * List connected agents and their agent tokens
  *
- * Agent tokens are how agents use Bane: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.
+ * Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.
  */
 export const listAgents = <ThrowOnError extends boolean = false>(options?: Options<ListAgentsData, ThrowOnError>): RequestResult<ListAgentsResponses, ListAgentsErrors, ThrowOnError> => (options?.client ?? client).get<ListAgentsResponses, ListAgentsErrors, ThrowOnError>({
     security: [
@@ -404,7 +404,7 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Bane records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.
+ * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Nightmail records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.
  */
 export const updateContactConsent = <ThrowOnError extends boolean = false>(options: Options<UpdateContactConsentData, ThrowOnError>): RequestResult<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError> => (options.client ?? client).post<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError>({
     security: [
@@ -1153,7 +1153,7 @@ export const getTemplateAssetContent = <ThrowOnError extends boolean = false>(op
 /**
  * Check email sendability without sending
  *
- * Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Bane generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.
+ * Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Nightmail generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.
  */
 export const checkEmail = <ThrowOnError extends boolean = false>(options: Options<CheckEmailData, ThrowOnError>): RequestResult<CheckEmailResponses, CheckEmailErrors, ThrowOnError> => (options.client ?? client).post<CheckEmailResponses, CheckEmailErrors, ThrowOnError>({
     security: [
@@ -2026,7 +2026,7 @@ export const configureDomainMailFrom = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Bane’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Bane’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.
+ * Hosted only. Choose where this domain receives mail, its root or one of its subdomains, instead of the automatic suggestion (the first of reply., inbound., mail. and so on with no MX and no CNAME); null returns to the suggestion. Public DNS is checked first. A CNAME (RFC 1034), one of Nightmail’s own names (custom MAIL FROM, ownership TXT, DKIM), a host another claim receives on (in any workspace), a name another workspace has claimed (send-only included) or a delegated zone (its own NS records) is refused with a free subdomain to use instead. A host whose mail another provider receives, or whose MX is split, needs confirm: true, because publishing Nightmail’s MX moves that mail. A wildcard (*.domain) answer only flags receivingIssue. Read-only: nothing changes in DNS or SES.
  */
 export const chooseReceivingHost = <ThrowOnError extends boolean = false>(options: Options<ChooseReceivingHostData, ThrowOnError>): RequestResult<ChooseReceivingHostResponses, ChooseReceivingHostErrors, ThrowOnError> => (options.client ?? client).post<ChooseReceivingHostResponses, ChooseReceivingHostErrors, ThrowOnError>({
     security: [
@@ -2546,7 +2546,7 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Explicitly queue idempotent setup of Bane-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.
+ * Explicitly queue idempotent setup of Nightmail-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.
  */
 export const provisionRegion = <ThrowOnError extends boolean = false>(options: Options<ProvisionRegionData, ThrowOnError>): RequestResult<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError> => (options.client ?? client).post<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError>({
     security: [
@@ -2571,7 +2571,7 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Set SES Auto Validation for one Bane-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.
+ * Set SES Auto Validation for one Nightmail-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.
  */
 export const configureRegionAutoValidation = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionAutoValidationData, ThrowOnError>): RequestResult<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError>({
     security: [
@@ -4097,7 +4097,7 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
 /**
  * Enable receiving for a verified domain
  *
- * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Bane S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
+ * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: a Nightmail S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
  */
 export const enableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<EnableInboundDomainData, ThrowOnError>): RequestResult<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError>({
     security: [
@@ -4124,7 +4124,7 @@ export const enableInboundDomain = <ThrowOnError extends boolean = false>(option
 /**
  * Stop receiving for a domain
  *
- * Removes the domain from the Bane receipt rule. Receiving addresses and stored messages are kept.
+ * Removes the domain from the Nightmail receipt rule. Receiving addresses and stored messages are kept.
  */
 export const disableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<DisableInboundDomainData, ThrowOnError>): RequestResult<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError>({
     security: [
@@ -5311,7 +5311,7 @@ export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Bane support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.
+ * What happened in this workspace and who did it: members, roles and invitations, API keys, inbox keys and app passwords, domains, webhooks, endpoints, routes and rituals, settings, exports and deletions, and each time Nightmail support viewed the workspace with a support grant. Newest first. Owners and admins only; secrets and message content are never recorded.
  */
 export const listActivity = <ThrowOnError extends boolean = false>(options?: Options<ListActivityData, ThrowOnError>): RequestResult<ListActivityResponses, ListActivityErrors, ThrowOnError> => (options?.client ?? client).get<ListActivityResponses, ListActivityErrors, ThrowOnError>({
     security: [{
@@ -5349,7 +5349,7 @@ export const contactSupport = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportContext = <ThrowOnError extends boolean = false>(options?: Options<GetSupportContextData, ThrowOnError>): RequestResult<GetSupportContextResponses, GetSupportContextErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportContextResponses, GetSupportContextErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5358,7 +5358,7 @@ export const getSupportContext = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * The customer’s workspaces with their role, sending connection and resource counts. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * The customer’s workspaces with their role, sending connection and resource counts. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportWorkspaces = <ThrowOnError extends boolean = false>(options?: Options<ListSupportWorkspacesData, ThrowOnError>): RequestResult<ListSupportWorkspacesResponses, ListSupportWorkspacesErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportWorkspacesResponses, ListSupportWorkspacesErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5367,7 +5367,7 @@ export const listSupportWorkspaces = <ThrowOnError extends boolean = false>(opti
 });
 
 /**
- * Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Every domain with its sending verification (DKIM, MAIL FROM, DMARC) and receiving state. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportDomains = <ThrowOnError extends boolean = false>(options?: Options<ListSupportDomainsData, ThrowOnError>): RequestResult<ListSupportDomainsResponses, ListSupportDomainsErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportDomainsResponses, ListSupportDomainsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5376,7 +5376,7 @@ export const listSupportDomains = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content). Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Sent or received mail, newest first: addresses, subject, status and error codes. Never bodies; read one email for its events (and its body when the customer shared content). Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportEmails = <ThrowOnError extends boolean = false>(options?: Options<ListSupportEmailsData, ThrowOnError>): RequestResult<ListSupportEmailsResponses, ListSupportEmailsErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportEmailsResponses, ListSupportEmailsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5385,7 +5385,7 @@ export const listSupportEmails = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * One sent or received email with its delivery events; its body only when the customer shared message content with this request. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * One sent or received email with its delivery events; its body only when the customer shared message content with this request. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportEmail = <ThrowOnError extends boolean = false>(options: Options<GetSupportEmailData, ThrowOnError>): RequestResult<GetSupportEmailResponses, GetSupportEmailErrors, ThrowOnError> => (options.client ?? client).get<GetSupportEmailResponses, GetSupportEmailErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5394,7 +5394,7 @@ export const getSupportEmail = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Delivery events of sent mail (send, delivery, bounce, complaint, reject, open, click), newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Delivery events of sent mail (send, delivery, bounce, complaint, reject, open, click), newest first. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportEvents = <ThrowOnError extends boolean = false>(options?: Options<ListSupportEventsData, ThrowOnError>): RequestResult<ListSupportEventsResponses, ListSupportEventsErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportEventsResponses, ListSupportEventsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5403,7 +5403,7 @@ export const listSupportEvents = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Webhook deliveries (sending events and received mail), newest first, with attempts, the last HTTP status and error. Never payloads or URLs. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportWebhookDeliveries = <ThrowOnError extends boolean = false>(options?: Options<ListSupportWebhookDeliveriesData, ThrowOnError>): RequestResult<ListSupportWebhookDeliveriesResponses, ListSupportWebhookDeliveriesErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportWebhookDeliveriesResponses, ListSupportWebhookDeliveriesErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5412,7 +5412,7 @@ export const listSupportWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Sending standing and limits per workspace: the connection and any pause with its reason, limit overrides, the sender standing where enabled, the last 24 hours of sends by status, 60 days of score, limit and step history, and whether a limit request would be approved automatically. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportStanding = <ThrowOnError extends boolean = false>(options?: Options<GetSupportStandingData, ThrowOnError>): RequestResult<GetSupportStandingResponses, GetSupportStandingErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportStandingResponses, GetSupportStandingErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5421,7 +5421,7 @@ export const getSupportStanding = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Balance, payments and the billing ledger of the workspaces the customer owns or administers. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Balance, payments and the billing ledger of the workspaces the customer owns or administers. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportBilling = <ThrowOnError extends boolean = false>(options?: Options<GetSupportBillingData, ThrowOnError>): RequestResult<GetSupportBillingResponses, GetSupportBillingErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportBillingResponses, GetSupportBillingErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5430,7 +5430,7 @@ export const getSupportBilling = <ThrowOnError extends boolean = false>(options?
 });
 
 /**
- * The audit trail the customer sees in Settings → Activity (who changed what, when, from where), for the workspaces they own or administer. Filter by time, action or actor; newest first. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * The audit trail the customer sees in Settings → Activity (who changed what, when, from where), for the workspaces they own or administer. Filter by time, action or actor; newest first. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportAudit = <ThrowOnError extends boolean = false>(options?: Options<ListSupportAuditData, ThrowOnError>): RequestResult<ListSupportAuditResponses, ListSupportAuditErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportAuditResponses, ListSupportAuditErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5439,7 +5439,7 @@ export const listSupportAudit = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * The customer’s own failed API requests over at most the last 3 days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Bane could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * The customer’s own failed API requests over at most the last 3 days, from Workers Logs: grouped by route template, method, status, error code and how the caller authenticated, with counts, first and last seen and up to 5 request IDs each. Only requests Nightmail could attribute to one of the grant’s workspaces (a rejected key cannot be); never messages, addresses, user agents, URLs or bodies. Cached 60 seconds. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportRequests = <ThrowOnError extends boolean = false>(options?: Options<ListSupportRequestsData, ThrowOnError>): RequestResult<ListSupportRequestsResponses, ListSupportRequestsErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportRequestsResponses, ListSupportRequestsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5448,7 +5448,7 @@ export const listSupportRequests = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * What Bane recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last 3 days), the changes it made, campaign launches and routing versions. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * What Nightmail recorded for one API request (the x-request-id a customer quotes): its request line from Workers Logs (route, status, error code, duration; the last 3 days), the changes it made, campaign launches and routing versions. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportRequest = <ThrowOnError extends boolean = false>(options: Options<GetSupportRequestData, ThrowOnError>): RequestResult<GetSupportRequestResponses, GetSupportRequestErrors, ThrowOnError> => (options.client ?? client).get<GetSupportRequestResponses, GetSupportRequestErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5457,7 +5457,7 @@ export const getSupportRequest = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Delivery, bounce, complaint, open and click counts per day or hour over at most 30 days, optionally per campaign, From domain, recipient provider or stream, each rate with its numerator and denominator, plus findings. Created-cohort: an email counts in the bucket it was created in. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Delivery, bounce, complaint, open and click counts per day or hour over at most 30 days, optionally per campaign, From domain, recipient provider or stream, each rate with its numerator and denominator, plus findings. Created-cohort: an email counts in the bucket it was created in. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportDeliveryMetrics = <ThrowOnError extends boolean = false>(options?: Options<GetSupportDeliveryMetricsData, ThrowOnError>): RequestResult<GetSupportDeliveryMetricsResponses, GetSupportDeliveryMetricsErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportDeliveryMetricsResponses, GetSupportDeliveryMetricsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5466,7 +5466,7 @@ export const getSupportDeliveryMetrics = <ThrowOnError extends boolean = false>(
 });
 
 /**
- * Bounces, deferrals and complaints over at most 30 days, grouped by recipient provider, then type and subtype, enhanced status and redacted diagnostic, with first and last seen and the campaigns behind them; complaints by feedback type; the first-send bounce rate; findings. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Bounces, deferrals and complaints over at most 30 days, grouped by recipient provider, then type and subtype, enhanced status and redacted diagnostic, with first and last seen and the campaigns behind them; complaints by feedback type; the first-send bounce rate; findings. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportBounceReasons = <ThrowOnError extends boolean = false>(options?: Options<GetSupportBounceReasonsData, ThrowOnError>): RequestResult<GetSupportBounceReasonsResponses, GetSupportBounceReasonsErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportBounceReasonsResponses, GetSupportBounceReasonsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5475,7 +5475,7 @@ export const getSupportBounceReasons = <ThrowOnError extends boolean = false>(op
 });
 
 /**
- * One sending domain’s health: the stored verification, one live DNS read (SPF, DMARC, BIMI, the MAIL FROM’s MX and SPF), the DMARC alignment verdict, 30 days of volume and warm-up age, the marketing share and bulk-looking transactional mail, and findings. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * One sending domain’s health: the stored verification, one live DNS read (SPF, DMARC, BIMI, the MAIL FROM’s MX and SPF), the DMARC alignment verdict, 30 days of volume and warm-up age, the marketing share and bulk-looking transactional mail, and findings. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportDomainHealth = <ThrowOnError extends boolean = false>(options: Options<GetSupportDomainHealthData, ThrowOnError>): RequestResult<GetSupportDomainHealthResponses, GetSupportDomainHealthErrors, ThrowOnError> => (options.client ?? client).get<GetSupportDomainHealthResponses, GetSupportDomainHealthErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5484,7 +5484,7 @@ export const getSupportDomainHealth = <ThrowOnError extends boolean = false>(opt
 });
 
 /**
- * The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * The Hosted content screen over at most 7 days: hourly screened and rejected counts, and the last 50 rejections with subject, error code and spam score. Never bodies. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportScreen = <ThrowOnError extends boolean = false>(options?: Options<GetSupportScreenData, ThrowOnError>): RequestResult<GetSupportScreenResponses, GetSupportScreenErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportScreenResponses, GetSupportScreenErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5493,7 +5493,7 @@ export const getSupportScreen = <ThrowOnError extends boolean = false>(options?:
 });
 
 /**
- * Recent campaigns, newest first: state, audience and size, tracking, sender, subject, pause reason and lifetime statistics. Never content. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Recent campaigns, newest first: state, audience and size, tracking, sender, subject, pause reason and lifetime statistics. Never content. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const listSupportCampaigns = <ThrowOnError extends boolean = false>(options?: Options<ListSupportCampaignsData, ThrowOnError>): RequestResult<ListSupportCampaignsResponses, ListSupportCampaignsErrors, ThrowOnError> => (options?.client ?? client).get<ListSupportCampaignsResponses, ListSupportCampaignsErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5502,7 +5502,7 @@ export const listSupportCampaigns = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * One campaign: what the list shows, plus hourly send pacing and, only when the customer shared message content in its workspace, the draft content. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * One campaign: what the list shows, plus hourly send pacing and, only when the customer shared message content in its workspace, the draft content. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportCampaign = <ThrowOnError extends boolean = false>(options: Options<GetSupportCampaignData, ThrowOnError>): RequestResult<GetSupportCampaignResponses, GetSupportCampaignErrors, ThrowOnError> => (options.client ?? client).get<GetSupportCampaignResponses, GetSupportCampaignErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5511,7 +5511,7 @@ export const getSupportCampaign = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Checks one sent email against what filters and Bane’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Checks one sent email against what filters and Nightmail’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportEmailLint = <ThrowOnError extends boolean = false>(options: Options<GetSupportEmailLintData, ThrowOnError>): RequestResult<GetSupportEmailLintResponses, GetSupportEmailLintErrors, ThrowOnError> => (options.client ?? client).get<GetSupportEmailLintResponses, GetSupportEmailLintErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5520,7 +5520,7 @@ export const getSupportEmailLint = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * Checks one campaign’s draft the same way as an email: metadata always, content checks only with the customer’s content consent. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportCampaignLint = <ThrowOnError extends boolean = false>(options: Options<GetSupportCampaignLintData, ThrowOnError>): RequestResult<GetSupportCampaignLintResponses, GetSupportCampaignLintErrors, ThrowOnError> => (options.client ?? client).get<GetSupportCampaignLintResponses, GetSupportCampaignLintErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5529,7 +5529,7 @@ export const getSupportCampaignLint = <ThrowOnError extends boolean = false>(opt
 });
 
 /**
- * List hygiene: per list (the 20 largest) and overall, consent mix, suppressions by reason, engagement recency and stale share, role, free-mail and mistyped addresses, providers; recent imports with their bounce and complaint outcomes; findings. Counts only, never an address. Internal: for Bane support with a support grant (bane_support_…), never for customers.
+ * List hygiene: per list (the 20 largest) and overall, consent mix, suppressions by reason, engagement recency and stale share, role, free-mail and mistyped addresses, providers; recent imports with their bounce and complaint outcomes; findings. Counts only, never an address. Internal: for Nightmail support with a support grant (bane_support_…), never for customers.
  */
 export const getSupportAudienceHealth = <ThrowOnError extends boolean = false>(options?: Options<GetSupportAudienceHealthData, ThrowOnError>): RequestResult<GetSupportAudienceHealthResponses, GetSupportAudienceHealthErrors, ThrowOnError> => (options?.client ?? client).get<GetSupportAudienceHealthResponses, GetSupportAudienceHealthErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -5709,7 +5709,7 @@ export const createBillingTopUpLink = <ThrowOnError extends boolean = false>(opt
 /**
  * Set auto-recharge
  *
- * Hosted only; a signed-in owner or admin in the dashboard. Bane charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.
+ * Hosted only; a signed-in owner or admin in the dashboard. Nightmail charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.
  */
 export const updateBillingAutoRecharge = <ThrowOnError extends boolean = false>(options: Options<UpdateBillingAutoRechargeData, ThrowOnError>): RequestResult<UpdateBillingAutoRechargeResponses, UpdateBillingAutoRechargeErrors, ThrowOnError> => (options.client ?? client).put<UpdateBillingAutoRechargeResponses, UpdateBillingAutoRechargeErrors, ThrowOnError>({
     security: [

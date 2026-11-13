@@ -43,7 +43,7 @@ flowchart TD
   deliver --> slack["Slack"] & discord["Discord"] & hook["Webhook"] & fwd["Forward"]
 ```
 
-- A ritual error stops evaluation for that recipient. Bane discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters. A regex test also spends one step for every 64 bytes of matcher state it builds; a pattern that needs more than 512 KiB of state for a text (many wildcards in a row, for example) is a ritual error for that message, so prefer `includes`, anchors and specific words over long runs of `.`.
+- A ritual error stops evaluation for that recipient. Nightmail discards pending ritual actions, marks the message as junk with `ritual-error`, and uses the existing junk delivery rules. Ritual text and regex operations inspect at most the first 65,536 characters. A regex test also spends one step for every 64 bytes of matcher state it builds; a pattern that needs more than 512 KiB of state for a text (many wildcards in a row, for example) is a ritual error for that message, so prefer `includes`, anchors and specific words over long runs of `.`.
 - Local decisions commit with the message, so nobody sees mail before its final disposition. External calls are queued only after that commit.
 - A dry run (`testRituals`) runs the same pipeline on a stored message or pasted MIME inside a rolled-back transaction. It never delivers, never calls Jev and never saves; pass `scores` (or set answers in the dashboard) to see what an omen answer would do.
 
@@ -124,7 +124,7 @@ The parameters are always `email` and `ctx` (`ctx` is optional). Top-level `cons
 | `to`, `cc`, `replyTo` | arrays of the same shape | |
 | `envelope` | `{ from, to[] }` | SMTP envelope. |
 | `auth` | `{ fromVerified, spf, dkim, dmarc }` | `fromVerified` is true when DMARC-aligned SPF or DKIM authenticates the From domain. Verdicts are `pass`, `fail`, `gray` or `none`. |
-| `spam` | `{ ses, junk, reason }` | `junk` is Bane's verdict so far. |
+| `spam` | `{ ses, junk, reason }` | `junk` is Nightmail's verdict so far. |
 | `flags` | `{ automated, autoReply, bulk, listId, baneHops }` | |
 | `thread` | `{ id, isReply, inReplyTo, references[] }` | |
 | `attachments`, `images` | `{ id, filename, contentType, size, inline, isImage, safe, … }[]` | Metadata only; content never reaches a ritual. |
@@ -162,7 +162,7 @@ Every endpoint is called the same way, by name; its type decides the payload, an
 |---|---|---|
 | `slack` | `endpoints.support({ text: "…" })` | Plain text. Mentions, markup and link previews are off. |
 | `discord` | `endpoints.alerts({ content: "…" })` | Plain text. Mentions are off. |
-| `webhook` | `endpoints.crm({ … })` or `endpoints.crm()` | Any record. It arrives as `data.ritualBody` in a signed Bane event, with `Idempotency-Key`. |
+| `webhook` | `endpoints.crm({ … })` or `endpoints.crm()` | Any record. It arrives as `data.ritualBody` in a signed Nightmail event, with `Idempotency-Key`. |
 | `forward` | `endpoints.team()` | None: it forwards this message as text from the receiving address. |
 
 Hyphenated names use quotes: `endpoints["support-hook"]({ … })`. A script can never contain a URL or credential; saving fails if it does. An endpoint must exist (and a forward must be confirmed) before a ritual that calls it can be saved. Each endpoint can be called at most three times per recipient of a message.
@@ -341,7 +341,7 @@ stateDiagram-v2
 
 ![The page a forward recipient sees: who asks, where mail would go, Allow or Decline](images/rituals/forward-confirm.png)
 
-- **The link alone confirms.** No Bane account is needed: team aliases and external addresses work. The token is a random 256-bit value, stored only as a hash, valid once for 24 hours.
+- **The link alone confirms.** No Nightmail account is needed: team aliases and external addresses work. The token is a random 256-bit value, stored only as a hash, valid once for 24 hours.
 - **The workspace cannot confirm for the recipient.** The confirmation email is sealed: the copy in the workspace's sent mail, thread view and email content API shows the link as withheld.
 - **Scanners cannot confirm.** Opening the link only shows the request; a same-origin form POST records the choice.
 - **Abuse limits.** 20 requests per workspace per day, 3 per address per workspace per day and 5 per address per day across all workspaces. Declining, or the stop link in any forwarded message, blocks that workspace from asking the address again for 30 days.

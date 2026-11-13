@@ -6,7 +6,7 @@ import { auditContext, auditInsert, operatorRequired, type AuditContext } from '
 import { operatorActor } from './operator.js';
 import { uiNotesAllowed } from './operator-identity.js';
 
-// UI notes: Bane staff (the platform operator role, #115) ⌘-click anything in the dashboard and leave a design or bug
+// UI notes: Nightmail staff (the platform operator role, #115) ⌘-click anything in the dashboard and leave a design or bug
 // note on it, with where it was, a locator for the element, its computed styles and a screenshot crop; an agent lists
 // the open ones, fixes them and sets their status (scripts/ui-notes.ts). Notes are about the app, so they belong to the
 // deployment, not a workspace. Every change is in the audit trail (internal rows: workspace null, the operator as user).
@@ -70,7 +70,7 @@ const SECRET = [
 const RESOURCE_ID = /^[a-z]{2,8}_[0-9a-f]{32}$/;
 const entropy = (text: string) => { const counts = new Map<string, number>(); for (const ch of text) counts.set(ch, (counts.get(ch) ?? 0) + 1); let bits = 0; for (const n of counts.values()) { const p = n / text.length; bits -= p * Math.log2(p); } return bits; };
 const highEntropy = (run: string) => run.length >= 32 && /\d/.test(run) && /[A-Za-z]/.test(run) && !RESOURCE_ID.test(run) && (/^[0-9a-f]+$/i.test(run) || entropy(run) >= 3.5);
-/** Text with every credential-looking run (Bane keys, webhook secrets, Stripe keys, app passwords, JWTs, long random tokens) replaced. */
+/** Text with every credential-looking run (Nightmail keys, webhook secrets, Stripe keys, app passwords, JWTs, long random tokens) replaced. */
 export function redactSecrets(input: string) {
   // Invisible characters (U+FEFF, zero-width spaces and joiners, soft hyphens, bidi marks) render as nothing, so they
   // would hide carol\uFEFF@example.net from both patterns: they are dropped first.

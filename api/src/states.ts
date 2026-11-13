@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { ApiError, id, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
+import { productName } from './brand.js';
 
 // Every MX entity has one explicit state column, and this module is the only writer of those columns.
 // Readers use the predicates below instead of spelling out state names; transitions are pure
@@ -51,7 +52,7 @@ export type IdentityFacts = {
   dmarc?: import('./dmarc.js').DmarcObservation|null;
   ses: Pick<GetEmailIdentityCommandOutput, 'VerificationStatus' | 'VerifiedForSendingStatus' | 'DkimAttributes' | 'MailFromAttributes'>;
   proven: boolean; mx: MxReport | null; note: string | null;
-  /** The last receiving DNS check's conflict (CNAME, foreign or split MX, wildcard, Bane's own records, another claim), or null. */
+  /** The last receiving DNS check's conflict (CNAME, foreign or split MX, wildcard, Nightmail's own records, another claim), or null. */
   issue?: import('./receiving-host.js').ReceivingIssue | null;
   /** A receiving host the owner chose explicitly (POST /v1/domains/{id}/receiving-host), instead of the automatic suggestion. */
   receivingChoice?: string | null;
@@ -246,10 +247,10 @@ export const pauseHostedSending = (unhealthy: SQL) => sql`WITH h AS MATERIALIZED
 /** Queues the job that sets the workspace's SES tenants to match its pause (retry-safe by id; the job reads the current state). */
 export const queueTenantStatus = (workspaces: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'hosted.tenantStatus:'||workspace_id,'hosted.tenantStatus',workspace_id,'{}'::jsonb FROM (${workspaces}) w
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
-/** What Bane wants the SES tenants to be: disabled while paused (and not resuming), enabled otherwise. */
+/** What Nightmail wants the SES tenants to be: disabled while paused (and not resuming), enabled otherwise. */
 export const desiredTenantStatus = (pc: SQL = sql`pc`) => sql`CASE WHEN ${pc}.paused_at IS NOT NULL AND ${pc}.resume_pending_at IS NULL THEN 'DISABLED' ELSE 'ENABLED' END`;
 /**
- * Workspaces whose tenants differ from what Bane wants: a pause not yet applied to every ready regional tenant at the
+ * Workspaces whose tenants differ from what Nightmail wants: a pause not yet applied to every ready regional tenant at the
  * current generation, a disabled tenant on a workspace that is not paused, or an unfinished resume. The periodic
  * reconcile queues these, so any interleaving of transitions and job runs converges.
  */
@@ -262,7 +263,7 @@ export const tenantStatusDrift = () => sql`SELECT pc.workspace_id FROM provider_
  * workspace. Re-arms a resume that is waiting for its tenants; bumps the generation so the SES tenants are disabled.
  */
 export const pauseHostedByOperator = (wid: string, reason: string, via: 'script' | 'console' = 'script') => sql`WITH paused AS (
-    UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason='Hosted sending paused by Bane after a review.',resume_pending_at=NULL,tenant_generation=pc.tenant_generation+1
+    UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=${`Hosted sending paused by ${productName} after a review.`}::text,resume_pending_at=NULL,tenant_generation=pc.tenant_generation+1
     WHERE pc.workspace_id=${wid} AND pc.kind='shared' AND (pc.paused_at IS NULL OR pc.resume_pending_at IS NOT NULL) RETURNING pc.workspace_id
   ), audit AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT workspace_id,'pause-hosted-sending',jsonb_build_object('reason',${reason}::text,'via',${via}::text) FROM paused),
   queued AS (${queueTenantStatus(sql`SELECT workspace_id FROM paused`)})

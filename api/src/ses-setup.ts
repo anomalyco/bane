@@ -57,7 +57,7 @@ export type SesSetupOptions = { region: string; installationId: string; namespac
 export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId: string, topicArn: string) => Promise<void> };
 
 // OPEN/CLICK destinations support tracking-enabled sends; per-message tracking overrides
-// in sending.ts still disable instrumentation when tracking:false. Consent stays in Bane.
+// in sending.ts still disable instrumentation when tracking:false. Consent stays in Nightmail.
 // SEND is intentionally absent: provider acceptance is already recorded from the SendEmail response,
 // and the callback would double feedback volume at the full send rate.
 const EVENTS = FEEDBACK_EVENTS;
@@ -793,7 +793,7 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
-/** Bane's own switch on a workspace tenant (customer-managed status), set by a pause or resume as a backstop to the
+/** Nightmail's own switch on a workspace tenant (customer-managed status), set by a pause or resume as a backstop to the
  *  database hold. It is separate from AWS's own status: ENABLED never lifts a pause AWS applied. Returns the ARN. */
 export async function setTenantSendingStatus(runtime: Runtime, region: string, tenantName: string, arn: string | null, status: 'ENABLED' | 'DISABLED') {
   const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };

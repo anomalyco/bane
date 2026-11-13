@@ -10,7 +10,7 @@ import { SendingLimitsGuide } from '../score/limits'
 import { DocsArticleSkeleton, useDocsAudience } from './frame'
 import { openApiQuery } from './openapi'
 import './docs.css'
-import { publicOrigin, sdkPackage } from '../../../../api/src/brand'
+import { productName, publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
 type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
@@ -60,7 +60,7 @@ const useDocsOrigin = () => useContext(DocsOrigin)
 /** Shown instead of any example when the docs are open somewhere other than the installation's own address. */
 function ForeignHost({ origin }: { origin: string }) {
   const page = window.location.host, canonical = new URL(origin).host
-  return <article className="docs-operation docs-foreign"><Alert tone="danger" title="This isn’t this Bane installation’s address">
+  return <article className="docs-operation docs-foreign"><Alert tone="danger" title={`This isn’t this ${productName} installation’s address`}>
     These docs are open at <strong>{page}</strong>, but this installation is at <strong>{canonical}</strong>. Examples, keys and agent setup are only shown at its own address, so nothing you copy sends a key somewhere else. <a href={`${origin}${window.location.pathname}${window.location.hash}`}>Open the docs at {canonical}</a>.
   </Alert></article>
 }
@@ -183,7 +183,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   const groups = [...new Set(all.map(operation => operation.tag))]
   const install = `npm install ${sdkPackage}`
   return <article className="docs-operation docs-overview">
-    <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
+    <header className="docs-operation-header"><h1>{productName} API</h1><p>{document.info.description}</p></header>
     {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
     <section id="guides" className="docs-section" aria-labelledby="docs-guides"><h2 id="docs-guides">Guides</h2><div className="docs-resource-list">
       {guides.map(guide => <Link key={guide.id} to={`/docs/${guide.id}`}><strong>{guide.title}</strong><span>{guide.summary}</span></Link>)}
@@ -206,7 +206,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
 const defaultDescription = window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.content ?? ''
 function useDocumentMeta(title: string, description: string) {
   useEffect(() => {
-    window.document.title = `${title} · Bane docs`
+    window.document.title = `${title} · ${productName} docs`
     window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', description)
   }, [title, description])
   useEffect(() => () => window.document.querySelector<HTMLMetaElement>('meta[name="description"]')?.setAttribute('content', defaultDescription), [])
@@ -250,7 +250,7 @@ export function DocsPage() {
   const inShell = useDocsAudience() === 'shell'
   const current = page.kind === 'operation' ? all.find(operation => operation.id === page.id) : undefined
   const missing = page.kind === 'missing' || (page.kind === 'operation' && Boolean(spec) && !current)
-  const title = missing ? 'Page not found' : page.kind === 'guide' ? page.guide.title : page.kind === 'operation' ? current?.summary ?? 'API reference' : 'Bane API'
+  const title = missing ? 'Page not found' : page.kind === 'guide' ? page.guide.title : page.kind === 'operation' ? current?.summary ?? 'API reference' : `${productName} API`
   const description = page.kind === 'guide' ? page.guide.summary : current ? `${current.method.toUpperCase()} ${current.path}${current.description ? `. ${current.description}` : ''}` : spec?.info.description ?? defaultDescription
   useDocumentMeta(title, description)
   useAnchorScroll(Boolean(site.origin) && (page.kind === 'guide' || missing || Boolean(spec)))

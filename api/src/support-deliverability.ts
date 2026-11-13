@@ -4,6 +4,7 @@ import { ApiError, errors, notFound, response, type App, type Ctx, type DbExecut
 import { cachedDashboardRead } from './dashboard-cache.js';
 import * as d from './deliverability.js';
 import type { CampaignDraft } from './db/sending.js';
+import { productName } from './brand.js';
 
 // The support grant's deliverability reads (support-agent-design §5.2): GET only, behind supportGate (each costs 5 of the
 // grant's 120 a minute, see supportWeight), x-internal like every /v1/support route. Each handler is one read-only
@@ -107,7 +108,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
     workspaceId: z.string(), computedAt: z.string(), domain: z.object({ id: z.string(), name: z.string(), region: z.string().nullable(), createdAt: z.string().nullable() }),
     claim: z.object({ sending: z.string().nullable(), dkim: z.string().nullable(), dkimSigning: z.boolean(), mailFrom: z.object({ domain: z.string().nullable(), status: z.string().nullable() }),
       dmarc: z.object({ status: z.string().nullable(), record: z.string().nullable(), source: z.string().nullable(), checkedAt: z.string().nullable() }), receiving: z.string().nullable(), lostSince: z.string().nullable(),
-      connection: z.object({ kind: z.string(), region: z.string() }).nullable().describe('shared (Bane Hosted pool) or byo.') }).describe('What Bane stored at the last verification.'),
+      connection: z.object({ kind: z.string(), region: z.string() }).nullable().describe(`shared (${productName} Hosted pool) or byo.`) }).describe(`What ${productName} stored at the last verification.`),
     dns: z.object({ checkedAt: z.string(), complete: z.boolean().describe('False when a lookup did not answer within the 3-second budget.'), spf: Spf,
       dmarc: z.object({ record: z.string().nullable(), source: z.enum(['live', 'stored']).nullable().describe('stored: the exact label had none; this is the last verification’s record (it may be the organizational domain’s).'), at: z.string().nullable(),
         p: z.string().nullable(), sp: z.string().nullable(), pct: z.number().nullable(), adkim: z.string(), aspf: z.string(), rua: z.boolean(), ruf: z.boolean(), valid: z.boolean() }),
@@ -153,7 +154,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
         dns, alignment: align,
         volume: { days: activity.days, firstSendAt: activity.firstSendAt, olderThanRetention, warmupAgeDays: ageDays, peakDaily: peak, medianDaily: median, peakToMedian: median ? Math.round(peak / median * 10) / 10 : null },
         streams: { emails, campaign, marketingApi: activity.marketingApi, marketingShare: d.rate(campaign + activity.marketingApi, emails),
-          listUnsubscribe: 'Bane adds List-Unsubscribe and List-Unsubscribe-Post (one-click) to every campaign email and every kind=marketing send; transactional sends carry none.', bulkLikeTransactional: activity.bulk },
+          listUnsubscribe: `${productName} adds List-Unsubscribe and List-Unsubscribe-Post (one-click) to every campaign email and every kind=marketing send; transactional sends carry none.`, bulkLikeTransactional: activity.bulk },
         findings: d.domainFindings(name, { dns, align, days: activity.days, ageDays, bulk: activity.bulk, marketingApi: activity.marketingApi }),
       };
     }), 200);
@@ -257,7 +258,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   type Snapshot = { from?: string; subject?: string; html?: string; text?: string; raw?: string; kind?: string; tracking?: boolean; headers?: { Name: string; Value: string }[]; attachments?: string[]; deferredCampaign?: boolean; unsubscribeUrl?: string };
   const attachmentsOf = async (tx: DbExecutor, wid: string, list: string[]) => list.length
     ? (await tx.execute<{ content_type: string; size: number }>(sql`SELECT content_type, size FROM sending_attachments WHERE workspace_id = ${wid} AND id = ANY(${ids(list.slice(0, 50))})`)).rows : [];
-  app.openapi(createRoute({ ...meta('getSupportEmailLint', 'Checks one sent email against what filters and Bane’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent.'),
+  app.openapi(createRoute({ ...meta('getSupportEmailLint', `Checks one sent email against what filters and ${productName}’s screen look at. Always the metadata (size, parts, attachment types, List-Unsubscribe, tracking, DKIM and Return-Path alignment, subject style); the content checks (words against images, links, shorteners, hidden text, unresolved tokens, staging links, spam phrases) only with the customer’s content consent.`),
     path: '/v1/support/emails/{id}/lint', request: { query: WorkspaceFilter, params: z.object({ id: z.string().max(120) }) }, responses: { 200: response(Lint), ...errors } }), async c => {
     const id = c.req.valid('param').id, list = narrowed(c), scope = c.get('support')!;
     if (!list.length) notFound('Sent email');

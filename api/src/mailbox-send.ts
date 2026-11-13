@@ -16,6 +16,7 @@ import { readableMailboxKey } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import type { SendRequest } from './sending.js';
 import { decodeBase64 } from './outbound-content.js';
+import { productName } from './brand.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
@@ -256,7 +257,7 @@ export async function assertRegisteredSender(db: DbExecutor, scope: Scope, regio
   const host = from.split('@')[1]!.toLowerCase();
   const names = host.split('.').map((_, index, parts) => parts.slice(index).join('.')).filter(name => name.includes('.'));
   const [registered] = await db.select({ name: domains.name }).from(domains).where(and(eq(domains.workspaceId, scope.workspaceId), eq(domains.region, region), inArray(domains.name, names))).limit(1);
-  if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to Bane in ${region} before sending from it.`, field);
+  if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to ${productName} in ${region} before sending from it.`, field);
 }
 
 /** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */
@@ -304,7 +305,7 @@ export function assertReplyable(original: MessageRow, to: string[], allowAutomat
 }
 export const replySubject = (subject: string) => `Re: ${normalizeSubject(subject) || '(no subject)'}`.slice(0, 998);
 
-/** Mailbox sync can lag provider acceptance. Never put a Bane ID on the wire or silently send an unthreaded follow-up. */
+/** Mailbox sync can lag provider acceptance. Never put a Nightmail ID on the wire or silently send an unthreaded follow-up. */
 export async function replyParentId(db: DbExecutor, original: MessageRow) {
   if (original.messageId && wireId(original.messageId, 'In-Reply-To')) return original.messageId;
   // Inbound mail is allowed to omit Message-ID; never invent one that the recipient cannot match.

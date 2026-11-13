@@ -1,3 +1,4 @@
+import { productName } from './brand.js'
 /**
  * The Ritual language surface: email and ctx fields, built-ins, endpoint calls and templates.
  * Shared by the compiler, the API (typings, templates) and the dashboard editor, so it has no
@@ -38,7 +39,7 @@ const attachment = o('Attachment metadata. Content is never available to a ritua
 });
 
 export const emailFields: Record<string, Field> = {
-  id: s('Bane message ID (msg_…).'),
+  id: s(`${productName} message ID (msg_…).`),
   messageId: s('The Message-ID header.', true),
   subject: s('Subject line.'),
   from: mailbox,
@@ -47,7 +48,7 @@ export const emailFields: Record<string, Field> = {
   replyTo: list('Reply-To addresses.', mailbox),
   envelope: o('SMTP envelope.', { from: s('MAIL FROM.', true), to: list('RCPT TO addresses.', s('Recipient.')) }),
   date: s('The Date header (ISO 8601).', true),
-  receivedAt: s('When Bane received it (ISO 8601).'),
+  receivedAt: s(`When ${productName} received it (ISO 8601).`),
   size: n('Raw size in bytes.'),
   headers: { type: 'record', doc: 'Headers by lowercase name. Prefer email.headers.get(name).', items: list('Values in order.', s('Header value.')) },
   text: s('Plain-text body.'),
@@ -63,13 +64,13 @@ export const emailFields: Record<string, Field> = {
     dkim: s('pass, fail, gray or none.'),
     dmarc: s('pass, fail, gray or none.'),
   }),
-  spam: o('Spam verdict.', { ses: s('SES spam verdict: pass, fail, gray or none.'), junk: b('True when Bane already marked it junk.'), reason: s('Why it is junk.', true) }),
+  spam: o('Spam verdict.', { ses: s('SES spam verdict: pass, fail, gray or none.'), junk: b(`True when ${productName} already marked it junk.`), reason: s('Why it is junk.', true) }),
   flags: o('Message traits.', {
     automated: b('Auto-generated or bulk mail.'),
     autoReply: b('Has Auto-Submitted.'),
     bulk: b('Has List-Id.'),
     listId: s('The List-Id header.', true),
-    baneHops: n('Bane forwarding hops already taken.'),
+    baneHops: n(`${productName} forwarding hops already taken.`),
   }),
   thread: o('Conversation.', {
     id: s('Thread ID.', true),
@@ -323,7 +324,7 @@ if (email.headers.has("list-unsubscribe") || email.flags.bulk) junk("newsletter"
   },
   {
     id: 'refund-omen', name: 'Label refund requests',
-    description: 'Ask Bane’s AI (an omen) whether the sender wants a refund, then label it. Needs omens enabled for the domain.',
+    description: `Ask ${productName}’s AI (an omen) whether the sender wants a refund, then label it. Needs omens enabled for the domain.`,
     source: () => wrap(`
 const result = omens(email, { refund: "Is the sender asking for a refund?" })
 if (result.refund >= 0.7) label("refund")`),

@@ -1,10 +1,10 @@
-# Bane · AWS SES reference hub
+# Nightmail · AWS SES reference hub
 
 **Research date: 2026-09-08.** Local preparation for a transactional and marketing AWS SES wrapper. This is a documentation hub, **not an implemented API, deployed AWS environment or verified customer integration**.
 
 Two independent research workers covered sending/SDKs and credentials/account-region onboarding; the coordinating researcher covered events, marketing, suppression, operations and the build checklist. Existing design files are outside this documentation change.
 
-**Current build decisions:** see the [root TODO](../../todo.md) and [decision document](implementation-decisions-and-verification.md). Initial AWS access is environment-configured; the customer connection wizard and standalone template library are deferred. Bane will own marketing unsubscribe, attachment controls are required, and test API keys will simulate rather than send.
+**Current build decisions:** see the [root TODO](../../todo.md) and [decision document](implementation-decisions-and-verification.md). Initial AWS access is environment-configured; the customer connection wizard and standalone template library are deferred. Nightmail will own marketing unsubscribe, attachment controls are required, and test API keys will simulate rather than send.
 
 ## Start here
 
@@ -25,7 +25,7 @@ Two independent research workers covered sending/SDKs and credentials/account-re
 | [Delivery events and observability](delivery-events-and-observability.md) | Accepted versus delivered, SNS/SQS/EventBridge, signatures, event schemas, tracking, VDM and message history |
 | [Marketing, consent and suppression](marketing-consent-and-suppression.md) | Contact lists, unsubscribe, bulk tradeoffs, regional/account/tenant suppression, imports and validation |
 | [Limits, costs and operations](limits-costs-and-operations.md) | Numeric quotas, current pricing plans/add-ons, rate limits, simulator caveats and operational controls |
-| [Decisions and verification](implementation-decisions-and-verification.md) | What Bane must own, suggested records/capabilities, future acceptance matrix and unverified assumptions |
+| [Decisions and verification](implementation-decisions-and-verification.md) | What Nightmail must own, suggested records/capabilities, future acceptance matrix and unverified assumptions |
 
 Every topic document has its own primary-source links. Its letter-and-number citation labels refer to that document's Sources section, not an external bibliography.
 
@@ -33,7 +33,7 @@ Every topic document has its own primary-source links. Its letter-and-number cit
 
 1. **A connection is not just an API key.** Prefer a customer cross-account IAM role with temporary credentials and a unique ExternalId. A successful STS call does not prove regional SES permission, production access, verified identity or working events. SMTP credentials cannot manage SES APIs.
 2. **Bulk marketing needs an explicit consent strategy.** Current `SendBulkEmail` does not expose `ListManagementOptions`; SES-managed unsubscribe is a single-recipient `SendEmail` workflow. Bulk sends need an application-managed unsubscribe/consent path rather than imaginary parity.
-3. **SES does not supply Bane's durable send ledger.** Acceptance is not delivery, bulk can partially fail, timeout outcomes can be ambiguous, and event transports do not give an end-to-end exactly-once guarantee. Bane needs its own jobs, idempotency contract and event history.
+3. **SES does not supply Nightmail's durable send ledger.** Acceptance is not delivery, bulk can partially fail, timeout outcomes can be ambiguous, and event transports do not give an end-to-end exactly-once guarantee. Nightmail needs its own jobs, idempotency contract and event history.
 4. **Account, region and SES tenant are separate boundaries.** Quotas, identities and many resources are regional. New tenant suppression can skip the account list; application-level consent/safety must survive route changes and failover.
 5. **Old SES research is materially incomplete.** Current docs include structured attachments, tenants, email validation, tenant suppression, bot-likelihood engagement fields and 2026 pricing plans. Do not assume all customers pay the historical à-la-carte sending rate.
 
@@ -56,7 +56,7 @@ This is a capability watchlist, not a claim of feature parity in every SDK versi
 
 ## Reading rules for future implementation
 
-**AWS-documented behavior** is accompanied by official documentation/API/model links. **Recommendations/proposals** describe how Bane could wrap it; they are not AWS guarantees. **Unresolved** marks questions requiring a pinned SDK, customer account, runtime evidence or product decision.
+**AWS-documented behavior** is accompanied by official documentation/API/model links. **Recommendations/proposals** describe how Nightmail could wrap it; they are not AWS guarantees. **Unresolved** marks questions requiring a pinned SDK, customer account, runtime evidence or product decision.
 
 Use current operation references and installed SDK types together. Context7 discovery can retrieve classic SES or unrelated similarly named services; it is not the sole authority for SESv2 request shapes. Release announcements establish availability claims at a point in time, but the operation reference and service model establish actual fields. If they disagree, preserve the discrepancy instead of silently inventing an API.
 

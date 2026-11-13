@@ -1,6 +1,6 @@
-# Bane TypeScript SDK
+# Nightmail TypeScript SDK
 
-TypeScript client for the [Bane email API](https://bane.mx). Includes generated request and response types, with no runtime dependencies.
+TypeScript client for the [Nightmail email API](https://bane.mx). Includes generated request and response types, with no runtime dependencies.
 
 ## Install
 
@@ -8,11 +8,11 @@ TypeScript client for the [Bane email API](https://bane.mx). Includes generated 
 npm install @banemx/sdk
 ```
 
-This package uses ESM and the Fetch API. Use it on your server; never ship a Bane API key in a browser bundle.
+This package uses ESM and the Fetch API. Use it on your server; never ship a Nightmail API key in a browser bundle.
 
 ## Send an email
 
-Set `BANE_API_KEY` to a Bane API key (a **Send only** key restricted to your domain is enough). The sender's domain must be verified in your workspace: add it under **Domains**, publish its DNS records and wait for **Verified**.
+Set `BANE_API_KEY` to a Nightmail API key (a **Send only** key restricted to your domain is enough). The sender's domain must be verified in your workspace: add it under **Domains**, publish its DNS records and wait for **Verified**.
 
 ```ts
 import { createClient } from '@banemx/sdk/client';
@@ -42,7 +42,7 @@ const message = await getEmail({
 });
 ```
 
-**Base URL and region.** On hosted Bane use `https://bane.mx` and leave `region` out: each sender domain is bound to one sending region, and a different `region` fails with `SENDER_REGION_MISMATCH`. Self-hosted installations use their own public URL as `baseUrl`; pass `region` only to choose between the SES regions that installation has enabled (it defaults to the installation's default region).
+**Base URL and region.** On hosted Nightmail use `https://bane.mx` and leave `region` out: each sender domain is bound to one sending region, and a different `region` fails with `SENDER_REGION_MISMATCH`. Self-hosted installations use their own public URL as `baseUrl`; pass `region` only to choose between the SES regions that installation has enabled (it defaults to the installation's default region).
 
 **Testing.** Send to `success@simulator.amazonses.com`, `bounce@simulator.amazonses.com` or `complaint@simulator.amazonses.com` to exercise each outcome without reaching a real inbox. Simulator addresses count against hosted sending limits; read the current limit from `GET /v1/me` (`connection.sendingLimit`).
 
@@ -77,9 +77,9 @@ Agents can do the same over hosted MCP with an API key limited to their inboxes:
 
 An **address** routes mail and authorizes a sender. A **message** is one email; a **thread** is the conversation you read and reply to. Unrelated emails to the same address start separate threads. Adding an address to a later message does not reveal earlier messages to its key.
 
-1. Publish the receiving MX record listed for a verified domain (`GET /v1/domains/{id}`, the record with `purpose: "receiving"`). Hosted Bane suggests `reply.<domain>` so the domain's existing mailboxes keep working, and turns receiving on once the record resolves; self-hosted installations enable it first with `POST /v1/inbound/domains/{id}/enable`. Then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-bane).
+1. Publish the receiving MX record listed for a verified domain (`GET /v1/domains/{id}`, the record with `purpose: "receiving"`). Hosted Nightmail suggests `reply.<domain>` so the domain's existing mailboxes keep working, and turns receiving on once the record resolves; self-hosted installations enable it first with `POST /v1/inbound/domains/{id}/enable`. Then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-bane).
 2. Subscribe with `POST /v1/inbound/webhooks`, for example `{"url":"https://example.com/support-hook","eventTypes":["message.received"],"addressIds":["mbx_…"]}`. Allowlist the exact HTTPS host, verify the raw-body signature and timestamp, and deduplicate the event `id`. Store `threadId` with the ticket; `messageId` identifies the individual message. Issue a scoped `read`/`send` key with `POST /v1/inbound/keys` and the relevant `addressIds`.
-3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Bane for the receiving region, while address keys may only use their own addresses. Bane sets `In-Reply-To` and `References`. `202` means queued, not delivered.
+3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Nightmail for the receiving region, while address keys may only use their own addresses. Nightmail sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
 ```ts
 import { getInboundThread, replyToInboundThread } from '@banemx/sdk';
@@ -93,11 +93,11 @@ await replyToInboundThread({
 });
 ```
 
-### Forward a public address into Bane
+### Forward a public address into Nightmail
 
-Keep your existing mail provider for the root domain and let Bane receive one forwarded address. This is the flow used for `testing@opencode.ai`:
+Keep your existing mail provider for the root domain and let Nightmail receive one forwarded address. This is the flow used for `testing@opencode.ai`:
 
-1. Add and verify `inbox.example.com` in Bane, then enable receiving on it. Publish its SES MX record **only** on `inbox.example.com`; never add an SES MX to `example.com`, which would outrank your provider and take all its mail.
+1. Add and verify `inbox.example.com` in Nightmail, then enable receiving on it. Publish its SES MX record **only** on `inbox.example.com`; never add an SES MX to `example.com`, which would outrank your provider and take all its mail.
 2. In your provider (for example Cloudflare Email Routing), forward `support@example.com` to `support@inbox.example.com` and verify that destination. Automatic forwarding keeps `From`, `To`, `Subject`, `Message-ID`, `In-Reply-To` and `References`; it rewrites the envelope sender and adds authentication headers.
 3. Reply as the public address. Either create the address with `"publicAddress": "support@example.com"` (same local part, parent domain verified with DKIM), or pass `from` per reply when the address already exists, for example because the catch-all created it:
 
@@ -113,9 +113,9 @@ await replyToInboundThread({
 });
 ```
 
-The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and Bane files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
+The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and Nightmail files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
 
-**Reply to a conversation Bane never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
+**Reply to a conversation Nightmail never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
 
 ```ts
 await createInboundThread({
@@ -131,7 +131,7 @@ await createInboundThread({
 });
 ```
 
-Single sends, each item in a batch, and inbound thread creation and reply accept up to 20 custom headers (8 KB total). Names use letters, digits and hyphens; values must be single-line printable ASCII. Bane reserves identity, recipient, MIME, authentication, transport and unsubscribe headers; see the `headers` field in the generated SDK for the full list. When replying to an existing Bane thread, omit `In-Reply-To` and `References`: Bane computes them from the selected message.
+Single sends, each item in a batch, and inbound thread creation and reply accept up to 20 custom headers (8 KB total). Names use letters, digits and hyphens; values must be single-line printable ASCII. Nightmail reserves identity, recipient, MIME, authentication, transport and unsubscribe headers; see the `headers` field in the generated SDK for the full list. When replying to an existing Nightmail thread, omit `In-Reply-To` and `References`: Nightmail computes them from the selected message.
 
 **Only act on verified senders:** set `"requireDmarc": true` in `POST /v1/inbound/addresses` or `PATCH /v1/inbound/addresses/{addressId}`. Mail without a DMARC pass for its `From` domain is still stored and labelled `unverified` for that address, but it triggers neither a `message.received` event nor a webhook for that address. The event’s `data.dmarc` carries the SES verdict, or `null` if absent. Forwarded mail can still pass when the original sender’s aligned DKIM signature survives. The setting defaults to `false`; enable it on every address whose events you treat as verified.
 

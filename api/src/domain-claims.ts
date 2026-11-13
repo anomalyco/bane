@@ -4,6 +4,7 @@ import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type D
 import type { ReadyConnection } from './provider-credentials.js';
 import { placementRoot } from './domain-registry.js';
 import { assertTenantReady, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
+import { productName } from './brand.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
 // Separate from the PSL: these platform-controlled trees also prohibit child claims.
@@ -28,7 +29,7 @@ export function reservedPlatformName(name:string,publicUrl:string) {
   return name.endsWith('.'+host) && platformLabel.test(name.slice(0,-host.length-1).split('.').at(-1)!);
 }
 /** The mailboxes a certificate authority may use to validate the platform domain (CA/B BR 3.2.2.4.4, and root@).
- * Bane never creates them automatically: only an inbox someone creates on purpose receives that mail. */
+ * Nightmail never creates them automatically: only an inbox someone creates on purpose receives that mail. */
 export function platformValidationMailbox(address:string,host:string|null) {
   const [local='',domain='']=address.toLowerCase().split('@');
   return !!host && (domain===host || domain.endsWith('.'+host)) && /^(?:admin|administrator|hostmaster|postmaster|webmaster|root)$/.test(local.replace(/\+.*$/,''));
@@ -74,7 +75,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
   if (row.error_code==='OPERATOR_ADOPTION_REQUIRED') throw new ApiError(409,row.error_code,'An operator must reattest this retained sending identity.');
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
-  if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,'Hosted sending placement is managed by Bane.','region');
+  if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,`Hosted sending placement is managed by ${productName}.`,'region');
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');
@@ -118,7 +119,7 @@ export const lockedSettings = (wid: string) => sql`settings AS MATERIALIZED (SEL
 export const senderRoutes = (runtime:Runtime,wid:string,hosts:string[]) => sql`(SELECT coalesce(jsonb_object_agg(h.host,to_jsonb(r)),'{}'::jsonb)
   FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL ${regionalSender(runtime,wid,sql`h.host`)} r)`;
 export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, requested?: string) {
-  if (route?.platform_refused) throw new ApiError(403,'PLATFORM_SENDER_REFUSED','Only the workspace configured to own Bane’s own domain sends from it, and never from Bane’s platform hosts.','from');
+  if (route?.platform_refused) throw new ApiError(403,'PLATFORM_SENDER_REFUSED',`Only the workspace configured to own ${productName}’s own domain sends from it, and never from ${productName}’s platform hosts.`,'from');
   if (!route?.verified) throw unverifiedSender();
   if (requested !== undefined && requested !== route.region) throw new ApiError(422,'SENDER_REGION_MISMATCH','The requested region does not match this sender domain.', 'region');
   if (!route.connection) throw new ApiError(409,'CONNECTION_REQUIRED','The sending connection is not ready in the bound region.');

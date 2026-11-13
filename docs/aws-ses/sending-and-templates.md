@@ -2,7 +2,7 @@
 
 [Hub](README.md)
 
-Research date: **2026-09-08**. Scope: public AWS documentation and the current public botocore service model; no account inspection, sending, or AWS mutation occurred. **Verified** statements describe those sources, not a live account test. **Recommendation** identifies Bane design guidance. **Unknown / caveat** identifies behavior not established by the sources.
+Research date: **2026-09-08**. Scope: public AWS documentation and the current public botocore service model; no account inspection, sending, or AWS mutation occurred. **Verified** statements describe those sources, not a live account test. **Recommendation** identifies Nightmail design guidance. **Unknown / caveat** identifies behavior not established by the sources.
 
 See [API and SDK inventory](api-and-sdk-inventory.md) for exact operation names, SDK distinctions, model provenance, and newer capabilities.
 
@@ -20,7 +20,7 @@ API v2 uses HTTPS REST/JSON and AWS SigV4. Classic uses the AWS Query protocol; 
 
 ## 2. Limits and encoding boundaries
 
-The numbers below are AWS documented limits, not proposed Bane plan limits. AWS quotas can be regional and account-specific; a request fitting these structural limits can still be throttled. [S4][S5]
+The numbers below are AWS documented limits, not proposed Nightmail plan limits. AWS quotas can be regional and account-specific; a request fitting these structural limits can still be throttled. [S4][S5]
 
 | Item | Verified documented value | Interpretation |
 | --- | --- | --- |
@@ -115,7 +115,7 @@ Request-level fields mirror the sender, reply, feedback, authorization, configur
 - `ReplacementTags` carries event metadata; `ReplacementHeaders` adds/overrides custom headers.
 - **There is no `ListManagementOptions` member on `SendBulkEmail` in the current service model or API reference.** Do not promise that the single-send SES contact-list unsubscribe mechanism can simply be included in a bulk request. [S2][S6][S16]
 
-Illustrative request; the unsubscribe value is deliberately omitted because Bane's verified consent/preference workflow belongs in a separate contract:
+Illustrative request; the unsubscribe value is deliberately omitted because Nightmail's verified consent/preference workflow belongs in a separate contract:
 
 ```json
 {
@@ -180,7 +180,7 @@ Both v2 send operations also have whole-request errors: `TooManyRequestsExceptio
 
 Stored v2 template operations are `CreateEmailTemplate`, `GetEmailTemplate`, `ListEmailTemplates`, `UpdateEmailTemplate`, `DeleteEmailTemplate`, and `TestRenderEmailTemplate`. A stored template holds `Subject`, `Html`, and `Text`; attachments/header overrides are send-time fields. There is no native immutable version/publish operation in this operation set. [S9][S11][S16]
 
-**Recommendation:** maintain Bane-owned template versions, a content hash, selected AWS region, and published template name. Updating an in-use SES template changes what later sends reference; don't pretend it snapshots a campaign at scheduling time. Use immutable application revisions or inline content when deterministic scheduled content is required.
+**Recommendation:** maintain Nightmail-owned template versions, a content hash, selected AWS region, and published template name. Updating an in-use SES template changes what later sends reference; don't pretend it snapshots a campaign at scheduling time. Use immutable application revisions or inline content when deterministic scheduled content is required.
 
 **Verified rendering capabilities:** stored templates support documented Handlebars features including nested attributes, array iteration, basic conditionals, and inline partials. Inline `TemplateContent` supports **simple substitutions only**; do not assume feature-equivalence to the stored template engine. No guarantee of arbitrary custom helpers was established. [S9][S12]
 
@@ -217,7 +217,7 @@ For simple/templated structured headers, AWS disallows overriding SES-owned `BCC
 
 **Verified schema finding:** neither current v2 send request has a `ClientToken`, idempotency token, or documented deduplication key. SDK automatic retries do not create an exactly-once send guarantee. A timeout after transmission can leave the caller uncertain whether SES accepted the message. Repeating that request can send a duplicate; application tags only correlate events and are not deduplication instructions. [S1][S2][S16]
 
-**Bane recommendations:**
+**Nightmail recommendations:**
 
 - Assign a stable application message ID/idempotency key before enqueueing, with a tenant-scoped uniqueness rule and payload fingerprint. Keep this separate from each provider attempt/SES MessageId.
 - Persist attempt start and result. Distinguish not-attempted, accepted, definitively rejected, and **acceptance unknown**; do not label a timeout as definitively failed.
@@ -231,11 +231,11 @@ SMTP uses 4xx for temporary errors and 5xx for errors requiring correction; thes
 
 Stored templates and their names/counts are regional. Sender identity verification, sandbox/production state, quotas, feedback configuration, SMTP credentials, and sending-authorization policies must be correct in each sending region. A template ARN's region is not a mechanism that makes an arbitrary cross-region template usable. These documents do not establish an unrestricted cross-account template-sharing feature. [S5][S15]
 
-**Recommendation:** key mappings by AWS account + region + template name + Bane revision. Independently read/compare the deployed template content in each region; a matching name alone is insufficient.
+**Recommendation:** key mappings by AWS account + region + template name + Nightmail revision. Independently read/compare the deployed template content in each region; a matching name alone is insufficient.
 
 Global endpoints accept `EndpointId` on both v2 send operations and route across a configured pair of regions. They do not support SMTP or VPC endpoint access. **Do not assume continuous automatic replication of every dependency.** The high-level guide says setup synchronizes key artifacts, but its detailed preparation section requires consistent identities, configuration sets, templates and sending limits, with console-assisted duplication and explicit manual exceptions. Event destinations, reputation/archiving options and various identity settings require attention; the guide recommends regularly synchronizing changes. [S17]
 
-For `TenantName` sends, AWS explicitly requires referenced identities, configuration sets, and templates to be associated with the tenant. An Bane application tenant ID is not automatically an SES tenant, and adding a `TenantName` string is not authorization isolation by itself. Deep IAM/tenant controls belong in the account/credentials reference. [S1][S2][S16]
+For `TenantName` sends, AWS explicitly requires referenced identities, configuration sets, and templates to be associated with the tenant. A Nightmail application tenant ID is not automatically an SES tenant, and adding a `TenantName` string is not authorization isolation by itself. Deep IAM/tenant controls belong in the account/credentials reference. [S1][S2][S16]
 
 **Unknown / not validated here:** supported region combinations for every newest feature, provisioning timings, exact delivery behavior during endpoint failover, cross-region tenant readiness, hard bulk limits for many multi-recipient entries, and rendering behavior against actual customer templates. Source-model presence is not a claim of universal regional availability.
 

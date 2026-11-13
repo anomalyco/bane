@@ -1,4 +1,4 @@
-# Credentials and IAM for Bane
+# Credentials and IAM for Nightmail
 
 [Hub](README.md)
 
@@ -7,7 +7,7 @@ This is reference documentation, not an implemented integration, deployed IAM po
 
 ## Status and trust boundaries
 
-**Verified facts** below come from current official AWS documentation; **recommended design** describes proposed Bane behavior; **unverified constraints** identify checks still required before shipping.
+**Verified facts** below come from current official AWS documentation; **recommended design** describes proposed Nightmail behavior; **unverified constraints** identify checks still required before shipping.
 Context7 was consulted for AWS/STS/SES documentation, then the official service authorization reference (SAR), API reference, and developer guide were read directly. The current SAR is authoritative for the examples: older summaries saying SES only supports resource scoping for sending are incomplete for SES v2. [S1–S3]
 
 Keep these mechanisms distinct:
@@ -17,7 +17,7 @@ Keep these mechanisms distinct:
 | IAM role trust policy | A named platform principal may call `sts:AssumeRole`, subject to conditions | SES permissions by itself |
 | Role permissions policy | The assumed session may call selected AWS actions against selected resources | Permission for an arbitrary principal to assume the role |
 | SES sending authorization policy on an identity | A delegate may send using that identity, in its Region | General SES account administration or the ability to assume an IAM role |
-| Bane application authorization | A workspace member/API key may request allowed Bane operations | AWS authorization or proof of domain ownership |
+| Nightmail application authorization | A workspace member/API key may request allowed Nightmail operations | AWS authorization or proof of domain ownership |
 
 Sending authorization can use the delegate's own AWS account; AssumeRole instead operates as a principal in the customer's AWS account. These are different billing, quota, reputation, and incident boundaries. [S4, S5]
 
@@ -27,7 +27,7 @@ Sending authorization can use the delegate's own AWS account; AssumeRole instead
 
 **Recommended design — enrollment sequence:**
 
-1. Authenticate the Bane workspace administrator. Generate a unique, platform-assigned random ExternalId for the customer account connection; bind it to the workspace and account, not a browser-supplied arbitrary role ARN.
+1. Authenticate the Nightmail workspace administrator. Generate a unique, platform-assigned random ExternalId for the customer account connection; bind it to the workspace and account, not a browser-supplied arbitrary role ARN.
 2. Give the customer the exact platform execution-role ARN, ExternalId, chosen SES Regions, and separate capability policy examples. The customer creates the role in their account using their own AWS administration workflow.
 3. On the server, assume only the registered role with that connection's ExternalId and a non-sensitive, traceable role-session name. Test that assuming the same role without the ExternalId and with an incorrect ExternalId fails. AWS explicitly recommends rejecting enrollment if the role can be assumed without the correct ExternalId. [S5]
 4. Call `GetCallerIdentity` using the returned credentials. Match `Account` and assumed-role `Arn` against the registered connection; do not trust an account ID typed into a form. Then read SES in each selected Region to determine actual capabilities.
@@ -87,7 +87,7 @@ Both classic SES and SES v2 use the IAM prefix **`ses`**, not `sesv2`. Consult t
 | v2 `GetEmailIdentity` | `ses:GetEmailIdentity` | Identity ARN |
 | v2 `SendEmail` (Simple, Raw, or Template content) | `ses:SendEmail` in v2 action table | Identity required; configuration-set and template resources when used; content-specific live authorization remains a release check |
 | v2 `SendBulkEmail` | **`ses:SendBulkEmail`**, explicitly mapped in current v2 SAR | Identity and template are marked required; configuration-set supported; see inline-template caveat below |
-| Classic `SendRawEmail` / SMTP | `ses:SendRawEmail` | Do not grant just because Bane uses v2 Raw content; SMTP needs this action |
+| Classic `SendRawEmail` / SMTP | `ses:SendRawEmail` | Do not grant just because Nightmail uses v2 Raw content; SMTP needs this action |
 | Classic `SendTemplatedEmail`, `SendBulkTemplatedEmail` | Respective classic actions | Not substitutes for v2 send grants |
 | v2 stored template CRUD/render | `ses:CreateEmailTemplate`, `GetEmailTemplate`, `UpdateEmailTemplate`, `DeleteEmailTemplate`, `TestRenderEmailTemplate` | Template ARN; listing separately uses `*` |
 
@@ -168,7 +168,7 @@ Attach only the stream statements actually requested. This example uses a **stor
 }
 ```
 
-A resource allow-list does not itself require callers to specify a configuration set when the API allows omission. Bane should always select a registered configuration set, reject unregistered names, and inspect identity defaults; test this invariant at the service boundary. Likewise, the bulk example allows sending from the approved domain, not only one mailbox. Use a narrower separately verified email identity when appropriate, and validate bulk From addresses in Bane.
+A resource allow-list does not itself require callers to specify a configuration set when the API allows omission. Nightmail should always select a registered configuration set, reject unregistered names, and inspect identity defaults; test this invariant at the service boundary. Likewise, the bulk example allows sending from the approved domain, not only one mailbox. Use a narrower separately verified email identity when appropriate, and validate bulk From addresses in Nightmail.
 
 **Optional tenant restriction:** for a tenant-specific sender, add `"ses:TenantName": "bane-customer-a"` to `StringEquals` on the relevant send statement, and use only resources associated with that tenant. This requires the request to supply the tenant name; do not use `StringEqualsIfExists` if omission must be denied. A tenant ARN is not listed as the send action's resource type. [S1, S13]
 
@@ -232,7 +232,7 @@ The table is a design inventory, not a validated universal policy for those serv
 
 **Verified facts:** an API access key pair is not an SMTP username/password. SMTP passwords are Region-specific derivatives of IAM user secret keys; AWS explicitly says not to derive SMTP credentials from temporary security credentials. STS role credentials therefore cannot be repurposed as working SMTP credentials. An SMTP-only credential cannot power SES API onboarding, account discovery, or identity administration. [S3, S9]
 
-**Recommended design:** prefer AssumeRole. If a customer cannot use it, offer an explicitly labeled API-key fallback for a dedicated least-privilege IAM user, never root credentials, console passwords, or broadly privileged human-user keys. Use the same SES capability policies, with no IAM credential-management privileges granted to Bane. Do not ask customers to create SMTP users for this API integration.
+**Recommended design:** prefer AssumeRole. If a customer cannot use it, offer an explicitly labeled API-key fallback for a dedicated least-privilege IAM user, never root credentials, console passwords, or broadly privileged human-user keys. Use the same SES capability policies, with no IAM credential-management privileges granted to Nightmail. Do not ask customers to create SMTP users for this API integration.
 
 A secure enrollment form may transmit a fallback secret once over TLS to a server-side secret store; “no browser credentials” means no AWS credentials returned to or retained in the client, no client-side AWS SDK signing, no localStorage/sessionStorage, and no credentials in URLs, analytics, replay tools, logs, or error reports. Disable instrumentation on secret inputs. Prefer a server-to-server secret import option when available.
 

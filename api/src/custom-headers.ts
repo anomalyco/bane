@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi';
+import { productName } from './brand.js';
 
-// Headers that decide identity, recipients, where replies or receipts go, MIME structure, authentication, transport or SES behavior. Bane sets
+// Headers that decide identity, recipients, where replies or receipts go, MIME structure, authentication, transport or SES behavior. Nightmail sets
 // these itself (or from dedicated fields), so a caller can never override them.
 const RESERVED = /^(?:from|sender|reply-to|return-path|to|cc|bcc|subject|date|message-id|mime-version|content-[a-z0-9-]*|dkim-[a-z0-9-]*|arc-[a-z0-9-]*|authentication-results|received[a-z0-9-]*|resent-[a-z0-9-]*|x-ses-[a-z0-9-]*|list-unsubscribe[a-z0-9-]*|auto-submitted|mail-reply-to|mail-followup-to|followup-to|disposition-notification-[a-z0-9-]*|return-receipt-to|errors-to|bounces-to|delivered-to|x-original-to|domainkey-[a-z0-9-]*|feedback-id|tls-required|bimi-[a-z0-9-]*|autocrypt[a-z0-9-]*|openpgp)$/i;
 const MESSAGE_ID = '<[\\x21-\\x3b\\x3d\\x3f-\\x7e]+@[\\x21-\\x3b\\x3d\\x3f-\\x7e]+>';
@@ -16,7 +17,7 @@ export const CustomHeaders = z.array(z.object({
   let total = 0;
   headers.forEach((header, index) => {
     const name = header.name.toLowerCase();
-    if (RESERVED.test(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `${header.name} is set by Bane and cannot be passed as a custom header.` });
+    if (RESERVED.test(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `${header.name} is set by ${productName} and cannot be passed as a custom header.` });
     if (seen.has(name)) ctx.addIssue({ code: 'custom', path: [index, 'name'], message: `Do not repeat ${header.name}.` });
     seen.add(name);
     if (header.name.length + 2 + header.value.length > 998) ctx.addIssue({ code: 'custom', path: [index, 'value'], message: `${header.name} exceeds the 998-character SMTP line limit.` });
@@ -25,7 +26,7 @@ export const CustomHeaders = z.array(z.object({
     total += header.name.length + header.value.length;
   });
   if (total > MAX_TOTAL) ctx.addIssue({ code: 'custom', message: `Custom headers may total at most ${MAX_TOTAL} characters.` });
-}).describe('Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers Bane controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient\'s mail client.');
+}).describe(`Extra MIME headers, 8 KB total. The 15-header limit includes generated headers (two for marketing and any mailbox threading headers). Any name is allowed except headers ${productName} controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.`);
 
 export type CustomHeader = { name: string; value: string };
 

@@ -9,7 +9,7 @@ import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-gui
 import { concepts } from '../inbound/concepts'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
-import { apiKeyEnv } from '../../../../api/src/brand'
+import { apiKeyEnv, productName } from '../../../../api/src/brand'
 
 export type Guide = { id: string; title: string; summary: string; body: () => ReactNode }
 
@@ -52,7 +52,7 @@ export const guides: Guide[] = [
     id: 'receiving', title: 'Receiving', summary: 'How mail reaches your domain and where it goes: addresses, routes, rituals and endpoints.',
     body: () => <>
       <Section title="What happens to an email">
-        <p>Mail sent to one of your addresses arrives at Bane through your domain’s receiving MX record. Bane finds the address’s <strong>route</strong>, runs its <strong>rituals</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rituals name. You read it in Receiving → Inbox, over the API or from an agent.</p>
+        <p>Mail sent to one of your addresses arrives at {productName} through your domain’s receiving MX record. {productName} finds the address’s <strong>route</strong>, runs its <strong>rituals</strong>, then delivers it: to the address’s Inbox, and to any <strong>endpoints</strong> its route or rituals name. You read it in Receiving → Inbox, over the API or from an agent.</p>
         <Table head={['Word', 'What it is', 'Example']} rows={[
           ['Address', 'An email address that receives mail. It keeps its own threads in the Inbox.', <code key="e">support@acme.com</code>],
           ['Route', concepts.routes.line, <code key="e">{concepts.routes.example}</code>],
@@ -63,12 +63,12 @@ export const guides: Guide[] = [
         ]} />
       </Section>
       <Section title="Where your domain receives: reply.yourdomain or the domain itself">
-        <p>Receiving needs an MX record, and a domain can only send its mail to one place. So Bane suggests a free subdomain, usually <code>reply.yourdomain.com</code>: addresses there, such as <code>support@reply.yourdomain.com</code>, come to Bane, while mail to <code>yourdomain.com</code> itself keeps going to your current mailboxes.</p>
-        <p>Bane receives on the domain itself only when its MX record already points to Bane, or when you choose it on the domain’s page. Choosing the root moves all of the domain’s mail to Bane, so the page asks first. Onboarding and the domain’s page always show the host Bane chose, with the reason.</p>
+        <p>Receiving needs an MX record, and a domain can only send its mail to one place. So {productName} suggests a free subdomain, usually <code>reply.yourdomain.com</code>: addresses there, such as <code>support@reply.yourdomain.com</code>, come to {productName}, while mail to <code>yourdomain.com</code> itself keeps going to your current mailboxes.</p>
+        <p>{productName} receives on the domain itself only when its MX record already points to {productName}, or when you choose it on the domain’s page. Choosing the root moves all of the domain’s mail to {productName}, so the page asks first. Onboarding and the domain’s page always show the host {productName} chose, with the reason.</p>
       </Section>
       <Section title="Set it up">
         <ol className="docs-steps">
-          <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. Bane turns receiving on once it resolves.</li>
+          <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. {productName} turns receiving on once it resolves.</li>
           <li>In <Link to="/receiving">Receiving</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
           <li>Send it a test email. It shows up in Receiving → Inbox within seconds.</li>
           <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rituals">ritual</Link> that decides which mail goes there.</li>
@@ -80,7 +80,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'rituals', title: 'Rituals and omens', summary: 'Short scripts that label, filter and forward mail, and the questions they can ask Bane’s AI.',
+    id: 'rituals', title: 'Rituals and omens', summary: `Short scripts that label, filter and forward mail, and the questions they can ask ${productName}’s AI.`,
     body: () => <>
       <Section title="What a ritual is">
         <p>A ritual is a short script that runs on every email sent to the addresses it’s attached to. It reads the email and decides what happens: junk it, label it, post it to Slack, send it to a webhook, forward it. It can’t do anything else: no loops, no clock, no network calls of its own, so it always finishes and does the same thing for the same email.</p>
@@ -91,16 +91,16 @@ export const guides: Guide[] = [
         <p>A ritual runs only on mail to the addresses it’s attached to. Attach it in the editor’s <strong>Runs on</strong> section or from an address’s page; attaching, detaching and reordering save at once. Up to three rituals run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on.</p>
       </Section>
       <Section title="What it can do">
-        <Table head={['Call', 'What it does']} rows={Object.values(builtins).map(b => [<code key="c">{b.signature}</code>, b.doc.replace('Jev', 'Bane’s AI')])} />
+        <Table head={['Call', 'What it does']} rows={Object.values(builtins).map(b => [<code key="c">{b.signature}</code>, b.doc.replace('Jev', `${productName}’s AI`)])} />
         <Table head={['Endpoint call', 'What it does']} rows={Object.entries(endpointPayloads).map(([type, p]) => [<code key="c">{p.signature(type === 'webhook' ? 'crm' : type === 'forward' ? 'team' : type === 'discord' ? 'alerts' : 'support')}</code>, p.doc])} />
       </Section>
       <Section title="What it can read">
         <p>The email, as <code>email</code>, and the run, as <code>ctx</code>. Everything sender-supplied is untrusted: check <code>email.auth.fromVerified</code> before trusting who it’s from.</p>
         <Table head={['Field', 'Meaning']} rows={[...fieldRows('email', emailFields), ...fieldRows('ctx', ctxFields)]} />
       </Section>
-      <Section title="Omens: questions for Bane’s AI">
+      <Section title={`Omens: questions for ${productName}’s AI`}>
         <p>{concepts.omens.line} Ask with <code>omens(email, {'{'} name: "question" {'}'})</code>; each name comes back as a score you compare, like <code>asks.refund &gt;= 0.7</code>. One request per email answers every question in every ritual. In the API and its docs, that AI is called Jev.</p>
-        <p>Bane’s AI only reads mail at the receiving hosts you list under <strong>Omens can read mail at</strong> in the ritual editor. Everywhere else, and in Try it and Trace, an omen gives its default answer instead; in Try it you set each answer with a slider to see what the ritual would do.</p>
+        <p>{productName}’s AI only reads mail at the receiving hosts you list under <strong>Omens can read mail at</strong> in the ritual editor. Everywhere else, and in Try it and Trace, an omen gives its default answer instead; in Try it you set each answer with a slider to see what the ritual would do.</p>
       </Section>
       <Section title="Sender lists">
         <p>Named lists of senders, edited below the ritual: <code>vip: ceo@example.com, @partner.example</code>. Check one with <code>lists.has("vip", email.from.address)</code>; <code>@domain</code> covers everyone at that domain.</p>
@@ -138,7 +138,7 @@ export const guides: Guide[] = [
           ['Expired', 'For one more day, new mail is kept but held: stored and listed, not delivered.'],
           ['Deleted', 'The inbox, its mail and its keys are erased.'],
         ]} />
-        <p>Past its limit (200 messages or 25 MiB by default) new mail is held the same way. Bane pulls one-time codes and links out of each message. An inbox can reply only to people who wrote to it, if replies were allowed when it was created.</p>
+        <p>Past its limit (200 messages or 25 MiB by default) new mail is held the same way. {productName} pulls one-time codes and links out of each message. An inbox can reply only to people who wrote to it, if replies were allowed when it was created.</p>
       </Section>
       <Section title="Create one">
         <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
@@ -148,7 +148,7 @@ export const guides: Guide[] = [
     </>,
   },
   {
-    id: 'mcp', title: 'Connect an agent (MCP)', summary: 'Let OpenCode, Claude Code or Cursor work with Bane, as you or with one inbox.',
+    id: 'mcp', title: 'Connect an agent (MCP)', summary: `Let OpenCode, Claude Code or Cursor work with ${productName}, as you or with one inbox.`,
     body: () => <>
       <Section title="Two ways to connect">
         <Table head={['', 'What the agent can reach', 'Set up']} rows={[

@@ -8,6 +8,7 @@ import { MicroCentsJson } from './money.js';
 import { readBilling } from './state.js';
 import { chargeSavedCardTopUp, createCardSetup, createCheckoutTopUp, getPayment, listPayments, refundTopUp, removePaymentMethod, setAutoRecharge } from './stripe.js';
 import type { BillingPosition, LedgerKind } from './types.js';
+import { productName } from '../brand.js';
 
 // The billing API (hosted only): the balance, usage by meter, the ledger and payments for owners, admins and manage
 // credentials, and the money routes. Who may do what:
@@ -35,7 +36,7 @@ export const BillingSummarySchema = z.object({
   monthToDate: z.object({ cost: MicroCents.describe('This month’s usage cost after the free allowance, settled and unsettled, charged or not.') }).nullable(),
   grace: z.object({ unpaidSince: z.string().nullable(), receiveHoldAt: z.string().nullable(), writeOffAt: z.string().nullable() }),
   autoRecharge: z.object({ enabled: z.boolean(), thresholdCents: z.number().int(), amountCents: z.number().int(), monthlyCapCents: z.number().int(), monthTotalCents: z.number().int(),
-    disabledReason: z.string().nullable().describe('Why Bane turned auto-recharge off (a card decline code, dispute or a removed card).'), pending: z.boolean() }).nullable(),
+    disabledReason: z.string().nullable().describe(`Why ${productName} turned auto-recharge off (a card decline code, dispute or a removed card).`), pending: z.boolean() }).nullable(),
   paymentMethod: z.object({ brand: z.string(), last4: z.string(), expMonth: z.number().int(), expYear: z.number().int() }).nullable(),
   prices: Prices,
   topUpUrl: z.string().describe('Where a person adds credit.'),
@@ -103,8 +104,8 @@ function describe(kind: LedgerKind, detail: Record<string, unknown>) {
       return `Usage${period(detail.from, detail.to)}: ${parts.join(', ') || 'none'}${detail.charged === false ? ' (not charged)' : ''}`;
     }
     case 'topup': return detail.recharge === true ? 'Auto-recharge' : 'Credit added';
-    case 'grant': return 'Promotional credit from Bane';
-    case 'adjustment': return 'Adjustment by Bane';
+    case 'grant': return `Promotional credit from ${productName}`;
+    case 'adjustment': return `Adjustment by ${productName}`;
     case 'refund_hold': return 'Refund';
     case 'refund_release': return 'Refund canceled: credit restored';
     case 'dispute': return 'Card payment disputed';
@@ -218,7 +219,7 @@ export function registerBilling(app: App) {
     monthlyCapCents: z.number().int().min(2000).max(1_000_000).describe('At most this much auto-recharge per calendar month (UTC), at least amountCents.'),
   }).strict().refine(v => v.monthlyCapCents >= v.amountCents, { message: 'monthlyCapCents must be at least amountCents.', path: ['monthlyCapCents'] }).openapi('BillingAutoRecharge');
   app.openapi(createRoute({ method: 'put', path: '/v1/billing/auto-recharge', operationId: 'updateBillingAutoRecharge', tags: ['Billing'], security, summary: 'Set auto-recharge',
-    description: 'Hosted only; a signed-in owner or admin in the dashboard. Bane charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.',
+    description: `Hosted only; a signed-in owner or admin in the dashboard. ${productName} charges the saved card when the balance falls below the threshold, up to the monthly limit. Turning it on needs a saved card (409 PAYMENT_METHOD_REQUIRED) and clears a previous decline.`,
     request: { body: json(AutoRecharge) }, responses: { 200: response(BillingSummarySchema), ...errors } }), async c => {
     const session = moneySession(c);
     await setAutoRecharge(c.env, session.workspaceId, c.req.valid('json'));

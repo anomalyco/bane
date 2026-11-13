@@ -50,7 +50,7 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
 
 /**
  * The hourly backstop for the ten-minute standing job (src/standing.ts): runs the ladder now, which also re-queues any
- * workspace whose SES tenants differ from what Bane wants. The ladder, not this check, decides pauses (docs/sending-limits.md).
+ * workspace whose SES tenants differ from what Nightmail wants. The ladder, not this check, decides pauses (docs/sending-limits.md).
  */
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;

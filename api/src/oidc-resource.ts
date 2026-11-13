@@ -2,12 +2,13 @@ import * as oauth from 'oauth4webapi';
 import { Buffer } from 'node:buffer';
 import { sql } from 'drizzle-orm';
 import { digest, log, type Actor, type Runtime, type DbExecutor, type Permission } from './core.js';
+import { productName } from './brand.js';
 
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const SCOPES = permissions.map(p => `bane:${p}`);
 const audience = (runtime: Runtime) => new URL('/mcp', runtime.config.publicUrl).href;
 export function protectedResourceMetadata(runtime: Runtime) {
-  return { resource: audience(runtime), resource_name:'Bane', authorization_servers: [runtime.config.accountIssuer],
+  return { resource: audience(runtime), resource_name:productName, authorization_servers: [runtime.config.accountIssuer],
     scopes_supported: SCOPES, bearer_methods_supported: ['header'],
     // Provisional extension name until the issuer publishes its metadata contract.
     scope_descriptions:{'bane:read':'Read workspace data.', 'bane:send':'Send email from the workspace.', 'bane:manage':'Manage workspace mail and resources.'} };
@@ -135,12 +136,12 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const resource = audience(runtime);
   const metadata = new URL('/.well-known/oauth-protected-resource/mcp', resource).href;
   // MCP clients expect a JSON-RPC envelope; the challenge itself lives in WWW-Authenticate (RFC 6750, RFC 9470). The
-  // scope is every Bane scope: clients ask for what the challenge names, and the person narrows it when approving.
+  // scope is every Nightmail scope: clients ask for what the challenge names, and the person narrows it when approving.
   // `detail` replaces only the JSON-RPC message; the challenge header keeps its fixed description.
   function denied(status: 401 | 403, error = status === 401 ? 'invalid_token' : 'insufficient_scope', extra = '', detail?: string) {
     const scheme = /^dpop /i.test(request.headers.get('authorization') ?? '') ? 'DPoP' : 'Bearer';
-    const message = error === 'insufficient_user_authentication' ? 'Bane requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.'
-      : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : 'This client has no active Bane approval for the requested access.';
+    const message = error === 'insufficient_user_authentication' ? `${productName} requires Google sign-in. Reconnect this MCP client and choose Google at Anomaly account.`
+      : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : `This client has no active ${productName} approval for the requested access.`;
     return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${SCOPES.join(' ')}"${extra}` }});
   }
   const auth = request.headers.get('authorization');
@@ -177,9 +178,9 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // One approval per account and client: the same client used by two accounts (a personal and a work entry) gets two.
   // The account service's consent behind this token: its access tokens' jti is <consent>.<random>.
   const consent = typeof claims.jti === 'string' ? /^([A-Za-z0-9_-]{8,200})\.[A-Za-z0-9_-]{8,200}$/.exec(claims.jti)?.[1] ?? null : null;
-  // `?profile=` on the MCP URL is only a label for that entry, shown in Bane; it never selects or authorizes anything.
+  // `?profile=` on the MCP URL is only a label for that entry, shown in Nightmail; it never selects or authorizes anything.
   const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
-  // Revoked in Bane, an approval refuses the tokens of the consents it had. A token of a new consent (the person
+  // Revoked in Nightmail, an approval refuses the tokens of the consents it had. A token of a new consent (the person
   // connected the client again at the account service) starts it again under a new key, so nothing tied to the revoked
   // one comes back: its credentials, objects, ritual parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
@@ -210,6 +211,6 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // The presented token's own scopes: a token older than the approval's newest may carry fewer.
   const connection = await mcpConnection(runtime, keyId, allowed);
   if (!connection) return denied(403);
-  if (!connection.workspaces.length) return denied(403, undefined, '', 'This account belongs to no Bane workspace these scopes can act in. Join or create one in Bane, then reconnect.');
+  if (!connection.workspaces.length) return denied(403, undefined, '', `This account belongs to no ${productName} workspace these scopes can act in. Join or create one in ${productName}, then reconnect.`);
   return handler(connection);
 }

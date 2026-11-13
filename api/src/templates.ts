@@ -8,10 +8,11 @@ import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml 
 import { readPublicImage } from './adapters/public-image.js';
 import { readOwnMailObject } from './mail-object-route.js';
 import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
+import { productName } from './brand.js';
 
 const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
 const Address = mailAddress();
-const BlockHtml = z.string().max(512 * 1024).describe('Concrete Bane block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.').optional();
+const BlockHtml = z.string().max(512 * 1024).describe(`Concrete ${productName} block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.`).optional();
 const AssetIds = z.array(z.string().regex(/^tasset_[0-9a-f]{32}$/)).max(20).default([]);
 const DraftFields = { name: z.string().trim().min(1).max(200), description: z.string().trim().max(500).default(''), subject: z.string().max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.').default(''), previewText: z.string().max(200).optional(), fromName: senderDisplayName().optional(), replyTo: z.array(Address).max(10).default([]), html: BlockHtml, attachments: AssetIds };
 const TemplateDraftSchema = z.object(DraftFields).strict().openapi('CampaignTemplateDraft');
@@ -102,7 +103,7 @@ export function registerTemplates(app: App) {
     const identity = manageTemplates(c), input = c.req.valid('json');
     if (!c.env.importPublicImage) throw new ApiError(503, 'PUBLIC_IMAGE_IMPORT_UNAVAILABLE', 'Public image importing is not configured for this installation.', undefined, true);
     await chargeRenderBudget(c, identity.workspaceId);
-    // Bane's own download links are read in process: a Worker cannot fetch its own domain.
+    // Nightmail's own download links are read in process: a Worker cannot fetch its own domain.
     const own = await readOwnMailObject(c.env, input.url, identity.workspaceId);
     const imported = own ? await readPublicImage(own, true) : await c.env.importPublicImage(input.url), hash = await checksum(imported.data), extension = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[imported.contentType];
     const contentId = input.contentId ?? `image-${hash.slice(0, 16)}`;
