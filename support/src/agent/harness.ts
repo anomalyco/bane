@@ -8,6 +8,7 @@ export type HarnessEvent =
   | { type: 'text.delta'; delta: string }
   | { type: 'tool.start'; callId: string; tool: string; args: Record<string, unknown> }
   | { type: 'tool.end'; callId: string; tool: string; ok: boolean };
+/** inputTokens: uncached input plus cache writes; cacheReadTokens: cached input, billed at a tenth. */
 export type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number };
 export type TurnInput = {
   /** What the agent reads as the next user message (the customer's words, or a harness note in brackets). */

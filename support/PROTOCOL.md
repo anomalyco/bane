@@ -30,7 +30,7 @@ panel ══ WebSocket socketUrl ═══════════════�
 
 3. **Connect.** `new WebSocket(socketUrl)`, i.e. `wss://support.bane.mx/c/<conversationId>?token=<chatToken>`. The Worker checks the token (bound to this conversation and this person) and the `Origin`. A refused upgrade is a plain `401`/`403`/`404` with no body; get a fresh handoff and call `/chat/resume`.
 
-Keep `conversationId` in `sessionStorage` so a reload reconnects to the same conversation. Switching workspace in the dashboard starts a new conversation (the handoff's workspace is the conversation's scope).
+Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage` so a reload reconnects to the same conversation. Switching workspace in the dashboard starts a new conversation (the handoff's workspace is the conversation's scope).
 
 ## 2. Resuming, renewing and granting content access
 
@@ -124,10 +124,10 @@ Show `label` as a quiet progress line under the message. Labels are already writ
 
 Render a card: "Let Bane support read the content of your emails in **Acme Prod** for this conversation." with the `why` and two buttons, **Allow** and **Not now**.
 
-- **Allow:** call `POST /v1/contact-support` with `shareContent: true`, then send `consent.respond` with the handoff (§5). If the person isn't allowed (the call fails), send `decision: "deny"`.
+- **Allow:** call `POST /v1/contact-support` with `shareContent: true` (the dashboard must be on the card's workspace), then send `consent.respond` with the handoff (§5). If the call fails, send `decision: "deny"`.
 - **Not now:** send `consent.respond` with `decision: "deny"`.
 
-The agent waits for the answer before continuing. `consent.resolved` confirms it; a card whose request was resolved elsewhere (another tab) closes.
+The agent finishes its current answer by saying it has asked, and continues on its own once the person decides: after `consent.resolved` a new `message.start` follows. A card whose request was resolved elsewhere (another tab) closes.
 
 ```jsonc
 { "v": 1, "type": "ticket.filed", "seq": 10, "ticketId": "tkt_…",
@@ -170,7 +170,7 @@ Show a small card: "Passed to the Bane team as **tkt_…**. Someone will reply b
 
 - `clientMessageId` makes resends safe: the server ignores a `user.message` it has already accepted.
 - Messages sent while a turn is running are queued and answered in order.
-- The server closes the socket with code `1008` on a malformed frame storm or a revoked token, and `4401` when the chat token expires (renew through `/chat/resume`).
+- The server answers `pong` to `ping`, and closes the socket with `1000` when the conversation ends. If the socket drops, reconnect with the same `socketUrl` until `expiresAt`, then renew through `/chat/resume`.
 
 ## 6. What the panel can rely on
 
@@ -180,4 +180,4 @@ Show a small card: "Passed to the Bane team as **tkt_…**. Someone will reply b
 
 ## 7. Testing without a model
 
-`support/` ships a fake model script (`test/fixtures`) that drives the same message sequence, so the panel can be built against `bun run dev` in `support/` with no model key: the greeting, a reply with two tool steps, a consent card and a ticket.
+`support/test/fakes.ts` has the scripted model and the fake Bane the Worker's tests use. The model script decides its next move from the request: the greeting, a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.

@@ -16,6 +16,7 @@ import { ToolFailure, type TicketInput, type ToolHost } from './agent/tools.js';
 // The protocol to the panel is support/PROTOCOL.md.
 
 const TURNS_PER_CONVERSATION = 60;
+/** Per conversation, in uncached-equivalent tokens: input + output + a tenth of cache reads (they cost a tenth). */
 const TOKEN_BUDGET = 500_000;
 const GRANT_MINUTES = 120;
 const CHAT_IDLE_MS = 24 * 3_600_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
@@ -29,7 +30,7 @@ type Meta = {
   userId: string | null; email: string | null; name: string | null; role: string | null;
   workspace: { id: string; name: string } | null; workspaces: { id: string; name: string; role: string }[];
   verified: Customer['verified']; contentAccess: boolean; page: string | null; handoffMessage: string | null; requestIds: string[];
-  threadId: string | null; greeted: boolean; turns: number; inputTokens: number; outputTokens: number; costUsd: number;
+  threadId: string | null; greeted: boolean; turns: number; inputTokens: number; outputTokens: number; cacheReadTokens?: number; costUsd: number;
   ticketId: string | null; lastActivity: number; closedAt: number | null; seq: number;
   pendingSender: string | null; confirmSentAt: number | null;
 };
@@ -264,7 +265,7 @@ export class SupportConversation extends DurableObject<Env> {
   private admit(meta: Meta): string | null {
     if (meta.status === 'closed') return 'closed';
     if (meta.turns >= TURNS_PER_CONVERSATION) return 'turns';
-    if (meta.inputTokens + meta.outputTokens >= TOKEN_BUDGET) return 'budget';
+    if (meta.inputTokens + meta.outputTokens + (meta.cacheReadTokens ?? 0) / 10 >= TOKEN_BUDGET) return 'budget';
     return null;
   }
 
@@ -295,6 +296,7 @@ export class SupportConversation extends DurableObject<Env> {
     let result: TurnResult;
     try {
       const context = input.greeting ? await this.greetingContext(meta) : '';
+      meta = this.meta()!; // the greeting context may have learned the customer's name
       result = await (await this.agent()).turn({ text, context: `${customerBlock(this.customer(meta))}\n${context}` }, this.toolHost(), (event: HarnessEvent) => {
         if (event.type === 'text.delta') this.broadcast({ type: 'text.delta', messageId, delta: event.delta });
         else if (event.type === 'tool.start') { const label = this.label(event.tool, event.args); tools.push({ id: event.callId, label: label.done, ok: true }); this.broadcast({ type: 'tool.start', messageId, toolCallId: event.callId, tool: event.tool, label: label.running }); }
@@ -310,7 +312,7 @@ export class SupportConversation extends DurableObject<Env> {
       return;
     }
     this.abort = null;
-    meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+    meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
     let final = result.text.trim(), redacted = false;
     if (!final && result.error) final = 'Something went wrong on my side. Try again in a moment.';
     const checked = gate(final, this.gateScope(meta));
@@ -488,7 +490,7 @@ export class SupportConversation extends DurableObject<Env> {
     else {
       const text = `[A support email arrived${options.note ? `. ${options.note}` : ''}]\nSubject: <untrusted>${(message.subject ?? '').slice(0, 200)}</untrusted>\n<untrusted source="email">\n${body}\n</untrusted>`;
       const result = await (await this.agent()).turn({ text, context: customerBlock(this.customer(options.unverified ? { ...meta, verified: null, workspace: null, workspaces: [] } : meta)) }, options.unverified ? this.unverifiedTools() : this.toolHost(), () => {}, new AbortController().signal);
-      meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
+      meta = this.update(m => { m.turns += 1; m.inputTokens += result.usage.inputTokens; m.outputTokens += result.usage.outputTokens; m.cacheReadTokens = (m.cacheReadTokens ?? 0) + result.usage.cacheReadTokens; m.costUsd += result.usage.costUsd; m.lastActivity = Date.now(); });
       reply = plainText(result.text.trim());
       const checked = gate(reply, { ...this.gateScope(meta), emails: [sender] });
       if (!checked.ok || !reply) {

@@ -167,7 +167,8 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
             case 'session.tool.failed': onEvent({ type: 'tool.end', callId: String(data.id), tool: names.get(String(data.id)) ?? 'tool', ok: false }); break;
             case 'session.step.ended': {
               const t = data.tokens ?? {};
-              usage.inputTokens += Number(t.input ?? 0) + Number(t.cache?.read ?? 0) + Number(t.cache?.write ?? 0);
+              // Uncached input (and cache writes) apart from cache reads, which cost a tenth: the budget weighs them so.
+              usage.inputTokens += Number(t.input ?? 0) + Number(t.cache?.write ?? 0);
               usage.outputTokens += Number(t.output ?? 0) + Number(t.reasoning ?? 0);
               usage.cacheReadTokens += Number(t.cache?.read ?? 0);
               usage.costUsd += Number(data.cost ?? 0);
