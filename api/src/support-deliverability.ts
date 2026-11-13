@@ -63,11 +63,11 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
   const Metrics = z.object({
     workspaceId: z.string(), computedAt: z.string(), window: z.object({ since: z.string(), until: z.string(), granularity: z.enum(['day', 'hour']) }),
     groupBy: z.enum(['none', 'campaign', 'from_domain', 'provider', 'stream']), stream: z.enum(['all', 'transactional', 'marketing']), filters: z.object({ campaignId: z.string().nullable(), fromDomain: z.string().nullable() }),
-    totals: z.object({ ...countShape, unsubscribed: z.number().describe('Recipient unsubscribes (footer, one-click, SES) in the window.'), rates: Rates }),
+    totals: z.object({ ...countShape, unsubscribed: z.number().describe('Recipient unsubscribes (footer, one-click, SES) in the window, for the whole workspace: stream, campaignId and fromDomain do not narrow them.'), rates: Rates }),
     buckets: z.array(Bucket.extend({ unsubscribed: z.number() })).describe('Every bucket with mail, oldest first: the volume per day or hour.'),
     groups: z.array(z.object({ key: z.string().describe('Campaign ID ("" for mail outside campaigns), From domain, provider or recipient domain, or stream.'), other: z.boolean().describe('The groups beyond the largest 20, summed.'),
       provider: z.enum(d.PROVIDER_NAMES).nullable(), ...countShape, rates: Rates, buckets: z.array(Bucket) })).nullable().describe('Null when groupBy=none.'),
-    screen: z.object({ screened: z.number(), rejected: z.number() }).describe('What the Hosted content screen judged in the window.'),
+    screen: z.object({ screened: z.number(), rejected: z.number() }).describe('What the Hosted content screen judged in the window, for the whole workspace (not narrowed by the filters).'),
     findings: Findings,
   }).openapi('SupportDeliveryMetrics');
   app.openapi(createRoute({ ...meta('getSupportDeliveryMetrics', 'Delivery, bounce, complaint, open and click counts per day or hour over at most 30 days, optionally per campaign, From domain, recipient provider or stream, each rate with its numerator and denominator, plus findings. Created-cohort: an email counts in the bucket it was created in.'),

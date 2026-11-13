@@ -4440,7 +4440,7 @@ export type SupportDeliveryMetrics = {
         suppressed: number;
         simulated: number;
         /**
-         * Recipient unsubscribes (footer, one-click, SES) in the window.
+         * Recipient unsubscribes (footer, one-click, SES) in the window, for the whole workspace: stream, campaignId and fromDomain do not narrow them.
          */
         unsubscribed: number;
         rates: SupportRates;
@@ -4567,7 +4567,7 @@ export type SupportDeliveryMetrics = {
         }>;
     }> | null;
     /**
-     * What the Hosted content screen judged in the window.
+     * What the Hosted content screen judged in the window, for the whole workspace (not narrowed by the filters).
      */
     screen: {
         screened: number;

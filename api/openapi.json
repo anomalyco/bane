@@ -15007,7 +15007,7 @@
               },
               "unsubscribed": {
                 "type": "number",
-                "description": "Recipient unsubscribes (footer, one-click, SES) in the window."
+                "description": "Recipient unsubscribes (footer, one-click, SES) in the window, for the whole workspace: stream, campaignId and fromDomain do not narrow them."
               },
               "rates": {
                 "$ref": "#/components/schemas/SupportRates"
@@ -15287,7 +15287,7 @@
               "screened",
               "rejected"
             ],
-            "description": "What the Hosted content screen judged in the window."
+            "description": "What the Hosted content screen judged in the window, for the whole workspace (not narrowed by the filters)."
           },
           "findings": {
             "type": "array",
