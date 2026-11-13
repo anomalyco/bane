@@ -486,7 +486,7 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
   log(level, entry);
 }
 export const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
+  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://support.bane.mx wss://support.bane.mx https://support.dev.bane.mx wss://support.dev.bane.mx; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
