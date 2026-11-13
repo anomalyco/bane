@@ -41,6 +41,7 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap .node-column { min-width: 0; min-height: 64px; padding: 0; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); outline-offset: 4px; }
 .composer-document .tiptap .node-column:focus-within { outline-color: var(--color-muted); }
 .composer-document .tiptap .node-columns { gap: 4%; margin-bottom: 16px; }
+.composer-document .tiptap .node-column p.is-empty::before { content: '/ for blocks'; }
 .composer-document .tiptap .node-section { min-height: 64px; margin: 0 0 16px; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); outline-offset: 3px; }
 .composer-document .tiptap .node-section > p:last-child:has(> br.ProseMirror-trailingBreak:only-child) { min-height: 1px; height: 1px; margin: 0; line-height: 1px; }
 .composer-document .tiptap a { cursor: text; }
