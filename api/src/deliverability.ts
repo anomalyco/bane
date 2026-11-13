@@ -161,8 +161,9 @@ type GroupRow = Counts & { bucket: string; key: string };
 export async function deliveryMetrics(db: DbExecutor, wid: string, q: MetricsQuery) {
   const filters = sql`e.workspace_id = ${wid} AND e.created_at >= ${q.since}::timestamptz AND e.created_at < ${q.until}::timestamptz
     ${q.campaignId ? sql`AND e.campaign_id = ${q.campaignId}` : sql``} ${q.fromDomain ? sql`AND ${fromDomainIs(q.fromDomain)}` : sql``}`;
-  const key = q.groupBy === 'campaign' ? sql`coalesce(e.campaign_id, '')` : q.groupBy === 'from_domain' ? fromDomainOf
-    : q.groupBy === 'provider' ? sql`CASE WHEN ${providerSql(recipientDomain)} = 'other' THEN ${recipientDomain} ELSE ${providerSql(recipientDomain)} END` : sql`''`;
+  // Providers are classified per recipient domain, not per email: the rows are grouped by domain first.
+  const key = q.groupBy === 'campaign' ? sql`coalesce(e.campaign_id, '')` : q.groupBy === 'from_domain' ? fromDomainOf : q.groupBy === 'provider' ? recipientDomain : sql`''`;
+  const keyOf = q.groupBy === 'provider' ? sql`coalesce(nullif(${providerSql(sql`raw.key`)}, 'other'), raw.key)` : sql`raw.key`;
   // Opens that SES did not flag as a bot or a privacy proxy (isBotEvent true or Likely), once per email.
   const human = sql`human AS MATERIALIZED (SELECT DISTINCT email_id FROM sending_email_events WHERE workspace_id = ${wid} AND created_at >= ${q.since}::timestamptz
     AND type = 'open' AND NOT simulated AND coalesce(data->>'isBotEvent', 'Unknown') NOT IN ('true', 'Likely'))`;
@@ -170,11 +171,12 @@ export async function deliveryMetrics(db: DbExecutor, wid: string, q: MetricsQue
     FROM sending_emails e LEFT JOIN human h ON h.email_id = e.id WHERE ${filters} ${kind ? sql`AND (e.snapshot->>'kind') = ${kind}` : sql``} GROUP BY 1, 2`;
   // A stream reads sending_emails_kind_created; per-stream groups are the whole window minus marketing (every email
   // is created as exactly one kind), so neither arm detoasts snapshot for its kind.
-  const grouped = async (kind: 'transactional' | 'marketing' | null) => (await db.execute<GroupRow>(sql`WITH ${human}, mail AS (${arm(kind)}),
+  const sums = sql.join(COUNT_KEYS.map(k => sql`sum(${sql.identifier(k)})::int AS ${sql.identifier(k)}`), sql`, `);
+  const grouped = async (kind: 'transactional' | 'marketing' | null) => (await db.execute<GroupRow>(sql`WITH ${human}, raw AS (${arm(kind)}),
+      mail AS (SELECT raw.bucket, coalesce(${keyOf}, '') AS key, ${sums} FROM raw GROUP BY 1, 2),
       ranked AS (SELECT key, row_number() OVER (ORDER BY sum(emails + simulated) DESC, key) AS rank FROM mail GROUP BY key)
     SELECT m.bucket, CASE WHEN r.rank <= ${LIMITS.groups} THEN m.key ELSE '~other' END AS key,
-      ${sql.join(COUNT_KEYS.map(k => sql`sum(m.${sql.identifier(k)})::int AS ${sql.identifier(k)}`), sql`, `)}
-    FROM mail m JOIN ranked r USING (key) GROUP BY 1, 2 ORDER BY 1, 2`)).rows;
+      ${sums} FROM mail m JOIN ranked r USING (key) GROUP BY 1, 2 ORDER BY 1, 2`)).rows;
   const kind = q.stream === 'all' ? null : q.stream;
   let rows: GroupRow[];
   if (q.groupBy === 'stream') {
@@ -278,14 +280,19 @@ export async function bounceReasons(db: DbExecutor, wid: string, q: BounceQuery)
     firstSeen: new Date(r.first).toISOString(), lastSeen: new Date(r.last).toISOString(), campaigns: [...new Set(r.campaigns ?? [])].slice(0, 3) }));
   const other = rest.length ? { groups: rest.length, count: rest.reduce((s, r) => s + r.count, 0) } : null;
   // First sends: campaign mail, the sender score's definition of mail to recipients not mailed before (hygiene factor).
-  const { rows: [first] } = await db.execute<{ sends: number; bounced: number; provider_sends: Record<string, number> | null }>(sql`SELECT count(*) FILTER (WHERE ${ACCEPTED})::int AS sends,
-      count(*) FILTER (WHERE e.status = 'bounced' OR e.event_outcomes & 4 <> 0)::int AS bounced,
-      (SELECT jsonb_object_agg(p, n) FROM (SELECT ${provider} AS p, count(*)::int AS n FROM sending_emails e WHERE ${mail} AND e.created_at >= ${q.since}::timestamptz
-        AND e.created_at < ${q.until}::timestamptz AND NOT e.simulated AND (e.status = 'delivered' OR e.event_outcomes & 2 <> 0) GROUP BY 1) x) AS provider_sends
+  const { rows: [first] } = await db.execute<{ sends: number; bounced: number }>(sql`SELECT count(*) FILTER (WHERE ${ACCEPTED})::int AS sends,
+      count(*) FILTER (WHERE e.status = 'bounced' OR e.event_outcomes & 4 <> 0)::int AS bounced
     FROM sending_emails e WHERE ${mail} AND e.created_at >= ${q.since}::timestamptz AND e.created_at < ${q.until}::timestamptz AND NOT e.simulated AND e.campaign_id IS NOT NULL`);
   const firstSend = { basis: 'Campaign mail, which the sender score counts as first sends (recipients not mailed before).', ...rate(first?.bounced ?? 0, first?.sends ?? 0) };
   const complaints = Object.entries(groups.filter(g => g.class === 'complaint').reduce<Record<string, number>>((m, g) => ({ ...m, [g.subtype]: (m[g.subtype] ?? 0) + g.count }), {})).map(([feedbackType, count]) => ({ feedbackType, count }));
-  return { groups, other, complaints, firstSend, findings: byImpact(bounceFindings(groups, firstSend, first?.provider_sends ?? {})) };
+  // Deliveries per provider, the throttling finding's denominator: only when a group looks like throttling.
+  const delivered: Record<string, number> = {};
+  if (groups.some(g => (g.class === 'deferral' || g.class === 'soft_bounce') && THROTTLE.test(`${g.status ?? ''} ${g.diagnostic ?? ''}`))) {
+    const { rows } = await db.execute<{ provider: string; n: number }>(sql`SELECT ${providerSql(sql`x.domain`)} AS provider, sum(x.n)::int AS n FROM (SELECT ${recipientDomain} AS domain, count(*) AS n
+      FROM sending_emails e WHERE ${mail} AND e.created_at >= ${q.since}::timestamptz AND e.created_at < ${q.until}::timestamptz AND NOT e.simulated AND (e.status = 'delivered' OR e.event_outcomes & 2 <> 0) GROUP BY 1) x GROUP BY 1`);
+    for (const r of rows) delivered[r.provider] = r.n;
+  }
+  return { groups, other, complaints, firstSend, findings: byImpact(bounceFindings(groups, firstSend, delivered)) };
 }
 const AUTH_CODES = /\b5\.7\.(?:26|509|515)\b|5\.7\.1\b.*unauthenticated/i, THROTTLE = /\b4\.7\.(?:28|650)\b|TSS04|\b421\b.*4\.7\.0/i;
 function bounceFindings(groups: { provider: Provider; class: string; status: string | null; diagnostic: string | null; count: number }[], first: Rate, delivered: Record<string, number>): Finding[] {
