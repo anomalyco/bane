@@ -58,6 +58,34 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
+test('email preview engine: Word-only lint, Gmail account modes, safe rewrites and byte clipping', async () => {
+  const { emulate, lint, PreviewLimitError } = await import('./src/email-preview/index.js');
+  const source = '<!doctype html><head><style>.card {border-radius:14px;color:#123456}</style></head><body><p class="card">Receipt</p><a href="https://example.com/read">Read</a><img src="https://example.com/pixel" alt="Logo"><!--[if mso]><p style="display:grid">Word only</p><![endif]--></body>';
+  const gmail = emulate(source, { client: 'gmail-web', theme: 'light' });
+  assert.match(gmail.html, /border-radius:\s*14px/);
+  assert.doesNotMatch(gmail.html, /https:\/\/example\.com|Word only|class="card"/);
+  const mobile = emulate(source, { client: 'gmail-android-non-google', theme: 'light' });
+  assert.match(mobile.html, /Receipt/); assert.doesNotMatch(mobile.html, /border-radius:/);
+  const issues = lint(source).filter(i => i.feature === 'css-display-grid');
+  assert.deepEqual(issues, [{ feature: 'css-display-grid', clients: ['outlook-classic-windows'], severity: 'error' }]);
+  assert.deepEqual(emulate(source, { client: 'outlook-classic-windows', theme: 'dark' }).html, '');
+  const long = '<p>' + 'é'.repeat(52_000) + '</p><p>TAIL</p>';
+  const clipped = emulate(long, { client: 'gmail-web', theme: 'light' });
+  assert.match(clipped.html, /Message clipped/); assert.doesNotMatch(clipped.html, /TAIL|\uFFFD/);
+  assert.match(emulate(long, { client: 'apple-mail-macos', theme: 'light' }).html, /TAIL/);
+  assert.throws(() => lint('é'.repeat(132_000)), PreviewLimitError);
+});
+test('email preview engine: forced colors and opt-in media use the selected theme and device', async () => {
+  const { emulate } = await import('./src/email-preview/index.js');
+  const html = '<style>@media (prefers-color-scheme:dark){.card{color:#787123}} @media (max-width:500px){.card{padding:12px}}</style><p class="card" style="color:#202020;background:#ffffff">Total</p>';
+  const apple = (theme: 'light' | 'dark', device: 'desktop' | 'mobile') => emulate('<meta name="color-scheme" content="light dark">' + html, {client:'apple-mail-ios', theme, device}).html;
+  assert.match(apple('dark', 'mobile'), /#787123/); assert.match(apple('dark', 'mobile'), /padding:12px/);
+  assert.doesNotMatch(apple('light', 'desktop'), /#787123|padding:12px/);
+  const gmail = (client: 'gmail-web' | 'gmail-ios', source: string) => emulate(source, {client, theme:'dark'}).html;
+  assert.match(gmail('gmail-web', html), /background:#ffffff/);
+  assert.doesNotMatch(gmail('gmail-ios', html), /background:#ffffff|#787123/);
+  assert.match(gmail('gmail-ios', '<meta name="color-scheme" content="light only">' + html), /background:#ffffff/);
+});
 test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
   const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
   const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
@@ -492,7 +520,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.equal((spec.paths as Json)['/v1/workspaces'].get.deprecated, true, 'listWorkspaces is a deprecated alias of GET /v1/me workspaces.');
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
-  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
+  for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','previewEmail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
   const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','getRitualVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
@@ -1613,7 +1641,7 @@ describe('Public contract and authentication', () => {
       '/v1/audience-query/query': ['post'], '/v1/audience-query/plan': ['post'], '/v1/audience-query/apply': ['post'],
       '/v1/lists': ['get', 'post'], '/v1/lists/{id}/members': ['get', 'post'],
       '/v1/segments': ['get', 'post'], '/v1/segments/{id}/preview': ['post'],
-      '/v1/emails/send': ['post'], '/v1/emails/batch': ['post'], '/v1/emails': ['get'],
+      '/v1/emails/send': ['post'], '/v1/emails/batch': ['post'], '/v1/emails/preview': ['post'], '/v1/emails': ['get'],
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
@@ -5235,11 +5263,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
-    // REST lets a read credential run AudienceQL reads and segment previews (POSTs that change nothing): no confirm argument.
-    for (const name of ['queryAudience', 'previewSegment']) {
+    // Read-only POSTs change nothing and do not require confirm.
+    for (const name of ['queryAudience', 'previewSegment', 'previewEmail']) {
       const tool = catalog.tools.find((x: Json) => x.name === name);
       assert.ok(tool, name); assert.equal(tool.annotations.readOnlyHint, true, name); assert.equal(tool.inputSchema.properties.confirm, undefined, name);
     }
+    const preview = await rpc(token, 'tools/call', { name: 'previewEmail', arguments: { body: { html: '<p>Preview fixture</p>', clients: ['gmail-web'], theme: 'light' } } });
+    assert.equal(preview.isError, false); assert.match(preview.content[0].text, /^Untrusted email preview/);
+    assert.match(preview.structuredContent.previews[0].html, /Preview fixture/);
     await callTool(token, 'queryAudience', { body: { statement: 'SELECT count(*) FROM contacts' } });
     const unconfirmed = await rpc(token, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 60, purpose: 'read delegation' } } });
     assert.equal(unconfirmed.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(unconfirmed));
@@ -5839,6 +5870,67 @@ describe('Import property boundaries', () => {
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {
+  test('previewEmail validates offline previews and reads only authorized, redacted outbound HTML', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const path = '/v1/emails/preview', wid = runtime.config.workspaceId, foreign = unique('preview-workspace');
+      const key = async (permissions: string[], domains: string[] = []) => ok(await local('POST', '/v1/api-keys', { name: 'Preview fixture', permissions, domains }), 201).secret;
+      const reader = await key(['read']), restricted = await key(['read'], ['preview.example.com']), sender = await key(['send']);
+      const options = { clients: ['gmail-web'], theme: 'light' };
+      const preview = (source: Json, token = reader) => request('POST', path, token, { ...options, ...source });
+      const pasted = { html: '<p style="display:flex">Preview fixture</p>' };
+      error(await request('POST', path, undefined, { ...options, ...pasted }), 401, 'AUTH_REQUIRED');
+      error(await preview(pasted, sender), 403, 'PERMISSION_DENIED');
+      for (const invalid of [{}, { ...pasted, emailId: 'both' }, { html: '' }, { emailId: '' },
+        { ...pasted, clients: [] }, { ...pasted, clients: ['gmail-web', 'gmail-web'] }, { ...pasted, clients: ['unknown'] },
+        { ...pasted, theme: 'blue' }, { ...pasted, device: 'tablet' }]) error(await preview(invalid), 422, 'VALIDATION_FAILED');
+      const clients = ['outlook-classic-windows', 'gmail-web'];
+      const { previews } = ok(await preview({ ...pasted, clients, theme: 'dark', device: 'mobile' }, restricted));
+      assert.deepEqual(previews.map((p: Json) => p.client), clients);
+      assert.equal(previews[0].html, ''); assert.ok(previews[0].issues.length);
+      for (const issue of previews[0].issues) {
+        assert.equal(typeof issue.feature, 'string'); assert.ok(issue.clients.includes(clients[0])); assert.ok(['warning', 'error'].includes(issue.severity));
+      }
+      assert.match(previews[1].html, /Preview fixture/); assert.match(previews[1].html, /Content-Security-Policy/i);
+      const oversized = '🌍'.repeat(65537);
+      error(await preview({ html: oversized }), 413, 'EMAIL_PREVIEW_LIMIT_EXCEEDED');
+      error(await preview({ html: '<div>'.repeat(400) }), 413, 'EMAIL_PREVIEW_LIMIT_EXCEEDED');
+      // One small text node expands when its ampersands are serialized into each document.
+      const { clients: allClients } = await import('./src/email-preview/support.js');
+      error(await preview({ html: '<p>' + '&'.repeat(90_000) + '</p>', clients: allClients }), 413, 'EMAIL_PREVIEW_LIMIT_EXCEEDED');
+
+      // Terminal rows only; no dispatch or live provider. The foreign fixture uses the same sender domain.
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [foreign]);
+      const token = `u_${'a'.repeat(64)}`, sealed = `fwd_${'b'.repeat(64)}`;
+      const seed = async (snapshot: Json, workspace = wid, from = 'mail@sub.preview.example.com') => {
+        const id = unique('preview-email');
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated)
+          VALUES ($1,$2,$3,'fixture',$4,'["recipient@example.net"]','[]','[]','Preview',$5,'delivered',true)`,
+        [id, workspace, REGION, from, { subject: 'Preview', attachments: [], testCampaignId: null, ...snapshot }]);
+        return id;
+      };
+      const stored = await seed({ html: `<p>Visible ${token}</p>` });
+      for (const allowed of [reader, restricted]) {
+        const html = ok(await preview({ emailId: stored }, allowed)).previews[0].html;
+        assert.match(html, /Visible \[redacted\]/); assert.ok(!html.includes(token));
+      }
+      assert.ok(ok(await local('POST', path, { ...options, emailId: stored })).previews[0].html.includes(token));
+      error(await preview({ emailId: stored }, sender), 403, 'PERMISSION_DENIED');
+      for (const hidden of [await seed(pasted, foreign), unique('unknown')]) {
+        error(await local('POST', path, { ...options, emailId: hidden }), 404, 'NOT_FOUND');
+        error(await preview({ emailId: hidden }, restricted), 404, 'NOT_FOUND');
+      }
+      const mailbox = await seed({ ...pasted, mailbox: true });
+      for (const hidden of [await seed(pasted, wid, 'mail@elsewhere.example.com'), await seed({ ...pasted, testCampaignId: 'campaign-fixture' }), mailbox])
+        error(await preview({ emailId: hidden }, restricted), 404, 'NOT_FOUND');
+      error(await preview({ emailId: mailbox }), 404, 'NOT_FOUND');
+      const notice = await seed({ html: `<p>Sealed ${sealed}</p>`, sealed: true });
+      const sealedHtml = ok(await local('POST', path, { ...options, emailId: notice })).previews[0].html;
+      assert.match(sealedHtml, /link withheld/); assert.ok(!sealedHtml.includes(sealed));
+      error(await preview({ emailId: await seed({ raw: 'raw MIME must stay withheld', text: 'No HTML' }) }), 422, 'EMAIL_HTML_UNAVAILABLE');
+      error(await preview({ emailId: await seed({ html: oversized }) }), 413, 'EMAIL_PREVIEW_LIMIT_EXCEEDED');
+    });
+  });
+
   test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { permissions: ['read'] });
