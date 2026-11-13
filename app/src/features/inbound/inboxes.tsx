@@ -109,10 +109,10 @@ export function AgentInboxesPage() {
         empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} description={q ? undefined : 'Expiring addresses for agents and end-to-end tests. Create one here, or let an agent create its own with an API key over the API or MCP.'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New inbox</Button> : undefined} />}
         columns={[
           // An inbox's card: its address and status, its name or type, then expiry and mail counts.
-          { key: 'address', label: 'Address', width: '40%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>{row.name && <span className="muted receiving-clip">{row.name}</span>}</div>, cardRender: row => <PrivateAddress value={row.address} /> },
-          { key: 'name', label: 'Name', table: false, card: 'line', render: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
-          { key: 'status', label: 'Status', width: '14%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
-          { key: 'expires', label: 'Expires', width: '16%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : date(row.expiresAt), cardRender: row => row.status === 'deleting' ? 'Deleting now' : `Expires ${date(row.expiresAt)}` },
+          { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
+          { key: 'name', label: 'Name', width: '26%', card: 'line', render: row => row.name ? <span className="inbox-clip" title={row.name}>{row.name}</span> : <span className="muted">—</span>, cardRender: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
+          { key: 'status', label: 'Status', width: '11%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
+          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? date(row.expiresAt) : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? `Expires ${date(row.expiresAt)}` : 'Never expires' },
           { key: 'messages', label: 'Messages', align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
           { key: 'unread', label: 'Unread', align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
           { key: 'held', label: 'Held', align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
@@ -215,8 +215,8 @@ function InboxDetail({ id }: { id: string }) {
     {b && <>
       <dl className="settings-facts">
         <div><dt>Status</dt><dd><StatusBadge status={statusLabel[b.status]} tone={statusTone[b.status]} /></dd></div>
-        <div><dt>{b.status === 'active' ? 'Expires' : 'Expired'}</dt><dd>{date(b.expiresAt)}</dd></div>
-        <div><dt>Deleted after</dt><dd>{date(b.deleteAfter)}</dd></div>
+        <div><dt>{b.status === 'active' || !b.expiresAt ? 'Expires' : 'Expired'}</dt><dd>{b.expiresAt ? date(b.expiresAt) : 'Never'}</dd></div>
+        <div><dt>Deleted after</dt><dd>{b.deleteAfter ? date(b.deleteAfter) : 'Never'}</dd></div>
         <div><dt>Delivered</dt><dd>{number(b.usage.messages - b.usage.held)} of {number(b.limits.messages)}{b.usage.unread > 0 && <span className="muted"> · {number(b.usage.unread)} unread</span>}</dd></div>
         <div><dt>Stored</dt><dd>{size(b.usage.bytes)} of {size(b.limits.bytes)}</dd></div>
         <div><dt>Replies</dt><dd>{b.type === 'sandbox' ? 'Never (sandbox)' : b.send.enabled ? `To senders only, ${number(b.send.perDay)} a day` : 'Off'}</dd></div>
@@ -227,18 +227,18 @@ function InboxDetail({ id }: { id: string }) {
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
       {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
     </>}
-    <p className="muted inbox-facts-note">It receives mail until it expires. For 1 more day, new mail is held (stored and listed, not delivered), then the inbox and its mail are deleted. Over its message or size limit, new mail is held the same way. Replies go only to people who wrote to it and are turned on at creation.</p>
+    {(!b || b.expiresAt) && <p className="muted inbox-facts-note">After it expires, new mail is held for 1 more day (stored and listed, not delivered), then the inbox and its mail are deleted. Over its message or size limit, new mail is held the same way.</p>}
     <section className="section stack" aria-labelledby="agent-inbox-messages">
-      <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} />
-      {folders.error ? <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/> : <Field label="Folder" htmlFor="inbox-folder" hint="All deliveries lists every message; folders are where a mail client or agent filed them."><Select id="inbox-folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/></Field>}
+      <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} actions={!folders.error && <Select className="inbox-folder" aria-label="Folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/>} />
+      {folders.error && <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
         <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" description={b?.type === 'sandbox' ? 'Send test mail with POST /v1/inboxes/{id}/simulate.' : b ? 'Mail sent to this inbox shows up here within seconds.' : undefined} />}
           columns={[
             // A message's card: its subject and status, then the sender and any code it carries.
-            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="receiving-clip"><Sender value={row.from} /></span> },
-            { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <div className="settings-cell-stack"><span className="receiving-clip">{row.subject || '(no subject)'}</span>{row.snippet && <span className="muted receiving-clip">{row.snippet}</span>}</div>, cardRender: row => row.subject || '(no subject)' },
-            { key: 'code', label: <span title="A one-time code Bane found in the message, such as a sign-up code">Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span> },
+            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender value={row.from} /></span> },
+            { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
+            { key: 'code', label: <span title="A one-time code Bane found in the message, such as a sign-up code">Code found</span>, card: 'inline', render: row => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: row => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' },
             { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
             { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
           ]} />
@@ -246,7 +246,7 @@ function InboxDetail({ id }: { id: string }) {
       </>}
     </section>
     {canAdminister && settled && <section className="section stack" aria-labelledby="agent-inbox-keys">
-      <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} actions={b?.status === 'active' && <ConnectAgentButton inboxId={id} size="sm" />} />
+      <SectionHeader title={<span id="agent-inbox-keys">API keys for this inbox</span>} />
       <p className="muted inbox-facts-note">These API keys read only this inbox, over the API or MCP. They stop working when it is deleted.</p>
       {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={1} rows={keys.data ?? []} rowKey={key => key.id}
         empty={<EmptyState title="No keys" description="Create one with Connect an agent. It comes with a ready setup for OpenCode, Claude Code or Cursor." />}
@@ -263,6 +263,6 @@ function InboxDetail({ id }: { id: string }) {
     {selected && <MessageDialog inboxId={id} messageId={selected} onClose={() => setSelected(null)} />}
     {b && <EditInboxDialog inbox={b} open={editing} onOpenChange={setEditing} />}
     <ConfirmDialog open={revoking !== null} onOpenChange={value => { if (!value) setRevoking(null) }} title={`Revoke ${revoking?.name ?? 'this key'}?`} description="Agents using it lose access to this inbox right away. The inbox and its mail stay." confirmLabel="Revoke key" danger pending={revoke.isPending} onConfirm={async () => { if (revoking) await revoke.mutateAsync(revoking.id) }} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${b?.address ?? 'this inbox'}?`} description="This inbox stops receiving now. Its real address returns to normal domain routing. Keys created with the inbox stop working, and its messages are erased within the hour." confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this inbox?" description={<>{b ? <PrivateAddress value={b.address} /> : 'This inbox'} stops receiving now. Its real address returns to normal domain routing. Keys created with the inbox stop working, and its messages are erased within the hour.</>} confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
   </div>
 }

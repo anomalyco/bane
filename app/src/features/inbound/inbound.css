@@ -157,6 +157,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 
 /* Receiving: shared search width and one-line clipping. */
 .receiving-search { width: 240px; }
+.inbox-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receiving-clip { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .receiving-search { width: 100%; } }
 /* Route editor: the choices and the delete action. */
@@ -272,6 +273,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .inbound-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-size: var(--text-sm); font-weight: 500; }
 .inbound-advanced > summary .muted { font-weight: var(--font-weight-regular); }
 .inbound-advanced__body { padding-top: var(--space-16); }
+.inbox-folder { width: 280px; max-width: 100%; }
+@media (max-width: 640px) { .inbox-folder { width: 100%; } .ui-section-header > .cluster:has(> .inbox-folder) { flex: 1 1 100%; } }
 .inbox-facts-note { max-width: 72ch; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 .connect-agent__title { font-size: var(--text-sm); }
 /* Phone and tablet (the document scrolls): the conversation list and the open conversation take their natural height
