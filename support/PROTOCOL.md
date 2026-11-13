@@ -1,6 +1,6 @@
 # Support chat protocol (v1)
 
-The contract between the dashboard's Help panel and the support Worker (`support.bane.mx`, dev `support.dev.bane.mx`). The panel never talks to the model or to Bane's support routes: it talks to one conversation over one WebSocket, and the Worker does the rest.
+The contract between the dashboard's Help panel and the support Worker (`support.bane.mx`, dev `support.dev.bane.mx`). The panel never talks to the model or to Nightmail's support routes: it talks to one conversation over one WebSocket, and the Worker does the rest.
 
 Everything here is JSON. Unknown fields must be ignored and unknown `type`s skipped, so the server can add fields and message types without breaking an older panel. A breaking change bumps `v`.
 
@@ -39,7 +39,7 @@ Keep `conversationId`, `socketUrl` and `expiresAt` in `sessionStorage` so a relo
 - the chat token expired (connect refused, or `expiresAt` passed);
 - the server sent `{ type: "error", code: "GRANT_EXPIRED" }` (account access ends after two hours; a fresh handoff renews it);
 - the person pressed **Allow** on a consent card (§4.3): get the handoff with `shareContent: true`;
-- the person opened the dashboard from a support email's "continue in Bane" link: `https://bane.mx/?support=<conversationId>&share=1`. Open the panel, tick the share box, call `contact-support` then `/chat/resume`. Email conversations can be viewed this way; replies still go by email.
+- the person opened the dashboard from a support email's "continue in Nightmail" link: `https://bane.mx/?support=<conversationId>&share=1`. Open the panel, tick the share box, call `contact-support` then `/chat/resume`. Email conversations can be viewed this way; replies still go by email.
 
 The handoff's user must be the conversation's user (`403 { error: { code: "NOT_YOUR_CONVERSATION" } }` otherwise). `404 { error: { code: "CONVERSATION_NOT_FOUND" } }` means it expired: start a new one.
 
@@ -71,7 +71,7 @@ Every server message has `v: 1`, a `type` and a `seq`: a per-conversation counte
   "conversationId": "conv_7m2k…",
   "channel": "chat",                               // or "email" (view only: §2)
   "status": "open",                                // "open" | "ticketed" | "closed"
-  "agent": { "name": "Bane support", "ai": true }, // show "AI support agent" in the header
+  "agent": { "name": "Nightmail support", "ai": true }, // show "AI support agent" in the header
   "customer": { "firstName": "Ada" },
   "workspace": { "id": "ws_…", "name": "Acme Prod" },
   "contentAccess": false,                          // true once the person allowed content (§4.3)
@@ -122,7 +122,7 @@ Show `label` as a quiet progress line under the message. Labels are already writ
 { "v": 1, "type": "consent.resolved", "seq": 7, "requestId": "cns_…", "decision": "allow" }  // or "deny"
 ```
 
-Render a card: "Let Bane support read the content of your emails in **Acme Prod** for this conversation." with the `why` and two buttons, **Allow** and **Not now**.
+Render a card: "Let Nightmail support read the content of your emails in **Acme Prod** for this conversation." with the `why` and two buttons, **Allow** and **Not now**.
 
 - **Allow:** call `POST /v1/contact-support` with `shareContent: true` (the dashboard must be on the card's workspace), then send `consent.respond` with the handoff (§5). If the call fails, send `decision: "deny"`.
 - **Not now:** send `consent.respond` with `decision: "deny"`.
@@ -137,7 +137,7 @@ The agent finishes its current answer by saying it has asked, and continues on i
   "expect": "usually within one business day" }
 ```
 
-Show a small card: "Passed to the Bane team as **tkt_…**. Someone will reply by email to a…@acme.com, usually within one business day." After a ticket the conversation stays open: the person can keep asking, and the agent keeps answering what it can.
+Show a small card: "Passed to the Nightmail team as **tkt_…**. Someone will reply by email to a…@acme.com, usually within one business day." After a ticket the conversation stays open: the person can keep asking, and the agent keeps answering what it can.
 
 ### 4.4 Errors and the end
 
@@ -209,4 +209,4 @@ X-Filename: <URI-encoded file name, optional>
 
 ## 7. Testing without a model
 
-`support/test/fakes.ts` has the scripted model and the fake Bane the Worker's tests use. The model script decides its next move from the request: the greeting, a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.
+`support/test/fakes.ts` has the scripted model and the fake Nightmail the Worker's tests use. The model script decides its next move from the request: the greeting, a reply with a tool step (`bounce_reasons`), a consent card ("look at the content"), a ticket ("refund") and a gated answer ("leak please"). `bun run test` in `support/` drives the real bundle through these, so the frame sequences in §3 are exactly what the tests assert.

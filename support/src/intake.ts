@@ -4,17 +4,17 @@ import type { Env } from './env.js';
 import { attachmentLink, safeName, storeImage } from './attachments.js';
 import { cleanImage, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
 import { countToday, holdOverCap, mailAllowed, ticketAllowed } from './limits.js';
-import { hostedDomain } from '../../api/src/brand.js';
 import { fileTicket, notifyTeam, type TicketContext } from './tickets.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { addressHash, newId } from './tokens.js';
 import { log, logError } from './log.js';
+import { hostedDomain, productName } from '../../api/src/brand.js';
 
 // abuse@, privacy@ and legal@ (owner decision): straight into the ticket system, never to the AI agent and never
-// forwarded. One SupportIntake object per Bane thread at those addresses; there is no OpenCode here and no model call.
+// forwarded. One SupportIntake object per Nightmail thread at those addresses; there is no OpenCode here and no model call.
 // Each message becomes (or adds to) one typed ticket with the sender and its DMARC/verification result, the subject and
 // text (as untrusted quotes), image attachments checked and stripped like screenshots (other files are listed, to be
-// opened in Bane's inbox), an email to the team, and one fixed acknowledgement per sender per day. Same caps as the
+// opened in Nightmail's inbox), an email to the team, and one fixed acknowledgement per sender per day. Same caps as the
 // support address (review M5).
 
 export const INTAKE = { abuse: { type: 'abuse_report', severity: 'P3', label: 'abuse' }, privacy: { type: 'privacy', severity: 'P2', label: 'privacy' }, legal: { type: 'legal', severity: 'P2', label: 'legal' } } as const;
@@ -76,7 +76,7 @@ export class SupportIntake extends DurableObject<Env> {
     const mail = await mailAllowed(this.env, next.mailbox, sender, dmarcPass);
     if (!mail.ok) { await hold(mail.reason); return; }
     const automatic = message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender);
-    // Who wrote: a DMARC pass that maps to a Bane user names them; anything else is shown as an unverified sender.
+    // Who wrote: a DMARC pass that maps to a Nightmail user names them; anything else is shown as an unverified sender.
     let verified: TicketContext['verified'] = null, customer: TicketContext['customer'] = { userId: null, email: null, name: null, role: null, workspaces: [] };
     if (dmarc === 'PASS') {
       const checked = await this.env.BANE.verifyEmail({ email: sender, evidence: { kind: 'dmarc', result: 'pass', aligned: true, messageId: message.messageId ?? next.message_id } });
@@ -104,7 +104,7 @@ export class SupportIntake extends DurableObject<Env> {
     const input: TicketInput = {
       type: config.type as TicketType, title: subject.slice(0, 80) || '(no subject)', severity: config.severity, ask: text.slice(0, 600),
       summary: `An email to ${next.mailbox}@ (filed without the AI agent). Subject: “${subject.slice(0, 200)}”.\n\n${text.slice(0, 900)}`,
-      tried: [], recommendation: `Read it in Bane’s inbox (${next.mailbox}@ thread ${next.thread_id}) and reply there.${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
+      tried: [], recommendation: `Read it in ${productName}’s inbox (${next.mailbox}@ thread ${next.thread_id}) and reply there.${listed.length ? ` Other attachments, not opened here: ${listed.join('; ')}.` : ''}${automatic ? ' It was sent automatically (no acknowledgement was sent).' : ''}`,
       evidence: { ids: [next.message_id] }, details: { topic: next.mailbox },
     };
     const ctx: TicketContext = { conversationId, channel: 'email', threadId: next.thread_id, costUsd: 0, model: 'none (intake)', attachments: stored, verified, dmarc, sender: verified ? null : sender, customer };
@@ -120,7 +120,7 @@ export class SupportIntake extends DurableObject<Env> {
     if (filed?.created) await notifyTeam(this.env, ctx, filed as Awaited<ReturnType<typeof fileTicket>>, input);
     // One fixed acknowledgement per sender per mailbox per day; never to automatic mail.
     if (!automatic && (await countToday(this.env, `sender:${hash}:ack:${next.mailbox}`, 1)).ok) {
-      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@${hostedDomain}. We've received your message${filed ? ` and logged it as ${filed.id}` : ''}. A person at Bane will reply by email.\n\nBane`;
+      const text = `Hi,\n\nThanks for writing to ${next.mailbox}@${hostedDomain}. We've received your message${filed ? ` and logged it as ${filed.id}` : ''}. A person at ${productName} will reply by email.\n\n${productName}`;
       await api.reply(message.threadId ?? next.thread_id, { replyToMessageId: next.message_id, text, to: sender, subject: `Re: your message to ${next.mailbox}@${hostedDomain}`, addressId: null }, `ack-${next.message_id}`);
     }
     set(filed ? 'done' : 'held');

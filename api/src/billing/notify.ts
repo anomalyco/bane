@@ -3,12 +3,13 @@ import { isSimulatedSes, log, type JobHandler } from '../core.js';
 import { retryDatabaseFailures } from '../jobs.js';
 import { formatUsd, microCents, RATES, type MicroCents } from './money.js';
 import type { NoticeKind } from './types.js';
+import { productName } from '../brand.js';
 
 // Owner emails about money (job billing.notify, one per billing_notices row). The notice row is the dedupe: A's
 // billing_notice() inserts it once per episode (its dedupe_key is unique) with this job. Here a 5-minute lease
 // makes one runner send it, the idempotency key makes a retried send one email, and the status ends sent,
 // suppressed (shadow mode, or the account is not prepaid) or failed (nobody to tell). Each email says what
-// happened, what Bane did and what to do, ending with the Billing link.
+// happened, what Nightmail did and what to do, ending with the Billing link.
 
 
 export type NoticeContext = {
@@ -39,44 +40,44 @@ export const declineWords = (code: unknown, message: unknown) => (typeof code ==
 export function noticeEmail(kind: NoticeKind, n: NoticeContext) {
   const total = formatUsd(n.totalUc), debt = formatUsd(microCents(n.totalUc < 0n ? -n.totalUc : 0n));
   const holdAt = n.unpaidSince ? new Date(n.unpaidSince.getTime() + 7 * DAY) : null;
-  const body = (what: string, did: string, todo: string[]) => `What happened\n${what}\n\nWhat Bane did\n${did}\n\nWhat to do\n${steps(todo)}\n\nSettings → Billing: ${n.link}\n`;
+  const body = (what: string, did: string, todo: string[]) => `What happened\n${what}\n\nWhat ${productName} did\n${did}\n\nWhat to do\n${steps(todo)}\n\nSettings → Billing: ${n.link}\n`;
   switch (kind) {
     case 'low_balance': {
       const emails = (n.totalUc > 0n ? n.totalUc / RATES.emailUc : 0n) + BigInt(Math.max(0, n.freeLeft));
-      return { subject: `Bane: ${n.workspace} balance is low (${total})`,
+      return { subject: `${productName}: ${n.workspace} balance is low (${total})`,
         text: body(`The prepaid balance of ${n.workspace} is ${total}. That covers about ${count(emails)} more emails at $0.20 per 1,000.`,
-          'Nothing yet: sending and receiving continue. When the balance reaches $0, Bane pauses sending.',
-          ['Add credit in Settings → Billing.', 'Or turn on auto-recharge there, so Bane adds credit from your saved card before the balance runs out.']) };
+          `Nothing yet: sending and receiving continue. When the balance reaches $0, ${productName} pauses sending.`,
+          ['Add credit in Settings → Billing.', `Or turn on auto-recharge there, so ${productName} adds credit from your saved card before the balance runs out.`]) };
     }
     case 'recharge_failed': {
       const last4 = typeof n.data.last4 === 'string' && /^\d{4}$/.test(n.data.last4) ? ` ending ${n.data.last4}` : '';
-      return { subject: `Bane couldn't add credit to ${n.workspace}`,
+      return { subject: `${productName} couldn't add credit to ${n.workspace}`,
         text: body(`Auto-recharge tried to charge the card${last4} and the charge failed: ${declineWords(n.data.code, n.data.message)}.`,
-          `Bane turned auto-recharge off until the card is updated, and won't retry the charge. The balance is ${total}; sending continues until it reaches $0.`,
+          `${productName} turned auto-recharge off until the card is updated, and won't retry the charge. The balance is ${total}; sending continues until it reaches $0.`,
           ['Update the card in Settings → Billing (Replace).', 'Turn auto-recharge back on.', 'Or add credit with Stripe Checkout now.']) };
     }
     case 'sends_paused':
-      return { subject: `Bane paused sending for ${n.workspace}`,
+      return { subject: `${productName} paused sending for ${n.workspace}`,
         text: body(`The prepaid balance of ${n.workspace} reached ${total}, and this month's ${count(RATES.freeEmails)} free emails are used.`,
-          `Bane paused sending. The API answers 402 BALANCE_EXHAUSTED, campaigns wait and resume on their own, and SMTP submissions get a temporary 451, so mail clients keep the message and retry. ${holdAt ? `Received mail is still accepted until ${day(holdAt)}.` : 'Received mail is still accepted; if the balance stays below $0 for 7 days, Bane holds new received mail.'} Nothing is deleted.`,
+          `${productName} paused sending. The API answers 402 BALANCE_EXHAUSTED, campaigns wait and resume on their own, and SMTP submissions get a temporary 451, so mail clients keep the message and retry. ${holdAt ? `Received mail is still accepted until ${day(holdAt)}.` : `Received mail is still accepted; if the balance stays below $0 for 7 days, ${productName} holds new received mail.`} Nothing is deleted.`,
           ['Add credit in Settings → Billing. Sending resumes within a minute, and any amount owed is settled from the top-up.', 'Turn on auto-recharge so it doesn’t happen again.']) };
     case 'receive_hold_soon':
       return { subject: `Received mail for ${n.workspace} will be held on ${holdAt ? day(holdAt) : 'day 7'}`,
         text: body(`${n.workspace} has owed ${debt} since ${n.unpaidSince ? day(n.unpaidSince) : 'its balance went below $0'}.`,
-          `Sending is paused. Received mail is still accepted and delivered${holdAt ? ` until ${day(holdAt)}` : ''}. From then on Bane holds new received mail: it's stored safely but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,
+          `Sending is paused. Received mail is still accepted and delivered${holdAt ? ` until ${day(holdAt)}` : ''}. From then on ${productName} holds new received mail: it's stored safely but not delivered to inboxes, webhooks or IMAP. Nothing is deleted.`,
           [`Add credit in Settings → Billing to settle the ${debt}. Sending resumes and nothing is held.`]) };
     case 'credit_expiring': {
       const left = formatUsd(microCents(typeof n.data.remainingUc === 'string' ? n.data.remainingUc : '0'));
       const at = typeof n.data.expiresAt === 'string' ? new Date(n.data.expiresAt) : null;
-      return { subject: `Bane: ${left} of credit for ${n.workspace} expires on ${at ? day(at) : 'its anniversary'}`,
+      return { subject: `${productName}: ${left} of credit for ${n.workspace} expires on ${at ? day(at) : 'its anniversary'}`,
         text: body(`${left} of a top-up to ${n.workspace} is still unused. Prepaid credit expires 12 months after purchase${at ? `, so it expires on ${day(at)}` : ''}.`,
           'Nothing yet. Usage always spends the oldest credit first, so this credit goes before newer top-ups. Whatever is left on that day leaves the balance; it is not refundable.',
           ['Nothing to do if you expect to use it. Otherwise there is no action that keeps it: expired credit is not refunded.']) };
     }
     case 'receive_held':
-      return { subject: `Bane is holding received mail for ${n.workspace}`,
+      return { subject: `${productName} is holding received mail for ${n.workspace}`,
         text: body(`${n.workspace} has owed ${debt} since ${n.unpaidSince ? day(n.unpaidSince) : 'its balance went below $0'}, for more than 7 days.`,
-          `Bane is holding new received mail. It's stored safely but not delivered to inboxes, webhooks or IMAP until a top-up; mail received earlier stays readable. Nothing is deleted. After 60 days the debt is written off, but the hold stays until a top-up.`,
+          `${productName} is holding new received mail. It's stored safely but not delivered to inboxes, webhooks or IMAP until a top-up; mail received earlier stays readable. Nothing is deleted. After 60 days the debt is written off, but the hold stays until a top-up.`,
           ['Add credit in Settings → Billing. Held mail is then delivered in the order it arrived.']) };
   }
 }
