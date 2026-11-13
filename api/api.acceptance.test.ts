@@ -1,6 +1,6 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { SnsCertificateState } from './src/operations.js';
@@ -690,10 +690,25 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   runtime.config.accountClient!.requiredAcr=undefined;
   const googleAcr = 'urn:anomaly:acr:google';
   let tokenAcr: string | undefined = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
+  // The account service's DPoP rules for a first-party client (packages/server/src/tokens.ts and dpop.ts): the code
+  // exchange needs a proof (invalid_dpop_proof) carrying the server's nonce (use_dpop_nonce), the access token is bound
+  // to that key, and userinfo then needs the DPoP scheme and a proof of the same key with the token's hash.
+  const dpopNonce = randomUUID(), b64u = (v: string | Buffer) => Buffer.from(v).toString('base64url');
+  let boundJkt = '', exchanges = { refused: 0, nonce: 0, issued: 0 };
+  const dpopProof = (init: RequestInit | undefined, htu: string) => {
+    const jwt = new Headers(init?.headers).get('dpop'); if (!jwt) return null;
+    const [h, p, sig] = jwt.split('.'), header = JSON.parse(Buffer.from(h!, 'base64url').toString()), payload = JSON.parse(Buffer.from(p!, 'base64url').toString());
+    const jwk = header.jwk as { kty: string; crv: string; x: string; y: string; d?: string }, now = Math.floor(Date.now() / 1000);
+    assert.ok(header.typ === 'dpop+jwt' && header.alg === 'ES256' && jwk.kty === 'EC' && jwk.crv === 'P-256' && !('d' in jwk), 'DPoP header');
+    assert.ok(verifySignature('sha256', Buffer.from(h + '.' + p), { key: createPublicKey({ key: jwk as never, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }, Buffer.from(sig!, 'base64url')), 'DPoP signature');
+    assert.ok(payload.htu === htu && payload.htm === (init?.method ?? 'GET') && payload.iat >= now - 60 && payload.iat <= now + 10 && typeof payload.jti === 'string', 'DPoP claims');
+    return { jkt: b64u(createHash('sha256').update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })).digest()), nonce: payload.nonce, ath: payload.ath };
+  };
   t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
     assert.equal(new URL(url).origin,issuer);
     switch(new URL(url).pathname) {
-      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined});
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined,
+        response_modes_supported:['query'],dpop_signing_alg_values_supported:['ES256','EdDSA']});
       case '/par': {
         pushed = new URLSearchParams(String(init?.body));
         assert.equal(pushed.get('client_id'),'dashboard');
@@ -703,18 +718,29 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
         assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
         return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
       }
-      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
+      case '/userinfo': {
+        const proof = dpopProof(init, issuer+'/userinfo');
+        if (new Headers(init?.headers).get('authorization') !== 'DPoP fixture' || proof?.jkt !== boundJkt || proof.ath !== b64u(createHash('sha256').update('fixture').digest()))
+          return new Response(null,{status:401,headers:{'www-authenticate':'DPoP error="invalid_token"'}});
+        return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
+      }
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
+        const proof = dpopProof(init, issuer+'/token');
+        if (!proof) { exchanges.refused++; return Response.json({error:'invalid_dpop_proof'},{status:400}); }
+        if (proof.nonce !== dpopNonce) { exchanges.nonce++; return Response.json({error:'use_dpop_nonce'},{status:400,headers:{'dpop-nonce':dpopNonce}}); }
+        boundJkt = proof.jkt; exchanges.issued++;
         const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
           .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
-        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+        return Response.json({access_token:'fixture',token_type:'DPoP',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
       default: throw Error('unexpected issuer endpoint');
     }
   });
   const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  // The account service sends the browser back with response_mode=query: a cross-site top-level GET, without Origin.
+  const navigate = (path:string, cookie='') => app.fetch(new Request(origin+path,{method:'GET',headers:{cookie,referer:issuer+'/','sec-fetch-site':'cross-site','sec-fetch-mode':'navigate','x-bane-client-ip':`192.0.2.${peer}`}}),runtime);
   async function login(authorizationError?:string) {
     peer++; pushed=undefined;
     const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
@@ -724,9 +750,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const params = pushed ?? front;
     nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
     const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({...(authorizationError?{error:authorizationError}:{code:'fixture'}),state:params.get('state')!,iss:issuer});
-    assert.equal((await request(path,'GET')).headers.get('location'),origin+'/?auth=error');
-    const result=await request(path,'GET',cookie);
-    assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
+    assert.equal((await navigate(path)).headers.get('location'),origin+'/?auth=error');
+    const result=await navigate(path,cookie);
+    assert.equal((await navigate(path,cookie)).headers.get('location'),origin+'/?auth=error');
     return result;
   }
   const subjects=[subject];
@@ -740,6 +766,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
   }
+  // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
+  assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
   // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
   providerName='google';providerHd='example.org';providerVerified=true;verified=false;
   const result=await login();assert.equal(result.headers.get('location'),origin+'/');
