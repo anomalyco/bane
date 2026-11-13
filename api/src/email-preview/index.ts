@@ -26,6 +26,23 @@ const clipBytes = 102_400; // Gmail web, measured on decoded HTML; not a MIME or
 const maxBytes = 256 * 1024;
 const maxResultBytes = 4 * 1024 * 1024;
 const escapeText = (v: string) => v.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+// Gmail web makes visible URLs (even in <pre>) and bare domains look like links. Never emit a
+// destination, including Gmail's redirect URL. Match whole, bounded words; ordinary text stays escaped.
+function gmailText(value: string): string {
+  return value.replace(/\S+/g, word => {
+    if (word.length > 2048 || !word.includes('.')) return escapeText(word);
+    const parts = /^([("']*)((?:https?:\/\/)?(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)+[a-z]{2,24}(?:[/?#][^\s<>"']*)?)([),.!?:;'"\]]*)$/i.exec(word);
+    if (!parts) return escapeText(word);
+    const [, before, url, after] = parts;
+    // Observed soft wrap points follow separators near 30 characters in long auto-linked URLs.
+    let col = 0, label = '';
+    for (const segment of url!.split(/(?<=[/?&])/)) {
+      if (col && col + segment.length > 30) { label += '<wbr>'; col = 0; }
+      label += escapeText(segment); col += segment.length;
+    }
+    return `${escapeText(before!)}<a role="link">${label}</a>${escapeText(after!)}`;
+  });
+}
 const attr = (name: string, v: string) => ` ${name}="${escapeText(v).replaceAll('"', '&quot;')}"`;
 const attrValue = (el: Element, name: string) => el.attrs.find(a => a.name === name)?.value ?? '';
 const text = (el: Element) => el.childNodes.map(node => 'value' in node ? node.value : '').join('');
@@ -193,13 +210,13 @@ function render(doc: Document, options: PreviewOptions, clipped: boolean): strin
     const filtered = stylesheet(css, ctx);
     if (filtered) styles.push(filtered.replaceAll('<', '\\3c '));
   }
-  function node(n: Node): string {
-    if ('value' in n && n.nodeName === '#text') return escapeText(n.value);
+  function node(n: Node, canLink = client === 'gmail-web'): string {
+    if ('value' in n && n.nodeName === '#text') return canLink ? gmailText(n.value) : escapeText(n.value);
     if (!('tagName' in n) || n.namespaceURI !== spec.NS.HTML) return '';
     const tag = n.tagName;
     if (tag === 'style') { style(n, false); return ''; }
     if (omitSubtree.has(tag)) return '';
-    const content = n.childNodes.map(node).join('');
+    const content = n.childNodes.map(child => node(child, canLink && tag !== 'a' && tag !== 'textarea' && tag !== 'option')).join('');
     if (!layoutTags.has(tag)) return content;
     const feature = tagFeature(n);
     if (gmail && ['details', 'main', 'nav', 'summary', 'picture'].includes(tag)) return `<u></u>${content}<u></u>`;
@@ -217,13 +234,17 @@ function render(doc: Document, options: PreviewOptions, clipped: boolean): strin
     return `<${renderedTag}${a}>${content}</${renderedTag}>`;
   }
   for (const n of head.childNodes) if ('tagName' in n && n.tagName === 'style') style(n, true);
-  const content = body?.childNodes.map(node).join('') ?? '';
+  const content = body?.childNodes.map(child => node(child)).join('') ?? '';
   const after = clipped ? '<div>[Message clipped] &nbsp; View entire message</div>' : '';
-  const inherited = gmail ? 'font:14px Arial,Helvetica,sans-serif;' : outlook ? 'font:15px "Segoe UI",Arial,sans-serif;' : yahoo ? 'font:16px Arial,sans-serif;' : '';
-  const canvas = `background-color:${color('#ffffff', 'background-color', ctx)};color:${color('#000000', 'color', ctx)};`;
+  // Measured in a desktop Gmail message body, not the fonts of the surrounding inbox UI.
+  const inherited = client === 'gmail-web' ? 'font:13px/1.5 Arial,Helvetica,sans-serif;' : gmail ? 'font:14px Arial,Helvetica,sans-serif;' : client === 'outlook-web' ? 'font:15px "Segoe UI","Segoe UI Web (West European)",-apple-system,system-ui,Roboto,"Helvetica Neue",sans-serif;' : outlook ? 'font:15px "Segoe UI",Arial,sans-serif;' : yahoo ? 'font:16px Arial,sans-serif;' : '';
+  const ink = client === 'gmail-web' ? '#222222' : client === 'outlook-web' && ctx.theme === 'light' ? '#242424' : '#000000';
+  const canvas = `background-color:${color('#ffffff', 'background-color', ctx)};color:${color(ink, 'color', ctx)};`;
   const fit = ctx.width > viewport ? `html{width:${ctx.width}px;zoom:${viewport / ctx.width}}` : '';
   const wrap = client.startsWith('apple-mail') || client === 'samsung-email' ? 'overflow-wrap:break-word;' : '';
-  const defaults = `${fit}body{margin:${webmail ? 0 : '8px'};${wrap}${inherited}${canvas}}:where(a[role=link]){color:#1155cc;text-decoration:underline}`;
+  const pane = client === 'gmail-web' ? `.${wrapper}{position:relative;overflow:auto hidden}` : '';
+  const linkColor = client === 'outlook-web' && ctx.theme === 'light' ? '#0000ee' : '#1155cc';
+  const defaults = `${fit}body{margin:${webmail ? 0 : '8px'};${wrap}${inherited}${canvas}}${pane}:where(a[role=link]){color:${linkColor};text-decoration:underline}`;
   const docType = doc.childNodes.some(n => n.nodeName === '#documentType');
   const inner = webmail ? `<div${attr('class', wrapper)}>${gmail && docType ? '<u></u>' : ''}<div${body && client !== 'outlook-mac' ? attrs(body, 'bane-mail-body') : ' class="bane-mail-body"'}>${content}</div>${after}</div>` : content + after;
   return `<!doctype html><html${webmail ? '' : attrs(html, wrapper)}><head>${csp}<meta name="referrer" content="no-referrer"><meta name="viewport" content="width=${viewport},initial-scale=1"><style>${defaults}\n${styles.join('\n')}</style></head><body${!webmail && body ? attrs(body) : ''}>${inner}</body></html>`;
