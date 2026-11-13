@@ -136,6 +136,9 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
 }
 // `sensitive`: the dialog shows a secret (a one-time key, a signing secret, an invitation link). Staff UI notes can't be
 // left inside it and capture none of it (features/ui-notes).
+// What a dialog focuses when it opens with a form in it: the first text field, never the close button (a phone's
+// keyboard would open for it, so a touch screen focuses the dialog itself).
+const DIALOG_FIELD = '.ui-dialog__body :is(input:not([type=hidden], [type=file], [type=checkbox], [type=radio], [type=button], [type=submit], [disabled]), textarea:not([disabled]), select:not([disabled]), [role=combobox]:not([disabled]))';
 export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string; sensitive?: boolean };
 export function Dialog({ open, onOpenChange, title, description, children, footer, className, sensitive }: DialogProps) {
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -144,21 +147,21 @@ export function Dialog({ open, onOpenChange, title, description, children, foote
   const sheet = usePhone();
   const drag = useSheetDrag(() => onOpenChange(false), sheet);
   // Native input autofocus can precede Radix's callback; retain the external opener, not the mounted input.
-  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content data-component="Dialog" data-sensitive={sensitive || undefined} {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
+  return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content data-component="Dialog" data-sensitive={sensitive || undefined} {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; if (dialog instanceof HTMLElement && !dialog.contains(focused)) { event.preventDefault(); (matches(TOUCH) ? null : dialog.querySelector<HTMLElement>(DIALOG_FIELD))?.focus(); if (!dialog.contains(document.activeElement)) dialog.focus(); } }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
 export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: ReactNode; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
   const working = pending || busy;
   // One confirm at a time: a second press before the first answers (busy disables the button a render later) is ignored,
   // and a write the mutation guard drops (lib/single-flight.ts) isn't shown as an error; the first one closes the dialog.
   const confirming = useRef(false);
-  async function confirm() { if (confirming.current) return; confirming.current = true; setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause instanceof Error ? cause.message : 'Couldn’t complete the action. Try again.'); } finally { confirming.current = false; setBusy(false); } }
-  return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger">{error}</Alert> : null}</Dialog>;
+  async function confirm() { if (confirming.current) return; confirming.current = true; setBusy(true); setError(null); try { await onConfirm(); onOpenChange(false); } catch (cause) { if (isDuplicateSubmission(cause)) return; setError(cause ?? new Error('Couldn’t complete the action. Try again.')); } finally { confirming.current = false; setBusy(false); } }
+  return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} title={title} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger"><ErrorText error={error} fallback="Couldn’t complete the action. Try again." /></Alert> : null}</Dialog>;
 }
 export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };
-export function DropdownMenu({ items, label = 'More actions', trigger, title }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode }) {
+export function DropdownMenu({ items, label = 'More actions', trigger, title, align = 'end' }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode; align?: 'start' | 'end' }) {
   const phone = usePhone();
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
@@ -168,7 +171,7 @@ export function DropdownMenu({ items, label = 'More actions', trigger, title }: 
     const button = trigger && isValidElement(trigger) ? cloneElement(trigger as ReactElement<{ onClick?: (event: { currentTarget: HTMLElement }) => void }>, { onClick: show }) : <IconButton label={label} onClick={show}><MoreHorizontal size={16} /></IconButton>;
     return <>{button}<ActionSheet open={open} onOpenChange={setOpen} title={title ?? label} items={items} returnFocus={opener} /></>;
   }
-  return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align="end" sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
+  return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align={align} sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
 }
 // The actions run once the sheet has started closing, so a confirmation they open takes focus cleanly.
 export function ActionSheet({ open, onOpenChange, title, items, returnFocus }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; items: MenuItem[]; returnFocus?: RefObject<HTMLElement | null> }) {
@@ -231,13 +234,22 @@ function Table<T>({ columns: all, rows, rowKey, onRowClick, onRowIntent, rowHref
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
   </div>;
 }
+// A card line is one line; a value cut by its ellipsis says the whole of it on hover (a touch screen has no hover: a linked card opens its page, which shows it in full).
+function sayTruncated(event: { target: EventTarget }) {
+  const card = event.target instanceof Element ? event.target.closest('.ui-card') : null;
+  if (!card) return;
+  for (const part of card.querySelectorAll<HTMLElement>('.ui-card__title, .ui-card__segment, button.ui-card__link')) {
+    if (part.querySelector('.private-address')) continue;
+    part.title = [part, ...part.querySelectorAll<HTMLElement>('*')].some(node => node.scrollWidth > node.clientWidth + 1) ? part.textContent ?? '' : '';
+  }
+}
 function CardList<T>({ columns, rows, rowKey, onRowClick, onRowIntent, rowHref, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, tableRef, className }: DataTableProps<T>) {
   const shape = cardShape(columns), height = cardHeight(shape);
   const cell = (column: Column<T>, row: T) => (column.cardRender ?? column.render)(row);
   const style = { '--table-row-height': `${height}px` } as CSSProperties;
   return <div ref={tableRef} data-component="DataTable" className={cx('ui-cards', className)} style={style} aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading list</span>}
-    {(loading || rows.length > 0) && <ul className="ui-cards__list">{loading ? Array.from({ length: skeletonRows }, (_, index) => <li key={index} className="ui-card" aria-hidden="true">
+    {(loading || rows.length > 0) && <ul className="ui-cards__list" onPointerOver={sayTruncated}>{loading ? Array.from({ length: skeletonRows }, (_, index) => <li key={index} className="ui-card" aria-hidden="true">
       <div className="ui-card__main"><div className="ui-card__head"><span className="ui-card__title"><SkeletonText width="62%" /></span>{shape.aside.length > 0 && <span className="ui-card__aside"><SkeletonText width={56} /></span>}</div>
         {shape.lines.map((_, line) => <div key={line} className="ui-card__line"><SkeletonText width={`${[78, 52, 66, 44][line % 4]}%`} /></div>)}</div>
       {shape.end.length > 0 && <div className="ui-card__end"><ControlSkeleton width={44} /></div>}
@@ -326,9 +338,11 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
 }
 // A role that can't open something isn't a failure: a calm note with who can, and no retry that would fail again.
 const permissionError = (error: unknown) => error instanceof Error && 'code' in error && permissionCodes.has(String(error.code));
+// Something that isn't there stays missing however often it is asked for: no retry beside it.
+const notFound = (error: unknown) => error instanceof Error && (('status' in error && error.status === 404) || ('code' in error && /not_found/i.test(String(error.code))));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof Error && 'text' in error ? String(error.text) : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
-  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
+  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && !notFound(error) && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
