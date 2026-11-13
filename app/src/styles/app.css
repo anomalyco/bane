@@ -218,7 +218,9 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar__context { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: min(220px, 52vw); }
 .mobile-bar__context .demo-indicator { padding: 0; }
-.mobile-bar .theme-toggle { position: static; flex: none; width: 44px; height: 44px; }
+/* Positioned (not static), so a touch screen's enlarged hit area (ui.css, .ui-button--sm::after) stays on the button
+   instead of spreading over the whole bar: a tap on the workspace picker used to switch the theme. */
+.mobile-bar .theme-toggle { position: relative; inset: auto; flex: none; width: 44px; height: 44px; }
 .app-shell--compact .page-surface { --page-pad: max(var(--space-16), env(safe-area-inset-left), env(safe-area-inset-right)); height: auto; min-height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); margin: 0; padding: var(--space-20) var(--page-pad) var(--space-32); overflow-x: clip; overflow-y: visible; border-radius: 0; box-shadow: 0 -.5px 0 var(--color-border-muted); scrollbar-gutter: auto; overscroll-behavior: auto; }
 .tab-bar { position: fixed; inset: auto 0 0; z-index: 30; display: grid; grid-template-columns: repeat(5, minmax(0, 128px)); justify-content: center; height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: color-mix(in srgb, var(--color-deep) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border); backdrop-filter: blur(12px); }
 .tab-bar__item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: var(--color-muted); font-size: 11px; line-height: 14px; text-decoration: none; -webkit-tap-highlight-color: transparent; transition: color var(--motion-duration); }
@@ -298,3 +300,26 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 /* The open menu has focus as a whole; an address in it shows only while its own row is pointed at or highlighted. */
 .account-menu:focus-visible .private-address__rest, .account-sheet :focus-visible .private-address__rest { filter: blur(4px); }
 .account-menu [data-highlighted] .private-address__rest, .account-menu .private-address:hover .private-address__rest { filter: blur(0); }
+/* Help (components/SupportChat.tsx). On a desktop: a small raised button in the page's bottom-right corner, clear of a
+   classic scrollbar, with the chat docked above it. Every page keeps its last line (pagination, a reply box) above the
+   button, and notices rise above it, or to the left of the open chat. On a phone or tablet: in the top bar. A dot marks a
+   reply that arrived while the chat was closed. */
+:root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
+.app-shell--support .page-surface { padding-bottom: calc(var(--space-16) + var(--launcher-size) + var(--space-8)); }
+.ui-button.support-launcher { position: fixed; right: var(--launcher-inset); bottom: var(--launcher-inset); z-index: 41; width: var(--launcher-size); height: var(--launcher-size); padding: 0; border-radius: var(--radius-sm); color: var(--color-muted); box-shadow: var(--shadow-popover); }
+.ui-button.support-launcher[aria-expanded='true'], .ui-button.support-launcher:focus-visible { color: var(--color-text); }
+@media (hover: hover) and (pointer: fine) { .ui-button.support-launcher:hover { color: var(--color-text); transition-duration: 0ms; } }
+.support-launcher__icons { display: inline-grid; place-items: center; }
+.support-launcher__icons > svg { grid-area: 1 / 1; transition: opacity 140ms ease-out, transform 240ms var(--ease-out-strong); }
+.support-launcher__icons > svg:last-child, [aria-expanded='true'] > .support-launcher__icons > svg:first-child { opacity: 0; transform: scale(.6) rotate(-45deg); }
+[aria-expanded='true'] > .support-launcher__icons > svg:last-child { opacity: 1; transform: none; }
+body:has(.support-launcher) .ui-toasts { right: var(--launcher-inset); bottom: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); }
+body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
+.support-trigger { position: relative; }
+.support-trigger:not(.support-launcher)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
+.support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
+.support-launcher::before { top: -2px; right: -2px; box-shadow: 0 0 0 2px var(--color-surface); }
+.support-trigger[data-unread]::before { opacity: 1; transform: none; }
+.mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: -8px; }
+.mobile-bar .support-trigger::before { top: 11px; right: 11px; }
+@media (prefers-reduced-motion: reduce) { .support-launcher__icons > svg { transform: none !important; transition: opacity 150ms ease-out !important; } }
