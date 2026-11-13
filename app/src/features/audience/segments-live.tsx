@@ -12,7 +12,7 @@ import { AudienceHeader } from './header'
 // Teaches what a segment is where there are none yet; the demo and the live list share it.
 export function SegmentsEmpty({ search, onClear }: { search: string; onClear: () => void }) {
   return search ? <EmptyState title="No matching segments" action={<Button onClick={onClear}>Clear search</Button>} />
-    : <EmptyState title="No segments yet" description="A segment is a saved filter, such as “Plan is pro” or “Opened an email in the last 30 days”. In a campaign, pick one to send only to the matching people on its list." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
+    : <EmptyState title="No segments yet" description="A segment is a saved filter, like “Plan is pro” or “Opened an email in the last 30 days”. Campaigns use it to send only to matching people on their list." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/audience/segments/new">Create segment</Link>} />
 }
 
 export function LiveSegmentsPage() {
@@ -159,6 +159,6 @@ function LiveSegmentEditor({ initial, onCreated }: { initial: Segment | null; on
 function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; listId: string; stale: boolean }) {
   const query = useApiQuery(['segments', 'preview', id, at, listId], (api, signal) => api.segments.preview({ id, name: '', match: 'all', rules: [], listId: listId || undefined }, signal))
   if (query.isPending) return <LoadingRegion label="Counting matching contacts"><AudienceSummarySkeleton /></LoadingRegion>
-  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">More than 1,000 contacts match, which is more than a preview counts. Pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  if (query.isError) return query.error instanceof ApiError && query.error.code === 'AUDIENCE_LIMIT_EXCEEDED' ? <p className="audience-summary muted">More than 1,000 contacts match, the most a preview counts. Pick a list to count within it.</p> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Counts are for the saved conditions. Save to update them.</span>}</div>
 }
