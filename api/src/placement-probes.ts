@@ -5,11 +5,12 @@ import { z } from 'zod';
 import type { Runtime } from './core.js';
 import { rdapBase } from './domain-registry.js';
 import { boundedJson, dns, fqdn } from './public-dns.js';
+import { productDomain, servedDomains } from './brand.js';
 
 const day = 86_400_000;
 const hostSyntax = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
-const protectedBrands = ['paypal.com','google.com','microsoft.com','apple.com','amazon.com','stripe.com','bane.mx','opensend.mx'];
+const protectedBrands = ['paypal.com','google.com','microsoft.com','apple.com','amazon.com','stripe.com',productDomain,...servedDomains,'opensend.mx'];
 const confusables:Record<string,string> = { '0':'o','1':'l','3':'e','4':'a','5':'s','7':'t','а':'a','α':'a','е':'e','ε':'e','і':'i','ι':'i','ӏ':'l','о':'o','ο':'o','р':'p','ρ':'p','с':'c','ѕ':'s','т':'t','у':'y','х':'x','ν':'v','к':'k','м':'m' };
 const skeleton = (value:string) => domainToUnicode(value).toLowerCase().normalize('NFKD').replace(/\p{M}/gu,'').replace(/./gu,c=>confusables[c]??c).replace(/rn/g,'m');
 export function brandLookalike(host:string) {

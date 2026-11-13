@@ -4,6 +4,7 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import type { HomeProps } from '.'
 import './variant-protocol.css'
 import { BaneWordmark } from '../../components/BaneLogo'
+import { hostedDomain, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 3: one conversation as a sequence diagram. The four verbs are its legend; the brand square is the message.
 type Lane = 0 | 1 | 2
@@ -87,15 +88,15 @@ export function ProtocolHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
         <div className="vp-actions">
           <Button variant="ghost" className="vp-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button>
           <a className="vp-secondary" href="/docs">Read the docs</a>
-          <code className="vp-install">npm i @banemx/sdk</code>
+          <code className="vp-install">npm i {sdkPackage}</code>
         </div>
         {notice}
       </div>
     </main>
 
     <footer className="vp-footer">
-      <span>bane.mx</span>
-      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href="https://www.npmjs.com/package/@banemx/sdk">npm</a><a href="/docs">docs</a></nav>
+      <span>{hostedDomain}</span>
+      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>npm</a><a href="/docs">docs</a></nav>
     </footer>
   </div>
 }

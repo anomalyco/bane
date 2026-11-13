@@ -10,6 +10,7 @@ import { request } from '../../data/live'
 import { number, percent } from '../../lib/format'
 import './home.css'
 import { BaneWordmark } from '../../components/BaneLogo'
+import { sdkPackage } from '../../../../api/src/brand'
 
 // GET /v1/public/stats: installation-wide aggregates over whole hours, rounded, computed every minute by the API.
 // `available` is false until enough workspaces send that the figures can't describe one customer; every figure is then null.
@@ -96,7 +97,7 @@ export function HomeActions({ onSignIn, onSignInIntent, busy }: Pick<HomeProps, 
 export function HomeFooter() {
   return <footer className="home-footer muted">
     <a className="home-by" href="https://anoma.ly" target="_blank" rel="noopener" title="Anomaly (opens in a new tab)">by <AnomalyLogo height={20} /></a>
-    <nav aria-label="Site links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">SDK</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
+    <nav aria-label="Site links"><a href="/docs">Docs</a><a href="/openapi.json">OpenAPI</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>SDK</a><Link to="/legal/terms">Terms</Link><Link to="/legal/privacy">Privacy</Link></nav>
   </footer>
 }
 

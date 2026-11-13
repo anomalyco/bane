@@ -5,13 +5,14 @@ import { CopyAction } from '../../components/motion'
 import type { HomeProps } from '.'
 import './variant-terminal.css'
 import { BaneWordmark } from '../../components/BaneLogo'
+import { apiKeyEnv, hostedDomain, mcpUrl, publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 1: the page reads like a man page whose synopsis is a real request and its real response.
 const samples = {
   curl: {
     label: 'curl',
-    copy: `curl https://bane.mx/v1/emails/send \\
-  -H "Authorization: Bearer $BANE_API_KEY" \\
+    copy: `curl ${publicOrigin}/v1/emails/send \\
+  -H "Authorization: Bearer $${apiKeyEnv}" \\
   --json '{
     "from": "receipts@example.com",
     "to": "ada@example.net",
@@ -21,13 +22,13 @@ const samples = {
   },
   typescript: {
     label: 'typescript',
-    copy: `import { createClient } from '@banemx/sdk/client'
-import { sendEmail } from '@banemx/sdk'
+    copy: `import { createClient } from '${sdkPackage}/client'
+import { sendEmail } from '${sdkPackage}'
 
 const client = createClient({
-  baseUrl: 'https://bane.mx',
+  baseUrl: '${publicOrigin}',
   auth: scheme => scheme.scheme === 'bearer'
-    ? process.env.BANE_API_KEY
+    ? process.env.${apiKeyEnv}
     : undefined,
 })
 
@@ -114,7 +115,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
       <section className="vt-section" aria-label="Environment">
         <h2 className="vt-heading">Environment</h2>
         <div className="vt-env">
-          <code className="vt-text">BANE_API_KEY</code>
+          <code className="vt-text">{apiKeyEnv}</code>
           <span>Created in the dashboard. <Button variant="ghost" className="vt-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button></span>
           {notice && <div className="vt-notice">{notice}</div>}
         </div>
@@ -133,8 +134,8 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
       <section className="vt-section" aria-label="Install">
         <h2 className="vt-heading">Install</h2>
         <div className="vt-facts">
-          <div><code className="vt-text">npm i @banemx/sdk</code><span>typescript sdk</span></div>
-          <div><code className="vt-text">https://bane.mx/mcp</code><span>mcp server for coding agents</span></div>
+          <div><code className="vt-text">npm i {sdkPackage}</code><span>typescript sdk</span></div>
+          <div><code className="vt-text">{mcpUrl}</code><span>mcp server for coding agents</span></div>
         </div>
       </section>
 
@@ -145,10 +146,10 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
 
       <section className="vt-section" aria-label="See also">
         <h2 className="vt-heading">See also</h2>
-        <p className="vt-see"><a href="/docs">docs</a>, <a href="/openapi.json">openapi.json</a>, <a href="https://www.npmjs.com/package/@banemx/sdk">npm</a></p>
+        <p className="vt-see"><a href="/docs">docs</a>, <a href="/openapi.json">openapi.json</a>, <a href={`https://www.npmjs.com/package/${sdkPackage}`}>npm</a></p>
       </section>
     </main>
 
-    <footer className="vt-footer"><span>bane.mx</span><span>BANE(1)</span></footer>
+    <footer className="vt-footer"><span>{hostedDomain}</span><span>BANE(1)</span></footer>
   </div>
 }

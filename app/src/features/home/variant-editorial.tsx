@@ -3,6 +3,7 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import type { HomeProps } from '.'
 import './variant-editorial.css'
 import { BaneWordmark } from '../../components/BaneLogo'
+import { hostedDomain, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 2: one narrow column, four sentences, one verb each. Every fragment is a real SDK export.
 const verbs = [
@@ -34,7 +35,7 @@ export function EditorialHome({ onSignIn, onSignInIntent, busy, notice }: HomePr
 
       <div className="ve-close">
         <p>An API, a TypeScript SDK and an MCP server for coding agents.<br />On Amazon SES. Pay per email.</p>
-        <code className="ve-install">npm i @banemx/sdk</code>
+        <code className="ve-install">npm i {sdkPackage}</code>
         <div className="ve-actions">
           <Button variant="ghost" className="ve-action" loading={busy} onClick={onSignIn} onPointerDown={onSignInIntent}>Sign in with OIDC</Button>
           <a className="ve-secondary" href="/docs">Read the docs</a>
@@ -44,8 +45,8 @@ export function EditorialHome({ onSignIn, onSignInIntent, busy, notice }: HomePr
     </main>
 
     <footer className="ve-footer">
-      <span>bane.mx</span>
-      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href="https://www.npmjs.com/package/@banemx/sdk">npm</a></nav>
+      <span>{hostedDomain}</span>
+      <nav aria-label="Developer links"><a href="/openapi.json">openapi.json</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>npm</a></nav>
     </footer>
   </div>
 }

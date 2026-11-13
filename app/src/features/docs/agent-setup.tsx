@@ -9,6 +9,7 @@ import { recordsFor } from '../settings/domain-records'
 import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
 import { McpClientSetup, mcpAccess, useMcpUrl, type McpAccess } from './connect-agent'
 import './developer.css'
+import { apiKeyEnv, sdkPackage } from '../../../../api/src/brand'
 
 // The canonical public origin from /v1/me; the page origin stands in for demo mode.
 function receivingMx(domain: Domain) {
@@ -24,8 +25,8 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
     '',
     `- API base URL: ${origin}`,
     `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
-    `- Install the TypeScript SDK: npm i @banemx/sdk. Create the client with createClient from '@banemx/sdk/client' (baseUrl ${origin}) and call it from server code only.`,
-    '- Auth: bearer API key from the BANE_API_KEY environment variable. Never hardcode it or ship it to a browser.',
+    `- Install the TypeScript SDK: npm i ${sdkPackage}. Create the client with createClient from '${sdkPackage}/client' (baseUrl ${origin}) and call it from server code only.`,
+    `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
   ]
   if (domain === undefined) {
     lines.push('- Sending domain: use a verified domain from Domains in the Bane dashboard. Ask me which one before sending.')
