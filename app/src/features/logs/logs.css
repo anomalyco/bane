@@ -9,23 +9,35 @@
 .page-surface .received-details { gap: 0; }
 .page-surface .received-group { margin-top: var(--space-24); }
 .page-surface .message-identifiers { padding-top: var(--space-24); border-top-color: var(--color-border-muted); }
-.email-header-actions { display: grid; align-items: center; }
-.email-header-actions > * { grid-area: 1 / 1; justify-self: end; }
-.page-surface .email-header-actions > [data-hidden] { visibility: hidden; }
+/* The back button stays beside the first line of a long subject, and the status stays on that line's row. */
+.page-surface .email-detail-page > .ui-page-header { flex-wrap: nowrap; align-items: flex-start; }
+.page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
+.page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
+.page-surface .email-detail-page > .ui-page-header h1 { --title-line: 24px; min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
+/* A sender: the name, then the address with its brackets, which wraps to its own line as one piece. */
+.email-sender { display: flex; flex-wrap: wrap; column-gap: .3em; }
+.email-sender > span { min-width: 0; max-width: 100%; }
+.email-sender__address { display: flex; }
+.email-sender__address > .private-address { min-width: 0; }
+.email-sender .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.email-sender .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table) { flex-shrink: 0; }
 .page-surface .logs-page .search-box { min-width: 0; }
 @media (max-width: 850px) {
   .page-surface .email-detail-page { min-height: auto; }
   .page-surface .email-detail-grid { row-gap: var(--space-24); }
-  .page-surface .delivery-timeline { border-top-color: var(--color-border-muted); }
+  .page-surface .delivery-timeline { padding-left: 0; padding-top: var(--space-20); border-left: 0; border-top: 1px solid var(--color-border-muted); }
+  .page-surface .email-metadata { gap: var(--space-8); }
+  .email-metadata > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
+  .email-metadata dt { margin: 0; }
 }
 
 /* Tablet: the toolbar in one row (search, both filters, an icon-only export), and the table drops its stream column to
    fit without scrolling sideways. Phone: search on its own row, then the filters and export; rows are cards. */
 @media (max-width: 1100px) {
   .logs-table [data-col='stream'] { display: none; }
-  .logs-page .logs-table .ui-table { min-width: 720px; }
+  .page-surface .logs-page .logs-table .ui-table { min-width: 720px; }
 }
 @media (max-width: 1100px) {
   .logs-page > .data-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: var(--space-8); }
@@ -49,19 +61,22 @@
 .ui-cards.logs-table .ui-card__segment:last-child { flex: 1 1 0; }
 /* Phone: a message's facts are label · value rows, its status sits under the title, and the body and its timeline stack. */
 @media (max-width: 640px) {
-  .page-surface .email-metadata { gap: var(--space-8); }
-  .email-metadata > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
-  .email-metadata dt { margin: 0; }
-  .email-header-actions { justify-items: start; }
-  .email-header-actions > * { justify-self: start; }
-  .email-header-actions > [data-hidden] { display: none; }
+  .page-surface .email-detail-page > .ui-page-header { flex-wrap: wrap; }
+  .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex-basis: 100%; }
+  .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { min-height: 0; }
+  .page-surface .email-detail-page > .ui-page-header h1 { --title-line: 28px; }
   .page-surface .email-detail-grid { margin-top: var(--space-20); padding-block: var(--space-16); }
-  .page-surface .delivery-timeline { padding-left: 0; padding-top: var(--space-20); border-left: 0; border-top: 1px solid var(--color-border-muted); }
   .email-detail-grid .ui-email-preview, .plain-text-preview, .message-source { min-height: 320px; }
   .email-detail-grid .ui-tabs { padding-bottom: var(--space-8); }
-  .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+  .page-surface .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
   .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; }
 }
 /* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
 .logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Addresses in rows and cards give way to what follows them (the "+2" of more recipients) instead of pushing it out of the cell. */
+.logs-table :is(td, .ui-card__segment) .private-address > :not(.private-address__value) { flex: none; }
+.logs-table :is(td, .ui-card__segment) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.logs-table td .private-address { display: flex; }
+.ui-cards.logs-table .ui-card__segment:has(.private-address) { display: flex; gap: .3em; }
+.ui-cards.logs-table .ui-card__segment > .private-address { min-width: 0; }

@@ -9,9 +9,10 @@ import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton } from './skeletons'
-import { isReceivedId, logColumns, logCsvRows, logHref, useLogRowIntent } from './rows'
+import { isReceivedId, logsPageColumns, logCsvRows, logHref, useLogRowIntent } from './rows'
 import { useAdaptivePageSize } from '../../lib/pagination'
-import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, NameText, PrivateAddress } from '../../components/PrivateAddress'
+import { nameParts } from '../../lib/private-address'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 // Sent statuses, most looked-for first; received and spam filter received mail (spam is visible to owners and admins).
@@ -89,7 +90,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `bane-${campaignId}-logs-page.csv` : 'bane-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Download size={16} /><span>Export CSV</span></Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logColumns}
+      <DataTable<LogEntry> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => `${query.isPlaceholderData ? 'previous:' : ''}${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} columns={logsPageColumns}
         empty={campaignId && !search && status === 'all' && stream === 'all' && campaign.data && !campaign.data.counts?.total ? <EmptyState title="Nothing sent from this campaign yet" description={campaign.data.scheduledAt && Date.parse(campaign.data.scheduledAt) > Date.now() ? `It is scheduled for ${date(campaign.data.scheduledAt)} at ${time(campaign.data.scheduledAt)} UTC. Each email appears here once it sends.` : 'Each email appears here once it sends.'} action={<Link className="ui-button ui-button--secondary ui-button--md" to={`/campaigns/${encodeURIComponent(campaignId)}/review`}>Back to campaign</Link>} />
           : filtered ? <EmptyState title="No matching mail" action={<Button onClick={() => update({ q: null, status: null, stream: null, campaign: null, ...direction !== 'all' && !campaignId ? { view: null } : {} })}>Clear filters</Button>} />
           : <EmptyState title={direction === 'received' ? 'No mail received yet' : direction === 'sent' ? 'No mail sent yet' : 'No mail yet'} description="Every email you send or receive appears here." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Send your first email</Link>} />} />
@@ -104,6 +105,11 @@ export function LogDetailPage() {
   return isReceivedId(id) ? <ReceivedEmailDetailPage /> : <EmailDetailPage />
 }
 
+// "Name <address>": the name wraps as one piece and the address, with its brackets, stays together on the next line when it doesn't fit.
+function Sender({ name, address }: { name?: string | null; address: string }) {
+  const parts = nameParts(name, address)
+  return parts ? <span className="email-sender"><span><NameText parts={parts} /></span><span className="email-sender__address">&lt;<PrivateAddress value={address} />&gt;</span></span> : <PrivateAddress value={address} />
+}
 const checkTone = (value?: string) => value === 'PASS' ? 'success' as const : value === 'FAIL' ? 'danger' as const : value === 'GRAY' ? 'warning' as const : 'neutral' as const
 const fileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1_048_576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`
 export function ReceivedEmailDetailPage() {
@@ -125,8 +131,12 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const hasHtml = html.trim().length > 0
   const verdicts = email.verdicts ?? {}
   const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => verdicts[key])
+  // To is the envelope when the API has it. When every recipient is one of the receiving addresses, they link to the inbox and the Address row would only repeat them.
+  const recipients = email.envelopeTo?.length ? email.envelopeTo : email.to.map(to => to.address)
+  const inboxFor = (address: string) => email.addresses?.find(mailbox => mailbox.address.toLowerCase() === address.toLowerCase())
+  const routed = Boolean(email.addresses?.length) && recipients.every(address => inboxFor(address))
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
-    <dl className="email-metadata"><div><dt>From</dt><dd><NamedAddress name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{email.envelopeTo?.length ? <AddressList values={email.envelopeTo} /> : <AddressList values={email.to.map(to => to.address)} />}</dd></div>{email.addresses && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
+    <dl className="email-metadata"><div><dt>From</dt><dd><Sender name={email.from.name} address={email.from.address} /></dd></div><div><dt>To</dt><dd>{recipients.map((address, index) => <Fragment key={`${index}:${address}`}>{index > 0 && ', '}{inboxFor(address) ? <Link to={`/receiving/inbox?address=${encodeURIComponent(inboxFor(address)!.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={address} /></Link> : <PrivateAddress value={address} />}</Fragment>)}</dd></div>{email.addresses && !routed && <div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/receiving/inbox?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}><PrivateAddress value={mailbox.address} /></Link></Fragment>) : 'Unrouted'}</dd></div>}</dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store. Download the original for the full content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
@@ -139,7 +149,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
-        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</span><span className="muted received-checks-note">Sender authentication (SPF, DKIM, DMARC) and spam and virus scans. None means no record to check, not a failure.</span></dd></div>}
+        {checks.length > 0 && <div><dt>Checks</dt><dd><span className="cluster">{checks.map(key => <StatusBadge key={key} status={`${key.toUpperCase()} ${label(String(verdicts[key]).toLowerCase())}`} tone={checkTone(String(verdicts[key]))} />)}</span>{checks.some(key => !['PASS', 'FAIL'].includes(String(verdicts[key]).toUpperCase())) && <span className="muted received-checks-note">None means no record to check, not a failure.</span>}</dd></div>}
         {email.cc.length > 0 && <div><dt>Cc</dt><dd><AddressList values={email.cc.map(cc => cc.address)} /></dd></div>}
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd><AddressList values={email.replyTo.map(r => r.address)} /></dd></div>}
         {email.sizeBytes != null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
@@ -174,8 +184,8 @@ function EmailDetail({ email }: { email: Email }) {
   const plainText = email.text ?? (api.mode === 'demo' && hasHtml ? htmlToText(email.html) : '')
   const hasPlainText = plainText.trim().length > 0
   const contact = email.contact
-  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={<span className="email-header-actions"><span data-hidden={contact ? true : undefined}><StatusBadge status={email.status} /></span><Button data-hidden={contact ? undefined : true} onClick={() => contact && navigate(`/audience/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button></span>} />
-    <dl className="email-metadata"><div><dt>To</dt><dd><AddressList values={email.to.split(', ').filter(Boolean)} /></dd></div><div><dt>From</dt><dd><NamedAddress name={email.fromName} address={email.from} /></dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
+  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={<><StatusBadge status={email.status} />{contact && <Button onClick={() => navigate(`/audience/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button>}</>} />
+    <dl className="email-metadata"><div><dt>To</dt><dd><AddressList values={email.to.split(', ').filter(Boolean)} /></dd></div><div><dt>From</dt><dd><Sender name={email.fromName} address={email.from} /></dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
     {email.simulated && <Alert tone="info">Simulated; not sent to SES.</Alert>}
     {email.status === 'bounced' && <Alert tone="warning">Delivery failed.{contact?.suppressed && ' This address is suppressed.'}</Alert>}
     {['complaint', 'complained'].includes(email.status) && <Alert tone="danger">The recipient reported this message as spam.{contact?.suppressed && ' This address is suppressed.'}</Alert>}

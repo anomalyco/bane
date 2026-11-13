@@ -1,9 +1,9 @@
 // Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
 import { useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check } from 'lucide-react'
-import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
@@ -13,8 +13,8 @@ import { CreateAddressDialog } from './addresses'
 import { concepts, guides, kindNote, kinds, type KindFilter } from './concepts'
 import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
-import { ago, expiresIn, receivingDomains, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
-import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets } from './parts'
+import { ago, expiresIn, receivingDomains, typeLabel, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
+import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets, targetName } from './parts'
 import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, endpointStatusTone, type EditableEndpoint, type Endpoint } from './ritual-connections'
 import { RouteEditor } from './routing'
 import { actorText, useLiveVersion } from './live'
@@ -22,6 +22,7 @@ import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
+import { isMailbox } from '../../lib/private-address'
 
 type Tab = 'routes' | 'rituals' | 'endpoints'
 const PAGE = 50
@@ -44,6 +45,10 @@ function note(r: RouteEntry) {
   const parts = [a?.displayName, a?.expiresAt ? expiresIn(a.expiresAt) : null, also].filter(Boolean)
   return parts.length ? parts.map((part, i) => <span key={i}>{i > 0 && ' · '}{part}</span>) : 'Address'
 }
+// The same line as text for a tooltip, when the cell clips it. An address never goes in: it stays masked until revealed.
+const noteTitle = (r: RouteEntry) => r.kind === 'catch_all' || r.kind === 'route' || r.address?.origin === 'auto' ? undefined
+  : [r.kind === 'inbox' ? kindNote.inbox : null, r.address?.displayName, expiresIn(r.address?.expiresAt)].filter(Boolean).join(' · ') || undefined
+const targetsTitle = (r: RouteEntry) => r.to.map(t => isMailbox(t.name) ? typeLabel[t.type] : targetName(t, r.address?.id)).join(', ')
 // Where a row leads: its address or its agent inbox (real links). Every other route, including a domain's default
 // catch-all, opens its own route editor here, never the domain's page (Back from there led to Domains, not Receiving).
 const hrefOf = (r: RouteEntry) => r.kind === 'inbox' && r.address ? `/receiving/inboxes/${r.address.id}` : r.address ? `/receiving/addresses/${r.address.id}` : null
@@ -92,12 +97,12 @@ function RoutesTab({ overview, fetching, filters, setFilter, page, onPage, onCre
       empty={<EmptyState title={empty.title} description={empty.description} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={onCreate}>New address</Button> : undefined} />}
       columns={[
         // A route's card: the address (its link) and its unread count or last mail, what it is, then where its mail goes.
-        { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip">{note(r)}</span></div></div>,
+        { key: 'match', label: 'Route', width: '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
           cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
         { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
         { key: 'rituals', label: 'Rituals', width: '17%', card: 'hide', render: r => <Chain keys={r.rituals} empty={overview.manage && r.address && r.kind !== 'pattern'
           ? <Link className="rcv-add" to={`/receiving/addresses/${r.address.id}#rituals`} onClick={e => e.stopPropagation()}>No ritual · add</Link> : <span className="muted">—</span>} /> },
-        { key: 'to', label: 'Goes to', width: '32%', card: 'line', render: r => <Targets to={r.to} total={r.toTotal} ownId={r.address?.id} />, cardRender: r => <span className="rcv-card-to">{r.rituals.length > 0 && <><Chain keys={r.rituals} /><span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
+        { key: 'to', label: 'Goes to', width: '32%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets to={r.to} total={r.toTotal} ownId={r.address?.id} /></span>, cardRender: r => <span className="rcv-card-to">{r.rituals.length > 0 && <><Chain keys={r.rituals} /><span aria-hidden="true">→</span></>}<Targets to={r.to} total={r.toTotal} ownId={r.address?.id} max={2} /></span> },
         { key: 'unread', label: 'Unread', align: 'right', width: '8%', card: 'hide', render: r => r.address && r.kind !== 'pattern' ? (r.address.stats.unreadThreads ? <strong>{number(r.address.stats.unreadThreads)}</strong> : <span className="muted">0</span>) : <span className="muted">—</span> },
         { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => r.address?.stats.lastMessageAt && r.kind !== 'pattern' ? ago(r.address.stats.lastMessageAt) : <span className="muted">—</span>,
           cardRender: r => r.address && r.kind !== 'pattern' ? <>{r.address.stats.unreadThreads > 0 && <strong className="rcv-unread">{number(r.address.stats.unreadThreads)} new</strong>}{r.address.stats.lastMessageAt ? ago(r.address.stats.lastMessageAt) : null}</> : null },
@@ -127,11 +132,12 @@ function RitualsTab({ overview }: { overview: Overview }) {
 }
 
 function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () => void }) {
-  const toast = useToast()
+  const toast = useToast(), navigate = useNavigate()
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
   // Kept after closing, so the dialog's title and fields don't change while it animates out.
   const [editing, setEditing] = useState<EditableEndpoint | null>(null), [editOpen, setEditOpen] = useState(false)
+  const [deleting, setDeleting] = useState<OverviewEndpoint | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
   async function act(e: OverviewEndpoint, path: string, method: string, body: unknown, done: string) {
     try {
       const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
@@ -146,24 +152,26 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
     <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
       empty={<EmptyState title="No endpoints yet" description="A named place rituals and routes send mail: Slack, Discord, a webhook or a forward. A ritual calls it like endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
-        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
+        { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.call ?? e.name}>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },
         { key: 'target', label: 'Target', table: false, card: 'line', render: e => <PrivateAddress value={e.target} /> },
         { key: 'type', label: 'Type', width: '14%', card: 'hide', render: e => e.source === 'inbound_webhook' ? 'Inbound webhook' : { webhook: 'Webhook', slack: 'Slack', discord: 'Discord', forward: 'Forward' }[e.type] },
         { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
-        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <span /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+        { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(`/receiving/webhooks/${e.id}`) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
           { label: 'Edit', onSelect: () => { setEditing(e); setEditOpen(true) } },
           ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
           ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
           { label: e.status === 'paused' ? 'Resume' : 'Pause', onSelect: () => void act(e, '', 'PATCH', { paused: e.status !== 'paused' }, e.status === 'paused' ? 'Resumed.' : 'Paused. Calls wait until you resume.') },
-          { label: 'Delete', destructive: true, onSelect: () => void act(e, '', 'DELETE', undefined, `${e.name} deleted.`) },
+          { label: 'Delete', destructive: true, onSelect: () => { setDeleting(e); setDeleteOpen(true) } },
         ]} /> },
       ]} />
     {overview.endpointsTruncated && <p className="muted rcv-truncated">Showing the first 100 endpoints and 100 inbound webhooks. <Link to="/receiving/webhooks">Event webhooks</Link> lists every inbound webhook.</p>}
     <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
     <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); refresh() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} danger title={`Delete ${deleting?.name ?? 'this endpoint'}?`} description="Rituals and routes that send to it stop delivering. This can’t be undone." confirmLabel="Delete endpoint"
+      onConfirm={() => deleting ? act(deleting, '', 'DELETE', undefined, `${deleting.name} deleted.`) : undefined} />
   </div>
 }
 

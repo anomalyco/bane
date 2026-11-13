@@ -88,22 +88,24 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   }
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.rows.length} onClick={() => void submitImport()}>{preview.rows.length ? `Import ${plural(preview.rows.length, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
     <div className="stack">
-      <Field label="Destination list" htmlFor="import-list" hint={listId ? undefined : 'Optional. Contacts are added to your audience either way.'}><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
-      <Field label="CSV file" htmlFor="import-file" hint={<>Columns: email (required); name, first name, last name, plan and country (optional). Up to {number(MAX_ROWS)} rows and 5 MiB. <a href={sampleHref} download="contacts-sample.csv">Download a sample CSV</a></>}><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onChange={event => void readFile(event.target.files?.[0])} /></Field>
-      {csv && <div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`} error={fieldError(review.error, `mapping.${target.value}`)} hint={target.value === 'lastName' ? mapping.name === COMBINED ? 'Joined with First name into Full name.' : 'Used only when Full name is First + last name.' : target.value === 'name' && mapping.name === COMBINED ? 'Each contact’s first and last name, joined.' : undefined}>
-        <Select id={`map-${target.value}`} disabled={locked} value={mapping[target.value] ?? ''} onValueChange={value => { setMapping({ ...mapping, [target.value]: value }); resetPreview() }} options={[{ value: '', label: 'Do not import' }, ...(target.value === 'name' && combinedAvailable ? [{ value: COMBINED, label: 'First + last name' }] : []), ...headers.map(header => ({ value: header, label: header }))]} />
-      </Field>)}</div>}
+      <div className="stack audience-import-fields" hidden={Boolean(preview)}>
+        <Field label="Destination list" htmlFor="import-list" hint={listId ? undefined : 'Optional. Contacts are added to your audience either way.'}><ListPicker id="import-list" emptyLabel="No list" value={listId} disabled={locked} onChange={value => { setListId(value); resetPreview() }} /></Field>
+        <Field label="CSV file" htmlFor="import-file" hint={<>Columns: email (required); name, first name, last name, plan and country (optional). Up to {number(MAX_ROWS)} rows and 5 MiB. <a href={sampleHref} download="contacts-sample.csv">Download a sample CSV</a></>}><Input type="file" id="import-file" accept=".csv,text/csv" disabled={locked} onChange={event => void readFile(event.target.files?.[0])} /></Field>
+        {csv && <div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`} error={fieldError(review.error, `mapping.${target.value}`)} hint={target.value === 'lastName' ? mapping.name === COMBINED ? 'Joined with First name into Full name.' : 'Used only when Full name is First + last name.' : target.value === 'name' && mapping.name === COMBINED ? 'Each contact’s first and last name, joined.' : undefined}>
+          <Select id={`map-${target.value}`} disabled={locked} value={mapping[target.value] ?? ''} onValueChange={value => { setMapping({ ...mapping, [target.value]: value }); resetPreview() }} options={[{ value: '', label: 'Do not import' }, ...(target.value === 'name' && combinedAvailable ? [{ value: COMBINED, label: 'First + last name' }] : []), ...headers.map(header => ({ value: header, label: header }))]} />
+        </Field>)}</div>}
+      </div>
+      {preview && <>
+        <div className="cluster audience-review-bar"><span className="muted">Check the rows, then import.</span><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
+        {preview.rows.length > 0 && <><DataTable rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={row.name}>{row.name || '—'}</span> }]} />
+          <span className="muted">{plural(preview.rows.length, 'valid row')}{preview.rows.length > 10 ? ' · showing the first 10' : ''}</span></>}
+        {preview.errors.length > 0 && <RejectedRows errors={preview.errors} />}
+      </>}
       <div className="audience-consent">
         <Checkbox checked={consent} disabled={busy} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="These people agreed to receive marketing email" />
         <p className="ui-field__hint">{consent ? 'Contacts without a consent decision are marked subscribed. Opt-outs and suppressed addresses stay as they are.' : 'Without this, imported contacts can’t receive campaigns until they’re marked subscribed.'}</p>
         {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? 'Say how they agreed, for example “Signed up on our website”.' : fieldError(commit.error, 'consent.evidence')} hint="Saved in each consent record, like “Signed up on our website”."><Input id="import-evidence" autoFocus maxLength={2000} disabled={busy} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
-      {preview && <>
-        <div className="cluster audience-review-bar"><span className="muted">Fields are locked while you review. Change mapping to edit them.</span><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
-        {preview.rows.length > 0 && <><DataTable rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', render: row => row.row }, { key: 'email', label: 'Email', width: '50%', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', render: row => <span className="audience-cell-text" title={row.name}>{row.name || '—'}</span> }]} />
-          <span className="muted">{plural(preview.rows.length, 'valid row')}{preview.rows.length > 10 ? ' · showing the first 10' : ''}</span></>}
-        {preview.errors.length > 0 && <RejectedRows errors={preview.errors} />}
-      </>}
       <MutationError error={error} />
     </div>
   </Dialog>

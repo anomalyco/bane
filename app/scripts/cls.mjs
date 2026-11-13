@@ -8,7 +8,7 @@
 //
 // From app/: bun run cls (builds first), or node scripts/cls.mjs against an existing build.
 //   CLS_ONLY=<regex>   only pages whose name matches
-//   CLS_WORKERS=<n>    pages measured at once (default: 4 per CPU, at most 16; most of a page's time is network wait)
+//   CLS_WORKERS=<n>    pages measured at once (default: 5 per CPU, at most 32; most of a page's time is network wait)
 //   CLS_PG_URL=<url>   Postgres admin URL (CI); otherwise Docker or a local initdb (see cls-fixture.mjs)
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
@@ -40,7 +40,7 @@
 // fixed sleeps, and polling pages settle between polls.
 import { mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { liveSource, seed, start } from './cls-fixture.mjs';
@@ -48,7 +48,7 @@ import { liveSource, seed, start } from './cls-fixture.mjs';
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls');
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
-const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParallelism() * 4);
+const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParallelism() * 5);
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
@@ -156,7 +156,7 @@ const throttle = { offline: false, latency: 150, downloadThroughput: 1.6 * 1024 
 // with the runner's load, and a page whose text changed size when the font swapped in failed only sometimes (Settings ·
 // webhook on a phone, 2 of 3 dev runs on Nov 12). CLS_FONTS=late measures that swap instead: every font arrives 1.8 s
 // late, after the slowest API response, so text first paints in its local fallback (tokens.css).
-const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800, fontDir = join(app, 'dist', 'fonts');
+const lateFonts = process.env.CLS_FONTS === 'late', FONT_DELAY_MS = 1800;
 
 // Runs in the page before its own scripts.
 const probe = () => {
@@ -302,32 +302,36 @@ async function measure(browser, job, fx) {
   const work = (async () => {
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `bane.session_token.${slot}` : 'bane.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
     await context.addInitScript(probe);
-    // In-app jobs run with Data Saver on, which turns off the app's idle warm-up of the other sidebar pages: the click
-    // then loads the next page's code and data cold, the case with the most loading states to get wrong.
-    if (job.mode === 'in-app') await context.addInitScript(() => { if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true }); });
+    // Data Saver turns off the shell's idle warm-up of every other sidebar section: in-app clicks then load the next
+    // page's code and data cold, and cold loads (apart from Overview, which exercises the warm-up in each pass) measure
+    // their own page rather than re-fetching all eight sections 170 times.
+    if (job.mode === 'in-app' || job.name !== 'Overview') await context.addInitScript(() => {
+      if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true });
+      else Object.defineProperty(navigator, 'connection', { value: { saveData: true }, configurable: true });
+    });
     // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
     if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
     // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
     if (job.notes) await context.addInitScript(() => localStorage.setItem('bane.ui-notes', 'on'));
-    await context.route(url => url.origin !== origin, route => { problems.push(`external request ${route.request().url()}`); return route.abort(); });
-    await context.route(url => url.origin === origin && url.pathname.startsWith('/v1/'), async route => {
-      const url = new URL(route.request().url());
-      await new Promise(done => setTimeout(done, apiDelay(url.pathname + url.search)));
-      await route.continue().catch(() => {});
-    });
-    await context.route(url => url.origin === origin && url.pathname.startsWith('/fonts/'), async route => {
-      if (lateFonts) { await new Promise(done => setTimeout(done, FONT_DELAY_MS)); return route.continue().catch(() => {}); }
-      const file = join(fontDir, basename(new URL(route.request().url()).pathname));
-      await route.fulfill({ path: file, contentType: 'font/woff2', headers: { 'cache-control': 'public, max-age=31536000, immutable' } }).catch(() => route.continue().catch(() => {}));
-    });
     page = await context.newPage();
     net = network(page);
+    page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429)) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
     page.on('pageerror', error => problems.push(`page error: ${error.message}`));
+    // Network rules shape traffic in Chrome without CDP Fetch interception (context.route), whose per-request pauses
+    // stalled targets on Linux CI. The fixture shaper applies apiDelay on /v1/* and serves /fonts/* from memory.
     const cdp = await context.newCDPSession(page);
     await cdp.send('Network.enable');
-    await cdp.send('Network.emulateNetworkConditions', throttle);
-    await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'load', timeout: 60_000 });
+    if (lateFonts) await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Network.emulateNetworkConditionsByRule', {
+      offline: false,
+      matchedNetworkConditions: [
+        ...(lateFonts ? [] : [{ urlPattern: `${origin}/fonts/*`, offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }]),
+        { urlPattern: `${origin}/*`, ...throttle },
+        { urlPattern: 'http*://*', offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
+      ],
+    });
+    await page.goto(origin + (job.mode === 'in-app' ? job.from : job.path), { waitUntil: 'domcontentloaded', timeout: 60_000 });
     // With late fonts, the fallbacks only keep text still if this machine has one of their local fonts (tokens.css).
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
@@ -384,7 +388,7 @@ async function measure(browser, job, fx) {
         await page.keyboard.press('End'); await page.keyboard.type(' // mine');
         await page.waitForFunction(() => document.querySelector('.ritual-savebar')?.textContent.includes('Unsaved changes'), null, { timeout: 10_000 });
       }
-      const saved = await fetch(origin + '/v1/rituals/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
+      const saved = await fetch(fx.apiOrigin + '/v1/rituals/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
       if (!saved.ok) problems.push(`the agent's save failed: ${saved.status}`);
       else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
       await settle(page, net);
@@ -448,11 +452,16 @@ function summarize(results, seconds) {
 
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
-const fx = await start(repo, { servers: Math.ceil(workers / 4), log: message => console.log(`${elapsed()} ${message}`) });
-for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => fx.stop().finally(() => process.exit(130)));
+const browserPromise = chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
+browserPromise.catch(() => {});
+const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
+  await browserPromise.then(b => b.close(), () => {});
+  throw error;
+});
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => Promise.allSettled([fx.stop(), browserPromise.then(b => b.close())]).finally(() => process.exit(130)));
 let results = [];
 try {
-  const ids = await seed(fx);
+  const [ids, browser] = await Promise.all([seed(fx), browserPromise]);
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
@@ -463,20 +472,22 @@ try {
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
-  const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });
+  // Multi-step jobs (Support chat, live rituals, Overview's full warm-up) start first so none trails alone at the end.
+  const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
+  const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
   console.log(`${elapsed()} measuring ${jobs.length} page loads, ${workers} at a time`);
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(workers, jobs.length) }, async () => {
-    while (next < jobs.length) {
-      const job = jobs[next++];
+  await Promise.all(Array.from({ length: Math.min(workers, queue.length) }, async () => {
+    while (next < queue.length) {
+      const job = queue[next++];
       const r = await measure(browser, job, fx);
       results[job.index] = r;
       const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
       console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
     }
   }));
-  await browser.close();
 } finally {
+  await browserPromise.then(b => b.close(), () => {});
   writeFileSync(join(out, 'api.log'), fx.serverLog());
   await fx.stop();
 }
