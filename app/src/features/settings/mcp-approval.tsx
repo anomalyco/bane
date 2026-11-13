@@ -43,7 +43,7 @@ export function McpApprovalPage() {
       {browser.isPending ? <div className="settings-row"><Skeleton width={220} height={20} /></div>
         : accounts.map(account => <label key={account.id} className="settings-row mcp-approval__account">
           <span className="mcp-approval__who"><input type="radio" name="mcp-account" checked={picked === account.id} onChange={() => setChosen(account.id)} />
-            <AccountAvatar name={account.name} email={account.email} /><span className="settings-row__label"><span>{account.name || account.email}</span>{account.email && <PrivateAddress className="muted" value={account.email} />}</span></span>
+            <AccountAvatar name={account.name} email={account.email} /><span className="settings-row__label"><span title={account.name || undefined}>{account.name || account.email}</span>{account.email && <PrivateAddress className="muted" value={account.email} />}</span></span>
           <span className="settings-row__control">{account.id === owner && <StatusBadge status="This agent" tone="info" />}{account.id === identity?.id && <span className="muted">This tab</span>}</span>
         </label>)}
       {browser.data && <div className="settings-row"><span className="settings-row__label"><span>Another account</span><span className="muted">Choose it at Anomaly account</span></span><span className="settings-row__control"><Button onClick={() => session?.addAccount(location.pathname)}>Use another account</Button></span></div>}

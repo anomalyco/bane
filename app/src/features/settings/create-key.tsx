@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { ChevronRight } from 'lucide-react'
-import { Button, Checkbox, Dialog, Field, Input, Select } from '../../components/ui'
+import { Button, Checkbox, Dialog, Field, Input } from '../../components/ui'
+import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ApiKeyInput, AppPasswordInput, AppPasswordProtocol, KeyPermission, MailPermission, PageRequest } from '../../data/types'
@@ -19,10 +20,10 @@ const isWorkspace = (purpose: Purpose): purpose is WorkspacePurpose => purpose i
 const purposes: { value: Purpose; label: string; hint: string }[] = [
   { value: 'manage', label: 'Full access', hint: 'Sends, reads, and manages domains, keys and settings.' },
   { value: 'send', label: 'Sending only', hint: 'Sends email from your app. Can’t read logs or change settings.' },
-  { value: 'read_send', label: 'Send and read', hint: 'Sends email and looks up what happened to it in logs and events. Can’t change settings.' },
+  { value: 'read_send', label: 'Send and read', hint: 'Sends email and reads logs and events. Can’t change settings.' },
   { value: 'read', label: 'Read only', hint: 'Reads logs, events and settings. Can’t send.' },
-  { value: 'addresses', label: 'Chosen addresses', hint: 'Reads mail at the receiving addresses you choose, and can reply from them. Nothing else.' },
-  { value: 'inbox', label: 'One inbox', hint: 'Reads one agent inbox, and nothing else. Stops working when the inbox is deleted.' },
+  { value: 'addresses', label: 'Chosen addresses', hint: 'Reads mail at the receiving addresses you choose. Nothing else.' },
+  { value: 'inbox', label: 'One inbox', hint: 'Reads one agent inbox. Stops working when the inbox is deleted.' },
   { value: 'create', label: 'Create inboxes', hint: 'Creates agent inboxes and reads only the ones it created.' },
 ]
 type Kind = 'api' | 'agent' | 'app'
@@ -39,26 +40,44 @@ export type CreatedSecret = { secret: string; title: string; description?: strin
  *  secret in mutation state go away on close. */
 export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string } }) {
   const [kind, setKind] = useState<Kind | null>(initial ? 'api' : null)
-  const back = () => setKind(null)
-  if (kind === 'api') return <ApiKeyForm open={open} onOpenChange={onOpenChange} onBack={back} onCreated={onCreated} initial={initial} />
-  if (kind === 'app') return <AppPasswordForm open={open} onOpenChange={onOpenChange} onBack={back} onCreated={onCreated} />
-  return <Dialog open={open} onOpenChange={onOpenChange} title="Create key" footer={<Button onClick={() => onOpenChange(false)}>Cancel</Button>}>
-    <ul className="keys-types" aria-label="What kind of key?">
-      {kinds.map(item => <li key={item.value}>
-        <button type="button" className="keys-type" aria-describedby={`key-kind-${item.value}-hint`} onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
-          <span className="settings-cell-stack"><span className="keys-type__label">{item.label}</span><span id={`key-kind-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
-          <ChevronRight size={16} aria-hidden="true" />
-        </button>
-      </li>)}
-    </ul>
+  const [pending, setPending] = useState(false)
+  // One dialog for every step, so moving between them keeps focus inside it.
+  const form = kind === 'api' ? { title: 'Create API key', id: 'create-key', submit: 'Create key' } : kind === 'app' ? { title: 'Create app password', id: 'create-app-password', submit: 'Create password' } : null
+  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form?.title ?? 'Create key'}
+    footer={form ? <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></> : <Button onClick={() => onOpenChange(false)}>Cancel</Button>}>
+    {kind === 'api' ? <ApiKeyForm open={open} onOpenChange={onOpenChange} onPending={setPending} onCreated={onCreated} initial={initial} />
+      : kind === 'app' ? <AppPasswordForm open={open} onOpenChange={onOpenChange} onPending={setPending} onCreated={onCreated} />
+      : <ul className="keys-types" aria-label="What kind of key?">
+        {kinds.map(item => <li key={item.value}>
+          <button type="button" className="keys-type" aria-describedby={`key-kind-${item.value}-hint`} onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
+            <span className="settings-cell-stack"><span className="keys-type__label">{item.label}</span><span id={`key-kind-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </button>
+        </li>)}
+      </ul>}
   </Dialog>
 }
 
-type FormProps = { open: boolean; onOpenChange: (open: boolean) => void; onBack: () => void; onCreated: (created: CreatedSecret) => void }
+type InboxOption = { id: string; name?: string | null; address: string }
 
-function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProps & { initial?: { purpose?: Purpose; domain?: string } }) {
+/** Which inbox: a radio list, because a select would show the address unmasked. */
+function InboxChoice({ name, inboxes, pending, value, onChange, disabled, error, none }: { name: string; inboxes: InboxOption[]; pending: boolean; value: string; onChange: (id: string) => void; disabled: boolean; error?: string; none: ReactNode }) {
+  return <fieldset className="settings-key-domains" disabled={disabled} aria-describedby={error ? `${name}-error` : undefined}>
+    <legend className="ui-field__label">Inbox</legend>
+    {pending ? <p className="muted" role="status">Loading inboxes…</p> : !inboxes.length ? <p className="muted keys-form-note">{none}</p>
+      : <div className="settings-key-domain-options">{inboxes.map(box => <label key={box.id} className="keys-choice">
+        <input type="radio" name={name} value={box.id} checked={value === box.id} onChange={() => onChange(box.id)} />
+        <span>{box.name ? <>{box.name} · </> : null}<PrivateAddress value={box.address} /></span>
+      </label>)}</div>}
+    {error && <p id={`${name}-error`} className="ui-field__error" role="alert">{error}</p>}
+  </fieldset>
+}
+
+type FormProps = { open: boolean; onOpenChange: (open: boolean) => void; onPending: (pending: boolean) => void; onCreated: (created: CreatedSecret) => void }
+
+function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial }: FormProps & { initial?: { purpose?: Purpose; domain?: string } }) {
   const api = useApi()
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
+  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input))
   const addresses = useApiDef(queries.inboundAddressOptions())
   const [name, setName] = useState('')
   const [purpose, setPurpose] = useState<Purpose>(initial?.purpose ?? 'send')
@@ -72,6 +91,7 @@ function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProp
   const [errors, setErrors] = useState<Record<string, string>>({})
   const workspace = isWorkspace(purpose)
   const pending = create.isPending
+  useEffect(() => onPending(pending), [pending, onPending])
   const domainOptions = useInfiniteQuery({
     queryKey: ['bane', api.mode, 'domains', 'key-options'],
     enabled: open && workspace,
@@ -114,7 +134,7 @@ function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProp
     if (purpose === 'addresses' && !allAddresses && !addressIds.length) next.addressIds = 'Choose an address, or Every address.'
     if (purpose === 'inbox' && !chosenInbox) next.inboxId = 'Choose an inbox.'
     setErrors(next)
-    if (Object.keys(next).length) return
+    if (Object.keys(next).length) { if (next.name) document.getElementById('key-name')?.focus(); return }
     const mail: MailPermission[] = ['read', ...(reply ? ['send' as const] : []), ...(organize ? ['modify' as const] : [])]
     const input: ApiKeyInput = isWorkspace(purpose) ? { name: name.trim(), permissions: workspacePermissions[purpose], domains: allDomains ? [] : selectedDomains }
       : purpose === 'addresses' ? { name: name.trim(), access: { type: 'addresses', ...(allAddresses ? {} : { addressIds }), mail } }
@@ -132,7 +152,7 @@ function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProp
   const placeholder = workspace ? 'Order notifications' : purpose === 'create' ? 'End-to-end tests' : purpose === 'inbox' ? 'Sign-up test' : 'Support agent'
   const where = purpose === 'inbox' ? 'this inbox' : 'these addresses'
 
-  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title="Create API key" footer={<><Button disabled={pending} onClick={onBack}>Back</Button><Button variant="primary" loading={pending} type="submit" form="create-key">Create key</Button></>}>
+  return <>
     <form id="create-key" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Name" htmlFor="key-name" error={nameError}><Input id="key-name" value={name} onChange={event => setName(event.target.value)} autoFocus required disabled={pending} placeholder={placeholder} /></Field>
@@ -161,15 +181,12 @@ function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProp
         <Checkbox label="Every address, including new ones" checked={allAddresses} onCheckedChange={checked => { setAllAddresses(checked); setAddressIds([]); clearError('addressIds') }} disabled={pending} />
         <div className="settings-key-domain-options">
           {addresses.isPending ? <p className="muted" role="status">Loading addresses…</p> : !receiving.length ? <p className="muted">No receiving addresses yet. <Link to="/receiving">Create one</Link>, or choose Every address.</p>
-            : receiving.map(item => <Checkbox key={item.id} label={item.address} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
+            : receiving.map(item => <Checkbox key={item.id} label={<PrivateAddress value={item.address} />} checked={!allAddresses && addressIds.includes(item.id)} disabled={pending} onCheckedChange={checked => toggleAddress(item.id, checked)} />)}
         </div>
         {addressError && <p id="key-address-error" className="ui-field__error" role="alert">{addressError}</p>}
       </fieldset>}
-      {purpose === 'inbox' && <Field label="Inbox" htmlFor="key-inbox" error={inboxError} hint={inboxes.isPending ? 'Loading inboxes…' : !activeInboxes.length ? undefined : 'It stops working when the inbox is deleted.'}>
-        {inboxes.isPending || activeInboxes.length ? <Select id="key-inbox" value={chosenInbox} onValueChange={value => { if (value) { setInboxId(value); clearError('inboxId') } }} disabled={pending || inboxes.isPending} placeholder="Choose an inbox"
-          options={activeInboxes.map(box => ({ value: box.id, label: box.name ? `${box.name} · ${box.address}` : box.address }))} />
-          : <p className="muted keys-form-note">No active agent inboxes. <Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create one in Receiving</Link>.</p>}
-      </Field>}
+      {purpose === 'inbox' && <InboxChoice name="key-inbox" inboxes={activeInboxes} pending={inboxes.isPending} value={chosenInbox} onChange={id => { setInboxId(id); clearError('inboxId') }} disabled={pending} error={inboxError}
+        none={<>No active agent inboxes. <Link to="/receiving/inboxes" onClick={() => onOpenChange(false)}>Create one in Receiving</Link>.</>} />}
       {(purpose === 'addresses' || purpose === 'inbox') && <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can do with the mail</legend>
         {[{ value: false, label: 'Read', hint: 'Lists and reads mail, events and attachments.' }, { value: true, label: 'Read and reply', hint: `Also replies and starts conversations, from ${where} only.${purpose === 'inbox' ? ' Needs replies on for the inbox.' : ''}` }].map(item => <label key={item.label} className="keys-choice">
@@ -180,18 +197,19 @@ function ApiKeyForm({ open, onOpenChange, onBack, onCreated, initial }: FormProp
         {mailError && <p className="ui-field__error" role="alert">{mailError}</p>}
       </fieldset>}
     </form>
-  </Dialog>
+  </>
 }
 
-function AppPasswordForm({ open, onOpenChange, onBack, onCreated }: FormProps) {
+function AppPasswordForm({ open, onOpenChange, onPending, onCreated }: FormProps) {
   const { multiTenant } = useWorkspaceAccess()
-  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input), 'App password created')
+  const create = useApiMutation((api, input: AppPasswordInput) => api.credentials.createAppPassword(input))
   const inboxes = useApiQuery(['agent-inboxes', 'app-password-options'], (api, signal) => api.inboxes.list({ type: 'persistent', status: 'active' }, signal), { enabled: open })
   const [inboxId, setInboxId] = useState('')
   const [name, setName] = useState('')
   const [protocols, setProtocols] = useState<AppPasswordProtocol[]>(['imap', 'smtp'])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const pending = create.isPending
+  useEffect(() => onPending(pending), [pending, onPending])
   const persistent = (inboxes.data ?? []).filter(box => box.status === 'active')
   const chosen = inboxId || persistent[0]?.id || ''
   const toggle = (protocol: AppPasswordProtocol, checked: boolean) => { setErrors(current => ({ ...current, protocols: '' })); setProtocols(current => checked ? [...new Set([...current, protocol])] : current.filter(item => item !== protocol)) }
@@ -202,7 +220,7 @@ function AppPasswordForm({ open, onOpenChange, onBack, onCreated }: FormProps) {
     if (!name.trim()) next.name = 'Enter a name, such as the mail app it’s for.'
     if (!protocols.length) next.protocols = 'Choose IMAP, SMTP or both.'
     setErrors(next)
-    if (Object.values(next).some(Boolean)) return
+    if (Object.values(next).some(Boolean)) { if (next.name && !next.inboxId) document.getElementById('app-password-name')?.focus(); return }
     try {
       const result = await create.mutateAsync({ inboxId: chosen, name: name.trim(), protocols })
       onOpenChange(false)
@@ -210,14 +228,11 @@ function AppPasswordForm({ open, onOpenChange, onBack, onCreated }: FormProps) {
     } catch { /* Shown in the form. */ }
   }
   const protocolError = errors.protocols || fieldError(create.error, 'protocols')
-  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title="Create app password" footer={<><Button disabled={pending} onClick={onBack}>Back</Button><Button variant="primary" loading={pending} type="submit" form="create-app-password">Create password</Button></>}>
+  return <>
     <form id="create-app-password" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
-      <Field label="Inbox" htmlFor="app-password-inbox" error={errors.inboxId} hint={inboxes.isPending ? 'Loading inboxes…' : !persistent.length ? undefined : 'Persistent inboxes keep their mail until they’re deleted.'}>
-        {inboxes.isPending || persistent.length ? <Select id="app-password-inbox" value={chosen} onValueChange={value => { if (value) setInboxId(value) }} disabled={pending || inboxes.isPending} placeholder="Choose an inbox"
-          options={persistent.map(box => ({ value: box.id, label: box.name ? `${box.name} · ${box.address}` : box.address }))} />
-          : <p className="muted keys-form-note">No persistent inboxes yet. A mail app can only open an inbox that keeps its mail; create one over the API with createInbox.</p>}
-      </Field>
+      <InboxChoice name="app-password-inbox" inboxes={persistent} pending={inboxes.isPending} value={chosen} onChange={setInboxId} disabled={pending} error={errors.inboxId}
+        none="No persistent inboxes yet. A mail app can only open an inbox that keeps its mail; create one over the API with createInbox." />
       <Field label="Name" htmlFor="app-password-name" error={errors.name || fieldError(create.error, 'name')}><Input id="app-password-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus required disabled={pending} placeholder="Apple Mail" autoComplete="off" /></Field>
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What the mail app can do</legend>
@@ -227,5 +242,5 @@ function AppPasswordForm({ open, onOpenChange, onBack, onCreated }: FormProps) {
         {protocolError && <p className="ui-field__error" role="alert">{protocolError}</p>}
       </fieldset>
     </form>
-  </Dialog>
+  </>
 }
