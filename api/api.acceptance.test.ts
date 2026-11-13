@@ -356,6 +356,20 @@ test('UI notes capture text: an address split across inline elements is masked i
     assert.ok(!maskRuns([`x ${secret} y`])[0]!.includes(secret.slice(-12)), secret);
   }
   assert.equal(maskText(`Sent to ada@example.net with ${key}`), 'Sent to ad••• with [secret]');
+  // Recheck M2: invisible characters (default-ignorable and format) inside an address, as the campaign editor's code
+  // block keeps them (<pre><code>carol\uFEFF@example.net</code></pre>). Every visible character after the first two is
+  // dotted, the invisible ones stay where they are, and every node keeps its length.
+  const invisible = ['\uFEFF', '\u200B', '\u200C', '\u200D', '\u2060', '\u00AD', '\u180E', '\u034F', '\u2063', '\u202E', '\u{E0001}', '\u3164'];
+  for (const mark of invisible) {
+    const name = `U+${mark.codePointAt(0)!.toString(16).toUpperCase()}`;
+    for (const nodes of [[`carol${mark}@example.net`], ['carol', mark, '@example.net'], [`c${mark}arol@exa${mark}mple.net`], ['<', 'carol', `${mark}@exam`, 'ple.net', '>']]) {
+      const out = maskRuns(nodes), visible = out.join('').replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, '');
+      assert.deepEqual(out.map(t => t.length), nodes.map(t => t.length), name);
+      assert.ok(!/arol|example|\.net/.test(visible) && /ca|<c/.test(visible), `${name} ${JSON.stringify(nodes)} → ${JSON.stringify(out)}`);
+    }
+    assert.equal(maskText(`Reply to carol${mark}@example.net`), 'Reply to ca•••', name);
+    assert.equal(redactSecrets(`key bane_${mark}${hex(64)}`), 'key [secret]', name);
+  }
 });
 // PR #144 review: a contact property is free text. Every run of non-space characters with an @ in it is masked whole,
 // with any quoted string or comment it touches (app/src/lib/private-address.ts addressParts, components/AddressText.tsx).
@@ -4268,7 +4282,7 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('UI notes: operators leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; customers get 403; every change is audited', async t => {
+  test('UI notes: only allowlisted operators (UI_NOTES_SUBJECTS) leave notes with screenshots behind five-minute links; a notes key reads and resolves them and nothing else; other operators get 404, customers 403; every change is audited', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       // The attachments bucket, in memory: the screenshot objects are checked directly.
@@ -4282,8 +4296,12 @@ describe('Hosted MCP OAuth and tools', () => {
         return { status: res.status, body: parsed, headers: res.headers };
       };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
-      const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t);
-      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture')`, [operator.userId, reader.userId]);
+      const operator = await sessionFixture(t), reader = await sessionFixture(t), owner = await sessionFixture(t), other = await sessionFixture(t);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'UI notes acceptance fixture'), ($2, 'operator:read', 'UI notes acceptance fixture'), ($3, 'operator', 'UI notes acceptance fixture')`, [operator.userId, reader.userId, other.userId]);
+      // Only `operator` is allowlisted, by issuer subject (seedSession binds the subject to the user ID). `other` is an
+      // operator too, and `reader` is listed but only operator:read: both must see nothing of the feature.
+      const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+      runtime.config.uiNotesSubjects = [{ issuer, subject: operator.userId }, { issuer, subject: reader.userId }];
       const apiKey = `bane_${hex()}`; secrets.add(apiKey);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'UI notes fixture',$3,$4,'["read","send","manage"]','[]')`, [unique('key'), runtime.config.workspaceId, sha(apiKey), apiKey.slice(0, 14)]);
       const context = { viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'dark', device: 'desktop', pointer: 'fine', build: 'abc123def456', title: 'Campaigns · bane' };
@@ -4315,19 +4333,30 @@ describe('Hosted MCP OAuth and tools', () => {
       const stored = JSON.stringify((await db.query('SELECT url, path, element FROM ui_notes WHERE id = $1', [exposed.id])).rows[0]);
       for (const [name, secret] of Object.entries(leaked)) assert.equal(stored.includes(secret) || JSON.stringify(exposed).includes(secret), false, name);
       assert.match(exposed.element.text, /^Key \[secret\] · \[secret\] · \[secret\] · \[secret\]$/);
+      // Recheck M2: an invisible character doesn't hide an address from the API's own pass either.
+      const hidden = ok(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, text: 'carol\uFEFF@example.net', label: 'To carol\u200B@exam\u00ADple.net' } }), 201);
+      assert.deepEqual([hidden.element.text, hidden.element.label], ['ca•••', 'To ca•••']);
+      ok(await send('DELETE', `/v1/operator/ui-notes/${hidden.id}`, session(operator)));
       ok(await send('DELETE', `/v1/operator/ui-notes/${exposed.id}`, session(operator)));
-      error(await send('POST', '/v1/operator/ui-notes', session(reader), input), 403, 'OPERATOR_REQUIRED');
-      assert.equal(ok(await send('GET', `/v1/operator/ui-notes/${created.id}`, session(reader))).id, created.id);
+      // GET /v1/me tells the dashboard whether to show any of it: true for the allowlisted operator alone.
+      assert.deepEqual(await Promise.all([operator, other, reader, owner].map(async who => ok(await send('GET', '/v1/me', session(who))).uiNotes)), [true, false, false, false]);
+      // Every other operator, read-only or not, gets 404 on every route, as if the feature didn't exist.
+      const notFound: string[] = [];
+      for (const who of [other, reader]) for (const [method, path] of [...routes.map(([m, p]) => [m, p.replace(nid, created.id)] as const), ['GET', `/v1/operator/ui-notes?status=open`] as const]) {
+        const reply = await send(method, path, session(who), method === 'GET' || method === 'DELETE' ? undefined : method === 'PUT' ? undefined : { name: 'x', status: 'fixed' });
+        if (reply.status !== 404 || reply.body?.error?.code !== 'NOT_FOUND') notFound.push(`${method} ${path} → ${reply.status}`);
+      }
+      assert.deepEqual(notFound, []);
       error(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, element: { ...element, selector: '' } }), 422);
       error(await send('POST', '/v1/operator/ui-notes', session(operator), { ...input, url: 'javascript:alert(1)' }), 422);
       const list = async (query: string, who: Record<string, string> = session(operator)) => ok(await send('GET', `/v1/operator/ui-notes${query}`, who)).data.map((note: Json) => note.id);
       assert.deepEqual(await list('?status=open,in_progress'), [created.id]);
-      assert.deepEqual([await list('?status=fixed'), await list('?kind=bug'), await list('?route=/campaigns/:id/edit'), await list('?q=2px', session(reader))], [[], [], [created.id], [created.id]]);
+      assert.deepEqual([await list('?status=fixed'), await list('?kind=bug'), await list('?route=/campaigns/:id/edit'), await list('?q=2px')], [[], [], [created.id], [created.id]]);
       error(await send('GET', '/v1/operator/ui-notes?status=closed', session(operator)), 422);
 
       // Status and the fixing PR: resolvedAt follows the status; a PR link must be https.
       error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { prUrl: 'javascript:alert(1)' }), 422);
-      error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(reader), { status: 'fixed' }), 403, 'OPERATOR_REQUIRED');
+      error(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(other), { status: 'fixed' }), 404, 'NOT_FOUND');
       const fixed = ok(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { status: 'fixed', prUrl: 'https://github.com/anomalyco/bane/pull/1' }));
       assert.ok(fixed.resolvedAt && fixed.prUrl === 'https://github.com/anomalyco/bane/pull/1');
       assert.equal(ok(await send('PATCH', `/v1/operator/ui-notes/${created.id}`, session(operator), { status: 'open', body: 'Title sits 2px low' })).resolvedAt, null);
@@ -4341,7 +4370,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await shot(new TextEncoder().encode('<svg onload=alert(1)>'), 'image/png'), 422, 'INVALID_IMAGE');
       const large = new Uint8Array(2 * 1024 * 1024 + 1); large.set(png);
       error(await shot(large), 413);
-      error(await shot(png, 'image/png', session(reader)), 403, 'OPERATOR_REQUIRED');
+      error(await shot(png, 'image/png', session(other)), 404, 'NOT_FOUND');
       const withShot = ok(await shot(png));
       assert.deepEqual([withShot.screenshot.contentType, withShot.screenshot.bytes, withShot.screenshot.width, objects.get(`ui-notes/${created.id}`)?.body.length], ['image/png', png.length, 1, png.length]);
       // Its link needs no credential, answers the bytes with locked-down headers, and lasts five minutes.
@@ -4359,13 +4388,13 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await send('GET', screenshotLink(runtime, created.id, `ui-notes/${created.id}`, Date.now() - 299_000).url)).status, 200, 'Still inside its five minutes.');
 
       // A notes key: made by an operator for themself, shown once, at most 90 days.
-      error(await send('POST', '/v1/operator/ui-note-keys', session(reader), { name: 'Reader agent' }), 403, 'OPERATOR_REQUIRED');
+      error(await send('POST', '/v1/operator/ui-note-keys', session(other), { name: 'Other agent' }), 404, 'NOT_FOUND');
       error(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 91 }), 422);
       const key = ok(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Fix agent', expiresInDays: 7 }), 201); secrets.add(key.secret);
       assert.match(key.secret, /^bane_notes_[0-9a-f]{64}$/); assert.match(key.id, /^unk_[0-9a-f]{32}$/);
       const listed = ok(await send('GET', '/v1/operator/ui-note-keys', session(operator))).data;
       assert.deepEqual(listed.map((k: Json) => [k.id, k.name, 'secret' in k || 'hash' in k]), [[key.id, 'Fix agent', false]]);
-      error(await send('GET', '/v1/operator/ui-note-keys', session(reader)), 403, 'OPERATOR_REQUIRED');
+      error(await send('GET', '/v1/operator/ui-note-keys', session(other)), 404, 'NOT_FOUND');
       // It reads notes and sets status, PR link and resolution, as its operator; nothing else, here or anywhere.
       const agent = bearer(key.secret);
       assert.deepEqual(await list('?status=open', agent), [created.id]);
@@ -4404,12 +4433,24 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
       await db.query(`UPDATE ui_note_keys SET expires_at = now() + interval '1 day' WHERE id = $1`, [key.id]);
       ok(await send('GET', '/v1/operator/ui-notes', agent));
-      error(await send('POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, session(reader), {}), 403, 'OPERATOR_REQUIRED');
+      // Leaving the allowlist stops the key too; an empty list turns the whole feature off (links included).
+      const allowed = runtime.config.uiNotesSubjects;
+      runtime.config.uiNotesSubjects = [{ issuer, subject: other.userId }];
+      error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
+      error(await send('GET', '/v1/operator/ui-notes', session(operator)), 404, 'NOT_FOUND');
+      runtime.config.uiNotesSubjects = [];
+      error(await send('GET', '/v1/operator/ui-notes', session(operator)), 404, 'NOT_FOUND');
+      error(await send('POST', '/v1/operator/ui-note-keys', session(operator), { name: 'Off' }), 404, 'NOT_FOUND');
+      error(await send('GET', screenshotLink(runtime, created.id, `ui-notes/${created.id}`).url), 404, 'NOT_FOUND');
+      assert.equal(ok(await send('GET', '/v1/me', session(operator))).uiNotes, false);
+      runtime.config.uiNotesSubjects = allowed;
+      ok(await send('GET', '/v1/operator/ui-notes', agent));
+      error(await send('POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, session(other), {}), 404, 'NOT_FOUND');
       assert.deepEqual(ok(await send('POST', `/v1/operator/ui-note-keys/${key.id}/revoke`, session(operator), {})), { id: key.id, revoked: true });
       error(await send('GET', '/v1/operator/ui-notes', agent), 403, 'OPERATOR_REQUIRED');
 
       // Deleting a note removes its screenshot, and its links stop working.
-      error(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(reader)), 403, 'OPERATOR_REQUIRED');
+      error(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(other)), 404, 'NOT_FOUND');
       assert.deepEqual(ok(await send('DELETE', `/v1/operator/ui-notes/${created.id}`, session(operator))), { id: created.id, deleted: true });
       assert.equal(objects.has(`ui-notes/${created.id}`), false);
       error(await send('GET', `/v1/operator/ui-notes/${created.id}`, session(operator)), 404);

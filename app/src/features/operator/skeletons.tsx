@@ -1,6 +1,7 @@
 import { forwardRef, type ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { useLocation } from 'react-router'
+import { useSession } from '../../data/context'
 import { Button, type ButtonProps, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import './operator.css'
 
@@ -81,14 +82,17 @@ export function OperatorNotesSkeleton() {
   return <>
     <PageHeader title="Operator" actions={<Button disabled>Agent keys</Button>} />
     <LoadingRegion label="Loading UI notes"><div className="op-page">
-      <Tabs value="notes" onValueChange={() => {}} disabled items={operatorTabs} label="Operator views" />
+      <Tabs value="notes" onValueChange={() => {}} disabled items={notesTabs} label="Operator views" />
       <NotesToolbar disabled />
       <TableSkeleton className="op-notes" columns={noteColumnDefs} rows={6} />
     </div></LoadingRegion>
   </>
 }
 
-export const operatorTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }, { value: 'notes', label: 'UI notes' }]
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'actions', label: 'Actions' }]
+const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
+/** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
+export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
 export const facts = ['Step', 'Score', 'Daily limit', 'Since', 'Strikes', 'Connection'] as const
 
 export const stepOptions = [{ value: '', label: 'Needs review' }, { value: 'pause', label: 'Paused' }, { value: 'restrict', label: 'Restricted' }, { value: 'warn', label: 'Warned' }, { value: 'notice', label: 'Notice' }]
@@ -103,7 +107,7 @@ export function OperatorQueueSkeleton({ view = 'queue' }: { view?: string }) {
   return <>
     <PageHeader title="Operator" />
     <LoadingRegion label="Loading the review queue"><div className="op-page">
-      <Tabs value={view} onValueChange={() => {}} disabled items={operatorTabs} label="Operator views" />
+      <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
       <TableSkeleton columns={view === 'queue' ? queueColumnDefs : actionColumnDefs} rows={6} />
     </div></LoadingRegion>
@@ -128,8 +132,8 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
 }
 // The route-level placeholder while the operator chunk loads.
 export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'operator:read' | null | undefined }) {
-  const { pathname, search } = useLocation()
+  const { pathname, search } = useLocation(), uiNotes = useSession()?.identity?.uiNotes === true
   if (!operator) return null
-  if (pathname === '/operator/notes') return <OperatorNotesSkeleton />
+  if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={new URLSearchParams(search).get('view') === 'actions' ? 'actions' : 'queue'} />
 }

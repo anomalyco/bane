@@ -52,8 +52,9 @@ export function AppShell() {
   const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   const toast = useToast()
-  const canNote = api.mode === 'live' && session?.identity?.operator === 'operator'
-  const notesOn = useUiNotesMode() && canNote
+  // Only for the people the API allows (GET /v1/me uiNotes): nobody else gets the shortcut, its listeners or its code.
+  const canNote = api.mode === 'live' && session?.identity?.uiNotes === true
+  const notesOn = useUiNotesMode(canNote)
   useUiNotesShortcut(canNote, useCallback((on: boolean) => toast(on ? `UI notes on. ${notesModifierLabel}-click anything to leave a note.` : 'UI notes off.'), [toast]))
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.

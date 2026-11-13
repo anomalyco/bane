@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Eye, EyeOff, Plus, X } from 'lucide-react'
-import { Button, IconButton, Input } from '../../components/ui'
+import { Button, IconButton, Input, SecretInput } from '../../components/ui'
 import { ApiError, type WebhookHeaderInput, type WebhookHeaderView } from '../../data/types'
 import { MAX_WEBHOOK_HEADERS, webhookHeaderErrors } from '../../lib/webhook-headers'
 
@@ -92,7 +92,7 @@ export function WebhookHeadersField({ current, draft, onChange, errors, apiError
             autoComplete="off" autoCapitalize="off" spellCheck={false} aria-invalid={nameError ? true : undefined} aria-describedby={nameError ? rowErrorId : undefined}
             onChange={event => update(item.key, { name: event.target.value })} />
           <div className="webhook-header-row__value" data-sensitive>
-            <Input ref={node => { if (node) inputs.current.set(`${item.key}:value`, node); else inputs.current.delete(`${item.key}:value`) }} type={item.shown ? 'text' : 'password'} aria-label={`Header ${n} value`} value={item.value} placeholder={replacing && current.some(header => header.name === item.name) ? 'New value' : 'Value'} disabled={disabled}
+            <SecretInput ref={node => { if (node) inputs.current.set(`${item.key}:value`, node); else inputs.current.delete(`${item.key}:value`) }} type={item.shown ? 'text' : 'password'} aria-label={`Header ${n} value`} value={item.value} placeholder={replacing && current.some(header => header.name === item.name) ? 'New value' : 'Value'} disabled={disabled}
               autoComplete="off" autoCapitalize="off" spellCheck={false} data-1p-ignore="" data-lpignore="true" data-bwignore="" aria-invalid={valueError ? true : undefined} aria-describedby={valueError ? rowErrorId : undefined}
               onChange={event => update(item.key, { value: event.target.value })} />
             <IconButton size="sm" label={`${item.shown ? 'Hide' : 'Show'} header ${n} value`} aria-pressed={Boolean(item.shown)} disabled={disabled} onClick={() => update(item.key, { shown: !item.shown })}>{item.shown ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}</IconButton>

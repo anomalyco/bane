@@ -109,6 +109,8 @@ const pages = ids => [
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
   // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
   ['Overview · UI notes mode', '/', { from: '/logs', notes: true }],
+  // An operator outside UI_NOTES_SUBJECTS with the mode forced on: no tab, toggle, pill or pins, and the API says 404.
+  ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
   ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
@@ -128,7 +130,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -352,6 +354,11 @@ async function measure(browser, job, fx) {
       else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
       await settle(page, net);
       if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
+    }
+    if (job.user === 'rae') {
+      const leak = await page.evaluate(async () => [document.querySelector('.uin-pill, .uin-pin, .uin-layer') && 'the notes layer', [...document.querySelectorAll('[role=tab], [role=menuitem]')].some(el => el.textContent.startsWith('UI notes')) && 'a UI notes control',
+        await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
+      for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);

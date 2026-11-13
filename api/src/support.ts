@@ -66,6 +66,11 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const { authenticate } = await import('./auth.js');
   try { await authenticate(c, async () => {}); await requireOperator(c, 'operator:read'); }
   catch (error) { if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) throw operatorRequired(); throw error; }
+  // Staff UI notes are for UI_NOTES_SUBJECTS only: any other operator gets 404 before a body is even read.
+  if (/^\/v1\/operator\/ui-note(?:s|-keys)(?:\/|$)/.test(c.req.path)) {
+    const { uiNotesAllowed } = await import('./operator-identity.js');
+    if (!(await uiNotesAllowed(c.env.db, c.env.config.uiNotesSubjects, c.get('actor').keyId.slice(5)))) notFound('Endpoint');
+  }
   return next();
 };
 

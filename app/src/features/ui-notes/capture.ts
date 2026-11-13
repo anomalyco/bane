@@ -1,4 +1,4 @@
-import { maskRuns, maskText } from '../../lib/capture-text'
+import { maskRuns, maskText, visibleOnly } from '../../lib/capture-text'
 import type { NoteContext, NoteElement } from '../../data/ui-notes'
 
 // What a UI note records about the element it was left on, so an agent can find it in the code and see it: where
@@ -16,24 +16,28 @@ export const ownElement = (node: EventTarget | null) => node instanceof Element 
 // Secret-bearing screens (one-time keys and signing secrets, invitation links, credential examples) carry
 // data-sensitive: a note can't be left inside one, and a capture drops its text and blacks it out. Frames and media are
 // blacked out too: their content is the page's to show, not a note's to keep.
-const SENSITIVE = '[data-sensitive]'
+// Password fields are sensitive whatever marks them. What anyone types is never captured: a form field's value is
+// cleared from the screenshot and left out of the text, so a field shows only its label and placeholder.
+const SENSITIVE = '[data-sensitive], input[type="password"]'
 const OPAQUE = `${SENSITIVE}, iframe, frame, embed, object, video`
+const FIELDS = 'input, textarea, select'
 // Inline elements join their text with their neighbours'; anything else starts a new run.
 const INLINE = new Set(['A', 'ABBR', 'B', 'BDI', 'BDO', 'CITE', 'CODE', 'DATA', 'DFN', 'EM', 'FONT', 'I', 'KBD', 'LABEL', 'MARK', 'Q', 'S', 'SAMP', 'SMALL', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TIME', 'U', 'VAR', 'WBR'])
 const blockOf = (node: Node) => { let element = node.parentElement; while (element && INLINE.has(element.tagName)) element = element.parentElement; return element }
 export const sensitiveElement = (node: Element) => Boolean(node.closest(SENSITIVE))
 export { maskText }
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text
-const clean = (value: string | null | undefined, max: number) => { const text = value?.replace(/\s+/g, ' ').trim(); return text ? clip(maskText(text), max) : null }
+const clean = (value: string | null | undefined, max: number) => { const text = value && visibleOnly(value).replace(/\s+/g, ' ').trim(); return text ? clip(maskText(text), max) : null }
 /**
  * The element's text as the page renders it, without the text of any sensitive part inside it. An inline element is
  * masked in the context of its whole block, so <strong>alice</strong> in <strong>alice</strong>@example.net reads al•••.
  */
 function visibleText(target: Element) {
   const scope = INLINE.has(target.tagName) ? blockOf(target) ?? target : target
-  if (scope === target && !target.querySelector(SENSITIVE)) return (target as HTMLElement).innerText ?? target.textContent
+  if (target.matches(FIELDS)) return null
+  if (scope === target && !target.querySelector(`${SENSITIVE}, ${FIELDS}`)) return (target as HTMLElement).innerText ?? target.textContent
   const nodes: Text[] = [], texts: string[] = [], slots: number[] = []
-  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, { acceptNode: node => node.nodeType === Node.ELEMENT_NODE && (node as Element).matches(SENSITIVE) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT })
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, { acceptNode: node => node.nodeType === Node.ELEMENT_NODE && (node as Element).matches(`${SENSITIVE}, ${FIELDS}`) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT })
   let block: Element | null = null
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (node.nodeType !== Node.TEXT_NODE) continue
@@ -172,7 +176,7 @@ const intersect = (a: Rect, b: Rect): Rect => ({ left: Math.max(a.left, b.left),
 // The clone the image is drawn from. Its rendered text is masked as a whole (lib/capture-text.ts maskRuns): an
 // address split across inline elements, or revealed by the hover the ⌘-click sits on, is masked in every node it
 // spans, and so is anything that looks like a credential. Text in different blocks is never joined. Sensitive parts
-// lose their text and form values and are painted over; labels and values are masked too.
+// lose their text and are painted over; every form field's value is cleared; labels and placeholders are masked.
 function maskClone(root: Node) {
   if (root.nodeType !== Node.ELEMENT_NODE) return
   const element = root as Element
@@ -195,9 +199,11 @@ function maskClone(root: Node) {
   }
   const masked = maskRuns(texts)
   nodes.forEach((node, i) => { const value = masked[slots[i]!]!; if (value !== node.nodeValue) node.nodeValue = value })
-  for (const node of [element, ...element.querySelectorAll('input, textarea, [title], [aria-label], [placeholder], [alt]')]) {
-    if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') { const value = maskText((node as HTMLInputElement).value); (node as HTMLInputElement).value = value; if (node.hasAttribute('value')) node.setAttribute('value', value) }
-    for (const name of ['title', 'aria-label', 'placeholder', 'alt', 'value']) { const value = node.getAttribute(name); if (value) node.setAttribute(name, maskText(value)) }
+  for (const node of [element, ...element.querySelectorAll('input, textarea, [title], [aria-label], [placeholder], [alt], [value]')]) {
+    if (node.tagName === 'TEXTAREA' || (node.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'image'].includes((node as HTMLInputElement).type))) {
+      (node as HTMLInputElement).value = ''; node.removeAttribute('value'); if (node.tagName === 'TEXTAREA') node.textContent = ''
+    }
+    for (const name of ['title', 'aria-label', 'placeholder', 'alt']) { const value = node.getAttribute(name); if (value) node.setAttribute(name, maskText(value)) }
   }
 }
 /**

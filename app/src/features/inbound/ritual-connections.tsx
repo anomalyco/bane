@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, SecretCode, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError } from '../../data/types'
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
@@ -71,7 +71,7 @@ export function NewEndpointDialog({ open, onOpenChange, onCreated, types = Objec
         <Input value={name} onChange={e => setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-'))} placeholder={type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support'} autoComplete="off" aria-invalid={!!nameError || undefined} />
       </Field>
       <Field label={targetLabel[type]} error={targetError || undefined} hint={type === 'slack' || type === 'discord' ? 'Stored encrypted and never shown again.' : type === 'forward' ? 'They confirm with a link we email them. Nothing is forwarded until they do.' : 'Bane signs each event; the secret is shown once.'}>
-        <Input type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => setTarget(e.target.value)} placeholder={type === 'forward' ? 'team@example.com' : 'https://'} />
+        <SecretInput type={type === 'forward' ? 'email' : type === 'webhook' ? 'url' : 'password'} autoComplete="off" value={target} onChange={e => setTarget(e.target.value)} placeholder={type === 'forward' ? 'team@example.com' : 'https://'} />
       </Field>
       {type === 'forward' && <>
         <Field label="Ask from" hint="The receiving address that sends the request and the forwards.">

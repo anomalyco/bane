@@ -53,6 +53,8 @@ export interface Config {
   allowedSubjects: string[];
   /** Hosted staff: Google Workspace domains of the sign-in's provider identity (see account-policy.ts). */
   staffGoogleDomains: string[];
+  /** Hosted: the issuer subjects allowed to use staff UI notes (src/ui-notes.ts); empty turns the feature off. */
+  uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;

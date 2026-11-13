@@ -38,15 +38,24 @@ export function secretSpans(text: string): [number, number][] {
   for (const match of text.matchAll(/[A-Za-z0-9_+=-]{32,}/g)) if (highEntropy(match[0])) spans.push([match.index, match.index + match[0].length])
   return spans.sort((a, b) => a[0] - b[0])
 }
+// Invisible characters (zero-width spaces and joiners, U+FEFF, soft hyphens, bidi marks: every default-ignorable code
+// point and format character) render as nothing, so carol\uFEFF@example.net reads as one address on screen. They are
+// left out when looking for addresses and secrets; maskRuns maps what it finds back over them.
+const INVISIBLE = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/u
+const INVISIBLE_ALL = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu
+/** Text without invisible characters. */
+export const visibleOnly = (text: string) => text.replace(INVISIBLE_ALL, '')
+
 /** Text with every credential-looking run replaced. */
-export function redactSecrets(text: string) {
+export function redactSecrets(input: string) {
+  const text = visibleOnly(input)
   let out = '', from = 0
   for (const [start, end] of secretSpans(text)) { if (end <= from) continue; out += text.slice(from, Math.max(from, start)) + '[secret]'; from = end }
   return out + text.slice(from)
 }
 /** Text with secrets removed and every address masked: its first two characters, then dots. */
 export function maskText(text: string) {
-  const clean = redactSecrets(text)
+  const clean = redactSecrets(text) // Also drops invisible characters.
   if (!clean.includes('@')) return clean
   return addressParts(clean).map(part => part.address ? `${maskedParts(part.text)?.shown ?? part.text.slice(0, 2)}•••` : part.text).join('')
 }
@@ -59,19 +68,29 @@ export function maskText(text: string) {
  */
 export function maskRuns(texts: string[]): string[] {
   const joined = texts.join('')
-  const hide = new Uint8Array(joined.length)
-  let at = 0
-  for (const part of addressParts(joined)) {
-    if (part.address) for (let i = at + [...part.text].slice(0, 2).join('').length; i < at + part.text.length; i++) hide[i] = 1
-    at += part.text.length
+  // The visible text, and for each of its characters (UTF-16 units) where it is in `joined`.
+  let visible = ''
+  const at: number[] = []
+  for (let i = 0; i < joined.length;) {
+    const point = joined.codePointAt(i)!, width = point > 0xffff ? 2 : 1, character = joined.slice(i, i + width)
+    if (!INVISIBLE.test(character)) { visible += character; for (let k = 0; k < width; k++) at.push(i + k) }
+    i += width
   }
-  for (const [start, end] of secretSpans(joined)) hide.fill(1, start, end)
-  if (!hide.includes(1)) return texts
+  const hide = new Uint8Array(joined.length)
+  // Hides visible[start, end) and every invisible character between them.
+  const cover = (start: number, end: number) => { if (end > start) hide.fill(1, at[start]!, at[end - 1]! + 1) }
   let offset = 0
+  for (const part of addressParts(visible)) {
+    if (part.address) cover(offset + [...part.text].slice(0, 2).join('').length, offset + part.text.length)
+    offset += part.text.length
+  }
+  for (const [start, end] of secretSpans(visible)) cover(start, end)
+  if (!hide.includes(1)) return texts
+  let from = 0
   return texts.map(text => {
     let out = ''
-    for (let i = 0; i < text.length; i++) out += hide[offset + i] && !/\s/.test(text[i]!) ? '•' : text[i]
-    offset += text.length
+    for (let i = 0; i < text.length; i++) out += hide[from + i] && !/\s/.test(text[i]!) && !INVISIBLE.test(text[i]!) ? '•' : text[i]
+    from += text.length
     return out
   })
 }

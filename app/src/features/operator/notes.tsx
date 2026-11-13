@@ -7,7 +7,7 @@ import { useSession } from '../../data/context'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { relativeTime, shortDateTime } from '../../lib/format'
 import { setUiNotesMode } from '../../lib/ui-notes-mode'
-import { NotesToolbar, noteColumnDefs, operatorTabs } from './skeletons'
+import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
 
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
 // one for its screenshot and everything captured with it, change status in bulk, and make the key an agent uses to fetch
@@ -26,7 +26,8 @@ type NotesPage = Awaited<ReturnType<typeof uiNotesApi.list>>
 const Thumb = ({ note }: { note: UiNote }) => <span className="op-shot">{note.screenshot && <img src={note.screenshot.url} alt="" loading="lazy" decoding="async" />}</span>
 
 export function OperatorNotesPage() {
-  const role = useSession()?.identity?.operator ?? null, canAct = role === 'operator'
+  // Only for the people the API allows (GET /v1/me uiNotes); the API answers 404 to everyone else.
+  const identity = useSession()?.identity, role = identity?.uiNotes === true ? identity.operator ?? null : null, canAct = role === 'operator', tabs = useOperatorTabs()
   const navigate = useNavigate(), client = useQueryClient(), toast = useToast()
   const [params, setParams] = useSearchParams()
   const status = params.get('status') ?? '', kind = params.get('kind') ?? ''
@@ -75,7 +76,7 @@ export function OperatorNotesPage() {
   return <>
     <PageHeader title="Operator" actions={canAct ? <Button onClick={() => setKeys(true)}>Agent keys</Button> : undefined} />
     <div className="op-page">
-      <Tabs value="notes" label="Operator views" items={operatorTabs} onValueChange={value => { if (value !== 'notes') navigate(value === 'actions' ? '/operator?view=actions' : '/operator') }} />
+      <Tabs value="notes" label="Operator views" items={tabs} onValueChange={value => { if (value !== 'notes') navigate(value === 'actions' ? '/operator?view=actions' : '/operator') }} />
       <NotesToolbar search={search} status={status} kind={kind} onSearch={setSearch} onStatus={value => setParam('status', value)} onKind={value => setParam('kind', value)}
         actions={selected.size ? <DropdownMenu label="Selected notes" title={`${selected.size} selected`} trigger={bulkTrigger} items={bulkItems} /> : bulkTrigger} />
       {notes.isError && !notes.data ? <ErrorState error={notes.error} onRetry={() => void notes.refetch()} /> : <>

@@ -34,7 +34,7 @@ export function AccountSwitcher() {
   const [creating, setCreating] = useState(false)
   const [support, setSupport] = useState(false)
   const list = useAccounts(open)
-  const notesOn = useUiNotesMode()
+  const notesOn = useUiNotesMode(identity?.uiNotes === true)
   const load = () => client.fetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 })
   const intent = () => { void load().catch(() => {}) }
   // The phone's sheet is anchored to the bottom of the screen and would grow upwards when the list arrived, so it opens
@@ -70,7 +70,7 @@ export function AccountSwitcher() {
   const full = accounts.length >= limit
   sections.push([
     // Bane staff: UI notes mode, for leaving design and bug notes on the dashboard (⇧N anywhere).
-    ...identity.operator === 'operator' ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
+    ...identity.uiNotes === true ? [{ key: 'ui-notes', text: `UI notes ${notesOn ? 'on' : 'off'}`, icon: <StickyNote />, onSelect: () => { setOpen(false); toggleUiNotesMode() },
       label: <span className="account-menu__toggle">UI notes<span className="account-menu__toggle-state">{notesOn ? 'On' : 'Off'}{!phone && <kbd>⇧N</kbd>}</span></span> }] : [],
     { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
     { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, disabled: full, hint: full ? `Up to ${limit} accounts. Sign out of one to add another.` : undefined, onSelect: () => { setOpen(false); session!.addAccount() } },

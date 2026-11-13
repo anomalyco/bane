@@ -68,7 +68,9 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     const secret = randomBytes(36).toString('hex');
     const envFor = port => ({
       PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: `http://127.0.0.1:${port}`, API_BASE_URL: `http://127.0.0.1:${port}`, HOST: '127.0.0.1', PORT: String(port),
-      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
+      // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
@@ -355,6 +357,8 @@ export async function seed(fx) {
   // Harbor Supply: restricted (marketing held) after complaints, with a quarantined campaign: the banner on every
   // page, Overview's standing card and the operator's workspace page.
   const rae = await fx.signIn('rae', 'rae@harborsupply.example', 'Rae Lind', { id: 'ws_harbor', name: 'Harbor Supply' });
+  // Rae is an operator too, but not in UI_NOTES_SUBJECTS: no UI notes anywhere for her (cls.mjs checks).
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_rae','operator','CLS fixture: an operator without UI notes')");
   const harborConn = await hosted(db, 'ws_harbor');
   await domain(db, 'ws_harbor', harborConn, 'harborsupply.example', { mailFrom: true });
   await rae.api('POST', '/v1/api-keys', { name: 'Production', permissions: ['send'], domains: [] }, 201);

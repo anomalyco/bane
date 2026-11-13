@@ -8,7 +8,7 @@ import { ApiError, type SenderScoreFactor, type StandingStep } from '../../data/
 import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type TimelineKind } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorTabs, OperatorQueueSkeleton, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, WorkspaceBodySkeleton } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, useOperatorTabs, OperatorQueueSkeleton, OperatorWorkspaceSkeleton, QueueToolbar, queueColumnDefs, timelineColumnDefs, WorkspaceBodySkeleton } from './skeletons'
 
 // The operator console (lazy, /operator): Bane staff with a platform role review flagged Hosted workspaces and act on
 // them through the audited operator API. Impersonation-free: it reads standing, score, limits and evidence, never
@@ -34,12 +34,12 @@ export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
   const view = params.get('view') === 'actions' ? 'actions' : 'queue'
-  const navigate = useNavigate()
+  const navigate = useNavigate(), tabs = useOperatorTabs()
   if (!role) return <NotFound />
   return <>
     <PageHeader title="Operator" />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={operatorTabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
+      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); if (value === 'actions') next.set('view', 'actions'); else next.delete('view'); return next }, { replace: true })} />
       {view === 'queue' ? <Queue /> : <Actions />}
     </div>
   </>

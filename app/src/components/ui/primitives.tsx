@@ -26,6 +26,11 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: s
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...props }, ref) {
   return <input data-component="Input" {...props} ref={ref} className={cx('ui-input', className)} />;
 });
+// A field for a secret or a write-only capability (an endpoint URL with its token, a header value): marked so staff UI
+// notes refuse it and black it out (features/ui-notes), and kept out of autofill.
+export const SecretInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function SecretInput(props, ref) {
+  return <Input data-sensitive autoComplete="off" spellCheck={false} {...props} ref={ref} />;
+});
 // A list's search box: the magnifier, type=search and the shared width (.search-box). Props go to the input.
 export const SearchField = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>>(function SearchField({ className, ...props }, ref) {
   return <div data-component="SearchField" className={cx('search-box', className)}><Search size={16} aria-hidden="true" /><Input {...props} ref={ref} type="search" /></div>;

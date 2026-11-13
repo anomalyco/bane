@@ -20,7 +20,9 @@ function subscribe(listener: () => void) {
   listeners.add(listener)
   return () => { listeners.delete(listener); if (!listeners.size) window.removeEventListener('storage', onStorage) }
 }
-export const useUiNotesMode = () => useSyncExternalStore(subscribe, () => on, () => false)
+const inert = () => () => {}
+/** Whether the mode is on. Off, and nothing subscribed, unless `enabled` (the session may use UI notes). */
+export const useUiNotesMode = (enabled: boolean) => useSyncExternalStore(enabled ? subscribe : inert, () => enabled && on, () => false)
 
 /** ⌘ on a Mac, Ctrl elsewhere: the key held to click an element for a note. */
 export const isMac = typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test((navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.platform || navigator.userAgent)

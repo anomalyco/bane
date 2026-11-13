@@ -4,14 +4,16 @@ import { sql } from 'drizzle-orm';
 import { ApiError, digest, errors, id, json, logError, notFound, randomSecret, response, security, timed, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { auditContext, auditInsert, operatorRequired, type AuditContext } from './audit.js';
 import { operatorActor } from './operator.js';
+import { uiNotesAllowed } from './operator-identity.js';
 
 // UI notes: Bane staff (the platform operator role, #115) ⌘-click anything in the dashboard and leave a design or bug
 // note on it, with where it was, a locator for the element, its computed styles and a screenshot crop; an agent lists
 // the open ones, fixes them and sets their status (scripts/ui-notes.ts). Notes are about the app, so they belong to the
 // deployment, not a workspace. Every change is in the audit trail (internal rows: workspace null, the operator as user).
 //
-// Who: a signed-in operator session (operatorActor); reading needs operator:read, everything else the operator role.
-// A script uses a UI notes key (bane_notes_…), made by an operator for themself: it works only on GET
+// Who: only the people in UI_NOTES_SUBJECTS (by issuer subject; today Ryan alone), and only while they hold the
+// operator role. Every other operator gets 404 on every route, and so does everyone when the list is empty: the
+// feature is off. A script uses a UI notes key (bane_notes_…), made by such a person for themself: it works only on GET
 // /v1/operator/ui-notes[/{id}] and PATCH /v1/operator/ui-notes/{id} (status, PR link and resolution), only while its
 // operator still holds the operator role, and never for anything else (support.ts operatorGate admits it on exactly
 // those routes; every other operator route still refuses any bearer token).
@@ -69,7 +71,10 @@ const RESOURCE_ID = /^[a-z]{2,8}_[0-9a-f]{32}$/;
 const entropy = (text: string) => { const counts = new Map<string, number>(); for (const ch of text) counts.set(ch, (counts.get(ch) ?? 0) + 1); let bits = 0; for (const n of counts.values()) { const p = n / text.length; bits -= p * Math.log2(p); } return bits; };
 const highEntropy = (run: string) => run.length >= 32 && /\d/.test(run) && /[A-Za-z]/.test(run) && !RESOURCE_ID.test(run) && (/^[0-9a-f]+$/i.test(run) || entropy(run) >= 3.5);
 /** Text with every credential-looking run (Bane keys, webhook secrets, Stripe keys, app passwords, JWTs, long random tokens) replaced. */
-export function redactSecrets(text: string) {
+export function redactSecrets(input: string) {
+  // Invisible characters (U+FEFF, zero-width spaces and joiners, soft hyphens, bidi marks) render as nothing, so they
+  // would hide carol\uFEFF@example.net from both patterns: they are dropped first.
+  const text = input.replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, '');
   const spans: [number, number][] = [];
   for (const pattern of SECRET) for (const match of text.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
   for (const match of text.matchAll(/[A-Za-z0-9_+=-]{32,}/g)) if (highEntropy(match[0])) spans.push([match.index, match.index + match[0].length]);
@@ -108,16 +113,20 @@ const shotKey = (noteId: string) => `ui-notes/${noteId}`;
 // ---------- who ----------
 
 type Caller = { userId: string; context: AuditContext; key: boolean };
-/** A signed-in operator (operator:read reads, the operator role writes), or the UI notes key the gate admitted. */
-async function caller(c: Ctx, write: boolean): Promise<Caller> {
+/** An allowed operator (sessionOperator), or the UI notes key the gate admitted (its owner is checked the same way). */
+async function caller(c: Ctx): Promise<Caller> {
   const a = c.get('actor');
   if (a?.credential === 'uiNotesKey' && a.userId) return { userId: a.userId, key: true, context: auditContext(c) };
-  const operator = await operatorActor(c, write ? 'operator' : 'operator:read');
-  return { userId: operator.userId, key: false, context: { ...auditContext(c), actor: { type: 'operator', id: operator.userId, userId: operator.userId, via: 'console' } } };
+  return sessionOperator(c);
 }
-/** Only a signed-in operator with the operator role: creating, deleting, screenshots and keys. A key gets 403. */
+/**
+ * A signed-in operator (the operator role) whose issuer subject is in UI_NOTES_SUBJECTS: creating, deleting, screenshots
+ * and keys. Any other operator, and everyone when the list is empty, gets 404, as if the routes weren't there. A key
+ * gets 403 (operatorActor).
+ */
 async function sessionOperator(c: Ctx): Promise<Caller> {
-  const operator = await operatorActor(c, 'operator');
+  const operator = await operatorActor(c, 'operator:read');
+  if (!(await uiNotesAllowed(c.env.db, c.env.config.uiNotesSubjects, operator.userId))) notFound('Endpoint');
   return { userId: operator.userId, key: false, context: { ...auditContext(c), actor: { type: 'operator', id: operator.userId, userId: operator.userId, via: 'console' } } };
 }
 
@@ -130,12 +139,13 @@ const NOTES_KEY = /^Bearer (bane_notes_[0-9a-f]{64})$/;
  * whose operator still holds the operator role, within its minute budget. One statement reads and touches it.
  */
 export async function authenticateNotesKey(c: Ctx) {
-  const token = NOTES_KEY.exec(c.req.header('authorization') ?? '')?.[1];
-  if (!token) throw operatorRequired();
+  const token = NOTES_KEY.exec(c.req.header('authorization') ?? '')?.[1], subjects = c.env.config.uiNotesSubjects ?? [];
+  if (!token || !subjects.length) throw operatorRequired();
   const hash = await digest(token);
   const { rows: [key] } = await timed(c, 'notes-key-db', () => c.env.db.execute<{ id: string; user_id: string; name: string | null }>(sql`WITH k AS (
       SELECT k.id, k.user_id, u.name FROM ui_note_keys k JOIN platform_operators p ON p.user_id = k.user_id AND p.role = 'operator' JOIN bane_users u ON u.id = k.user_id
       WHERE k.hash = ${hash} AND k.revoked_at IS NULL AND k.expires_at > now()
+        AND EXISTS (SELECT FROM bane_oidc_identities i WHERE i.user_id = k.user_id AND (i.issuer, i.subject) IN (${sql.join(subjects.map(s => sql`(${s.issuer}, ${s.subject})`), sql`, `)}))
     ), touched AS (UPDATE ui_note_keys t SET last_used_at = now() FROM k WHERE t.id = k.id AND (t.last_used_at IS NULL OR t.last_used_at < now() - interval '1 minute'))
     SELECT * FROM k`));
   if (!key) throw operatorRequired();
@@ -198,7 +208,7 @@ export function registerUiNotes(app: App) {
     description: 'UI notes across the dashboard, newest first, each with a five-minute screenshot link. A UI notes key may call this.',
     request: { query: z.object({ status: list(Status), kind: list(Kind), route: z.string().max(300).optional(), q: z.string().trim().max(200).optional(), cursor: Cursor, limit: z.coerce.number().int().min(1).max(200).default(100) }) },
     responses: { 200: response(z.object({ data: z.array(Note), nextCursor: z.string().nullable() })), ...errors } }), async c => {
-    await caller(c, false);
+    await caller(c);
     const q = c.req.valid('query'), after = readCursor(q.cursor), search = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null;
     const { rows } = await c.env.db.execute<NoteRow>(sql`SELECT ${noteColumns} FROM ui_notes n WHERE true
       ${q.status ? sql`AND n.status = ANY(${sql.param(q.status)}::text[])` : sql``} ${q.kind ? sql`AND n.kind = ANY(${sql.param(q.kind)}::text[])` : sql``}
@@ -210,7 +220,7 @@ export function registerUiNotes(app: App) {
   });
   app.openapi(createRoute({ hide: true, tags, security, method: 'get', path: '/v1/operator/ui-notes/{id}', operationId: 'operatorGetUiNote', description: 'One UI note. A UI notes key may call this.',
     request: { params: z.object({ id: NoteId }) }, responses: { 200: response(Note), ...errors } }), async c => {
-    await caller(c, false);
+    await caller(c);
     return c.json(view(c.env, await loadNote(c.env.db, c.req.valid('param').id)), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security, method: 'post', path: '/v1/operator/ui-notes', operationId: 'operatorCreateUiNote',
@@ -230,7 +240,7 @@ export function registerUiNotes(app: App) {
   app.openapi(createRoute({ hide: true, tags, security, method: 'patch', path: '/v1/operator/ui-notes/{id}', operationId: 'operatorUpdateUiNote',
     description: 'Edits a note or sets its status and fixing PR. A UI notes key may set status, prUrl and resolution.',
     request: { params: z.object({ id: NoteId }), body: json(UpdateNote) }, responses: { 200: response(Note), ...errors } }), async c => {
-    const who = await caller(c, true), input = c.req.valid('json'), noteId = c.req.valid('param').id;
+    const who = await caller(c), input = c.req.valid('json'), noteId = c.req.valid('param').id;
     if (who.key && Object.keys(input).some(field => !KEY_FIELDS.has(field))) throw new ApiError(403, 'UI_NOTES_KEY_SCOPE', 'A UI notes key can set status, prUrl and resolution only.');
     await c.env.db.transaction(async tx => {
       const { rows: [before] } = await tx.execute<NoteRow>(sql`SELECT n.kind, n.severity, n.status, n.pr_url, n.route FROM ui_notes n WHERE n.id = ${noteId} FOR UPDATE`);
@@ -286,7 +296,7 @@ export function registerUiNotes(app: App) {
   app.get('/v1/ui-notes/screenshots/:token', async c => {
     const missing = () => new ApiError(404, 'NOT_FOUND', 'This screenshot link is invalid or has expired.');
     const token = c.req.param('token');
-    if (!c.env.config.multiTenant || token.length > 1024 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) throw missing();
+    if (!c.env.config.multiTenant || !c.env.config.uiNotesSubjects?.length || token.length > 1024 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(token)) throw missing();
     const [data, mac] = token.split('.') as [string, string];
     if (!timingSafeEqual(Buffer.from(mac), Buffer.from(shotTag(c.env.config.authSecret, data)))) throw missing();
     let claims: { n?: unknown; k?: unknown; e?: unknown };
