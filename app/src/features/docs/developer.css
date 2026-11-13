@@ -44,3 +44,5 @@
 .connect-agent__empty { margin: 0; font-size: var(--text-sm); }
 /* The agent prompt is prose for an agent to read: it wraps at every width instead of hiding its long lines behind a sideways scroll. */
 .developer-code.developer-code--prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The send example takes the height of the tab shown: cURL doesn't leave the gap TypeScript needs. A click resizes it, which is not a layout shift. */
+.developer-client-panels--fit > .developer-client-panel:not([data-active]) { display: none; }
