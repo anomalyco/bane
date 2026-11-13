@@ -387,9 +387,11 @@ jobs:
 
       # The dashboard's live support chat (app/src/components/SupportChat.tsx): on for every hosted workspace on dev;
       # in production only for Bane staff and free (billing-exempt) workspaces while it rolls out. "true" opens it to all.
+      # VITE_PUBLIC_URL makes the link-preview image URLs in index.html absolute for the stage's own host.
       - uses: ./.github/actions/build-release
         env:
           VITE_SUPPORT_CHAT: ${{ needs.authorize.outputs.stage == 'dev' && 'true' || 'staff' }}
+          VITE_PUBLIC_URL: ${{ needs.authorize.outputs.stage == 'dev' && 'https://dev.bane.mx' || 'https://bane.mx' }}
 
       # The environment picks the stage. No variable or secret name carries a
       # stage prefix: each stage reads the same keys from its own bane/<stage>/
