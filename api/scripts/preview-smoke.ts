@@ -42,6 +42,8 @@ for (const path of ['/', '/logs', '/settings']) {
   const html = await response.text();
   if (response.status !== 200 || !html.includes('<div id="root"')) failures.push(`GET ${path}: expected the dashboard HTML from assets, got HTTP ${response.status}.`);
 }
+const missing = await fetch(origin + '/assets/does-not-exist.js');
+if (missing.status !== 404) failures.push(`Missing chunk: expected 404, got ${missing.status}.`);
 for (const failure of failures) console.log(`::error title=Preview smoke::${failure}`);
 console.log(`Preview smoke: ${checked} of ${unique.length} routes answered by the Worker; ${retried} dropped by the dev proxy and retried; ${failures.length} problem(s).`);
 if (failures.length || checked !== unique.length) process.exitCode = 1;
