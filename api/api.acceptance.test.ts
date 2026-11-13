@@ -6488,7 +6488,8 @@ async function stripeFixture(t: TestContext) {
     import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
-  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false',
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false',
+    ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
     STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
     S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
