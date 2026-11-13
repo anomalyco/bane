@@ -68,7 +68,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
     </fieldset>
   }
   return <>
-    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? <>Where should mail to <PrivateAddress value={normalized} /> go?</> : 'Add route'} description="Where an address’s mail goes: its inbox, other inboxes, webhooks, or nowhere." 
+    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? 'Where should this mail go?' : 'Add route'} description="Where an address’s mail goes: its inbox, other inboxes, webhooks, or nowhere." 
       footer={<>
         {route && <Button variant="ghost" className="routing-delete" disabled={save.isPending} onClick={() => setConfirmDelete(true)}>Delete route</Button>}
         <Button disabled={save.isPending} onClick={onClose}>Cancel</Button>
@@ -89,7 +89,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         </>}
         {action === 'keep' && <p className="muted routing-explain">Stored and readable over the API by message ID, but in no inbox.</p>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}
-        {losesOwner && <Alert tone="warning">Mail to {normalized} will stop reaching {owner.displayName || owner.address}. Tick its inbox to keep it.</Alert>}
+        {losesOwner && <Alert tone="warning">Mail to <PrivateAddress value={normalized} /> will stop reaching {owner.displayName || <PrivateAddress value={owner.address} />}. Tick its inbox to keep it.</Alert>}
         {route && <Switch checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} label="On. When off, this mail follows the next most specific rule." />}
         {problem && <p className="ui-field__error" role="alert">{problem}</p>}
         {!fieldError(save.error, 'match') && !fieldError(save.error, 'to') && <MutationError error={save.error} />}
@@ -101,7 +101,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
       if (hook) { setAction('deliver'); setSelected(current => current.includes(hook.id) ? current : [...current, hook.id]) }
     }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} writeRitual={false} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description={`Mail to ${route?.match ?? ''} falls back to the next most specific rule: its own inbox, a pattern or the domain default.`} confirmLabel="Delete route" pending={remove.isPending}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} danger title="Delete route?" description="Mail to this route falls back to the next most specific rule: its own inbox, a pattern or the domain default." confirmLabel="Delete route" pending={remove.isPending}
       onConfirm={async () => { try { await remove.mutateAsync(); setConfirmDelete(false); onClose() } catch { /* The dialog stays open. */ } }} />
   </>
 }
