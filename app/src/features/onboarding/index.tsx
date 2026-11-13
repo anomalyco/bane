@@ -448,8 +448,8 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   const domain = useDomain(domainId)
   const [scope, setScope] = useState<KeyScope>('send')
   const create = useApiMutation((api, input: { scope: KeyScope; domain: string | null }) => api.keys.create(input.scope === 'send'
-    ? { name: input.domain ? `Send from ${input.domain}` : 'Send only', permission: 'send', domains: input.domain ? [input.domain] : [] }
-    : { name: 'Coding agent', permission: 'manage', domains: [] }))
+    ? { name: input.domain ? `Send from ${input.domain}` : 'Send only', permissions: ['send'], domains: input.domain ? [input.domain] : [] }
+    : { name: 'Coding agent', permissions: ['read', 'send', 'manage'], domains: [] }))
   const [secret, setSecret] = useState<string | null>(null)
   // A removed domain still leaves a useful prompt without domain details.
   const missing = domain.error instanceof ApiError && domain.error.status === 404

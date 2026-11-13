@@ -17,7 +17,7 @@ type QuickstartStep = { title: string; text: string; code?: string }
 type Document = { info: {title: string; version: string; description?: string; 'x-quickstart'?: QuickstartStep[]}; tags?: {name: string}[]; paths: Record<string, Record<string, Schema>>; components?: {schemas?: Record<string, Schema>; parameters?: Record<string, Schema>} }
 const methods = ['get', 'post', 'put', 'patch', 'delete']
 // Tag names are API identifiers (ApiKeys); people read them with spaces (API keys).
-const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent sign-ins and tokens' : tag
+const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent tokens' : tag
 // Examples are written for bane.mx; this instance's own origin goes in their place, so a copied command works here.
 const here = (code: string, origin: string) => code.replaceAll('https://bane.mx', origin)
 function operationTitle(value: string) {

@@ -1,152 +1,182 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Link, useSearchParams } from 'react-router'
-import { ChevronDown } from 'lucide-react'
-import { Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
+import { useSearchParams } from 'react-router'
+import { Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { AgentTokenSummary, ApiKey, MailboxKey, McpConnection } from '../../data/types'
+import type { Agent, AgentTokenSummary, ApiKey, AppPassword } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { SecretDialog } from './shared'
 import { AdminOnlyPage } from './admin-only'
 import { KeySendExample } from '../docs/first-send'
-import { CreateKeyDialog, accessLabel, domainScope, permissionList, type Purpose } from './create-key'
-import { settingsColumns } from './skeletons'
+import { CreateKeyDialog, type CreatedSecret, type Purpose } from './create-key'
+import { accessLabel, agentAccess, connectionTitle, domainScope, mailLabel, protocolLabel } from './key-labels'
+import { keyTypes, settingsColumns, type KeyTypeFilter } from './skeletons'
+import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
-import { ConnectAgentButton } from '../docs/connect-agent'
-import { guides } from '../inbound/concepts'
-import { credentials } from '../docs/credentials'
+import { ConnectAgentButton, ConnectAgentDialog } from '../docs/connect-agent'
 
-type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
-type ConnectedRow = { kind: 'token'; item: AgentTokenSummary } | { kind: 'mcp'; item: McpConnection }
+// One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
+// made nested under it) and app passwords.
+type Row =
+  | { kind: 'key'; id: string; key: ApiKey }
+  | { kind: 'agent'; id: string; agent: Agent }
+  | { kind: 'token'; id: string; token: AgentTokenSummary }
+  | { kind: 'app'; id: string; password: AppPassword }
+const typeName: Record<Row['kind'], string> = { key: 'API key', agent: 'Agent token', token: 'Agent token', app: 'App password' }
 const lastUsed = (value: string | null) => value ? date(value) : 'Never'
-const tokenInactive = (token: AgentTokenSummary) => token.revokedAt !== null || Date.parse(token.expiresAt) <= Date.now()
+const usedLine = (value: string | null) => value ? `Used ${date(value)}` : 'Never used'
+const newestFirst = <T extends { createdAt: string }>(items: T[]) => [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+const past = (value: string | null) => value !== null && Date.parse(value) <= Date.now()
+/** Revoked, ended (an inbox key whose inbox is gone), or null while it works. */
+const keyState = (key: ApiKey) => key.revokedAt ? 'Revoked' : past(key.expiresAt) ? 'Ended' : null
+const tokenState = (token: AgentTokenSummary) => token.revokedAt ? 'Revoked' : past(token.expiresAt) ? 'Expired' : null
+const agentState = (agent: Agent) => agent.status === 'revoked' ? 'Revoked' : agent.status === 'expired' ? 'Expired' : null
+// Another member's agent can only lose the tokens it made here, so once none is active there is nothing to revoke.
+const rowState = (row: Row): ReactNode => row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'app' ? null
+  : agentState(row.agent) ?? (!row.agent.own && !row.agent.tokens.some(token => !tokenState(token)) ? <span className="muted">—</span> : null)
+const rowName = (row: Row) => row.kind === 'key' ? row.key.name : row.kind === 'agent' ? connectionTitle(row.agent) : row.kind === 'token' ? row.token.purpose : row.password.name
+const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
 export function ApiKeysPage() {
   // /api-keys?connect=1 (from Overview and Docs) opens Connect an agent. Members connect one as themselves too, so
   // their locked page keeps the button.
   const [connectLink] = useState(() => new URLSearchParams(window.location.search).has('connect'))
-  return useWorkspaceAccess().canAdminister ? <ApiKeys connectLink={connectLink} /> : <AdminOnlyPage title="API keys" button="Create key" action="create, list and revoke API keys and see connected agents" actions={<ConnectAgentButton initiallyOpen={connectLink} />} />
+  return useWorkspaceAccess().canAdminister ? <ApiKeys connectLink={connectLink} /> : <AdminOnlyPage title="API keys" button="Create key" action="create, list and revoke API keys, agent tokens and app passwords" actions={<ConnectAgentButton initiallyOpen={connectLink} />} />
 }
 function ApiKeys({ connectLink }: { connectLink: boolean }) {
+  const toast = useToast()
   const [showRevoked, setShowRevoked] = useState(false)
+  const [type, setType] = useState<KeyTypeFilter>('all')
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
   const keys = useApiDef(queries.keys(cursor, showRevoked), { keepPrevious: true })
-  const inboundKeys = useApiDef(queries.mailboxKeys(showRevoked), { keepPrevious: true })
+  const agents = useApiDef(queries.agents(showRevoked), { keepPrevious: true })
+  const passwords = useApiDef(queries.appPasswords())
   const addresses = useApiDef(queries.inboundAddressOptions())
-  const agentTokens = useApiDef(queries.agentTokens(showRevoked), { keepPrevious: true })
-  const mcpConnections = useApiDef(queries.mcpConnections())
-  const revoke = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
-  const revokeInbound = useApiMutation((api, id: string) => api.mailboxes.revokeKey(id), 'Inbound key revoked')
-  const revokeAgentToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
-  const revokeMcpConnection = useApiMutation((api, id: string) => api.credentials.revokeMcpConnection(id), 'MCP connection revoked')
-  // /api-keys?create=send&domain=acme.com opens the dialog filled in (Overview's setup step links here); the
-  // parameters then leave the URL, so Back and reload don't open it again.
+  const revokeKey = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
+  // Your own agent loses its sign-in and every token; another member's loses the tokens it made here.
+  const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') })
+  const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
+  const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked')
+  // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here);
+  // the parameters then leave the URL, so Back and reload don't open it again.
   const [params, setParams] = useSearchParams()
-  const [initial] = useState(() => params.has('create') ? { purpose: (['send', 'read_send', 'read', 'manage', 'inbound'] as Purpose[]).find(value => value === params.get('create')) ?? 'send', domain: params.get('domain') || undefined } : undefined)
+  const [initial] = useState(() => {
+    if (!params.has('create')) return undefined
+    const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
+    return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
+  })
   const [open, setOpen] = useState(Boolean(initial))
+  const [connecting, setConnecting] = useState(connectLink)
   useEffect(() => { if (params.has('create')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true }) }, [params, setParams])
-  const [secret, setSecret] = useState<{ value: string; title: string } | null>(null)
-  const [revokeKey, setRevokeKey] = useState<KeyRow | null>(null)
-  const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
-  const [revokeConnection, setRevokeConnection] = useState<McpConnection | null>(null)
+  const [secret, setSecret] = useState<CreatedSecret | null>(null)
+  const [revoking, setRevoking] = useState<Row | null>(null)
   const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
-  const inboxOf = (id: string) => addresses.data?.find(item => item.id === id && item.kind === 'inbox')
 
-  // Inbound keys aren't paginated, so they join the first page of API keys, newest first.
+  // API keys page by cursor; agents and app passwords aren't paginated, so they join the first page. Each source fails
+  // on its own: the others still list, with the failed one's error and its own retry.
   const firstPage = !cursor
-  const listLoading = keys.isPending || firstPage && (inboundKeys.isPending || addresses.isPending)
-  // Each source fails on its own: a failed API key page still lists inbound keys, and the other way round.
-  const apiFailed = Boolean(keys.error)
-  const inboundFailed = firstPage && Boolean(inboundKeys.error)
-  const listFailed = apiFailed && (!firstPage || inboundFailed)
-  const emptyTitle = cursor ? 'No keys on this page' : `No ${showRevoked ? '' : 'active '}${apiFailed ? 'inbound keys' : inboundFailed ? 'API keys' : 'keys'}`
-  const rows: KeyRow[] = [...(keys.data ?? []).map(key => ({ kind: 'api' as const, key })), ...(firstPage ? inboundKeys.data ?? [] : []).map(key => ({ kind: 'inbound' as const, key }))]
-    .sort((a, b) => b.key.createdAt.localeCompare(a.key.createdAt))
-  const connected: ConnectedRow[] = [...(mcpConnections.data ?? []).map(item => ({ kind: 'mcp' as const, item })), ...(agentTokens.data ?? []).map(item => ({ kind: 'token' as const, item }))]
-  const connectedError = agentTokens.error ?? mcpConnections.error
-  // Always shown once known, empty or not: where agents you connect appear, and how to connect one.
-  const showConnected = !listLoading && !agentTokens.isPending && !mcpConnections.isPending
-  const connectionName = (grantId: string) => mcpConnections.data?.find(connection => connection.id === grantId)?.name
+  const sources = [
+    ...(type === 'all' || type === 'api' ? [{ query: keys, label: 'API keys' }] : []),
+    ...((type === 'all' && firstPage) || type === 'agent' ? [{ query: agents, label: 'agent tokens' }] : []),
+    ...((type === 'all' && firstPage) || type === 'app' ? [{ query: passwords, label: 'app passwords' }] : []),
+  ]
+  const failed = sources.filter(source => source.query.error)
+  const keysShown = type === 'all' || type === 'api'
+  // Addresses name a limited key's scope; without them the key would list IDs, so it waits for them (not their failure).
+  const listLoading = sources.some(source => source.query.isPending) || keysShown && addresses.isPending
+  const listFailed = failed.length === sources.length
+  const included = (query: typeof keys | typeof agents | typeof passwords) => sources.some(source => source.query === query) && !query.error
+  const rows: Row[] = [
+    ...(included(keys) ? newestFirst(keys.data ?? []).map(key => ({ kind: 'key' as const, id: key.id, key })) : []),
+    ...(included(agents) ? newestFirst(agents.data ?? []).flatMap(agent => [{ kind: 'agent' as const, id: agent.id, agent }, ...newestFirst(agent.tokens).map(token => ({ kind: 'token' as const, id: token.id, token }))]) : []),
+    // App passwords are active only: revoking one removes it.
+    ...(included(passwords) ? newestFirst(passwords.data ?? []).map(password => ({ kind: 'app' as const, id: password.id, password })) : []),
+  ]
+  const active = showRevoked ? '' : 'active '
+  const empty = failed.length ? <EmptyState title="Nothing else to show" />
+    : cursor && keysShown ? <EmptyState title="No keys on this page" />
+    : type === 'api' ? <EmptyState title={`No ${active}API keys`} description={showRevoked ? undefined : 'An API key lets your server, a script or an agent send email or read mail.'} />
+    : type === 'agent' ? <EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with the tokens it makes." action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
+    : type === 'app' ? <EmptyState title="No app passwords" description="An app password lets a mail app such as Apple Mail or Thunderbird open a persistent inbox over IMAP or SMTP." />
+    : <EmptyState title={`No ${active}keys`} description={showRevoked ? undefined : 'Create a key to send from your app, connect an agent or open an inbox in a mail app.'} />
+
+  const keyAccess = (key: ApiKey): { first: ReactNode; second: string } => {
+    const { access } = key
+    if (access.type === 'workspace') return { first: accessLabel(key.permissions, key.domains.length === 0), second: domainScope(key.domains) }
+    if (access.type === 'inbox') return { first: <>Inbox: <PrivateAddress value={address(access.inboxId ?? '')} /></>, second: mailLabel(access.mail) }
+    if (access.addressIds?.length === 0) return { first: 'Creates inboxes', second: 'Reads only the inboxes it created' }
+    return { first: access.addressIds ? <>Addresses: <AddressList values={access.addressIds.map(address)} /></> : 'Every address', second: mailLabel(access.mail) }
+  }
+  const name = (row: Row): { first: ReactNode; second: ReactNode } => {
+    if (row.kind === 'key') return { first: row.key.name, second: `Created ${date(row.key.createdAt)}${row.key.expiresAt && !keyState(row.key) ? ` · ends ${date(row.key.expiresAt)}` : ''}` }
+    if (row.kind === 'agent') return { first: connectionTitle(row.agent), second: row.agent.own ? row.agent.clientId : <PrivateAddress value={row.agent.userEmail} /> }
+    if (row.kind === 'token') return { first: row.token.purpose, second: expiry(row.token) }
+    return { first: row.password.name, second: `Created ${date(row.password.createdAt)}` }
+  }
+  const access = (row: Row): { first: ReactNode; second: ReactNode } => {
+    if (row.kind === 'key') return keyAccess(row.key)
+    if (row.kind === 'agent') return { first: agentAccess(row.agent.permissions), second: `Signed in ${date(row.agent.createdAt)}` }
+    if (row.kind === 'token') return { first: accessLabel(row.token.permissions, false), second: domainScope(row.token.domains) }
+    return { first: protocolLabel(row.password.protocols), second: <PrivateAddress value={row.password.inboxAddress} /> }
+  }
+  const used = (row: Row) => row.kind === 'key' ? lastUsed(row.key.lastUsedAt) : row.kind === 'agent' ? lastUsed(row.agent.lastUsedAt) : row.kind === 'token' ? lastUsed(row.token.lastUsedAt) : <span className="muted" title="Bane doesn’t track an app password’s last use">—</span>
+  // On a phone the last line says what matters most for each: a key's prefix and use, a token's expiry.
+  const cardLast = (row: Row) => {
+    if (row.kind === 'key') return <><code>{row.key.prefix}</code> · {keyState(row.key) ?? usedLine(row.key.lastUsedAt)}</>
+    if (row.kind === 'agent') return agentState(row.agent) ?? usedLine(row.agent.lastUsedAt)
+    if (row.kind === 'token') return expiry(row.token)
+    return `Created ${date(row.password.createdAt)}`
+  }
+  const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? 'Revoke agent' : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+  const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
   return <div className="stack">
-    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><ConnectAgentButton initiallyOpen={connectLink} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
+    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
     <KeysGuide />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
-        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
-          empty={<EmptyState title={emptyTitle} description={cursor || showRevoked || apiFailed || inboundFailed ? undefined : 'Create a key to send from your app or let an agent work on an inbound address.'} />}
+        <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
+        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} empty={empty}
           columns={[
-            { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} />, cardRender: row => row.key.name },
-            { ...settingsColumns.keys[1], render: row => row.kind === 'api'
-              ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
-              : <TwoLines first={<>{row.key.addressIds?.length === 1 && inboxOf(row.key.addressIds[0]!) ? 'Inbox key: ' : 'Inbound key: '}{row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</>} second={permissionList(row.key.permissions)} />,
-              cardRender: row => row.kind === 'api' ? `${accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} · ${domainScope(row.key.domains)}` : <>{row.key.addressIds?.length === 1 && inboxOf(row.key.addressIds[0]!) ? 'Inbox key: ' : 'Inbound key: '}{row.key.addressIds ? <AddressList values={row.key.addressIds.map(address)} /> : 'every address'}</> },
-            { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
-            { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt), cardRender: row => row.key.revokedAt ? 'Revoked' : row.key.lastUsedAt ? `Used ${date(row.key.lastUsedAt)}` : 'Never used' },
-            { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button>,
-              cardRender: row => row.key.revokedAt ? null : <DropdownMenu label={`Actions for ${row.key.name}`} title={row.key.name} items={[{ label: 'Revoke key', destructive: true, onSelect: () => setRevokeKey(row) }]} /> },
+            { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
+            { ...typeColumn, render: row => typeName[row.kind] },
+            { ...accessColumn, render: row => <TwoLines first={access(row).first} second={access(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{access(row).first} · {access(row).second}</span> },
+            { ...prefixColumn, render: row => row.kind === 'key' ? <code>{row.key.prefix}</code> : <span className="muted">—</span> },
+            { ...lastColumn, render: used, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{cardLast(row)}</span> },
+            { ...actionsColumn, render: row => rowState(row) ?? <Button variant="danger" aria-label={`Revoke ${rowName(row)}`} onClick={() => setRevoking(row)}>Revoke</Button>,
+              cardRender: row => rowState(row) ? null : <DropdownMenu label={`Actions for ${rowName(row)}`} title={rowName(row)} items={[{ label: revokeLabel(row), destructive: true, onSelect: () => setRevoking(row) }]} /> },
           ]} />}
-        {apiFailed && <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />}
-        {inboundFailed && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
-        {!listLoading && (!apiFailed || pagination.page > 1) && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
+        {failed.map(source => <ErrorState key={source.label} error={source.query.error} onRetry={() => void source.query.refetch()} />)}
+        {keysShown && !listLoading && (!keys.error || pagination.page > 1) && <Pagination page={pagination.page} pageSize={100} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
-      {showConnected && <section className="section stack">
-        <div className="keys-head">
-          <SectionHeader title="Connected agents" actions={<ConnectAgentButton size="sm" />} />
-          <p className="muted">Agents signed in as someone in this workspace over MCP, and the short-lived agent tokens they made. Revoking a sign-in also revokes its tokens.</p>
-        </div>
-        {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id}
-          empty={<EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with a Revoke button." />} columns={[
-          { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
-            ? <TwoLines first={`${row.item.name || 'MCP client'}${row.item.profile ? ` · ${row.item.profile}` : ''}`} second={row.item.clientId} />
-            : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
-            cardRender: row => row.kind === 'mcp' ? `${row.item.name || 'MCP client'}${row.item.profile ? ` · ${row.item.profile}` : ''}` : row.item.purpose },
-          { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'
-            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)} second={row.item.scopes.map(scope => scope.replace('bane:', '').replaceAll('_', ' ')).join(', ')} />
-            : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} />,
-            cardRender: row => row.kind === 'mcp' ? `MCP · ${accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)}` : `Agent token · ${accessLabel(row.item.permissions, false)}` },
-          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? row.item.status==='expired'?'Expired':row.item.status==='revoked'?'Revoked':`Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
-          { key: 'used', label: 'Last used', card: 'hide', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
-          { key: 'actions', label: '', align: 'right', width: 100, card: 'end', render: row => row.kind === 'mcp'
-            ? <Button variant="danger" disabled={row.item.status==='expired'||row.item.status==='revoked'} aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
-            : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button>,
-            cardRender: row => row.kind === 'mcp' ? <DropdownMenu label={`Actions for ${row.item.name || 'MCP connection'}`} title={row.item.name || 'MCP connection'} items={[{ label: 'Revoke connection', destructive: true, onSelect: () => setRevokeConnection(row.item) }]} />
-              : tokenInactive(row.item) ? null : <DropdownMenu label={`Actions for ${row.item.purpose}`} title={row.item.purpose} items={[{ label: 'Revoke token', destructive: true, onSelect: () => setRevokeToken(row.item) }]} /> },
-        ]} />}
-      </section>}
     </div>
-    {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={(value, title) => setSecret({ value, title })} />}
-    <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)}>{secret?.title === 'API key created' && <KeySendExample apiKey={secret.value} />}</SecretDialog>
-    <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.key.name ?? 'key'}?`}
-      description={revokeKey?.kind === 'inbound' ? 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.' : 'Requests using this key will stop working. Revoking a key cannot be undone.'}
-      confirmLabel="Revoke key" danger pending={revoke.isPending || revokeInbound.isPending} onConfirm={async () => { if (revokeKey?.kind === 'api') await revoke.mutateAsync(revokeKey.key.id); else if (revokeKey) await revokeInbound.mutateAsync(revokeKey.key.id) }} />
-    <ConfirmDialog open={revokeToken !== null} onOpenChange={next => { if (!next) setRevokeToken(null) }} title={`Revoke ${revokeToken?.purpose ?? 'agent token'}?`} description="This temporary token will stop working immediately. Revoking it cannot be undone." confirmLabel="Revoke token" danger pending={revokeAgentToken.isPending} onConfirm={async () => { if (revokeToken) await revokeAgentToken.mutateAsync(revokeToken.id) }} />
-    <ConfirmDialog open={revokeConnection !== null} onOpenChange={next => { if (!next) setRevokeConnection(null) }} title={`Revoke ${revokeConnection?.name || 'MCP connection'}?`} description="This connection and every agent token created from it will stop working immediately." confirmLabel="Revoke connection" danger pending={revokeMcpConnection.isPending} onConfirm={async () => { if (revokeConnection) await revokeMcpConnection.mutateAsync(revokeConnection.id) }} />
+    {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
+    <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} />
+    <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}</SecretDialog>
+    <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
+      onConfirm={async row => {
+        if (row.kind === 'key') await revokeKey.mutateAsync(row.key.id)
+        else if (row.kind === 'agent') await revokeAgent.mutateAsync(row.agent.id)
+        else if (row.kind === 'token') await revokeToken.mutateAsync(row.token.id)
+        else await revokePassword.mutateAsync(row.password)
+      }} />
   </div>
 }
 
-// Which key do I need: one quiet line, closed until asked for, and left the way it was last time in this browser.
-const guideKey = 'bane.keys-guide'
-function KeysGuide() {
-  const [open, setOpen] = useState(() => { try { return localStorage.getItem(guideKey) === 'open' } catch { return false } })
-  const toggle = () => {
-    setOpen(!open)
-    try { if (open) localStorage.removeItem(guideKey); else localStorage.setItem(guideKey, 'open') } catch { /* Stays as chosen for this visit. */ }
-  }
-  return <section className="keys-guide" aria-label="Which key do I need?" data-open={open || undefined}>
-    <div className="keys-guide__line">
-      <button type="button" className="keys-guide__toggle" aria-expanded={open} aria-controls="keys-guide-panel" onClick={toggle}>Which key do I need?<ChevronDown size={14} aria-hidden="true" /></button>
-      <Link className="guide-link" to={guides.keys}>Guide</Link>
-    </div>
-    <div id="keys-guide-panel" className="keys-guide__panel" aria-hidden={!open} inert={!open}>
-      <div><dl>{credentials.map(kind => <div key={kind.name}><dt>{kind.name}</dt><dd>{kind.line} <span className="keys-guide__where">{kind.where}</span></dd></div>)}</dl></div>
-    </div>
-  </section>
+// What revoking each one ends, said before it happens.
+function RevokeDialog({ row, onClose, onConfirm, pending }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean }) {
+  const description: ReactNode = !row ? ''
+    : row.kind === 'key' ? row.key.access.type === 'workspace' ? 'Requests using this key will stop working. Revoking a key cannot be undone.' : 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.'
+    : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. It can sign in again as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
+    : row.kind === 'token' ? 'This short-lived token stops working immediately. Revoking it cannot be undone.'
+    : 'Mail apps using it are signed out and can’t sign in with it again. The inbox and its mail stay.'
+  const label = !row ? 'Revoke' : row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+  return <ConfirmDialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={`Revoke ${row ? rowName(row) : 'key'}?`} description={description} confirmLabel={label} danger pending={pending} onConfirm={async () => { if (row) await onConfirm(row) }} />
 }
 
-function TwoLines({ first, second }: { first: ReactNode; second: ReactNode }) {
-  return <div className="settings-cell-stack keys-cell"><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={typeof second === 'string' ? second : undefined}>{second}</span></div>
+function TwoLines({ first, second, nested = false }: { first: ReactNode; second: ReactNode; nested?: boolean }) {
+  return <div className={`settings-cell-stack keys-cell${nested ? ' keys-cell--nested' : ''}`}><span title={typeof first === 'string' ? first : undefined}>{first}</span><span className="muted" title={typeof second === 'string' ? second : undefined}>{second}</span></div>
 }

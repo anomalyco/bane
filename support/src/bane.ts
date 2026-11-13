@@ -8,7 +8,7 @@ import { MissingSecret } from './tokens.js';
 //   email sender, mint and revoke a support grant, and grant-scoped GET /v1/support/* reads. No token: the binding is
 //   the credential.
 // - `BANE_API` → the default entrypoint, Bane's public API, as a customer of Bane would use it: the support@bane.mx
-//   inbound address's own inbox key (BANE_SUPPORT_INBOX_KEY) reads support mail and sends replies and ticket emails.
+//   inbound address's own API key (BANE_SUPPORT_INBOX_KEY, limited to that address) reads support mail and sends replies and ticket emails.
 
 export type PlatformReply<T = unknown> = { status: number; body: T; requestId: string | null; retryAfter: string | null };
 export type Handoff = {
@@ -36,7 +36,7 @@ export class BaneError extends Error {
 }
 
 /**
- * Bane's public API over the BANE_API binding, with the support address's inbox key, or (`intake`) the key for the
+ * Bane's public API over the BANE_API binding, with the support address's API key, or (`intake`) the key for the
  * abuse@, privacy@ and legal@ addresses.
  */
 export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
@@ -58,7 +58,7 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
   return {
     /**
      * A received message with the sender's authentication results (SPF, DKIM, DMARC) and Bane's automated-mail flag, for
-     * sender checks. Inbox keys can't read the delivery projection (envelopes, headers), and don't need it.
+     * sender checks. Address-limited API keys can't read the delivery projection (envelopes, headers), and don't need it.
      */
     message: (messageId: string) => call<InboundMessage>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}?includeAuthentication=true`),
     /** One attachment's bytes (≤ limit, else null), through the short-lived signed link Bane returns for it. */

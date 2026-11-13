@@ -177,7 +177,7 @@ Inboxes phase 1 moves new hosted received mail (raw MIME and extracted files) fr
    - The receiving canary passes. Its `mail_messages` row has `raw_bucket = 'r2:bane-dev-mail'` and `raw_key = 'd/<workspace>/<message>.eml'`; the only new S3 object is under `staging/`.
    - An inbox on the dev receiving host (`POST /v1/inboxes`) receives a real message, `waitForMessage` returns it within 5 seconds of the SES receipt, and its attachment downloads through `/v1/objects/…`.
    - After `DELETE /v1/inboxes/{id}` and the next hourly sweep, its rows are gone and `npx wrangler r2 object get bane-dev-mail/e/<workspace>/<inbox>/<message>.eml --remote` answers not found.
-   - OpenCode connected to `https://dev.bane.mx/mcp` with an inbox key runs create → wait → read → delete.
+   - OpenCode connected to `https://dev.bane.mx/mcp` with an API key for its inboxes runs create → wait → read → delete.
 
 ### Production (after Ryan approves)
 

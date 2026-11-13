@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, isoTime, json, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -79,7 +79,7 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
 }
 
 // ---------- helpers ----------
-const iso = (value: string | null | undefined) => value ? new Date(value.includes('T') ? value : value.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')).toISOString() : null;
+const iso = isoTime;
 const labelName = z.string().trim().toLowerCase().min(1).max(64).regex(/^[a-z0-9][a-z0-9 _.:/-]*$/, 'Labels use letters, numbers, spaces and _ . : / -');
 
 // ---------- schemas ----------
@@ -688,46 +688,32 @@ export function registerMailbox(app: App) {
   registerInboundWebhooks(app);
 }
 
+// Deprecated aliases: an inbound key is an API key limited to receiving addresses (POST /v1/api-keys with access).
+// Same rules and rows as createApiKey; these keep their original request and response shapes.
 function registerInboundKeys(app: App) {
-  const base = '/v1/inbound/keys', tags = ['Inbound keys'];
+  const base = '/v1/inbound/keys', tags = ['Inbound keys'], deprecated = true;
   const keyFields = { name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'modify','create'])).min(1).max(4).default(['read', 'send', 'modify']) };
   const ids = z.array(z.string().min(1).max(120)).max(500).optional();
   const body = z.object({ ...keyFields, addressIds: ids }).strict().openapi('CreateInboundKey');
-  app.openapi(createRoute({ method: 'post', path: base, operationId: 'createInboundKey', tags, security, summary: 'Create a key for an agent', description: 'Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.',
+  app.openapi(createRoute({ method: 'post', path: base, operationId: 'createInboundKey', tags, security, deprecated, summary: 'Create a key for an agent (deprecated: createApiKey with access)', description: 'Deprecated: use createApiKey with access {type: "addresses"} or {type: "inbox"}. Scopes a key to specific receiving addresses; omit the filter for every address, including future ones. The secret is returned once.',
     request: { body: json(body) }, responses: { 201: response(KeySchema.extend({ secret: z.string() }).openapi('InboundKeySecret')), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json');
     // An MCP agent may create one only with explicit receiving consent; the key is then revoked with that approval.
     if (!['apiKey', 'dashboard', 'mcp'].includes(c.get('actor')?.credential ?? '')) throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Create inbound keys with a live API key, the dashboard or an MCP approval with receiving consent.');
-    const mailboxIds = input.addressIds ? [...new Set(input.addressIds)] : null;
-    if(input.permissions.includes('create') && mailboxIds===null || mailboxIds?.length===0 && !input.permissions.includes('create'))throw new ApiError(422,'ADDRESS_SCOPE_REQUIRED','Provisioning keys need an explicit addressIds scope.');
-    if (mailboxIds?.length) {
-      const found = await c.env.db.select({ id: mailboxes.id }).from(mailboxes).where(and(eq(mailboxes.workspaceId, value.workspaceId), inArray(mailboxes.id, mailboxIds)));
-      if (found.length !== mailboxIds.length) throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
-    }
-    const secret = randomSecret('bane_mbx_');
-    const [row] = await c.env.db.transaction(async tx => {
-      const rows = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId: value.workspaceId, name: input.name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, permissions: [...new Set(input.permissions)] }).returning();
-      await ownReceiving(tx, c, 'key', rows[0]!.id);
-      await recordAudit(tx, c, { action: 'inbox_key.create', workspaceId: value.workspaceId, target: { type: 'inbox_key', id: rows[0]!.id }, after: { name: input.name, permissions: rows[0]!.permissions, addressIds: mailboxIds } });
-      return rows;
-    });
-    c.header('Cache-Control', 'no-store');
-    return c.json({ ...keyView(row!), secret }, 201);
+    const { createLimitedKey } = await import('./address-keys.js');
+    const { row, secret } = await createLimitedKey(c, value.workspaceId, input.name, { type: 'addresses', addressIds: input.addressIds ?? null, mail: input.permissions }, { addresses: 'addressIds', inbox: 'addressIds', mail: 'permissions' });
+    return c.json({ ...keyView(row), secret }, 201);
   });
-  app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundKeys', tags, security, request: { query: z.object({ includeRevoked: z.enum(['true', 'false']).default('false'), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(KeySchema, 'InboundKeyPage')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundKeys', tags, security, deprecated, description: 'Deprecated: listApiKeys lists these with every other API key.', request: { query: z.object({ includeRevoked: z.enum(['true', 'false']).default('false'), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(KeySchema, 'InboundKeyPage')), ...errors } }), async c => {
     const value = admin(c); const q = c.req.valid('query');
     const rows = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), q.includeRevoked === 'false' ? isNull(mailboxKeys.revokedAt) : undefined, q.cursor ? lt(mailboxKeys.id, q.cursor) : undefined)).orderBy(desc(mailboxKeys.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: `${base}/{id}/revoke`, operationId: 'revokeInboundKey', tags, security, request: { params: IdParam }, responses: { 200: response(KeySchema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: `${base}/{id}/revoke`, operationId: 'revokeInboundKey', tags, security, deprecated, description: 'Deprecated: revokeApiKey revokes any API key.', request: { params: IdParam }, responses: { 200: response(KeySchema), ...errors } }), async c => {
     const value = admin(c);
-    const row = await c.env.db.transaction(async tx => {
-      const [row] = await tx.update(mailboxKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), eq(mailboxKeys.id, c.req.valid('param').id), isNull(mailboxKeys.revokedAt))).returning();
-      if (row) await recordAudit(tx, c, { action: 'inbox_key.revoke', workspaceId: value.workspaceId, target: { type: 'inbox_key', id: row.id }, before: { name: row.name, permissions: row.permissions, addressIds: row.mailboxIds } });
-      return row;
-    });
-    if (!row) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
-    return c.json(keyView(row), 200);
+    const revoked = await (await import('./address-keys.js')).revokeLimitedKey(c, value.workspaceId, c.req.valid('param').id);
+    if (!revoked?.fresh) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
+    return c.json(keyView(revoked.row), 200);
   });
 }
 

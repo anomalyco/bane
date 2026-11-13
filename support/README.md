@@ -18,7 +18,7 @@ dashboard Help ─ POST /v1/contact-support (Bane) ─▶ handoff JWS
               ═ WebSocket /c/<conv>?token= ═▶ DO ─ OpenCode turn ─ tools ─ BANE.read(/v1/support/*, grant)
                                                                 └ model ─▶ Console gateway (Opus 5.5, medium)
 support@ mail ─ Bane route → webhook ritual ─▶ POST /hooks/bane-inbound ─▶ DO inbox + alarm
-                                              DO ─ BANE_API (inbox key) ─ read message, reply in thread
+                                              DO ─ BANE_API (address API key) ─ read message, reply in thread
 tickets ─ D1 (typed: billing, bug, deliverability, account, abuse_report, feature_request, other)
         ─ email "[Bane <type>] tkt_…" to the team (Bane API) + the customer's follow-up thread
         ─ staff list at /staff (Bane operator sign-in), mark done
@@ -27,7 +27,7 @@ screenshots ─ POST /c/<conv>/attachments (chat) or email image attachments ─
 ```
 
 - **Bane access** is a service binding to Bane's `SupportPlatform` entrypoint (`api/src/support-platform.ts`), with no token. It can verify a handoff, verify an email sender, mint and revoke a grant, and run grant-scoped `GET /v1/support/*` reads. The grant is stored only in the DO's private `support_grant` table, and tool closures add it to each read. It never reaches the model, the panel, logs or D1.
-- **Email and tickets** go through Bane's public API as a normal customer would: the support address's own inbox key (`BANE_SUPPORT_INBOX_KEY`) over the `BANE_API` binding.
+- **Email and tickets** go through Bane's public API as a normal customer would: an API key limited to the support address (`BANE_SUPPORT_INBOX_KEY`) over the `BANE_API` binding.
 - **The model** is pinned to Claude Opus 5.5 at medium effort, through Console's inference gateway (`GATEWAY_URL`, key `CONSOLE_GATEWAY_KEY`). It's pinned in the config, the agent, the session and a provider policy. A fetch guard also refuses any other model or effort. Nothing falls back.
 
 ## Why OpenCode, embedded this way
@@ -58,11 +58,11 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
 3. **DNS:** nothing to add by hand. The Worker's Custom Domain (`support.dev.bane.mx` / `support.bane.mx`) creates its record on first deploy, as long as the zone `bane.mx` is in the same account.
 4. **The support address** in Bane's platform workspace (production `ws_90b0…`, or dev's own), through Bane's API with an admin key:
    - create the inbound address `support@bane.mx` (dev: `support@dev.bane.mx`) and put its ID (`mbx_…`) in `SUPPORT_ADDRESS_ID`. Give it the key `support`: routes name an inbox by its address's key;
-   - create an inbox key for that address only, with read and send: this is `BANE_SUPPORT_INBOX_KEY`;
+   - create an API key limited to that address, read and reply (`POST /v1/api-keys` with `access: {"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}`): this is `BANE_SUPPORT_INBOX_KEY`;
    - create a webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-inbound` (dev: `support.dev.bane.mx`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
    - add a route for the address to `["inbox:support", "webhook:<that webhook>"]`. Keep the root catch-all at `store`.
 5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`):
-   - create the three inbound addresses, and one inbox key covering only those three, with read and send. This is `BANE_INTAKE_INBOX_KEY`;
+   - create the three inbound addresses, and one API key limited to those three, read and reply. This is `BANE_INTAKE_INBOX_KEY`;
    - create a second webhook (Bane format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
    - add a route for each address to its own inbox and the shared webhook, such as `abuse@bane.mx` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
    - `INTAKE_ADDRESSES` in the wrangler config lists them.

@@ -1,4 +1,4 @@
-import type { MailRoute, AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, MailboxKey, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { MailRoute, Agent, ApiKey, AppPassword, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -19,14 +19,14 @@ export interface DemoState {
   templateAssets?: DemoAttachment[]
   templates?: CampaignTemplate[]
   domains: Domain[]
+  /** Every API key: workspace keys and keys limited to addresses or an inbox. */
   keys: ApiKey[]
-  agentTokens?: AgentTokenSummary[]
-  mcpConnections?: McpConnection[]
+  agents?: Agent[]
+  appPasswords?: AppPassword[]
   webhooks: Webhook[]
   mailboxes?: Mailbox[]
   mailboxDomains?: MailboxDomain[]
   mailboxThreads?: MailboxThreadDetail[]
-  mailboxKeys?: MailboxKey[]
   mailboxWebhooks?: (InboundWebhook & { deliveries: MailboxWebhookDelivery[] })[]
   mailRoutes?: { version: number; routes: MailRoute[] }
   /** Inbound message ID → every receiving address it is visible through. Unlisted messages belong to their own mailboxId. */
@@ -49,6 +49,8 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
       mailbox('mbx_billing', 'billing@mail.acme.com', 'Billing agent', 42, 1, 3),
       mailbox('mbx_sales', 'sales@mail.acme.com', 'Sales agent', 17, 0, 26),
       mailbox('mbx_jordan', 'jordan@mail.acme.com', null, 3, 1, 50, 'auto'),
+      // A persistent agent inbox: the demo's inbox key and app passwords belong to it.
+      { ...mailbox('inbox_ops', 'ops@mail.acme.com', 'Ops inbox', 0, 0, null), kind: 'inbox' },
     ],
     mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_address', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), addressCount: 4 }],
   }
@@ -61,16 +63,12 @@ export function demoRoutes(now = Date.now()): NonNullable<DemoState['mailRoutes'
 }
 export function demoMailboxAccess(now = Date.now()) {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
-  const keys: MailboxKey[] = [
-    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'bane_mbx_4f2a91', addressIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
-    { id: 'mbk_triage', name: 'Triage reader', prefix: 'bane_mbx_8c1d07', addressIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
-  ]
   const delivery = (id: string, hours: number, status: MailboxWebhookDelivery['status'], code: number | null, attempts = 1): MailboxWebhookDelivery => ({ id, webhookId: 'mwh_agent', eventId: `mev_${id}`, status, attemptCount: attempts, lastStatusCode: code, lastError: status === 'failed' ? 'WEBHOOK_HTTP_ERROR' : null, createdAt: ago(hours), updatedAt: ago(hours) })
   const webhooks: NonNullable<DemoState['mailboxWebhooks']> = [
     { id: 'mwh_agent', url: 'https://agents.acme.com/hooks/mail', description: 'Support agent runtime', eventTypes: ['message.received', 'message.bounced'] as InboundWebhook['eventTypes'], addressIds: ['mbx_support'], paused: false, headers: [{ name: 'Authorization', hint: '••••7f3a', updatedAt: ago(48) }, { name: 'X-Agent-Tenant', hint: '••••', updatedAt: ago(48) }], createdAt: ago(20 * 24), updatedAt: ago(48), deliveries: [delivery('d1', 0.2, 'delivered', 200), delivery('d2', 1.5, 'delivered', 200), delivery('d3', 5, 'failed', 503, 6), delivery('d4', 27, 'delivered', 204)] },
     { id: 'mwh_audit', url: 'https://audit.acme.com/mail-events', description: 'Audit log', eventTypes: ['message.received', 'message.sent', 'message.delivered', 'thread.updated'] as InboundWebhook['eventTypes'], addressIds: null, paused: true, headers: [], createdAt: ago(9 * 24), updatedAt: ago(9 * 24), deliveries: [] },
   ]
-  return { keys, webhooks }
+  return { webhooks }
 }
 
 export function demoMailboxThreads(now = Date.now()): MailboxThreadDetail[] {
@@ -180,16 +178,36 @@ export function createSeed(now = Date.now()): DemoState {
   ].map(value => ({ ...value, status: value.status as Domain['status'], mailFromStatus: value.status === 'verified' ? 'verified' : 'pending', createdAt: ago(45 * 24), sending: value.status === 'verified' ? 'verified' : 'pending', receiving: value.id === 'dom_acme' ? 'verified' : 'pending', records: [{ id: `${value.id}_dkim`, type: 'CNAME', purpose: 'sending', name: `demo_key._domainkey.${value.name}`, value: 'demo_key.dkim.example.invalid', status: value.status === 'verified' ? 'verified' : 'pending' }, value.id === 'dom_europe'
     ? { id: `${value.id}_inbound`, type: 'MX', purpose: 'receiving', name: `reply.${value.name}`, value: `10 inbound-smtp.${value.regionId}.amazonaws.com`, status: 'pending', note: `Your root MX points elsewhere, so receive on reply.${value.name}.` }
     : { id: `${value.id}_inbound`, type: 'MX', purpose: 'receiving', name: value.name, value: `10 inbound-smtp.${value.regionId}.amazonaws.com`, status: value.id === 'dom_acme' ? 'verified' : 'pending' }, { id: `${value.id}_spf`, type: 'TXT', purpose: 'mail_from', name: `send.${value.name}`, value: 'v=spf1 -all', status: value.status === 'verified' ? 'verified' : 'pending' }, { id: `${value.id}_mx`, type: 'MX', purpose: 'mail_from', name: `send.${value.name}`, value: '10 demo-feedback.example.invalid', status: value.status === 'verified' ? 'verified' : 'pending' }] as DnsRecord[] }))
+  const workspaceKey = (id: string, name: string, prefix: string, permissions: ApiKey['permissions'], domains: string[], days: number, used: number | null): ApiKey =>
+    ({ id, name, prefix, permissions, domains, createdAt: ago(days * 24), lastUsedAt: used === null ? null : ago(used), revokedAt: null, expiresAt: null, access: { type: 'workspace', addressIds: null, inboxId: null, mail: [] } })
+  const limitedKey = (id: string, name: string, prefix: string, access: Omit<ApiKey['access'], 'inboxId'> & { inboxId?: string }, days: number, used: number | null): ApiKey =>
+    ({ id, name, prefix, permissions: [], domains: [], createdAt: ago(days * 24), lastUsedAt: used === null ? null : ago(used), revokedAt: null, expiresAt: null, access: { ...access, inboxId: access.inboxId ?? null } })
   const keys: ApiKey[] = [
-    { id: 'key_production', name: 'Production application', prefix: 'demo_prod_', permission: 'send', domains: ['acme.com'], createdAt: ago(30 * 24), lastUsedAt: ago(1) },
-    { id: 'key_analytics', name: 'Analytics dashboard', prefix: 'demo_read_', permission: 'read', domains: [], createdAt: ago(14 * 24), lastUsedAt: ago(3) },
+    workspaceKey('key_production', 'Production application', 'demo_prod_', ['send'], ['acme.com'], 30, 1),
+    workspaceKey('key_analytics', 'Analytics dashboard', 'demo_read_', ['read'], [], 14, 3),
+    workspaceKey('key_deploy', 'Deploy pipeline', 'demo_full_', ['read', 'send', 'manage'], [], 6, 50),
+    limitedKey('mbk_support_agent', 'Support agent', 'bane_mbx_4f2a91', { type: 'addresses', addressIds: ['mbx_support', 'mbx_billing'], mail: ['read', 'send', 'modify'] }, 20, 0.1),
+    limitedKey('mbk_triage', 'Triage reader', 'bane_mbx_8c1d07', { type: 'addresses', addressIds: null, mail: ['read'] }, 9, 30),
+    limitedKey('mbk_ops_inbox', 'Ops inbox reader', 'bane_mbx_2b7e55', { type: 'inbox', addressIds: ['inbox_ops'], inboxId: 'inbox_ops', mail: ['read', 'modify'] }, 4, 2),
+    limitedKey('mbk_e2e', 'End-to-end tests', 'bane_mbx_d93a10', { type: 'addresses', addressIds: [], mail: ['create', 'read', 'modify'] }, 2, 0.5),
   ]
-  const agentTokens: AgentTokenSummary[] = [{ id: 'agt_demo_import', grantId: 'mcp_demo_opencode', permissions: ['read', 'manage'], domains: [], purpose: 'Import customer contacts', expiresAt: new Date(now + 3_600_000).toISOString(), createdAt: ago(0.25), lastUsedAt: ago(0.1), revokedAt: null }]
-  const mcpConnections: McpConnection[] = [{ id: 'mcp_demo_opencode', clientId: 'demo-opencode', name: 'OpenCode', userEmail: 'ryan@example.com', scopes: ['bane:read', 'bane:send', 'bane:manage', 'offline_access'], createdAt: ago(14 * 24), updatedAt: ago(2), status: 'active', workspaceId: 'workspace_acme', receiving: false }]
+  const token = (id: string, grantId: string, purpose: string, permissions: ApiKey['permissions'], domains: string[], madeHours: number, expiresInHours: number, used: number | null) =>
+    ({ id, grantId, purpose, permissions, domains, createdAt: ago(madeHours), expiresAt: new Date(now + expiresInHours * 3_600_000).toISOString(), lastUsedAt: used === null ? null : ago(used), revokedAt: null })
+  // Your OpenCode sign-in with two short-lived tokens it made, and Jordan's Claude Code, which made one here.
+  const agents: Agent[] = [
+    { id: 'mcp_demo_opencode', clientId: 'demo-opencode', name: 'OpenCode', profile: 'work', userEmail: 'ryan@example.com', own: true, status: 'active', permissions: ['read', 'send', 'manage'], workspaceId: 'workspace_acme', createdAt: ago(14 * 24), lastUsedAt: ago(0.1),
+      tokens: [token('agt_demo_import', 'mcp_demo_opencode', 'Import customer contacts', ['read', 'manage'], [], 0.25, 1, 0.1), token('agt_demo_digest', 'mcp_demo_opencode', 'Send the weekly digest', ['send'], ['acme.com'], 2, 6, null)] },
+    { id: 'mcp_demo_jordan', clientId: 'demo-claude-code', name: 'Claude Code', profile: null, userEmail: 'jordan@example.com', own: false, status: 'active', permissions: ['read', 'send'], workspaceId: null, createdAt: ago(5 * 24), lastUsedAt: ago(4),
+      tokens: [token('agt_demo_bounces', 'mcp_demo_jordan', 'Check last week’s bounces', ['read'], [], 4, 20, 4)] },
+  ]
+  const appPasswords: AppPassword[] = [
+    { id: 'app_demo_mail', name: 'Apple Mail', protocols: ['imap', 'smtp'], createdAt: ago(3 * 24), inboxId: 'inbox_ops', inboxAddress: 'ops@mail.acme.com' },
+    { id: 'app_demo_thunderbird', name: 'Thunderbird', protocols: ['imap'], createdAt: ago(26), inboxId: 'inbox_ops', inboxAddress: 'ops@mail.acme.com' },
+  ]
   const webhooks: Webhook[] = [
     { id: 'wh_pipeline', name: 'Event pipeline', url: 'https://api.example.com/webhooks/email', regionIds: 'all', events: ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.delivery_delayed'], status: 'active', secretHint: 'demo_wh_…pipeline', headers: [{ name: 'Authorization', hint: '••••c0de', updatedAt: ago(72) }], deliveries: [{ id: 'del_pipeline_success', at: ago(0.5), regionId: 'us-east-1', event: 'email.delivered', response: 200, attempts: 1, status: 'delivered', payload: { demo: true, event: 'email.delivered', emailId: 'em_activity_01' } }, { id: 'del_pipeline_pending', at: ago(2), regionId: 'eu-west-1', event: 'email.bounced', response: 503, attempts: 1, status: 'retry_pending', payload: { demo: true, event: 'email.bounced', emailId: 'em_activity_23' } }] },
     { id: 'wh_bounces', name: 'Bounce monitoring', url: 'https://monitor.example.com/events', regionIds: ['us-east-1'], events: ['email.bounced', 'email.complained'], status: 'active', secretHint: 'demo_wh_…bounces', headers: [], deliveries: [] },
     { id: 'wh_warehouse', name: 'Data warehouse', url: 'https://data.example.com/email-events', regionIds: ['eu-west-1'], events: ['email.delivered'], status: 'paused', secretHint: 'demo_wh_…warehouse', headers: [{ name: 'X-Api-Key', hint: '••••', updatedAt: ago(200) }, { name: 'X-Warehouse-Source', hint: '••••mail', updatedAt: ago(200) }], deliveries: [] },
   ]
-  return { ...demoMailboxes(now), version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, templates, templateAssets: [], domains, keys, agentTokens, mcpConnections, webhooks }
+  return { ...demoMailboxes(now), version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, templates, templateAssets: [], domains, keys, agents, appPasswords, webhooks }
 }

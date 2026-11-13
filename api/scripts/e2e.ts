@@ -18,7 +18,7 @@ const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subd
 const byoV2 = 'Regional BYO setup requires a dashboard owner and a customer AWS account, not the Hosted fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const safeModeSkips: Partial<Record<Op, string>> = {
-  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard,
+  listMcpConnections: dashboard, revokeMcpConnection: dashboard, bindMcpConnection: dashboard, listAgents: dashboard, revokeAgent: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
   listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
@@ -279,6 +279,7 @@ async function devBoundaries() {
   await expectDenial(()=>api('updateInboxFolder',{path:missingFolder,body:{subscribed:false}}),404,'NOT_FOUND');
   await expectDenial(()=>api('deleteInboxFolder',{path:missingFolder}),404,'NOT_FOUND');
   check(!(await api('listInboxAppPasswords',{path:missingInbox})).data.length,'unexpected password listing');
+  check((await api('listAppPasswords',{})).data.every(p=>p.inboxId.startsWith('mbx_')&&!('password' in p)),'invalid workspace password listing');
   await expectDenial(()=>api('createInboxAppPassword',{path:missingInbox,body:{name:'Check',protocols:['imap']}}),409,'INBOX_UNAVAILABLE');
   await expectDenial(()=>api('revokeInboxAppPassword',{path:{...missingInbox,passwordId:'app_missing'}}),404,'NOT_FOUND');
   // Valid inputs, nonexistent IDs where possible. A 403/404 covers isolation, NOT the
@@ -292,7 +293,7 @@ async function devBoundaries() {
     await step(`${op}: rejects unauthorized or invalid input`,()=>expectDenial(()=>api(op,{...input,client:apiKeyClient}),status,code));
   }
   // Intentionally sequential: don't issue a burst of requests against dashboard endpoints.
-  for (const op of ['listWorkspaces','listWorkspaceMembers','listWorkspaceInvitations','listMcpConnections'] as const) await denied(op,{});
+  for (const op of ['listWorkspaces','listWorkspaceMembers','listWorkspaceInvitations','listMcpConnections','listAgents'] as const) await denied(op,{});
   await denied('renameCurrentWorkspace',{body:{name:'E2E'}});
   await denied('inviteWorkspaceMember',{body:invite});
   await denied('createWorkspaceInvitation',{body:invite});
@@ -301,6 +302,7 @@ async function devBoundaries() {
   await denied('updateWorkspaceMember',{path:fake,body:{role:'member'}});
   await denied('removeWorkspaceMember',{path:fake});
   await denied('revokeMcpConnection',{path:fake});
+  await denied('revokeAgent',{path:fake});
   await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
   await denied('revokeAgentToken',{path:fake},404,'NOT_FOUND');
@@ -718,6 +720,18 @@ async function inboundKey(addressId: string, otherId: string) {
   check(row.addressIds?.length === 1 && row.addressIds[0] === addressId && row.permissions.join() === 'read', 'inbound key scope differs');
   check((await api('getInboundAddress', { client: restricted, path: { addressId } })).address === inbox, 'run key cannot read its address');
   await expectDenial(() => api('getInboundAddress', { client: restricted, path: { addressId: otherId } }), 404, 'NOT_FOUND');
+  // The same key as an API key limited to the address: listed with the other API keys, and kept out of the workspace.
+  const limited = await api('createApiKey', { body: { name: prefix, access: { type: 'addresses', addressIds: [addressId], mail: ['read'] } } });
+  const limitedClient = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${limited.secret}` } });
+  defer(`revoke limited key ${limited.id}`, async () => {
+    check((await api('revokeApiKey', { path: { id: limited.id } })).revoked, 'limited key not revoked');
+    await expectDenial(() => api('getInboundAddress', { client: limitedClient, path: { addressId } }), 401, 'AUTH_INVALID');
+  });
+  check(limited.secret.startsWith('bane_mbx_') && limited.access.type === 'addresses' && limited.access.addressIds?.join() === addressId && limited.access.mail.join() === 'read' && !limited.permissions.length, 'limited key access differs');
+  check((await listed(limited.id, cursor => api('listApiKeys', { query: { cursor, limit: 100, includeRevoked: 'false' } }))).access.type === 'addresses', 'limited key not listed as an API key');
+  check((await api('getInboundAddress', { client: limitedClient, path: { addressId } })).address === inbox, 'limited key cannot read its address');
+  await expectDenial(() => api('getInboundAddress', { client: limitedClient, path: { addressId: otherId } }), 404, 'NOT_FOUND');
+  await expectDenial(() => api('getCurrentIdentity', { client: limitedClient }), 401, 'AUTH_INVALID');
 }
 
 async function inboundWebhook(addressId: string, threadId: string) {

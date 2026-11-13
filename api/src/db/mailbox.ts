@@ -141,6 +141,8 @@ export const mailIngestTurns=pgTable('mail_ingest_turns',{workspaceId:text('work
 export const mailboxKeys = pgTable('mailbox_keys', {
   id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), hash: text('hash').notNull().unique(), prefix: text('prefix').notNull(),
   mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), permissions: jsonb('permissions').$type<MailboxPermission[]>().notNull(),
+  // The agent inbox this key belongs to: it stops working when the inbox is deleted (inbox_end).
+  inboxId: text('inbox_id'),
   expiresAt: ts('expires_at'),
   createdAt: ts('created_at').notNull().defaultNow(), lastUsedAt: ts('last_used_at'), revokedAt: ts('revoked_at'),
 });

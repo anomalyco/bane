@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { ApiKey, LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { ApiKey, Inbox, LogEntry, SenderScoreFactor, MailRoute, RoutedRecipient, AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, BaneApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived, demoRoutes } from './seed'
@@ -31,6 +31,9 @@ const clone = <T,>(value: T): T => structuredClone(value)
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const now = () => new Date().toISOString()
 const DISCOVERY_TTL = 15 * 60 * 1000
+// A demo address of kind 'inbox' as the agent inbox list reads it: persistent, so it never expires.
+const demoInbox = (box: Mailbox): Inbox => ({ id: box.id, kind: 'inbox', type: 'persistent', address: box.address, domain: box.domain, name: box.displayName, metadata: {}, clientId: null, status: 'active', createdAt: box.createdAt, expiresAt: null as unknown as string, deleteAfter: null as unknown as string,
+  limits: { messages: 0, bytes: 0 }, send: { enabled: false, perDay: 0, replyOnly: true }, usage: { messages: box.stats.threads, bytes: 0, held: 0, unread: box.stats.unreadThreads, lastMessageAt: box.stats.lastMessageAt } })
 function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean, subscription: SesDiscovery['resources']['topic']['subscription'] = resourcesReady ? 'confirmed' : 'missing'): SesDiscovery {
   const profile = find(state.regions, region, 'Region')
   const set = (kind: 'transactional' | 'marketing') => ({ name: `bane-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady, autoValidation: resourcesReady ? kind === 'marketing' ? 'managed' as const : 'off' as const : null })
@@ -432,7 +435,8 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && attachmentIds(row.attachments) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
   if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && (row.listId === '' || references('lists', row.listId)) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending', 'not_configured', 'failed'].includes(String(row.mailFromStatus)) && (row.mailFromDomain == null || typeof row.mailFromDomain === 'string') && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
-  if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read', 'manage'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
+  const keyAccess = (v: unknown) => isRecord(v) && ['workspace', 'addresses', 'inbox'].includes(String(v.type)) && (v.addressIds === null || stringArray(v.addressIds)) && (v.inboxId === null || typeof v.inboxId === 'string') && stringArray(v.mail) && v.mail.every(p => ['read', 'send', 'modify', 'create'].includes(p))
+  if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && (String(row.prefix).startsWith('demo_') || String(row.prefix).startsWith('bane_mbx_')) && stringArray(row.permissions) && row.permissions.every(p => ['read', 'send', 'manage'].includes(p)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)) && (row.revokedAt === null || date(row.revokedAt)) && (row.expiresAt === null || date(row.expiresAt)) && keyAccess(row.access))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
 }
 
@@ -446,6 +450,17 @@ function parseSnapshot(stored: string): DemoState | undefined {
           row.addressIds = row.mailboxIds; delete row.mailboxIds
         }
       }
+    }
+    // One API key type: workspace keys saved with a single `permission` gain permissions and access, and the separate
+    // inbound keys join them as keys limited to addresses. Agents and app passwords start from the demo's own.
+    if (isRecord(parsed) && Array.isArray(parsed.keys)) {
+      for (const key of parsed.keys.filter(isRecord)) {
+        if (typeof key.permission === 'string') { key.permissions = key.permission === 'manage' ? ['read', 'send', 'manage'] : key.permission.split(', '); delete key.permission }
+        key.revokedAt ??= null; key.expiresAt ??= null
+        key.access ??= { type: 'workspace', addressIds: null, inboxId: null, mail: [] }
+      }
+      if (Array.isArray(parsed.mailboxKeys)) for (const key of parsed.mailboxKeys.filter(isRecord)) parsed.keys.push({ id: key.id, name: key.name, prefix: key.prefix, permissions: [], domains: [], createdAt: key.createdAt, lastUsedAt: key.lastUsedAt ?? null, revokedAt: key.revokedAt ?? null, expiresAt: null, access: { type: 'addresses', addressIds: key.addressIds ?? null, inboxId: null, mail: key.permissions } })
+      delete parsed.mailboxKeys; delete parsed.agentTokens; delete parsed.mcpConnections
     }
     // Preserve legacy restrictions by resolving IDs, never by defaulting missing domains to all.
     if (isRecord(parsed) && Array.isArray(parsed.keys) && Array.isArray(parsed.domains)) {
@@ -948,30 +963,73 @@ export function createMockApi(): BaneApi {
       preview: (input, signal) => run(signal, false, s => audience(segmentContacts(s, validateSegment(s, input)).filter(contact => !input.listId || contact.listIds.includes(input.listId)))),
     },
     keys: {
-      list: (signal, _cursor, includeRevoked = true) => run(signal, false, s => s.keys.filter(key => includeRevoked || !key.revokedAt)),
+      // Ended (an inbox key past its inbox's deletion) counts as inactive, like revoked.
+      list: (signal, _cursor, includeRevoked = true) => run(signal, false, s => Object.assign(s.keys.filter(key => includeRevoked || !key.revokedAt && !(key.expiresAt && Date.parse(key.expiresAt) <= Date.now())), { nextCursor: null })),
       create: (input, signal) => run(signal, true, s => {
         const name = text(input.name, 'name', 100)
-        if (input.permission !== 'send' && input.permission !== 'read' && input.permission !== 'read_send' && input.permission !== 'manage') invalid('permission', 'Choose send, read, or manage permission.')
-        if (!Array.isArray(input.domains) || !input.domains.every(name => typeof name === 'string' && s.domains.some(domain => domain.name === name))) invalid('domains', 'Choose connected domain hostnames.')
-        const secret = `demo_key_${crypto.randomUUID().replaceAll('-', '')}`
-        const key = { id: id('key'), name, prefix: secret.slice(0, 17), permission: input.permission === 'read_send' ? 'read, send' as ApiKey['permission'] : input.permission, domains: [...input.domains], createdAt: now(), lastUsedAt: null }
+        const access = input.access ?? { type: 'workspace' as const }
+        if (access.type === 'workspace') {
+          const permissions = input.permissions ?? ['send']
+          if (!Array.isArray(permissions) || !permissions.length || !permissions.every(p => p === 'read' || p === 'send' || p === 'manage')) invalid('permissions', 'Choose read, send or manage.')
+          const domains = input.domains ?? []
+          if (!Array.isArray(domains) || !domains.every(name => typeof name === 'string' && s.domains.some(domain => domain.name === name))) invalid('domains', 'Choose connected domain hostnames.')
+          const secret = `demo_key_${crypto.randomUUID().replaceAll('-', '')}`
+          const key: ApiKey = { id: id('key'), name, prefix: secret.slice(0, 17), permissions: [...new Set(permissions)], domains: [...domains], createdAt: now(), lastUsedAt: null, revokedAt: null, expiresAt: null, access: { type: 'workspace', addressIds: null, inboxId: null, mail: [] } }
+          s.keys.push(key)
+          return { key, secret }
+        }
+        const boxes = s.mailboxes ??= demoMailboxes().mailboxes
+        const mail = access.mail ?? ['read']
+        if (!mail.length || !mail.every(p => ['read', 'send', 'modify', 'create'].includes(p))) invalid('access.mail', 'Choose what it can do with the mail.')
+        let addressIds: string[] | null, inboxId: string | null = null
+        if (access.type === 'inbox') {
+          if (!boxes.some(box => box.id === access.inboxId && box.kind === 'inbox')) invalid('access.inboxId', 'Choose an active agent inbox.')
+          if (mail.includes('create')) invalid('access.mail', 'A key for one inbox can’t create inboxes.')
+          addressIds = [access.inboxId]; inboxId = access.inboxId
+        } else {
+          addressIds = access.addressIds ?? null
+          if (addressIds && !addressIds.every(ref => boxes.some(box => box.id === ref))) invalid('access.addressIds', 'Choose receiving addresses in this workspace.')
+          if (addressIds?.length === 0 && !mail.includes('create')) invalid('access.addressIds', 'Choose at least one address.')
+        }
+        const secret = `bane_mbx_demo_${crypto.randomUUID().replaceAll('-', '')}`
+        const key: ApiKey = { id: id('mbk'), name, prefix: secret.slice(0, 15), permissions: [], domains: [], createdAt: now(), lastUsedAt: null, revokedAt: null, expiresAt: null, access: { type: access.type, addressIds, inboxId, mail: [...new Set(mail)] } }
         s.keys.push(key)
         return { key, secret }
       }),
       revoke: (keyId, signal) => run(signal, true, s => { const key = find(s.keys, keyId, 'API key'); key.revokedAt ??= now() }),
     },
     credentials: {
-      agentTokens: (includeInactive = false, signal) => run(signal, false, s => (s.agentTokens ??= []).filter(token => includeInactive || !token.revokedAt && Date.parse(token.expiresAt) > Date.now())),
-      revokeAgentToken: (tokenId, signal) => run(signal, true, s => { const token = find(s.agentTokens ??= [], tokenId, 'Agent token'); token.revokedAt ??= now() }),
-      mcpConnections: signal => run(signal, false, s => s.mcpConnections ??= []),
-      mcpConnection: (connectionId, signal) => run(signal, false, s => find(s.mcpConnections ??= [], connectionId, 'MCP connection')),
-      revokeMcpConnection: (connectionId, signal) => run(signal, true, s => {
-        const connection = find(s.mcpConnections ??= [], connectionId, 'MCP connection')
-        s.mcpConnections.splice(s.mcpConnections.indexOf(connection), 1)
-        const tokens = s.agentTokens ??= []
-        tokens.forEach(token => { if (token.grantId === connectionId) token.revokedAt ??= now() })
+      // Without inactive ones: active sign-ins and tokens, and another member's agent only while it has an active token here.
+      agents: (includeInactive = false, signal) => run(signal, false, s => (s.agents ??= createSeed().agents ?? [])
+        .map(agent => ({ ...agent, tokens: agent.tokens.filter(token => includeInactive || !token.revokedAt && Date.parse(token.expiresAt) > Date.now()) }))
+        .filter(agent => includeInactive || agent.status === 'active' && (agent.own || agent.tokens.length > 0))),
+      revokeAgent: (agentId, signal) => run(signal, true, s => {
+        const agent = find(s.agents ??= createSeed().agents ?? [], agentId, 'Agent')
+        if (agent.own) agent.status = 'revoked'
+        agent.tokens.forEach(token => { token.revokedAt ??= now() })
+        return { scope: agent.own ? 'agent' as const : 'tokens' as const }
       }),
-      bindMcpConnection: (connectionId, input, signal) => run(signal, true, s => { Object.assign(find(s.mcpConnections ??= [], connectionId, 'MCP connection'), input, { updatedAt: now() }) }),
+      revokeAgentToken: (tokenId, signal) => run(signal, true, s => {
+        const token = (s.agents ??= createSeed().agents ?? []).flatMap(agent => agent.tokens).find(item => item.id === tokenId)
+        if (!token) throw new ApiError('Agent token not found.', 'NOT_FOUND', {}, undefined, 404)
+        token.revokedAt ??= now()
+      }),
+      bindMcpConnection: (agentId, input, signal) => run(signal, true, s => { find((s.agents ??= createSeed().agents ?? []).filter(agent => agent.own), agentId, 'Agent').workspaceId = input.workspaceId }),
+      appPasswords: signal => run(signal, false, s => s.appPasswords ??= createSeed().appPasswords ?? []),
+      createAppPassword: (input, signal) => run(signal, true, s => {
+        const name = text(input.name, 'name', 100)
+        const inbox = (s.mailboxes ??= demoMailboxes().mailboxes).find(box => box.id === input.inboxId && box.kind === 'inbox')
+        if (!inbox) throw new ApiError('Choose an active persistent inbox with fewer than 20 app passwords.', 'INBOX_UNAVAILABLE', {}, undefined, 409)
+        const protocols = [...new Set(input.protocols)].filter(p => p === 'imap' || p === 'smtp')
+        if (!protocols.length) invalid('protocols', 'Choose IMAP, SMTP or both.')
+        const created = { id: id('app'), name, protocols, createdAt: now() }
+        ;(s.appPasswords ??= createSeed().appPasswords ?? []).unshift({ ...created, inboxId: inbox.id, inboxAddress: inbox.address })
+        return { ...created, password: crypto.randomUUID().replaceAll('-', '').match(/.{4}/g)!.join('-') }
+      }),
+      revokeAppPassword: (inboxId, passwordId, signal) => run(signal, true, s => {
+        const rows = s.appPasswords ??= createSeed().appPasswords ?? []
+        rows.splice(rows.indexOf(find(rows.filter(row => row.inboxId === inboxId), passwordId, 'App password')), 1)
+      }),
     },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),
@@ -1023,20 +1081,12 @@ export function createMockApi(): BaneApi {
       }),
       checkDomain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
       receivedEmail: (messageId, signal) => run(signal, false, () => find(demoReceived(), messageId, 'Message')),
-      keys: (includeRevoked, signal) => run(signal, false, s => (s.mailboxKeys ??= demoMailboxAccess().keys).filter(key => includeRevoked || !key.revokedAt)),
-      createKey: (input, signal) => run(signal, true, s => {
-        if (!input.name.trim()) invalid('name', 'Enter a name for this key.')
-        const secret = `bane_mbx_demo_${id('secret').slice(-12)}`
-        const key = { id: id('mbk'), name: input.name.trim(), prefix: secret.slice(0, 14), addressIds: input.addressIds, permissions: input.permissions, createdAt: now(), lastUsedAt: null, revokedAt: null }
-        ;(s.mailboxKeys ??= demoMailboxAccess().keys).unshift(key)
-        return { key, secret }
-      }),
-      revokeKey: (keyId, signal) => run(signal, true, s => { find(s.mailboxKeys ??= demoMailboxAccess().keys, keyId, 'Key').revokedAt = now() }),
     },
-    // The demo has no receiving host or sandbox store, so it shows the empty state.
+    // The demo has no receiving host or sandbox store, so the agent inboxes page shows the empty state. Its persistent
+    // inbox is listed only for the pickers that filter the list (Create key's One inbox and App password).
     inboxes: {
       folders:(_id,signal)=>run(signal,false,()=>({data:[]})),
-      list: (_input, signal) => run(signal, false, () => Object.assign([], { nextCursor: null })),
+      list: (input, signal) => run(signal, false, s => Object.assign(!input.type && !input.status ? [] : (s.mailboxes ??= demoMailboxes().mailboxes).filter(box => box.kind === 'inbox' && (!input.type || input.type === 'persistent')).map(box => demoInbox(box)), { nextCursor: null })),
       get: (_id, signal) => run(signal, false, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
       create: (_input, signal) => run(signal, true, () => { throw new ApiError('Agent inboxes need a live workspace.', 'INBOXES_UNAVAILABLE') }),
       remove: (_id, signal) => run(signal, true, () => { throw new ApiError('Inbox not found.', 'NOT_FOUND') }),
@@ -1046,7 +1096,7 @@ export function createMockApi(): BaneApi {
     inbound: {
       addresses: (input, signal) => run(signal, false, s => {
         const search = input.search?.trim().toLowerCase()
-        return Object.assign((s.mailboxes ??= demoMailboxes().mailboxes).filter(row => !search || row.address.includes(search) || row.displayName?.toLowerCase().includes(search)), { nextCursor: null })
+        return Object.assign((s.mailboxes ??= demoMailboxes().mailboxes).filter(row => (!input.kind || (row.kind ?? 'address') === input.kind) && (!search || row.address.includes(search) || row.displayName?.toLowerCase().includes(search))), { nextCursor: null })
       }),
       address: (addressId, signal) => run(signal, false, s => find(s.mailboxes ??= demoMailboxes().mailboxes, addressId, 'Address')),
       createAddress: (input, signal) => run(signal, true, s => {

@@ -33,8 +33,8 @@ const labels: Record<string, string> = {
   'member.invite': 'Invited a member', 'member.invite_revoke': 'Revoked an invitation', 'member.join': 'Joined the workspace', 'member.role_change': 'Changed a member’s role', 'member.remove': 'Removed a member',
   'workspace.create': 'Created the workspace', 'workspace.rename': 'Renamed the workspace', 'settings.update': 'Updated settings', 'settings.inbound_policy': 'Changed the inbound policy',
   'api_key.create': 'Created an API key', 'api_key.revoke': 'Revoked an API key',
-  'agent_token.create': 'Created an agent token', 'agent_token.revoke': 'Revoked an agent token', 'mcp_connection.revoke': 'Revoked an MCP connection',
-  'inbox_key.create': 'Created an inbox key', 'inbox_key.revoke': 'Revoked an inbox key', 'inbox_connection.create': 'Connected a mail client', 'app_password.create': 'Created an app password', 'app_password.revoke': 'Revoked an app password',
+  'agent_token.create': 'Created an agent token', 'agent_token.revoke': 'Revoked an agent token', 'mcp_connection.revoke': 'Revoked an agent', 'mcp_connection.bind': 'Set an agent’s default workspace',
+  'inbox_key.create': 'Created an API key', 'inbox_key.revoke': 'Revoked an API key', 'inbox_connection.create': 'Connected an agent to inboxes', 'app_password.create': 'Created an app password', 'app_password.revoke': 'Revoked an app password',
   'domain.create': 'Added a domain', 'domain.delete': 'Deleted a domain', 'domain.mail_from': 'Set a MAIL FROM domain', 'domain.receiving_host': 'Chose a receiving host',
   'inbound_domain.enable': 'Turned on receiving', 'inbound_domain.disable': 'Turned off receiving', 'inbound_domain.update': 'Updated a receiving domain',
   'inbound_subdomain.create': 'Added a receiving subdomain', 'inbound_subdomain.update': 'Updated a receiving subdomain', 'inbound_subdomain.delete': 'Deleted a receiving subdomain',
@@ -56,7 +56,7 @@ const labels: Record<string, string> = {
 export const actionLabel = (action: string) => labels[action] ?? action
 // The area filter: each option is one action prefix, which the API takes as `action=<area>.`.
 export const activityAreas: { value: string; label: string }[] = [
-  ['member.', 'Members'], ['workspace.', 'Workspace'], ['settings.', 'Settings'], ['api_key.', 'API keys'], ['agent_token.', 'Agent tokens'], ['inbox_key.', 'Inbox keys'], ['app_password.', 'App passwords'],
+  ['member.', 'Members'], ['workspace.', 'Workspace'], ['settings.', 'Settings'], ['api_key.', 'API keys'], ['agent_token.', 'Agent tokens'], ['inbox_key.', 'API keys (earlier)'], ['app_password.', 'App passwords'],
   ['domain.', 'Domains'], ['inbound_domain.', 'Receiving domains'], ['address.', 'Addresses'], ['inbox.', 'Inboxes'], ['webhook.', 'Webhooks'], ['inbound_webhook.', 'Inbound webhooks'],
   ['endpoint.', 'Endpoints'], ['route.', 'Routes'], ['ritual.', 'Rituals'], ['connection.', 'Sending connection'], ['campaign.', 'Campaigns'], ['billing.', 'Billing'], ['support.', 'Support'],
 ].map(([value, label]) => ({ value, label }))
