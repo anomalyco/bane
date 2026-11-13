@@ -6,9 +6,9 @@ import type { Config } from './core.js';
 // rotation, and is revoked by removing the binding or the entrypoint.
 //
 // It answers exactly what the support Worker needs and nothing else (PR #137 review L2): verify a handoff, verify an
-// email sender, mint and revoke a support grant, read a handoff, and the grant-scoped GET /v1/support/* reads. Each
-// call runs through the normal routes, so validation, audit rows and budgets are the same as for an operator. Operator
-// paths act as `service:bane-support`; /v1/support/* still needs the grant's own bearer.
+// email sender, mint and revoke a support grant, read a handoff, verify a staff sign-in, and the grant-scoped GET
+// /v1/support/* reads. Each call runs through the normal routes, so validation, audit rows and budgets are the same as
+// for an operator. Operator paths act as `service:bane-support`; /v1/support/* still needs the grant's own bearer.
 
 /** What the entrypoint passes to the app as `Runtime.platformCaller`. HTTP requests can never set it. */
 export const SUPPORT_PLATFORM_CALLER = 'bane-support';
@@ -18,11 +18,13 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/grants$/],
   ['POST', /^\/v1\/operator\/support\/grants\/sgr_[0-9a-f]{32}\/revoke$/],
   ['GET', /^\/v1\/operator\/support\/handoffs\/sho_[0-9a-f]{32}$/],
+  // Never GET staff-sign-in: only an operator's own dashboard session mints a staff token.
+  ['POST', /^\/v1\/operator\/support\/staff\/verify$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
 const SUPPORT_GRANT = /^bane_support_[0-9a-f]{64}$/;
 
-/** Whether the binding may make this call: the four operator support routes, or a grant's GET under /v1/support. */
+/** Whether the binding may make this call: the five operator support routes, or a grant's GET under /v1/support. */
 export function supportPlatformAllows(method: string, path: string) {
   if (path.includes('..') || path.includes('//')) return false;
   if (method === 'GET' && SUPPORT_READ.test(path)) return true;
@@ -38,8 +40,49 @@ export type HandoffCheck =
   | { ok: true; handoff: HandoffClaims & { usedAt: string | null; grantId: string | null; message: string | null } }
   | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'HANDOFF_NOT_FOUND' | 'SUPPORT_NOT_CONFIGURED' };
 
+export type StaffCheck =
+  | { ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string }
+  | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' | 'NOT_OPERATOR' };
+
+// ---------- the support tokens Bane signs: handoffs (aud bane-support) and staff sign-ins (aud bane-support-staff) ----------
+
+type SigningKey = NonNullable<NonNullable<Config['support']>['signingKey']>;
 const b64 = (value: string) => Buffer.from(value, 'base64url');
-async function keyId(x: string) { return Buffer.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(x)))).toString('base64url').slice(0, 16); }
+const b64url = (bytes: Uint8Array | string) => Buffer.from(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes).toString('base64url');
+/** The key ID of the support signing key, in each token's header and in GET /v1/public/support-keys. */
+export async function keyId(x: string) { return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(x)))).slice(0, 16); }
+/** A compact JWS (EdDSA) with the support signing key; the support platform verifies it with GET /v1/public/support-keys. */
+export async function signSupportToken(key: SigningKey, claims: Record<string, unknown>) {
+  const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: await keyId(key.x) })), payload = b64url(JSON.stringify(claims));
+  const signer = await crypto.subtle.importKey('jwk', { ...key, ext: false }, { name: 'Ed25519' }, false, ['sign']);
+  return `${header}.${payload}.${b64url(new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signer, new TextEncoder().encode(`${header}.${payload}`))))}`;
+}
+/** The claims of a JWS this installation signed (its structure, algorithm, key ID and signature), or null. */
+async function signedClaims(key: SigningKey, token: unknown): Promise<Record<string, unknown> | null> {
+  const parts = typeof token === 'string' && token.length <= 4096 ? token.split('.') : [];
+  if (parts.length !== 3) return null;
+  const [header, payload, signature] = parts as [string, string, string];
+  let head: { alg?: unknown; kid?: unknown }, claims: unknown;
+  try { head = JSON.parse(b64(header).toString()); claims = JSON.parse(b64(payload).toString()); } catch { return null; }
+  if (!head || head.alg !== 'EdDSA' || head.kid !== await keyId(key.x) || typeof claims !== 'object' || claims === null || Array.isArray(claims)) return null;
+  const verifier = await crypto.subtle.importKey('jwk', { kty: 'OKP', crv: 'Ed25519', x: key.x }, { name: 'Ed25519' }, false, ['verify']);
+  return await crypto.subtle.verify({ name: 'Ed25519' }, verifier, b64(signature), new TextEncoder().encode(`${header}.${payload}`)) ? claims as Record<string, unknown> : null;
+}
+
+/** Staff sign-in tokens (GET /v1/operator/support/staff-sign-in): their audience, lifetime and jti shape. */
+export const STAFF_AUDIENCE = 'bane-support-staff', STAFF_TOKEN_SECONDS = 120;
+export const STAFF_JTI = /^sst_[0-9a-f]{32}$/;
+/**
+ * Checks a staff sign-in JWS this installation signed: the signature, audience, issuer and the 2-minute lifetime. Whether
+ * its subject is still an operator is the verify route's business; single use is the support Worker's (by jti).
+ */
+export async function verifyStaffToken(config: Pick<Config, 'support' | 'publicUrl'>, token: unknown, now = Date.now()): Promise<{ ok: true; claims: { userId: string; email: string; jti: string; expiresAt: string } } | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' }> {
+  const key = config.support?.signingKey, claims = key ? await signedClaims(key, token) : null;
+  if (!claims || claims.aud !== STAFF_AUDIENCE || claims.iss !== config.publicUrl || typeof claims.sub !== 'string' || !claims.sub || typeof claims.jti !== 'string' || !STAFF_JTI.test(claims.jti)
+    || typeof claims.iat !== 'number' || typeof claims.exp !== 'number' || claims.exp - claims.iat > STAFF_TOKEN_SECONDS || claims.iat * 1000 > now + 60_000) return { ok: false, code: 'STAFF_INVALID' };
+  if (claims.exp * 1000 <= now) return { ok: false, code: 'STAFF_EXPIRED' };
+  return { ok: true, claims: { userId: claims.sub, email: typeof claims.email === 'string' ? claims.email : '', jti: claims.jti, expiresAt: new Date(claims.exp * 1000).toISOString() } };
+}
 
 /**
  * Checks a handoff JWS that this installation signed (POST /v1/contact-support): the signature against its own key, the
@@ -49,14 +92,8 @@ async function keyId(x: string) { return Buffer.from(new Uint8Array(await crypto
 export async function verifyHandoffToken(config: Pick<Config, 'support' | 'publicUrl'>, token: string, now = Date.now()): Promise<{ ok: true; claims: HandoffClaims } | { ok: false; code: 'HANDOFF_INVALID' | 'HANDOFF_EXPIRED' | 'SUPPORT_NOT_CONFIGURED' }> {
   const key = config.support?.signingKey;
   if (!key) return { ok: false, code: 'SUPPORT_NOT_CONFIGURED' };
-  const parts = typeof token === 'string' && token.length <= 4096 ? token.split('.') : [];
-  if (parts.length !== 3) return { ok: false, code: 'HANDOFF_INVALID' };
-  const [header, payload, signature] = parts as [string, string, string];
-  let head: { alg?: unknown; kid?: unknown }, claims: Record<string, unknown>;
-  try { head = JSON.parse(b64(header).toString()); claims = JSON.parse(b64(payload).toString()); } catch { return { ok: false, code: 'HANDOFF_INVALID' }; }
-  if (head.alg !== 'EdDSA' || head.kid !== await keyId(key.x)) return { ok: false, code: 'HANDOFF_INVALID' };
-  const verifier = await crypto.subtle.importKey('jwk', { kty: 'OKP', crv: 'Ed25519', x: key.x }, { name: 'Ed25519' }, false, ['verify']);
-  if (!await crypto.subtle.verify({ name: 'Ed25519' }, verifier, b64(signature), new TextEncoder().encode(`${header}.${payload}`))) return { ok: false, code: 'HANDOFF_INVALID' };
+  const claims = await signedClaims(key, token);
+  if (!claims) return { ok: false, code: 'HANDOFF_INVALID' };
   const user = claims.user as { id?: unknown; email?: unknown; role?: unknown } | undefined, workspace = claims.workspace as { id?: unknown; name?: unknown } | undefined;
   if (claims.aud !== 'bane-support' || claims.iss !== config.publicUrl || typeof claims.jti !== 'string' || !/^sho_[0-9a-f]{32}$/.test(claims.jti)
     || typeof claims.exp !== 'number' || typeof claims.iat !== 'number' || typeof user?.id !== 'string' || typeof workspace?.id !== 'string') return { ok: false, code: 'HANDOFF_INVALID' };
@@ -109,6 +146,16 @@ export function supportPlatform(dispatch: (request: Request) => Promise<Response
     mintGrant: (body: { userId: string; ticketRef: string; reason: string; verification: 'handoff' | 'dmarc' | 'magic_link'; handoffId?: string; workspaceIds?: string[]; ttlMinutes?: number }) =>
       call<{ id: string; token: string; userId: string; workspaceIds: string[]; ticketRef: string; contentShared: boolean; contentWorkspaceId: string | null; expiresAt: string }>('POST', '/v1/operator/support/grants', body),
     revokeGrant: (grantId: string) => call<{ id: string; revoked: true }>('POST', `/v1/operator/support/grants/${grantId}/revoke`, {}),
+    /**
+     * A staff sign-in token from the staff-sign-in redirect: Bane's own signature, audience, issuer and expiry, and that its
+     * subject is still an operator now. Returns its jti and expiry: the support Worker accepts each jti once.
+     */
+    async verifyStaff(token: string): Promise<StaffCheck> {
+      if (typeof token !== 'string' || !token || token.length > 4096) return { ok: false, code: 'STAFF_INVALID' };
+      const reply = await call<StaffCheck>('POST', '/v1/operator/support/staff/verify', { token });
+      if (reply.status !== 200) throw new Error(`Staff verification failed with ${reply.status}`);
+      return reply.body;
+    },
     /** A grant-scoped read: `path` under /v1/support/, with its query. */
     read: <T = unknown>(path: string, grant: string) => call<T>('GET', path, undefined, grant),
     call,

@@ -7,6 +7,8 @@ import { budgetedRead } from './deliverability.js';
 import { limitRequestEligibility, LIMIT_REQUEST, type Step } from './standing-model.js';
 import { cached, registerSupportDeliverability } from './support-deliverability.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE } from './support-logs.js';
+import { keyId, signSupportToken, STAFF_AUDIENCE, STAFF_TOKEN_SECONDS, verifyStaffToken } from './support-platform.js';
+import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Bane's operators and its
 // support platform, never for customers.
@@ -107,14 +109,6 @@ export const supportGate: MiddlewareHandler<AppEnv> = async (c, next) => {
 
 // ---------- the customer's in-app handoff ----------
 
-const b64url = (bytes: Uint8Array | string) => Buffer.from(typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes).toString('base64url');
-async function keyId(x: string) { return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(x)))).slice(0, 16); }
-/** A compact JWS (EdDSA) the support platform verifies with GET /v1/public/support-keys. */
-async function signHandoff(key: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string }, claims: Record<string, unknown>) {
-  const header = b64url(JSON.stringify({ alg: 'EdDSA', typ: 'JWT', kid: await keyId(key.x) })), payload = b64url(JSON.stringify(claims));
-  const signer = await crypto.subtle.importKey('jwk', { ...key, ext: false }, { name: 'Ed25519' }, false, ['sign']);
-  return `${header}.${payload}.${b64url(new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, signer, new TextEncoder().encode(`${header}.${payload}`))))}`;
-}
 /** A handoff opens at most one grant, within this many minutes; its signed token lives 10 minutes. */
 const HANDOFF_MINUTES = 30, HANDOFF_TOKEN_SECONDS = 600, HANDOFFS_PER_HOUR = 10;
 const Handoff = z.object({
@@ -346,6 +340,42 @@ export function registerSupportOperator(app: App) {
     if (!row) notFound('Handoff');
     return c.json({ ...row!, createdAt: new Date(row!.createdAt).toISOString(), expiresAt: new Date(row!.expiresAt).toISOString(), usedAt: row!.usedAt ? new Date(row!.usedAt).toISOString() : null }, 200);
   });
+
+  // Staff sign-in for the support Worker's internal pages: an operator's own dashboard session leaves Bane for the
+  // support site's /staff/callback with a 2-minute EdDSA JWS (aud bane-support-staff) naming them. The support Worker
+  // verifies it through the binding (staff/verify, which also checks they are still an operator) and accepts each jti
+  // once. The binding cannot mint one: staff-sign-in is not in its allow-list and refuses it here too.
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[], method: 'get', path: '/v1/operator/support/staff-sign-in', operationId: 'operatorSupportStaffSignIn',
+    request: { query: z.object({ return: z.string().max(500).describe('Exactly <the support site’s origin>/staff/callback.') }) },
+    responses: { 302: { description: 'To return?staff=<token>: a signed staff token that lives 2 minutes.' }, ...errors } }), async c => {
+    const operator = await requireOperator(c, 'operator:read'), support = c.env.config.support;
+    if (operator.via !== 'console' || !operator.userId) throw operatorRequired();
+    if (!support?.url || !support.signingKey) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set BANE_SUPPORT_URL and BANE_SUPPORT_SIGNING_KEY to sign staff in to the support site.');
+    const callback = `${new URL(support.url).origin}/staff/callback`;
+    let target: URL | null = null;
+    try { target = new URL(c.req.valid('query').return); } catch { /* refused below */ }
+    if (!target || target.origin + target.pathname !== callback || target.search || target.hash || target.username || target.password) throw new ApiError(422, 'RETURN_URL_INVALID', `return must be ${callback}.`, 'return');
+    const jti = id('sst'), now = Math.floor(Date.now() / 1000), userId = operator.userId;
+    const { rows: [user] } = await c.env.db.execute<{ email: string | null }>(sql`WITH logged AS (${auditInsert(operatorContext(c, operator), { action: 'support.staff_sign_in', workspaceId: null, userId,
+      target: { type: 'user', id: userId }, details: { jti }, internal: true })}) SELECT ${userEmail(sql`${userId}`)} AS email`);
+    const token = await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: STAFF_AUDIENCE, sub: userId, email: user?.email ?? '', role: operator.role, jti, iat: now, exp: now + STAFF_TOKEN_SECONDS });
+    c.header('cache-control', 'no-store');
+    return c.redirect(`${callback}?staff=${token}`, 302);
+  });
+  const StaffCheck = z.union([
+    z.object({ ok: z.literal(true), staff: z.object({ userId: z.string(), email: z.string(), role: z.string().describe('Their operator role now.') }), jti: z.string().describe('Accept each once.'), expiresAt: z.string() }),
+    z.object({ ok: z.literal(false), code: z.enum(['STAFF_INVALID', 'STAFF_EXPIRED', 'NOT_OPERATOR']) }),
+  ]);
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security: operatorSecurity, method: 'post', path: '/v1/operator/support/staff/verify', operationId: 'operatorVerifySupportStaff',
+    request: { body: json(z.object({ token: z.string().min(1).max(4096) }).strict()) }, responses: { 200: response(StaffCheck), ...errors } }), async c => {
+    if ((await requireOperator(c, 'operator:read')).via !== 'support') throw new ApiError(403, 'SUPPORT_PLATFORM_REQUIRED', 'Only the support platform verifies staff sign-ins.');
+    const checked = await verifyStaffToken(c.env.config, c.req.valid('json').token);
+    if (!checked.ok) return c.json({ ok: false as const, code: checked.code }, 200);
+    const { userId, jti, expiresAt } = checked.claims;
+    const { rows: [now] } = await c.env.db.execute<{ role: OperatorRole | null; email: string | null }>(sql`SELECT ${operatorRoleOf(userId)} AS role, ${userEmail(sql`${userId}`)} AS email`);
+    if (!now?.role) return c.json({ ok: false as const, code: 'NOT_OPERATOR' as const }, 200);
+    return c.json({ ok: true as const, staff: { userId, email: now.email ?? checked.claims.email, role: now.role }, jti, expiresAt }, 200);
+  });
 }
 
 /** The customer's "Contact support", the public signing keys and the grant's read routes. */
@@ -374,7 +404,7 @@ export function registerSupport(app: App) {
       SELECT h.id, h.expires_at::text, w.name, ${userEmail(sql`${userId}`)} AS email FROM h, workspaces w WHERE w.id = ${a.workspaceId}`);
     if (!row) { c.header('Retry-After', '3600'); throw new ApiError(429, 'SUPPORT_RATE_LIMITED', `You can contact support ${HANDOFFS_PER_HOUR} times an hour. Email support with your earlier reference instead.`, undefined, true); }
     const support = c.env.config.support, now = Math.floor(Date.now() / 1000);
-    const token = support?.signingKey ? await signHandoff(support.signingKey, { iss: c.env.config.publicUrl, aud: 'bane-support', jti: handoffId, iat: now, exp: now + HANDOFF_TOKEN_SECONDS,
+    const token = support?.signingKey ? await signSupportToken(support.signingKey, { iss: c.env.config.publicUrl, aud: 'bane-support', jti: handoffId, iat: now, exp: now + HANDOFF_TOKEN_SECONDS,
       kind: body.kind, workspace: { id: a.workspaceId, name: row.name }, user: { id: userId, email: row.email, role: a.role }, page: body.page ?? null, requestIds: body.requestIds,
       shareContent: body.shareContent, message: !!body.message }) : null;
     const url = support?.url ? `${support.url}#${token ? `handoff=${token}` : `handoffId=${handoffId}`}` : null;

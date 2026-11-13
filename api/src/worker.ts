@@ -162,6 +162,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async verifyEmail(body: Parameters<SupportPlatformApi['verifyEmail']>[0]) { return (await this.platform()).verifyEmail(body); }
   async mintGrant(body: Parameters<SupportPlatformApi['mintGrant']>[0]) { return (await this.platform()).mintGrant(body); }
   async revokeGrant(grantId: string) { return (await this.platform()).revokeGrant(grantId); }
+  async verifyStaff(token: string) { return (await this.platform()).verifyStaff(token); }
   async read(path: string, grant: string) { return (await this.platform()).read(path, grant); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }

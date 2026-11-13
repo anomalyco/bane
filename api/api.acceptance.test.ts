@@ -4091,6 +4091,74 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Support staff sign-in: an operator session gets a 2-minute staff token for the support site; only the binding verifies it, and only while they are an operator', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const jwk = (generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json), key = { kty: 'OKP' as const, crv: 'Ed25519' as const, d: jwk.d as string, x: jwk.x as string };
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
+      const app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const operator = await sessionFixture(t), member = await sessionFixture(t);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
+      const callback = 'https://support.example.com/staff/callback';
+      const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
+
+      // An operator's dashboard session: 302 to exactly the callback, carrying a 2-minute EdDSA JWS with today's key ID.
+      const signed = await signIn(callback);
+      assert.equal(signed.status, 302, JSON.stringify(signed.body));
+      const location = new URL(signed.headers.get('location')!);
+      assert.deepEqual([location.origin + location.pathname, [...location.searchParams.keys()], signed.headers.get('cache-control')], [callback, ['staff'], 'no-store']);
+      const token = location.searchParams.get('staff')!, [header, payload, signature] = token.split('.') as [string, string, string];
+      const head = JSON.parse(Buffer.from(header, 'base64url').toString()), claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+      const jwks = ok(await send('GET', '/v1/public/support-keys'));
+      assert.deepEqual([head.alg, head.kid], ['EdDSA', jwks.keys[0].kid]);
+      const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], { name: 'Ed25519' }, false, ['verify']);
+      assert.ok(await crypto.subtle.verify({ name: 'Ed25519' }, verifier, Buffer.from(signature, 'base64url'), new TextEncoder().encode(`${header}.${payload}`)));
+      assert.deepEqual([claims.iss, claims.aud, claims.sub, claims.email, claims.role, claims.exp - claims.iat], [runtime.config.publicUrl, 'bane-support-staff', operator.userId, operator.email, 'operator:read', 120]);
+      assert.match(claims.jti, /^sst_[0-9a-f]{32}$/); assert.ok(Math.abs(claims.iat - Date.now() / 1000) < 60);
+      const audit = (await db.query(`SELECT actor_type, actor_id, user_id, workspace_id, internal, summary FROM audit_events WHERE action = 'support.staff_sign_in' AND actor_id = $1`, [operator.userId])).rows;
+      assert.deepEqual(audit.map(r => [r.actor_type, r.user_id, r.workspace_id, r.internal, r.summary.jti]), [['operator', operator.userId, null, true, claims.jti]]);
+
+      // The support Worker verifies it through the binding: the operator as they are now, and the jti and expiry for single use.
+      assert.deepEqual(await platform.verifyStaff(token), { ok: true, staff: { userId: operator.userId, email: operator.email, role: 'operator:read' }, jti: claims.jti, expiresAt: new Date(claims.exp * 1000).toISOString() });
+
+      // Refused: a session that is not an operator's, any other return, the binding asking for a sign-in, a dashboard verifying.
+      error(await signIn(callback, member), 403, 'OPERATOR_REQUIRED');
+      for (const wrong of [`${callback}?next=/tickets`, `${callback}#x`, `${callback}/`, 'https://support.example.com/staff/other', 'https://support.example.com/start', 'https://evil.example.com/staff/callback',
+        'http://support.example.com/staff/callback', 'https://support.example.com.evil.example/staff/callback', 'https://staff@support.example.com/staff/callback', '/staff/callback', 'not a url'])
+        error(await signIn(wrong), 422, 'RETURN_URL_INVALID');
+      assert.equal(supportPlatformAllows('GET', '/v1/operator/support/staff-sign-in'), false);
+      assert.equal(supportPlatformAllows('POST', '/v1/operator/support/staff/verify'), true);
+      const viaBinding = await platform.call<Json>('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`);
+      assert.deepEqual([viaBinding.status, viaBinding.body.error.code], [404, 'NOT_FOUND']);
+      // Past its allow-list, the route itself still refuses the binding.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`), { ...runtime, platformCaller: 'bane-support' });
+      assert.deepEqual([bypass.status, bypass.headers.get('location')], [403, null]);
+      error(await send('POST', '/v1/operator/support/staff/verify', session(operator), { token }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+      error(await send('POST', '/v1/operator/support/staff/verify', session(member), { token }), 403, 'OPERATOR_REQUIRED');
+
+      // Tokens Bane did not issue for staff sign-in, or that are past their two minutes, or whose subject is no operator.
+      const now = Math.floor(Date.now() / 1000), sign = (extra: Json, with_ = key) => signSupportToken(with_, { ...claims, ...extra });
+      const other = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
+      const invalid = [`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`, `${header}.${Buffer.from(JSON.stringify({ ...claims, sub: member.userId })).toString('base64url')}.${signature}`,
+        await sign({ aud: 'bane-support' }), await sign({ iss: 'https://other.example.com' }), await sign({ exp: now + 3600 }), await sign({ jti: 'sho_' + '0'.repeat(32) }),
+        await sign({}, { kty: 'OKP', crv: 'Ed25519', d: other.d, x: other.x }), '', 'a.b.c'];
+      for (const bad of invalid) assert.deepEqual(await platform.verifyStaff(bad), { ok: false, code: 'STAFF_INVALID' }, bad);
+      assert.deepEqual(await platform.verifyStaff(await sign({ iat: now - 300, exp: now - 180 })), { ok: false, code: 'STAFF_EXPIRED' });
+      assert.deepEqual(await platform.verifyStaff(await sign({ sub: member.userId })), { ok: false, code: 'NOT_OPERATOR' });
+      // Demoted since: the same valid token no longer signs them in, nor can they ask for another.
+      await db.query('DELETE FROM platform_operators WHERE user_id = $1', [operator.userId]);
+      assert.deepEqual(await platform.verifyStaff(token), { ok: false, code: 'NOT_OPERATOR' });
+      error(await signIn(callback), 403, 'OPERATOR_REQUIRED');
+    });
+  });
+
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
