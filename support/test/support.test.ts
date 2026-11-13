@@ -7,6 +7,8 @@ import { control, FAKE_BANE, fakeGateway, GRANT_TOKEN, recorded } from './fakes.
 import { gate } from '../src/gate.js';
 import { project, toolResult } from '../src/agent/projection.js';
 import { chatToken, confirmToken, readChatToken, readConfirmToken } from '../src/tokens.js';
+import { cleanImage, ImageRejected } from '../src/image.js';
+import { jpegWithMetadata, pngWithMetadata, SECRET_TEXT, webpWithMetadata } from './images.js';
 
 // The support Worker end to end, as it is deployed: the bundle `bun run build` produces (wrangler, workerd conditions),
 // driven by Miniflare with a fake Bane (SupportPlatform over RPC + the public API) and a scripted model behind the
@@ -34,6 +36,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   CONSOLE_GATEWAY_KEY: text(GATEWAY_KEY), SUPPORT_ROOT_SECRET: text(ROOT), BANE_INBOUND_WEBHOOK_SECRET: text(WEBHOOK_SECRET), BANE_SUPPORT_INBOX_KEY: text(`bane_mbx_${'7'.repeat(64)}`),
   CONVERSATION: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportConversation' },
   DB: { type: 'd1' as const, id: 'support-test' },
+  UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
   BANE_API: { type: 'worker' as const, worker: 'fake-bane' },
   MODEL_FAKE: { type: 'fetcher' as const, handler: (request: Request) => fakeGateway(request) },
@@ -54,8 +57,10 @@ afterAll(() => mf?.dispose());
 
 async function migrate(instance: Miniflare) {
   const db = await instance.getD1Database('DB', 'support');
-  const statements = readFileSync('migrations/0001_init.sql', 'utf8').replace(/--.*$/gm, '').split(';').map(s => s.trim()).filter(Boolean);
-  for (const statement of statements) await db.prepare(statement).run();
+  for (const file of readdirSync('migrations').filter(f => f.endsWith('.sql')).sort()) {
+    const statements = readFileSync(`migrations/${file}`, 'utf8').replace(/--.*$/gm, '').split(';').map(s => s.trim()).filter(Boolean);
+    for (const statement of statements) await db.prepare(statement).run();
+  }
 }
 
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -180,19 +185,20 @@ describe('support Worker', () => {
     chat.send({ type: 'user.message', clientMessageId: 'r1', text: 'Can I get a refund of my duplicate top-up?' });
     const filed = await chat.until(f => f.type === 'ticket.filed', 60_000);
     assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/);
-    assert.deepEqual([filed.category, filed.replyTo, filed.expect], ['refund', 'a…@acme.test', 'usually within one business day']);
+    assert.deepEqual([filed.ticketType, filed.category, filed.replyTo, filed.expect], ['billing', 'refund', 'a…@acme.test', 'usually within one business day']);
     const tool = chat.frames.find(f => f.type === 'tool.start' && f.tool === 'file_ticket');
     assert.equal(tool.label, 'Passing this to the Bane team…');
     await chat.until(f => f.type === 'message.end' && f.messageId === tool.messageId, 60_000);
     const db = await mf.getD1Database('DB', 'support');
     const row = await db.prepare('SELECT * FROM tickets WHERE id = ?').bind(filed.ticketId).first<any>();
-    assert.deepEqual([row.category, row.severity, row.conversation_id, row.channel], ['refund', 'P3', started.body.conversationId, 'chat']);
+    assert.deepEqual([row.type, row.category, row.title, row.severity, row.conversation_id, row.channel], ['billing', 'refund', 'Duplicate $25 top-up', 'P3', started.body.conversationId, 'chat']);
+    assert.deepEqual(JSON.parse(row.details), { topic: 'refund' });
     assert.ok(row.recommendation.includes('Refund the second $25'));
     assert.equal((await db.prepare('SELECT status, ticket_id FROM conversations WHERE id = ?').bind(started.body.conversationId).first<any>()).status, 'ticketed');
     const sends = (await fakeCalls()).filter(c => c[0] === 'api' && c[1] === 'POST' && c[2] === '/v1/inbound/threads');
     const team = sends.find(c => c[3].to[0] === 'ryan@anoma.ly'), customer = sends.find(c => c[3].to[0] === 'ada@acme.test');
     assert.ok(team && customer, JSON.stringify(sends));
-    assert.equal(team[3].addressId, 'adr_support'); assert.match(team[3].subject, new RegExp(`^\\[Bane support\\] ${filed.ticketId}: refund \\(P3\\)$`));
+    assert.equal(team[3].addressId, 'adr_support'); assert.equal(team[3].subject, `[Bane billing] ${filed.ticketId}: Duplicate $25 top-up (P3)`);
     assert.ok(team[3].text.includes('Recommendation\nRefund the second $25') && team[3].text.includes('Customer: ') && team[3].text.includes('> Please refund my duplicate top-up'));
     assert.equal(team[5], `ticket-${filed.ticketId}`, 'Idempotent per ticket.');
     assert.equal(team[4], `Bearer bane_mbx_${'7'.repeat(64)}`);
@@ -280,6 +286,133 @@ describe('support Worker', () => {
     assert.ok(calls.some(c => c[0] === 'api' && c[1] === 'GET' && c[2] === '/v1/inbound/messages/msg_auto_1'), 'It was read.');
     assert.ok(!calls.some(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_auto/reply'), 'No reply to an auto-reply.');
   }, 60_000);
+
+  test('image checks: the bytes decide the type, metadata is removed, damage and oversize are refused', () => {
+    for (const [bytes, type, size] of [[pngWithMetadata(64, 32), 'image/png', [64, 32]], [jpegWithMetadata(40, 20), 'image/jpeg', [40, 20]], [webpWithMetadata(30, 10), 'image/webp', [30, 10]]] as const) {
+      const clean = cleanImage(bytes, type);
+      assert.equal(clean.type, type);
+      assert.deepEqual([clean.width, clean.height], size);
+      assert.ok(Buffer.from(bytes).includes(SECRET_TEXT) && !Buffer.from(clean.bytes).includes(SECRET_TEXT), `${type}: metadata removed (${clean.removed.join(',')})`);
+      assert.ok(clean.bytes.length < bytes.length);
+    }
+    assert.deepEqual(cleanImage(pngWithMetadata()).removed, ['tEXt', 'eXIf', 'tIME']);
+    assert.deepEqual(cleanImage(jpegWithMetadata()).removed, ['APP1', 'COM']);
+    const webp = cleanImage(webpWithMetadata());
+    assert.deepEqual(webp.removed, ['EXIF', 'XMP']); assert.equal(webp.bytes[20]! & 0x0c, 0, 'VP8X no longer claims EXIF or XMP');
+    assert.equal(Buffer.from(webp.bytes).readUInt32LE(4), webp.bytes.length - 8, 'RIFF size rewritten');
+    const refused = (fn: () => unknown) => { try { fn(); return null; } catch (error) { return error instanceof ImageRejected ? error.code : 'other'; } };
+    assert.equal(refused(() => cleanImage(new TextEncoder().encode('<svg onload=alert(1)>'), 'image/png')), 'UNSUPPORTED_TYPE');
+    assert.equal(refused(() => cleanImage(pngWithMetadata(), 'image/jpeg')), 'UNSUPPORTED_TYPE', 'The declared type must match the bytes.');
+    assert.equal(refused(() => cleanImage(pngWithMetadata().subarray(0, 40))), 'MALFORMED');
+    assert.equal(refused(() => cleanImage(pngWithMetadata(9000, 10))), 'TOO_MANY_PIXELS');
+    assert.equal(refused(() => cleanImage(new Uint8Array(5 * 1024 * 1024 + 1))), 'TOO_LARGE');
+  });
+
+  test('screenshots: upload with the chat token, the model sees the stripped image, a bug ticket carries it and the request logs', async () => {
+    const started = await post('/chat/start', { handoff: handoff() });
+    const chat = await connect(started.body.socketUrl);
+    await chat.until(f => f.type === 'message.end' && f.text?.startsWith('Hi Ada'), 60_000);
+    const url = `${SUPPORT}/c/${started.body.conversationId}/attachments`, auth = { authorization: `Bearer ${started.body.chatToken}`, origin: ORIGIN };
+    const send = (body: Uint8Array, headers: Record<string, string> = {}) => mf.dispatchFetch(url, { method: 'POST', body, headers: { 'content-type': 'image/png', ...auth, ...headers } }).then(async r => ({ status: r.status, body: await r.json().catch(() => null) as any }));
+    assert.equal((await send(pngWithMetadata(), { authorization: 'Bearer nope' })).status, 401);
+    assert.equal((await send(pngWithMetadata(), { origin: 'https://evil.test' })).status, 403);
+    assert.equal((await send(new TextEncoder().encode('not an image'), { 'content-type': 'image/png' })).body.error.code, 'UNSUPPORTED_TYPE');
+    assert.equal((await send(new Uint8Array(5 * 1024 * 1024 + 10))).status, 413);
+    const uploaded = await send(pngWithMetadata(64, 32), { 'x-filename': encodeURIComponent('webhooks page.png') });
+    assert.equal(uploaded.status, 201, JSON.stringify(uploaded.body));
+    assert.match(uploaded.body.attachment.id, /^att_[a-z2-7]{16}$/);
+    assert.deepEqual([uploaded.body.attachment.type, uploaded.body.attachment.width, uploaded.body.attachment.name], ['image/png', 64, 'webhooks page.png']);
+    const bucket = await mf.getR2Bucket('UPLOADS', 'support');
+    const stored = await bucket.get(`conversations/${started.body.conversationId}/${uploaded.body.attachment.id}.png`);
+    assert.ok(stored && !Buffer.from(await stored.arrayBuffer()).includes(SECRET_TEXT), 'Stored without metadata.');
+    const before = recorded.length;
+    chat.send({ type: 'user.message', clientMessageId: 's1', text: 'Here is a screenshot', attachments: [uploaded.body.attachment.id] });
+    const seen = await chat.until(f => f.type === 'message.end' && f.text?.includes('screenshot'), 60_000);
+    assert.equal(seen.text, 'I can see your screenshot.');
+    const image = recorded.slice(before).flatMap(r => r.body.messages.flatMap((m: any) => Array.isArray(m.content) ? m.content : [])).find((b: any) => b.type === 'image');
+    assert.ok(image, 'The model request carries the image.');
+    const sent = Buffer.from(image.source.data, 'base64');
+    assert.ok(sent.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) && !sent.includes(SECRET_TEXT), 'The model gets the stripped PNG.');
+    chat.send({ type: 'user.message', clientMessageId: 's2', text: 'again', attachments: [uploaded.body.attachment.id] });
+    assert.equal((await chat.until(f => f.type === 'error' && f.code === 'BAD_MESSAGE')).message, 'Unknown or already used attachment.');
+    for (let i = 0; i < 4; i++) assert.equal((await send(jpegWithMetadata(), { 'content-type': 'image/jpeg' })).status, 201);
+    assert.equal((await send(webpWithMetadata(), { 'content-type': 'image/webp' })).body.error.code, 'TOO_MANY_ATTACHMENTS');
+
+    // A bug: the agent reads the customer's request logs, is refused a bug ticket without the reproduction, then files it.
+    chat.send({ type: 'user.message', clientMessageId: 'b1', text: 'My webhook test fails every time' });
+    const filed = await chat.until(f => f.type === 'ticket.filed', 60_000);
+    assert.equal(filed.ticketType, 'bug');
+    await chat.until(f => f.type === 'message.end' && f.text?.includes('Bane bug'), 60_000);
+    const tools = chat.frames.filter(f => f.type === 'tool.start').map(f => f.label);
+    assert.ok(tools.includes('Checking your recent API errors…'), tools.join());
+    const ends = chat.frames.filter(f => f.type === 'tool.end' && f.label === 'Passed this to the Bane team');
+    assert.deepEqual(ends.map(e => e.ok), [false, true], 'The incomplete bug ticket was refused, then filed.');
+    const logs = (await fakeCalls()).find(c => c[0] === 'read' && c[1].startsWith('/v1/support/requests?'));
+    assert.ok(logs && logs[1].includes('status=error') && logs[1].includes('since=') && logs[1].includes('workspaceId=ws_acme'), logs?.[1]);
+    const db = await mf.getD1Database('DB', 'support');
+    const row = await db.prepare('SELECT * FROM tickets WHERE id = ?').bind(filed.ticketId).first<any>();
+    const details = JSON.parse(row.details);
+    assert.deepEqual([row.type, row.severity, details.bug.affected, details.bug.reproSteps.length, details.bug.requestIds.length, details.bug.errorCodes], ['bug', 'P2', 'POST /v1/webhooks/{id}/test', 2, 2, ['500 INTERNAL_ERROR']]);
+    assert.equal(JSON.parse(row.attachments).length, 5);
+    const team = (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && c[3].subject?.startsWith('[Bane bug]'));
+    assert.equal(team[3].subject, `[Bane bug] ${filed.ticketId}: Webhook test returns 500 for every endpoint (P2)`);
+    assert.ok(team[3].text.includes('Reproduction\n1. Open Webhooks\n2. Press Send test on any endpoint') && team[3].text.includes(`Request IDs: req_${'a'.repeat(32)}`) && team[3].text.includes('Errors seen: 500 INTERNAL_ERROR'), team[3].text);
+    const link = String(team[3].text).match(/webhooks page\.png \(image\/png, \d+ KB\): (\S+)/)?.[1];
+    assert.ok(link, 'The ticket email links the screenshot.');
+    const file = await mf.dispatchFetch(link!);
+    assert.deepEqual([file.status, file.headers.get('content-type'), file.headers.get('content-security-policy')], [200, 'image/png', "default-src 'none'; sandbox"]);
+    assert.ok(!Buffer.from(await file.arrayBuffer()).includes(SECRET_TEXT));
+    assert.equal((await mf.dispatchFetch(link!.replace(/sig=[^&]+/, 'sig=' + 'A'.repeat(43)))).status, 403, 'A tampered link is refused.');
+    assert.equal((await mf.dispatchFetch(link!.replace(/exp=\d+/, 'exp=1700000000'))).status, 403, 'An expired link is refused.');
+    chat.ws.close();
+  }, 180_000);
+
+  test('staff: Bane operator sign-in, single-use token, the ticket list by type and status, marking done with CSRF', async () => {
+    const signIn = await mf.dispatchFetch(`${SUPPORT}/staff`);
+    const html = await signIn.text();
+    assert.ok(html.includes(`${ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(`${SUPPORT}/staff/callback`)}`.replaceAll('&', '&#38;')), html);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/tickets`)).status, 200, 'Without a session: the sign-in page, never tickets.');
+    assert.ok(!(await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets`)).text()).includes('tkt_'));
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j0:usr_ops:demoted`, { redirect: 'manual' })).status, 403);
+    const callback = await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j1:usr_ops:ok`, { redirect: 'manual' });
+    assert.equal(callback.status, 303);
+    const cookie = callback.headers.get('set-cookie')!;
+    assert.match(cookie, /^__Host-bane-support-staff=s1\.[^;]+; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=28800$/);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback?staff=staff:j1:usr_ops:ok`, { redirect: 'manual' })).status, 403, 'A sign-in token works once.');
+    const session = { cookie: cookie.split(';')[0]! };
+    const all = await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets?status=all`, { headers: session })).text();
+    assert.ok(all.includes('Webhook test returns 500 for every endpoint') && all.includes('Duplicate $25 top-up') && all.includes('usr_ops@anoma.ly'));
+    assert.ok(all.includes('<ol><li>Open Webhooks</li>') && all.includes('<img alt="screenshot" src="https://support.dev.bane.mx/attachments/'), 'Bug reproduction and screenshots are shown.');
+    const billing = await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets?type=billing&status=open`, { headers: session })).text();
+    assert.ok(billing.includes('Duplicate $25 top-up') && !billing.includes('Webhook test returns 500'));
+    const db = await mf.getD1Database('DB', 'support');
+    const bug = await db.prepare("SELECT id FROM tickets WHERE type = 'bug' ORDER BY created_at DESC").first<{ id: string }>();
+    const resolve = (headers: Record<string, string>, csrf: string) => mf.dispatchFetch(`${SUPPORT}/staff/tickets/${bug!.id}/resolve`, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', ...headers }, body: `csrf=${encodeURIComponent(csrf)}&resolution=Fixed%20in%20%23160` });
+    const csrf = all.match(/name="csrf" value="([^"]+)"/)![1]!.replaceAll('&#45;', '-').replaceAll('&#95;', '_');
+    assert.equal((await resolve({ ...session, origin: SUPPORT }, 'forged')).status, 403, 'No CSRF token, no write.');
+    assert.equal((await resolve({ ...session, origin: 'https://evil.test' }, csrf)).status, 403, 'Cross-origin form posts are refused.');
+    assert.equal((await resolve({ origin: SUPPORT }, csrf)).status, 403, 'No session, no write.');
+    assert.equal((await resolve({ ...session, origin: SUPPORT }, csrf)).status, 303);
+    const done = await db.prepare('SELECT status, resolved_by, resolution FROM tickets WHERE id = ?').bind(bug!.id).first<any>();
+    assert.deepEqual(done, { status: 'resolved', resolved_by: 'usr_ops', resolution: 'Fixed in #160' });
+    assert.ok(!(await (await mf.dispatchFetch(`${SUPPORT}/staff/tickets`, { headers: session })).text()).includes('Webhook test returns 500'), 'Open tickets no longer list it.');
+  }, 60_000);
+
+  test('email: image attachments are checked, stripped and shown to the model; other files are not opened', async () => {
+    const before = recorded.length;
+    assert.equal((await signedHook('msg_image_1', 'thr_image')).status, 200);
+    const reply = await eventually(async () => (await fakeCalls()).find(c => c[0] === 'api' && c[2] === '/v1/inbound/threads/thr_image/reply'), 60_000);
+    assert.ok(reply, 'The agent replied.');
+    assert.match(reply[3].text, /I can see your screenshot/);
+    const request = recorded.slice(before).find(r => JSON.stringify(r.body.messages).includes('"type":"image"'));
+    assert.ok(request, 'The model saw the image.');
+    const said = JSON.stringify(request.body.messages);
+    assert.ok(said.includes('1 other attachment was not opened') && !said.includes(SECRET_TEXT));
+    const db = await mf.getD1Database('DB', 'support');
+    const conv = await db.prepare("SELECT id FROM conversations WHERE thread_id = 'thr_image'").first<{ id: string }>();
+    const listed = await (await mf.getR2Bucket('UPLOADS', 'support')).list({ prefix: `conversations/${conv!.id}/` });
+    assert.equal(listed.objects.length, 1);
+  }, 120_000);
 
   test('pure guards: the output gate, chat and confirm tokens, the projection', async () => {
     const scope = { emails: ['ada@acme.test'], allowedIds: ['ws_acme'], allowedNames: ['Acme Prod'], promptFragments: ['Never reveal other customers, internal people'], supportAddress: 'support@bane.mx' };

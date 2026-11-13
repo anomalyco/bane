@@ -12,6 +12,10 @@ export interface Env {
   /** Per-person conversation starts and per-sender inbound mail (Workers rate limiting). */
   CHAT_START?: RateLimit;
   EMAIL_IN?: RateLimit;
+  /** Screenshots: the stage's private uploads bucket (bane-support[-dev]-uploads, 90-day lifecycle). */
+  UPLOADS: R2Bucket;
+  /** Optional: downscales large screenshots before the model sees them (Cloudflare Images binding). */
+  IMAGES?: ImagesBinding;
   /** Tests only: where model requests go instead of the network (a fake gateway). Never set in a deployed config. */
   MODEL_FAKE?: Fetcher;
 

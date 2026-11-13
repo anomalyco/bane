@@ -2,7 +2,10 @@
 // public API it calls with the inbox key) and a scripted Anthropic Messages API standing in for Console's gateway.
 // No network, no real model: the model's moves are decided from the request body, so retries and replays stay stable.
 
+import { pngWithMetadata } from './images.js';
+
 export const GRANT_TOKEN = `bane_support_${'5'.repeat(64)}`;
+const EMAIL_PNG = Buffer.from(pngWithMetadata(80, 40)).toString('base64');
 
 /** The fake Bane, as a Worker module (it must export a real WorkerEntrypoint for RPC). */
 export const FAKE_BANE = `
@@ -27,6 +30,8 @@ const READS = {
   '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, audience: { size: 2160 }, pauseReason: null,
     stats: { counts: { total: 2160, byStatus: { delivered: 2140 } }, totals: { accepted: 2152, delivered: 2140, opened: 899, clicked: 64, bounced: 12, complained: 0 }, rates: {} } }] },
   '/v1/support/standing': { data: [{ workspaceId: 'ws_acme', standing: { step: 'normal', score: 93, dailyLimit: 10000 }, last24h: { delivered: 1980, bounced: 20 } }] },
+  '/v1/support/requests': { available: true, retention: '3 days', groups: [{ route: '/v1/webhooks/:id/test', method: 'POST', status: 500, code: 'INTERNAL_ERROR', principal: 'apiKey', count: 14,
+    firstSeen: new Date(Date.now() - 7200000).toISOString(), lastSeen: new Date().toISOString(), sampleRequestIds: ['req_' + 'a'.repeat(32), 'req_' + 'b'.repeat(32)] }], totals: { errors: 14 } },
   '/v1/support/deliverability/bounces': { data: [{ provider: 'gmail', type: 'bounce', count: 61, diagnostic: 'smtp; 550 5.1.1 user unknown at someone@gmail.com from 203.0.113.9' }], findings: [{ severity: 'serious', code: 'HARD_BOUNCES', message: '6.1% hard bounces at Gmail' }], grant: { token: 'never-shown' }, operatorId: 'op_secret' },
 };
 export class SupportPlatform extends WorkerEntrypoint {
@@ -42,6 +47,15 @@ export class SupportPlatform extends WorkerEntrypoint {
     return ok({ id: 'sgr_' + String(grants).padStart(32, '0'), token: '${GRANT_TOKEN}', userId: body.userId, workspaceIds: body.workspaceIds ?? ['ws_acme'], ticketRef: body.ticketRef,
       contentShared: shared.has(body.handoffId), contentWorkspaceId: shared.has(body.handoffId) ? 'ws_acme' : null, expiresAt: new Date(Date.now() + 7200000).toISOString() }, 201);
   }
+  async verifyStaff(token) {
+    calls.push(['verifyStaff', token]);
+    // Test staff tokens are "staff:<jti>:<userId>:<ok|demoted|expired>".
+    const [kind, jti, userId, state] = token.split(':');
+    if (kind !== 'staff') return { ok: false, code: 'STAFF_INVALID' };
+    if (state === 'demoted') return { ok: false, code: 'NOT_OPERATOR' };
+    if (state === 'expired') return { ok: false, code: 'STAFF_EXPIRED' };
+    return { ok: true, staff: { userId, email: userId + '@anoma.ly', role: 'operator:read' }, jti, expiresAt: new Date(Date.now() + 120000).toISOString() };
+  }
   async revokeGrant(id) { calls.push(['revokeGrant', id]); return ok({ id, revoked: true }); }
   async read(path, grant) {
     calls.push(['read', path, grant === '${GRANT_TOKEN}' ? 'GRANT' : grant]);
@@ -56,13 +70,19 @@ export default {
     if (url.pathname === '/__calls') return Response.json(calls);
     const body = request.method === 'POST' ? await request.json() : null;
     calls.push(['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')]);
+    if (request.method === 'GET' && url.pathname === '/v1/inbound/messages/msg_image_1/parts/part_png') {
+      // Bane redirects to signed storage; the fake answers with the bytes directly.
+      return new Response(Uint8Array.from(atob('${EMAIL_PNG}'), c => c.charCodeAt(0)), { headers: { 'content-type': 'image/png' } });
+    }
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/')) {
       const id = url.pathname.split('/').pop();
       const auto = id.includes('auto');
-      const threadId = ({ msg_mail_1: 'thr_mail_1', msg_nodmarc_1: 'thr_nodmarc', msg_auto_1: 'thr_auto' })[id] ?? 'thr_other';
+      const threadId = ({ msg_mail_1: 'thr_mail_1', msg_nodmarc_1: 'thr_nodmarc', msg_auto_1: 'thr_auto', msg_image_1: 'thr_image' })[id] ?? 'thr_other';
+      const attachments = id === 'msg_image_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
       return Response.json({ id, threadId, direction: 'inbound', subject: 'Bounces from Gmail?', from: { name: 'Ada', address: id.includes('stranger') ? 'stranger@else.test' : 'ada@acme.test' },
         text: 'Why are Gmail bounces up this week?', replyText: 'Why are Gmail bounces up this week?', messageId: '<m1@acme.test>',
-        headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: 'Bounces from Gmail?' }], verdicts: { dmarc: id.includes('nodmarc') ? 'FAIL' : 'PASS', spf: 'PASS' } });
+        headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: 'Bounces from Gmail?' }], verdicts: { dmarc: id.includes('nodmarc') ? 'FAIL' : 'PASS', spf: 'PASS' }, attachments });
+
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });
@@ -107,11 +127,28 @@ export async function fakeGateway(request: Request): Promise<Response> {
   if (!new URL(request.url).pathname.endsWith('/messages')) return new Response('not found', { status: 404 });
   if (control.failStatus) return Response.json({ type: 'error', error: { type: 'overloaded_error', message: 'fake failure' } }, { status: control.failStatus });
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
+  const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
+  const sawImage = blocks(lastUser).some(b => b.type === 'image');
+  if (said.includes('A support email arrived') && sawImage) return text(['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nBane support (AI)']);
+  if (said.includes('screenshot')) return text([sawImage ? 'I can see your screenshot.' : 'I can’t see a screenshot.']);
+  if (said.includes('webhook test fails')) {
+    // api_errors, then a bug ticket without its reproduction (refused), then the full one, then the answer.
+    const used = (body?.messages ?? []).slice((body?.messages ?? []).indexOf(lastUser) + 1).flatMap((m: any) => blocks(m)).filter((b: any) => b.type === 'tool_use').map((b: any) => b.name);
+    const lastResult = JSON.stringify(blocks(body?.messages?.at(-1)).filter(b => b.type === 'tool_result'));
+    if (!used.length) return toolUse('toolu_e1', 'api_errors', { hours: 24 });
+    if (used.length === 1) return toolUse('toolu_e2', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2', summary: 'Webhook tests fail with 500.', ask: 'My webhook test fails', tried: ['api_errors: 14 × 500 INTERNAL_ERROR'], recommendation: 'Look at the webhook test handler.' });
+    if (used.length === 2 && lastResult.includes('needs reproSteps')) return toolUse('toolu_e3', 'file_ticket', { type: 'bug', title: 'Webhook test returns 500 for every endpoint', severity: 'P2',
+      summary: 'Every POST /v1/webhooks/{id}/test returns 500 since this morning. 14 failures in 2 hours, all INTERNAL_ERROR. The customer wants their webhooks tested.', ask: 'My webhook test fails',
+      tried: ['api_errors: 14 × 500 INTERNAL_ERROR on POST /v1/webhooks/:id/test'], recommendation: 'Check the webhook test handler against req_' + 'a'.repeat(32) + '.',
+      reproSteps: ['Open Webhooks', 'Press Send test on any endpoint'], affected: 'POST /v1/webhooks/{id}/test', requestIds: ['req_' + 'a'.repeat(32), 'req_' + 'b'.repeat(32)], errorCodes: ['500 INTERNAL_ERROR'],
+      expected: 'A test delivery', actual: 'HTTP 500' });
+    return text(['That’s a Bane bug: I’ve passed it to the Bane team.']);
+  }
   if (said.includes('just opened the support chat')) return text(['Hi Ada, I see you sent ', '"Early access" yesterday', ' with 42% opens. What are we working on today?']);
   if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nBane support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
   if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
   if (said.includes('refund')) return answered ? text(['I’ve passed this to the Bane team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
-    category: 'refund', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
+    type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
     tried: ['get_billing: two $25 top-ups 40 s apart'], recommendation: 'Refund the second $25 top-up (billing error).', evidence: ['req_1'] });
   if (said.includes('look at the content')) return answered ? text(['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });
   if (said.includes('leak please')) return text([`Sure: bane_ops_${'a'.repeat(64)}`]);

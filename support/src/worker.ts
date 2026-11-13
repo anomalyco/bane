@@ -1,6 +1,9 @@
 import { verifyWebhook } from './webhook.js';
 import type { Env } from './env.js';
 import { addressHash, chatToken, MissingSecret, newId, readChatToken, readConfirmToken } from './tokens.js';
+import { readAttachmentLink, readCapped, serveAttachment } from './attachments.js';
+import { MAX_IMAGE_BYTES } from './image.js';
+import { staff } from './staff.js';
 export { SupportConversation } from './conversation.js';
 
 // The support Worker (support/README.md): chat starts and resumes, the conversation WebSocket, Bane's inbound webhook
@@ -18,7 +21,7 @@ function allowedOrigin(env: Env, request: Request) {
 }
 function cors(env: Env, request: Request): Record<string, string> {
   const origin = allowedOrigin(env, request);
-  return origin ? { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type', 'access-control-max-age': '600', vary: 'origin' } : {};
+  return origin ? { 'access-control-allow-origin': origin, 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type, authorization, x-filename', 'access-control-max-age': '600', vary: 'origin' } : {};
 }
 const socketUrl = (env: Env, conversationId: string, token: string) => `${env.PUBLIC_URL.replace(/^http/, 'ws')}/c/${conversationId}?token=${encodeURIComponent(token)}`;
 const conversation = (env: Env, id: string) => env.CONVERSATION.get(env.CONVERSATION.idFromName(id));
@@ -94,6 +97,29 @@ async function socket(request: Request, env: Env, conversationId: string): Promi
   return conversation(env, conversationId).fetch(forwarded);
 }
 
+/** A screenshot from the panel: the chat token in Authorization, the raw image as the body (support/PROTOCOL.md §5.1). */
+async function upload(request: Request, env: Env, conversationId: string): Promise<Response> {
+  const headers = cors(env, request);
+  if (!allowedOrigin(env, request)) return fail(403, 'ORIGIN_NOT_ALLOWED', 'Upload from the Bane dashboard.');
+  const token = request.headers.get('authorization')?.match(/^Bearer (\S+)$/)?.[1] ?? null;
+  const reader = await readChatToken(env.SUPPORT_ROOT_SECRET, token, conversationId);
+  if (!reader) return fail(401, 'CHAT_TOKEN_INVALID', 'Renew the conversation through /chat/resume.', headers);
+  const tooLarge = async () => {
+    // Read and drop a modestly oversized body so the client sees the 413 instead of a reset connection; give up past 12 MB.
+    const reader = request.body?.getReader();
+    for (let seen = 0; reader && seen < 12 * 1024 * 1024;) { const { done, value } = await reader.read(); if (done) break; seen += value.length; }
+    await reader?.cancel().catch(() => {});
+    return fail(413, 'ATTACHMENT_TOO_LARGE', 'Images can be up to 5 MB.', headers);
+  };
+  if (Number(request.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES) return tooLarge();
+  const bytes = await readCapped(request.body, MAX_IMAGE_BYTES);
+  if (!bytes) return tooLarge();
+  if (!bytes.length) return fail(400, 'INVALID_REQUEST', 'Send the image bytes as the request body.', headers);
+  let name: string | null = null; try { name = decodeURIComponent(request.headers.get('x-filename') ?? '') || null; } catch { name = null; }
+  const added = await conversation(env, conversationId).addAttachment({ userId: reader.userId, bytes, declared: request.headers.get('content-type'), name });
+  return added.ok ? json({ attachment: added.attachment }, 201, headers) : fail(added.status, added.code, added.message, headers);
+}
+
 /** Bane's signed webhook for mail received at support@bane.mx (route → webhook:support-agent, bane format, include message). */
 async function inbound(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!env.BANE_INBOUND_WEBHOOK_SECRET) throw new MissingSecret('BANE_INBOUND_WEBHOOK_SECRET');
@@ -149,11 +175,16 @@ export default {
     const url = new URL(request.url), path = url.pathname;
     try {
       if (path === '/health') return json({ status: 'ok', service: 'bane-support', stage: env.STAGE });
-      if (request.method === 'OPTIONS' && path.startsWith('/chat/')) return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });
+      if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });
       if (request.method === 'POST' && path === '/chat/start') return await startChat(request, env);
       if (request.method === 'POST' && path === '/chat/resume') return await resumeChat(request, env);
       const chat = path.match(/^\/c\/(conv_[a-z2-7]{26})$/);
       if (chat && request.method === 'GET') return await socket(request, env, chat[1]!);
+      const uploads = path.match(/^\/c\/(conv_[a-z2-7]{26})\/attachments$/);
+      if (uploads && request.method === 'POST') return await upload(request, env, uploads[1]!);
+      const file = path.match(/^\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})$/);
+      if (file && request.method === 'GET') return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? await serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
+      if (path === '/staff' || path.startsWith('/staff/')) return await staff(request, env);
       if (request.method === 'POST' && path === '/hooks/bane-inbound') return await inbound(request, env, ctx);
       const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
       if (link && (request.method === 'GET' || request.method === 'POST')) return await confirm(request, env, link[1]!);

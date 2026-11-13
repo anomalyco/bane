@@ -18,6 +18,10 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }],
   // Create once: wrangler d1 create bane-support, then put its id here (see support/README.md).
   "d1_databases": [{ "binding": "DB", "database_name": "bane-support", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
+  // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
+  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "bane-support-uploads" }],
+  // Downscales screenshots too large to send to the model (Cloudflare Images binding; optional in code).
+  "images": { "binding": "IMAGES" },
   "services": [
     // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
     { "binding": "BANE", "service": "bane-production", "entrypoint": "SupportPlatform" },

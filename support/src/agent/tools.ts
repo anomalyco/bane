@@ -28,9 +28,19 @@ export interface ToolHost {
   requestContentAccess(workspaceId: string, why: string): Promise<string>;
   fileTicket(input: TicketInput): Promise<string>;
 }
+export const TICKET_TYPES = ['billing', 'bug', 'deliverability', 'account', 'abuse_report', 'feature_request', 'other'] as const;
+export type TicketType = typeof TICKET_TYPES[number];
+export const TICKET_TOPICS = ['refund', 'billing_dispute', 'charge', 'credit', 'plan', 'account_closure', 'limit_increase', 'enforcement_review', 'access', 'security', 'legal', 'human_requested', 'guardrail', 'other'] as const;
+/** The structured part of a ticket, by type (a bug's reproduction; a feature's use case). */
+export type TicketDetails = {
+  topic?: string;
+  bug?: { reproSteps: string[]; affected: string; requestIds: string[]; errorCodes: string[]; expected: string; actual: string };
+  deliverability?: { affected: string };
+  featureRequest?: { useCase: string };
+};
 export type TicketInput = {
-  category: string; severity: 'P1' | 'P2' | 'P3'; summary: string; ask: string;
-  tried: { tool: string; finding: string }[]; recommendation: string; evidence: Record<string, string[]>;
+  type: TicketType; title: string; severity: 'P1' | 'P2' | 'P3'; summary: string; ask: string;
+  tried: { tool: string; finding: string }[]; recommendation: string; evidence: Record<string, string[]>; details: TicketDetails;
 };
 export class ToolFailure extends Error {}
 
@@ -45,6 +55,7 @@ function query(args: Record<string, unknown>, host: ToolHost, map: Record<string
   for (const [key, value] of Object.entries(args)) {
     if (key === 'workspaceId' || value === undefined || value === null || value === '') continue;
     if (key === 'days') { if (DAYS.test(String(value))) q.set('since', new Date(Date.now() - Number(value) * 86_400_000).toISOString()); continue; }
+    if (key === 'hours') { if (DAYS.test(String(value))) q.set('since', new Date(Date.now() - Math.min(72, Number(value)) * 3_600_000).toISOString()); continue; }
     q.set(map[key] ?? key, String(value));
   }
   const s = q.toString();
@@ -82,7 +93,12 @@ export const TOOLS: ToolSpec[] = [
   { name: 'list_webhook_deliveries', description: 'Webhook deliveries with attempts, last HTTP status and error (never payloads or URLs).',
     params: { workspaceId: workspaceParam, status: { type: 'enum', values: ['pending', 'delivered', 'failed', 'paused'], description: 'Filter by status', optional: true }, days: sinceParam },
     label: fixed('Checking your webhook deliveries…', 'Checked your webhook deliveries'), execute: read((a, h) => `/v1/support/webhook-deliveries${query(a, h)}`) },
-  { name: 'explain_request', description: 'What Bane recorded for one API request ID (req_…) the customer quotes: changes it made, campaign launches, routing versions.',
+  { name: 'api_errors', description: 'The customer’s own failed API and dashboard requests (their apps, SDK, MCP or agents included) from Bane’s request logs, which keep about 3 days: grouped by route, status and error code, with counts, first and last seen and sample request IDs to open with explain_request. Use it for "I get 500s", "my integration fails", or to find the request behind an error.',
+    params: { workspaceId: workspaceParam, status: { type: 'enum', values: ['error', '5xx', '4xx'], description: 'Default error (any 4xx or 5xx)', optional: true },
+      hours: { type: 'number', description: 'How many hours back (1–72). Default 24.', optional: true, min: 1, max: 72 },
+      route: { type: 'string', description: 'Only this route template, e.g. "/v1/emails/send"', optional: true, max: 200 }, code: { type: 'string', description: 'Only this error code, e.g. INTERNAL_ERROR', optional: true, max: 80 } },
+    label: fixed('Checking your recent API errors…', 'Checked your recent API errors'), execute: read((a, h) => `/v1/support/requests${query({ status: 'error', ...a }, h)}`) },
+  { name: 'explain_request', description: 'One API request ID (req_…) the customer quotes or api_errors found: its request log lines (route, status, error code, duration) and what it changed (audit entries, campaign launches, routing versions).',
     params: { requestId: { type: 'string', description: 'req_ followed by 32 hex characters', max: 40, pattern: '^req_[0-9a-f]{32}$' }, workspaceId: workspaceParam },
     label: fixed('Looking up that request…', 'Looked up that request'), execute: read((a, h) => `/v1/support/requests/${seg(a.requestId)}${query({ workspaceId: a.workspaceId }, h)}`) },
   { name: 'delivery_metrics', description: 'Delivery, bounce, complaint, open, click and unsubscribe rates over time, with numerators and denominators, optionally grouped by recipient provider, campaign, sending domain or stream. Includes findings[] computed from the thresholds.',
@@ -123,21 +139,51 @@ export const TOOLS: ToolSpec[] = [
   { name: 'request_content_access', description: 'Ask the customer to let you read the content (bodies, HTML) of their emails and campaigns in one workspace, for this conversation only. Use only when the content is the likely cause. Say why in one sentence.',
     params: { workspaceId: workspaceParam, why: { type: 'string', description: 'One sentence the customer will see, e.g. "To check why the screen rejected your Nov 3 promo, I need to read its HTML."', max: 240 } },
     label: fixed('Asking for content access…', 'Asked for content access'), execute: (a, h) => h.requestContentAccess(String(a.workspaceId ?? h.workspaceId() ?? ''), String(a.why ?? '')) },
-  { name: 'file_ticket', description: 'Pass this conversation to the Bane team. One per conversation; calling again adds facts to the same ticket. See the ticket rules in your instructions.',
+  { name: 'file_ticket', description: 'Pass this conversation to the Bane team. One per conversation; calling again adds facts to the same ticket. Pick the type that fits and fill its fields: a bug needs reproSteps and affected (plus the request IDs and error codes you saw).',
     params: {
-      category: { type: 'enum', values: ['refund', 'billing_dispute', 'account_closure', 'limit_increase', 'enforcement_review', 'legal', 'security', 'abuse_report', 'bug', 'human_requested', 'other'], description: 'The kind of request' },
-      severity: { type: 'enum', values: ['P1', 'P2', 'P3'], description: 'P1: security or sending fully down; P2: legal, pause review, degraded sending; P3: everything else' },
+      type: { type: 'enum', values: TICKET_TYPES, description: 'billing (refunds, disputes, charges, credit), bug (Bane software misbehaving), deliverability (inboxing, bounces, reputation, limits from sending quality), account (access, closure, limits, enforcement, legal, security), abuse_report, feature_request, other' },
+      title: { type: 'string', description: 'A short subject line for the team, ≤ 80 characters, e.g. "Webhook test returns 500 for every endpoint"', max: 80 },
+      severity: { type: 'enum', values: ['P1', 'P2', 'P3'], description: 'P1: security or sending fully down; P2: legal, pause review, degraded sending, a bug blocking work; P3: everything else' },
+      topic: { type: 'enum', values: TICKET_TOPICS, description: 'The specific ask within the type, e.g. refund, limit_increase, enforcement_review, human_requested', optional: true },
       summary: { type: 'string', description: 'Three sentences for the team: the situation, the cause if known, what the customer wants', max: 1200 },
       ask: { type: 'string', description: 'The customer’s request in their own words (a short quote)', max: 600 },
       tried: { type: 'strings', description: 'What you checked and found, one "tool: finding" per item', max: 12 },
       recommendation: { type: 'string', description: 'The exact action you recommend, with the evidence (e.g. "Refund the duplicate $25 top-up of Nov 3: two identical top-ups 40 s apart in the ledger")', max: 800 },
       evidence: { type: 'strings', description: 'IDs that back it up: request, email, campaign, domain IDs', optional: true, max: 20 },
+      reproSteps: { type: 'strings', description: 'bug: numbered steps to reproduce, as the customer did them', optional: true, max: 10 },
+      affected: { type: 'string', description: 'bug: the API route or dashboard page (e.g. "POST /v1/webhooks/{id}/test" or "Domains → Check now"); deliverability: the provider, domain or campaign', optional: true, max: 200 },
+      requestIds: { type: 'strings', description: 'bug: request IDs (req_…) of the failing calls', optional: true, max: 10 },
+      errorCodes: { type: 'strings', description: 'bug: error codes and statuses seen (e.g. "500 INTERNAL_ERROR")', optional: true, max: 10 },
+      expected: { type: 'string', description: 'bug: what should have happened', optional: true, max: 400 },
+      actual: { type: 'string', description: 'bug: what happened instead', optional: true, max: 400 },
+      useCase: { type: 'string', description: 'feature_request: what they are trying to do and why', optional: true, max: 600 },
     },
     label: fixed('Passing this to the Bane team…', 'Passed this to the Bane team'),
-    execute: (a, h) => h.fileTicket({
-      category: String(a.category), severity: (['P1', 'P2', 'P3'].includes(String(a.severity)) ? a.severity : 'P3') as TicketInput['severity'], summary: String(a.summary ?? ''), ask: String(a.ask ?? ''),
-      tried: (Array.isArray(a.tried) ? a.tried : []).slice(0, 12).map(item => { const [tool, ...rest] = String(item).split(':'); return { tool: (tool ?? '').trim().slice(0, 60), finding: rest.join(':').trim().slice(0, 400) }; }),
-      recommendation: String(a.recommendation ?? ''), evidence: { ids: (Array.isArray(a.evidence) ? a.evidence : []).slice(0, 20).map(String) },
-    }) },
+    execute: (a, h) => h.fileTicket(ticketInput(a)) },
 ];
 export const TOOL_NAMES = TOOLS.map(t => t.name);
+
+const list = (value: unknown, max: number, each = 400) => (Array.isArray(value) ? value : []).slice(0, max).map(v => String(v).trim().slice(0, each)).filter(Boolean);
+/** The model's file_ticket arguments as a ticket; a bug without its reproduction is refused, so the model adds it. */
+export function ticketInput(a: Record<string, unknown>): TicketInput {
+  const type = (TICKET_TYPES as readonly string[]).includes(String(a.type)) ? a.type as TicketType : 'other';
+  const details: TicketDetails = {};
+  if (a.topic && (TICKET_TOPICS as readonly string[]).includes(String(a.topic))) details.topic = String(a.topic);
+  if (type === 'bug') {
+    const bug = { reproSteps: list(a.reproSteps, 10), affected: String(a.affected ?? '').trim().slice(0, 200), requestIds: list(a.requestIds, 10, 40).filter(r => /^req_[0-9a-f]{32}$/.test(r)),
+      errorCodes: list(a.errorCodes, 10, 80), expected: String(a.expected ?? '').trim().slice(0, 400), actual: String(a.actual ?? '').trim().slice(0, 400) };
+    if (!bug.reproSteps.length || !bug.affected) throw new ToolFailure('A bug ticket needs reproSteps (how to make it happen) and affected (the API route or dashboard page). Add them, with the request IDs and error codes you saw, and call file_ticket again.');
+    details.bug = bug;
+  }
+  if (type === 'deliverability' && a.affected) details.deliverability = { affected: String(a.affected).trim().slice(0, 200) };
+  if (type === 'feature_request') {
+    if (!String(a.useCase ?? '').trim()) throw new ToolFailure('A feature request needs useCase: what the customer is trying to do and why.');
+    details.featureRequest = { useCase: String(a.useCase).trim().slice(0, 600) };
+  }
+  return {
+    type, title: String(a.title ?? '').trim().slice(0, 80) || type.replace('_', ' '), severity: (['P1', 'P2', 'P3'].includes(String(a.severity)) ? a.severity : 'P3') as TicketInput['severity'],
+    summary: String(a.summary ?? '').slice(0, 1200), ask: String(a.ask ?? '').slice(0, 600),
+    tried: list(a.tried, 12).map(item => { const [tool, ...rest] = item.split(':'); return { tool: (tool ?? '').trim().slice(0, 60), finding: rest.join(':').trim().slice(0, 400) }; }),
+    recommendation: String(a.recommendation ?? '').slice(0, 800), evidence: { ids: list(a.evidence, 20, 120) }, details,
+  };
+}

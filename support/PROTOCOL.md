@@ -131,7 +131,8 @@ The agent finishes its current answer by saying it has asked, and continues on i
 
 ```jsonc
 { "v": 1, "type": "ticket.filed", "seq": 10, "ticketId": "tkt_…",
-  "category": "refund",            // see support/README.md
+  "ticketType": "billing",         // billing | bug | deliverability | account | abuse_report | feature_request | other
+  "category": "refund",            // the topic within the type when there is one, else the type (kept for v1 panels)
   "replyTo": "a…@acme.com",        // masked: where the team will reply
   "expect": "usually within one business day" }
 ```
@@ -159,6 +160,7 @@ Show a small card: "Passed to the Bane team as **tkt_…**. Someone will reply b
 
 ```jsonc
 { "type": "user.message", "clientMessageId": "c_…", "text": "Why are Gmail opens down?" }  // ≤ 8,000 characters
+{ "type": "user.message", "clientMessageId": "c_…", "text": "This is what I see", "attachments": ["att_…"] }  // uploaded first (§5.1); text may be empty
 { "type": "consent.respond", "requestId": "cns_…", "decision": "allow", "handoff": "<JWS with shareContent>" }
 { "type": "consent.respond", "requestId": "cns_…", "decision": "deny" }
 { "type": "human.request" }                     // "Talk to a person": files a ticket (once per conversation)
@@ -169,8 +171,35 @@ Show a small card: "Passed to the Bane team as **tkt_…**. Someone will reply b
 ```
 
 - `clientMessageId` makes resends safe: the server ignores a `user.message` it has already accepted.
+- `attachments` are IDs from §5.1 that no earlier message used; an unknown or reused ID gets `BAD_MESSAGE`.
 - Messages sent while a turn is running are queued and answered in order.
 - The server answers `pong` to `ping`, and closes the socket with `1000` when the conversation ends. If the socket drops, reconnect with the same `socketUrl` until `expiresAt`, then renew through `/chat/resume`.
+
+### 5.1 Screenshots
+
+The person can attach images: PNG, JPEG or WebP, up to 5 MB each and 5 per conversation. They're uploaded over HTTP, not the socket: socket frames stay small (16 KB), and a plain request gets a size limit, a status code and its own retry.
+
+```
+POST {support}/c/<conversationId>/attachments
+Authorization: Bearer <chatToken>
+Content-Type: image/png | image/jpeg | image/webp
+X-Filename: <URI-encoded file name, optional>
+<the raw image bytes>
+```
+
+| Status | Body | Meaning |
+| --- | --- | --- |
+| `201` | `{ attachment: { id: "att_…", type, size, width, height, name } }` | Stored. Send its `id` in the next `user.message.attachments`. |
+| `401` | `{ error: { code: "CHAT_TOKEN_INVALID" } }` | Renew through `/chat/resume` |
+| `409` | `{ error: { code: "TOO_MANY_ATTACHMENTS" \| "CONVERSATION_CLOSED" } }` | 5 already, or the conversation ended |
+| `413` | `{ error: { code: "ATTACHMENT_TOO_LARGE" } }` | Over 5 MB |
+| `415` | `{ error: { code: "UNSUPPORTED_TYPE" } }` | Not PNG, JPEG or WebP. The bytes decide, not the header or the name. |
+| `422` | `{ error: { code: "INVALID_IMAGE" } }` | A damaged file, or more than 8,000 pixels on a side |
+
+- **What the server does:** it checks the type from the file's own bytes, and removes metadata (EXIF, XMP, text chunks, comments) before storing. The panel never gets the image back from the server, so show your own local preview.
+- **In `history`:** user messages carry `attachments: [{ id, type, width, height, name }]`. After a reload, show a placeholder such as "Screenshot · name".
+- **What the agent does:** it sees the images with the message and treats their content as untrusted. They attach to any ticket.
+- **Email:** image attachments on support emails are handled the same way.
 
 ## 6. What the panel can rely on
 

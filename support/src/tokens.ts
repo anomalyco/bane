@@ -7,7 +7,7 @@
 const encoder = new TextEncoder();
 const b64url = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 
-export type Purpose = 'chat-token/v1' | 'confirm/v1';
+export type Purpose = 'chat-token/v1' | 'confirm/v1' | 'attachment/v1' | 'staff/v1';
 const keys = new Map<string, Promise<CryptoKey>>();
 
 /** The HMAC key for one purpose; the root never leaves this function. Fails closed when the secret is missing or weak. */
@@ -29,8 +29,8 @@ export class MissingSecret extends Error {
   constructor(readonly secret: string) { super(`The support Worker is missing its ${secret} secret.`); }
 }
 
-async function sign(key: CryptoKey, payload: string) { return b64url(await crypto.subtle.sign('HMAC', key, encoder.encode(payload))); }
-async function verify(key: CryptoKey, payload: string, signature: string) {
+export async function sign(key: CryptoKey, payload: string) { return b64url(await crypto.subtle.sign('HMAC', key, encoder.encode(payload))); }
+export async function verify(key: CryptoKey, payload: string, signature: string) {
   const bytes = Uint8Array.from(atob(signature.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - signature.length % 4) % 4)), c => c.charCodeAt(0));
   return crypto.subtle.verify('HMAC', key, bytes, encoder.encode(payload));
 }
@@ -68,7 +68,7 @@ export async function readConfirmToken(root: string | undefined, token: string, 
 export async function addressHash(email: string) { return b64url(await crypto.subtle.digest('SHA-256', encoder.encode(`bane-support:${email.trim().toLowerCase()}`))).slice(0, 32); }
 
 /** `conv_` + 26 base32 characters (130 bits). */
-export function newId(prefix: 'conv' | 'tkt' | 'msg' | 'cns') {
+export function newId(prefix: 'conv' | 'tkt' | 'msg' | 'cns' | 'att') {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz234567', bytes = crypto.getRandomValues(new Uint8Array(prefix === 'conv' ? 26 : 16));
   return `${prefix}_${Array.from(bytes, b => alphabet[b & 31]).join('')}`;
 }

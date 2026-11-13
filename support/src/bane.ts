@@ -1,4 +1,5 @@
 import type { Env } from './env.js';
+import { readCapped } from './attachments.js';
 import { MissingSecret } from './tokens.js';
 
 // Bane, from the support Worker's side. Two bindings to the same Bane Worker in the same account:
@@ -26,6 +27,8 @@ export interface SupportPlatform {
   mintGrant(body: { userId: string; ticketRef: string; reason: string; verification: 'handoff' | 'dmarc' | 'magic_link'; handoffId?: string; workspaceIds?: string[]; ttlMinutes?: number }): Promise<PlatformReply<Grant>>;
   revokeGrant(grantId: string): Promise<PlatformReply<{ id: string; revoked: true }>>;
   read<T = unknown>(path: string, grant: string): Promise<PlatformReply<T>>;
+  /** A staff sign-in token from Bane's operator check: still an active operator? (staff.ts) */
+  verifyStaff(token: string): Promise<{ ok: true; staff: { userId: string; email: string; role: string }; jti: string; expiresAt: string } | { ok: false; code: 'STAFF_INVALID' | 'STAFF_EXPIRED' | 'NOT_OPERATOR' }>;
 }
 
 export class BaneError extends Error {
@@ -52,6 +55,17 @@ export function baneApi(env: Env) {
   return {
     /** A received message with its headers and verdicts (SPF, DKIM, DMARC), for sender checks. */
     message: (messageId: string) => call<InboundMessage>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}?includeDelivery=true`),
+    /** One attachment's bytes (≤ limit, else null). Bane answers 307 to a signed storage URL, which is fetched directly. */
+    async part(messageId: string, partId: string, limit: number): Promise<Uint8Array | null> {
+      if (!key) throw new MissingSecret('BANE_SUPPORT_INBOX_KEY');
+      const path = `/v1/inbound/messages/${encodeURIComponent(messageId)}/parts/${encodeURIComponent(partId)}`;
+      let response = await env.BANE_API.fetch(`${env.BANE_ORIGIN}${path}`, { headers: { authorization: `Bearer ${key}`, 'user-agent': 'bane-support' }, redirect: 'manual' });
+      const location = response.headers.get('location');
+      if (response.status >= 300 && response.status < 400 && location) response = await fetch(location, { redirect: 'error' });
+      if (!response.ok) throw new BaneError(response.status, 'ATTACHMENT_UNAVAILABLE', `Bane answered ${response.status} for an attachment`);
+      if (Number(response.headers.get('content-length') ?? 0) > limit) { await response.body?.cancel(); return null; }
+      return readCapped(response.body, limit);
+    },
     /** A new conversation from the support address (ticket emails, the chat follow-up thread). */
     startThread: (input: { to: string[]; subject: string; text: string; replyTo?: string[] }, idempotencyKey: string) =>
       call<{ id: string; threadId: string }>('POST', '/v1/inbound/threads', { addressId: env.SUPPORT_ADDRESS_ID, ...input }, idempotencyKey),
@@ -69,6 +83,7 @@ export type InboundMessage = {
   from: { name: string | null; address: string } | string | null; fromAddress?: string;
   to?: unknown; cc?: unknown; replyTo?: unknown; text?: string | null;
   replyText?: string | null; messageId?: string | null; inReplyTo?: string | null; references?: unknown;
+  attachments?: { id: string; filename: string | null; contentType: string; size: number; disposition?: string }[];
   headers?: { name: string; value: string }[]; verdicts?: Record<string, string | boolean>;
 };
 

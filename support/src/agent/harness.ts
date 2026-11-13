@@ -15,6 +15,8 @@ export type TurnInput = {
   text: string;
   /** Per-turn context the harness adds to the system prompt: <customer>, <context>, channel rules. */
   context: string;
+  /** Screenshots for this message, as data URIs (checked and stripped by image.ts). */
+  images?: { uri: string; name: string }[];
 };
 export type TurnResult = { text: string; usage: Usage; aborted: boolean; error?: string };
 

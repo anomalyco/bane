@@ -191,7 +191,7 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
       try {
         // Let the subscription attach before prompting, so no early event is missed.
         await new Promise(resolve => setTimeout(resolve, 0));
-        await opencode.sessions.prompt({ sessionID, text: input.text } as never);
+        await opencode.sessions.prompt({ sessionID, text: input.text, ...(input.images?.length ? { files: input.images.map(image => ({ uri: image.uri, name: image.name })) } : {}) } as never);
         await done;
       } finally {
         signal.removeEventListener('abort', stop);
