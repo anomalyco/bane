@@ -13499,6 +13499,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Real names are bane-probation-ws_<32 hex>; the fixture workspace ID is longer than SES allows in a tenant name.
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','bane-probation-fixture')`, [wid, REGION, pool]);
       const arn = `arn:aws:ses:${REGION}:${pool}:tenant/bane-probation-fixture/tn-1`;
+      Object.assign(runtime.config, { liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' } });
+      let liveStatus = 'ENABLED', offline = false;
+      const ses = t.mock.method((await import('@aws-sdk/client-sesv2')).SESv2Client.prototype, 'send', async (cmd: any) => {
+        assert.equal(cmd.constructor.name, 'GetReputationEntityCommand'); assert.deepEqual(cmd.input, { ReputationEntityType: 'RESOURCE', ReputationEntityReference: arn });
+        if (offline) throw Error('synthetic SES outage');
+        return { ReputationEntity: { ReputationEntityType: 'RESOURCE', ReputationEntityReference: arn, SendingStatusAggregate: liveStatus,
+          AwsSesManagedStatus: { Status: liveStatus, Cause: 'SES verified reason' }, CustomerManagedStatus: { Status: 'DISABLED', Cause: 'Status manually updated.' } } };
+      });
       await db.query(`INSERT INTO hosted_tenant_ownership(workspace_id,region,arn) VALUES($1,$2,$3)`, [wid, REGION, arn]);
       const item = (status: string, origin: string, cause: string, account = pool, target = arn, topic = topicArn, topicKind: 'shared' | 'byo' = 'shared') => ({ region: REGION, topicArn: topic, topicKind, messageId: unique('sns'), message: { version: '0', id: unique('eb'), 'detail-type': status === 'ENABLED' ? 'Sending Status Enabled' : 'Sending Status Disabled',
         source: 'aws.ses', account, time: new Date().toISOString(), region: REGION, resources: [target], detail: { version: '1.0.0', data: { origin, record: { status, cause } } } } });
@@ -13517,14 +13525,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await ingestFeedbackBatch(runtime, forged)).map(o => o.error), ['SNS_TOPIC_NOT_ALLOWED', 'SNS_TOPIC_NOT_ALLOWED', 'SES_TENANT_NOT_OWNED', 'SES_TENANT_NOT_OWNED', 'SES_TENANT_NOT_OWNED']);
       assert.equal(await pause(), null, 'No forged event pauses the workspace.');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1`, [wid])).rows[0].n, 0);
-      assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'CUSTOMER_MANAGED', 'Status manually updated.')]), [{ ok: true }]);
+      assert.equal(ses.mock.callCount(), 0, 'Unowned tenants never trigger a control-plane read');
+      await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'not reported by SES')]);
+      offline = true; await assert.rejects(ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'x')]), /synthetic SES outage/); offline = false;
+      assert.equal(await pause(), null); assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1`, [wid])).rows[0].n, 0);
+      liveStatus = 'DISABLED';
+      assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'CUSTOMER_MANAGED', 'shaped non-manual reason')]), [{ ok: true }]);
       assert.equal(await pause(), null, 'Bane\'s own switch is not an AWS pause.');
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'Trust and Safety review.')]), [{ ok: true }]);
       assert.match((await pause()).reason, /AWS paused this workspace’s SES tenant/);
       assert.deepEqual((await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [wid])).rows.map(r => [r.payload.code, r.payload.tenant, r.payload.exempt]), [['SES_TENANT_PAUSED', arn, false]], 'The operators are alerted.');
       const standing = (await db.query(`SELECT step,pause_kind,reasons FROM sender_standing WHERE workspace_id=$1`, [wid])).rows[0];
       assert.deepEqual([standing.step, standing.pause_kind, standing.reasons[0].code], ['pause', 'full', 'SES_TENANT_PAUSED']);
-      await ingestFeedbackBatch(runtime, [item('REINSTATED', 'AWS_SES', 'Reinstated.')]);
+      assert.equal(standing.reasons[0].message, 'SES verified reason');
+      liveStatus = 'REINSTATED'; await ingestFeedbackBatch(runtime, [item('REINSTATED', 'AWS_SES', 'Reinstated.')]);
       assert.notEqual(await pause(), null, 'Only an operator resumes it.');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1 AND kind='tenant'`, [wid])).rows[0].n, 3);
     });
