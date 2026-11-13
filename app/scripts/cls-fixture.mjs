@@ -234,6 +234,27 @@ async function domain(db, workspaceId, conn, name, { receiving = false, mailFrom
   return { id, mdom, host: name };
 }
 
+const RECEIPT_TEXT = 'Northwind\n\nThanks for your order.\n\nOrder 4821 is confirmed and ships within two business days.\n\nWalnut desk organizer  $48.00\nShipping  $6.00\nTotal  $54.00\n\nView your order: https://northwind.example/orders/4821\n\nNorthwind, 120 Harbor Street, Portland, OR 97209';
+const RECEIPT_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Your receipt</title></head><body style="margin:0;background:#f4f4f5">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5"><tr><td align="center" style="padding:32px 16px">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:100%;max-width:560px;background:#ffffff;border-radius:8px;font-family:Arial,Helvetica,sans-serif;color:#18181b">
+<tr><td style="padding:28px 32px 8px;font-size:15px;font-weight:bold;letter-spacing:.02em">Northwind</td></tr>
+<tr><td style="padding:8px 32px 0"><h1 style="margin:0;font-size:22px;line-height:30px">Thanks for your order.</h1><p style="margin:8px 0 0;font-size:15px;line-height:22px;color:#52525b">Order 4821 is confirmed and ships within two business days.</p></td></tr>
+<tr><td style="padding:24px 32px 0"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:15px;line-height:22px">
+<tr><td style="padding:10px 0;border-top:1px solid #e4e4e7">Walnut desk organizer</td><td align="right" style="padding:10px 0;border-top:1px solid #e4e4e7">$48.00</td></tr>
+<tr><td style="padding:10px 0;border-top:1px solid #e4e4e7">Shipping</td><td align="right" style="padding:10px 0;border-top:1px solid #e4e4e7">$6.00</td></tr>
+<tr><td style="padding:10px 0;border-top:1px solid #e4e4e7;font-weight:bold">Total</td><td align="right" style="padding:10px 0;border-top:1px solid #e4e4e7;font-weight:bold">$54.00</td></tr></table></td></tr>
+<tr><td style="padding:24px 32px"><a href="https://northwind.example/orders/4821" style="display:inline-block;padding:12px 20px;border-radius:6px;background:#18181b;color:#ffffff;font-size:15px;font-weight:bold;text-decoration:none">View your order</a></td></tr>
+<tr><td style="padding:0 32px 28px;font-size:12px;line-height:18px;color:#71717a">Northwind, 120 Harbor Street, Portland, OR 97209</td></tr>
+</table></td></tr></table></body></html>`;
+const JUNK_SUBJECT = 'FINAL NOTICE: YOU ARE A WINNER!!!';
+const JUNK_HTML = `<html><head><style>.wrap{display:flex;gap:12px}.hero{background-image:url(https://cdn.example.net/prize.jpg)}</style></head><body>
+<div class="wrap"><div class="hero"><img src="https://cdn.example.net/prize-banner.jpg" width="600" height="420"></div></div>
+<p style="font-size:1px;color:#ffffff">you are a winner you are a winner you are a winner you are a winner</p>
+<p><a href="https://bit.ly/3claim">CLAIM YOUR PRIZE NOW</a> or <a href="http://203.0.113.7/claim">https://northwind.example/claim</a></p>
+<form action="https://203.0.113.7/claim"><input type="text" name="card"><button>Claim</button></form>
+</body></html>`;
+
 // Hourly sending volume with a weekday rhythm from a fixed seed; bounces ~0.9%, complaints ~0.03%. Returns the newest.
 async function mail(db, workspaceId, days) {
   const now = Date.now(), rows = [];
@@ -354,6 +375,12 @@ export async function seed(fx) {
     ('ws_northwind','user_sam','member','user_sam',NULL,'dashboard','member.join','member','user_sam','{"after":{"role":"admin"}}',NULL,'req_fixture_join','198.51.100.0/24','Safari 18 on macOS',false,now()-interval '6 days',now()+interval '1 year'),
     ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
+  // The newest receipt as a well-made transactional email, and a junk-like one sent a minute ago (EmailInsight's two cases).
+  await db.query('UPDATE sending_emails SET snapshot = snapshot || $2::jsonb WHERE id = $1', [email, JSON.stringify({ fromName: 'Northwind', html: RECEIPT_HTML, text: RECEIPT_TEXT })]);
+  const junkEmail = rid('email');
+  await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+    VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
+    [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
   // The signed-out homepage's figures, as the minute job publishes them.
   const hourly = Array.from({ length: 24 }, (_, i) => 1200 + (i * 7919) % 900);
   await db.query('INSERT INTO public_stats (singleton, stats, generated_at) VALUES (true, $1::jsonb, now())', [JSON.stringify({
@@ -465,7 +492,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    mcp, restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, restricted: 'ws_harbor', email, junkEmail, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,
   };
 }

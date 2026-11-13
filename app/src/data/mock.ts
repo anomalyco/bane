@@ -6,6 +6,20 @@ import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMai
 import type { DemoAttachment, DemoState } from './seed'
 import type { AudiencePlan, ConsentEvent, ImportPreview } from './types'
 import { parseCsv } from '../features/audience/csv'
+import type { SendabilityFinding, SendabilityReport, SenderGrade } from './types'
+// A handful of the checker's content rules (plans/sendability-rules.md) with its weights, enough for the demo panel.
+function demoCheck(mail: { subject: string; html: string; text?: string | null; fromName?: string | null; stream: string }): SendabilityReport {
+  const findings: (SendabilityFinding & { points: number })[] = []
+  const letters = mail.subject.replace(/[^a-z]/gi, '')
+  if (mail.html.trim() && !mail.text?.trim()) findings.push({ ruleId: 'text-part', category: 'content', severity: 'warning', points: 32, title: 'Add a plain-text part', detail: 'HTML with no plain alternative: people using text-only clients lose the message.', fix: 'Send a text version alongside the HTML.' })
+  if (letters.length >= 10 && letters.replace(/[^A-Z]/g, '').length / letters.length > .65) findings.push({ ruleId: 'shouting', category: 'content', severity: 'warning', points: 8, title: 'The subject is shouting', detail: 'Most of the subject is uppercase.', fix: 'Write the subject in sentence case.' })
+  if (!mail.fromName?.trim()) findings.push({ ruleId: 'display-name', category: 'headers', severity: 'warning', points: 30, title: 'Add a sender name', detail: 'No recognizable From name.', fix: 'Set a From name readers recognize.' })
+  const weights = { authentication: 0, content: 33, headers: 15, size: 12, rendering: 5, reputation: 0 }
+  const categories = (Object.keys(weights) as (keyof typeof weights)[]).map(id => ({ id, weight: weights[id], score: Math.max(0, 100 - findings.filter(f => f.category === id).reduce((n, f) => n + f.points, 0)) }))
+  const score = Math.round(categories.reduce((n, c) => n + c.score * c.weight, 0) / categories.reduce((n, c) => n + c.weight, 0))
+  const grade: SenderGrade = score >= 95 ? 'A+' : score >= 90 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : score >= 60 ? 'D' : 'F'
+  return { score, grade, categories, findings: findings.map(({ points: _points, ...finding }) => finding) }
+}
 // Demo webhook signing secrets, so revealing one shows the same value until it is rotated.
 const demoSecrets = new Map<string, string>()
 
@@ -691,6 +705,17 @@ export function createMockApi(): BaneApi {
       get: (emailId, signal) => run(signal, false, s => {
         const email = find(s.emails, emailId, 'Email'), contact = s.contacts.find(c => c.email.toLowerCase() === email.to.toLowerCase())
         return { ...email, contact: contact ? {id:contact.id, suppressed:contact.status === 'suppressed'} : null }
+      }),
+      // The demo has no checker or emulator: a few content rules, and each client shows the HTML as sent.
+      check: (input, signal) => run(signal, false, s => {
+        const mail = 'emailId' in input ? find(s.emails, input.emailId, 'Email') : (({ subject, html, fromName }) => ({ subject, html, fromName, text: null, stream: 'marketing' as const }))(find(s.campaigns, input.campaignId, 'Campaign'))
+        return demoCheck(mail)
+      }),
+      preview: (input, signal) => run(signal, false, s => {
+        const html = 'html' in input.source ? input.source.html : find(s.emails, input.source.emailId, 'Email').html
+        if (!html.trim()) throw new ApiError('This email has no retained HTML to preview.', 'EMAIL_HTML_UNAVAILABLE')
+        const canvas = input.theme === 'dark' ? 'background:#1f1f1f;color:#e8e8e8' : 'background:#fff;color:#222'
+        return input.clients.map(client => ({ client, html: client === 'outlook-classic-windows' ? '' : `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"><style>body{margin:16px;font:14px Arial,sans-serif;${canvas}}</style></head><body>${html}</body></html>`, issues: [] }))
       }),
     },
     campaigns: {

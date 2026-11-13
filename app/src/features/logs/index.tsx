@@ -6,6 +6,7 @@ import { queries } from '../../data/queries'
 import type { Email, LogDirection, LogEntry, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { EmailPreview, ReceivedEmailPreview, htmlToText } from '../../components/EmailPreview'
+import { EmailInsight } from '../../components/EmailInsight'
 import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton } from './skeletons'
@@ -194,6 +195,8 @@ function EmailDetail({ email }: { email: Email }) {
       {view === 'preview' ? hasHtml ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} remoteImages /> : hasPlainText ? <pre className="plain-text-preview">{plainText}</pre> : <EmptyState title="No message snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html || 'No HTML snapshot available.' : hasPlainText ? plainText : 'No plain-text snapshot available.'}</pre>}
     </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} />{!events.length && !cursor && <p className="muted">No delivery events yet.</p>}<ol>{chronological(events).map(event => <li key={event.id}><span className={`timeline-dot ui-tone--${eventTone(event.type)}`} /><div><div className="cluster between"><span title={`Event type: ${event.type}`}>{eventLabel(event.type)}</span><time className="muted">{time(event.at)}</time></div>{eventMeaning(event.type) && <p className="muted">{eventMeaning(event.type)}</p>}{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Couldn’t load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>
     <div className="message-identifiers"><span className="cluster">Email ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy email ID" /></span><span>Created {date(email.sentAt)} · {time(email.sentAt)} UTC</span>{!multiTenant && <span>SES · {email.regionId}</span>}</div>
+    {/* Last on the page: its result replaces a skeleton with nothing below it to move. */}
+    <div className="email-insight"><EmailInsight source={{ kind: 'email', id: email.id, html: hasHtml }} /></div>
   </div>
 }
 
