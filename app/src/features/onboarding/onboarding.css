@@ -4,7 +4,7 @@
 .onboarding-header .wordmark, .onboarding-header .theme-toggle { position: static; }
 .onboarding-signout > svg { display: none; }
 .onboarding-header-actions { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
-.onboarding-workspace { width: 200px; min-width: 0; }
+.onboarding-workspace { width: 240px; min-width: 0; }
 .page-surface.onboarding-surface { flex: 1; height: auto; margin: 0 var(--page-inset) var(--page-inset); padding: var(--space-40) var(--space-32) 0; }
 .onboarding-notice { width: 100%; max-width: 920px; margin: 0 auto var(--space-24); }
 
@@ -192,12 +192,14 @@
 
 @media (max-width: 850px) {
   .page-surface.onboarding-surface { padding: var(--space-28) var(--space-16) 0; }
-  .onboarding-workspace { width: 160px; }
 }
 @media (max-width: 640px) {
   /* A 44 px tap target for each control; the workspace name gets the room Sign out's label gave up. */
-  .onboarding-header-actions { flex: 1; justify-content: flex-end; gap: var(--space-4); }
-  .onboarding-workspace { flex: 1 1 auto; width: auto; max-width: 220px; }
+  /* Wordmark, theme and Sign out share the first row; the workspace picker takes the second in full, so a long name fits. */
+  .onboarding-header { flex-wrap: wrap; row-gap: 0; column-gap: var(--space-4); }
+  .onboarding-header-actions { display: contents; }
+  .onboarding-header .wordmark { margin-right: auto; }
+  .onboarding-workspace { order: 1; flex: 1 0 100%; width: auto; max-width: none; padding-bottom: var(--space-4); }
   .onboarding-header .theme-toggle, .onboarding-header .onboarding-signout { width: 44px; height: 44px; padding: 0; }
   .onboarding-signout > svg { display: block; }
   .onboarding-signout-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
