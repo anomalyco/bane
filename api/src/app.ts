@@ -13,13 +13,15 @@ import { withRegionSettings } from './ses-region-state.js';
 import { countEnqueued } from './jobs.js';
 import { authenticatedCreates } from './idempotency.js';
 
-type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview';
+type RouteGroup = 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Bane operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/v1/public/stats') return 'public-stats';
+  // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
+  if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname)) return 'operator';
   if (supportPath(pathname) || pathname === '/v1/activity' || pathname === '/v1/contact-support' || pathname === '/v1/public/support-keys') return 'support';
   if (pathname === '/v1/me' || pathname === '/v1/mcp-connections' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
@@ -82,6 +84,10 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js')]);
         return (target: App) => { registerOperator(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); };
+      }
+      case 'billing': {
+        const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
+        return (target: App) => { registerBilling(target); registerStripeWebhook(target); };
       }
     }
   }).catch(error => { delete groupRegistrars[group]; throw error; });
@@ -204,6 +210,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') return next();
+    // Stripe's webhook authenticates with its own signature (billing/stripe-webhook.ts).
+    if (c.req.method === 'POST' && c.req.path === '/v1/billing/stripe') return next();
     return authenticate(c, next);
   });
   app.use('*', async (c, next) => {
@@ -211,7 +219,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // own scoped keys. Unknown routes and public forms are not upload routes.
     if (c.req.path!=='/internal/v1/mail' && c.req.path!=='/mcp' && !/^\/v1\/inboxes(?:\/|$)/.test(c.req.path) && !c.req.path.startsWith('/v1/inbound/')) {
       const matched=c.req.matchedRoutes.some(r=>r.method===c.req.method && !r.path.endsWith('*'));
-      await boundRequestBody(c,c.req.path==='/v1/events/ses'?512*1024:matched && c.get('actor')?undefined:64*1024);
+      await boundRequestBody(c,c.req.path==='/v1/events/ses'||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
     await next();
   });
@@ -315,10 +323,12 @@ export async function createOpenApiApp(): Promise<App> {
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
     import('./audit.js'), import('./support.js'),
   ]));
+  const [{ registerBilling }, { registerStripeWebhook }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]));
   registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full);
+  registerBilling(full); registerStripeWebhook(full);
   return full;
 }
 

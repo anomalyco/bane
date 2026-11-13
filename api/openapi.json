@@ -3216,7 +3216,8 @@
                   "pacing_window",
                   "ses_daily_quota",
                   "hosted_daily_quota",
-                  "list_probe"
+                  "list_probe",
+                  "balance"
                 ]
               },
               "until": {

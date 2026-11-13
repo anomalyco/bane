@@ -48,6 +48,10 @@ const values = z.object({
   BANE_ALLOW_SES_SANDBOX: z.enum(['true','false']).default('false'),
   BANE_REQUIRE_DMARC_FOR_BULK: z.enum(['true','false']).optional(),
   BANE_HOSTED_SCREEN: z.enum(['true','false']).default('true'),
+  STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
+  STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
+  STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
+  STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   BANE_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   BANE_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
@@ -165,6 +169,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     allowSesSandbox: v.MULTI_TENANT==='true' && v.BANE_ALLOW_SES_SANDBOX==='true',
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.BANE_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
     hostedScreen: v.MULTI_TENANT==='true' && v.BANE_HOSTED_SCREEN==='true',
+    billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true', apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
     placementShadow: v.MULTI_TENANT === 'true' && v.BANE_PLACEMENT_SHADOW === 'true', placementDblZone: v.BANE_PLACEMENT_DBL_ZONE,
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
