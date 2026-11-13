@@ -46,7 +46,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
     </div>
     <section className="usage-steps-section" aria-labelledby="usage-steps-title">
       <SectionHeader title={<span id="usage-steps-title">How the daily limit grows</span>} />
-      <p className="muted usage-note">New workspaces start small so a mistake can’t hurt everyone’s delivery. The limit rises on its own as your mail proves healthy. Only real email accepted by SES counts: simulator sends use the limit but never raise it.</p>
+      <p className="muted usage-note">New workspaces start small so one mistake can’t hurt everyone’s delivery. The limit rises as real email accepted by SES proves healthy; simulator sends use it but never raise it.</p>
       <ol className="usage-steps">{steps.map((step, index) => {
         const current = usage?.daily?.step === index, done = usage?.daily?.step != null && index < usage.daily.step
         return <li key={index} data-current={current || undefined} data-done={done || undefined} style={{ '--i': index } as CSSProperties}>
