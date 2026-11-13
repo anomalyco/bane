@@ -71,8 +71,15 @@ jobs:
           allowed='^(thdxr|R44VC0RP)$'
           enqueued_by() {
             [[ $SHA =~ ^[0-9a-f]{40}$ ]] || return 0
-            local pr
-            pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" | jq -r --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '[.[] | select(.merged_at and .base.ref == "dev" and .base.repo.full_name == $repo and .merge_commit_sha == $sha) | .number][0] // empty')
+            # GitHub links the queue's merge commit to its pull request a few
+            # seconds after the push that starts this job (#151's own deploy
+            # found none 4 s in), so retry an empty lookup for up to 2 minutes.
+            local pr='' try
+            for ((try = 1; try <= 12; try++)); do
+              pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" | jq -r --arg sha "$SHA" --arg repo "$GITHUB_REPOSITORY" '[.[] | select(.merged_at and .base.ref == "dev" and .base.repo.full_name == $repo and .merge_commit_sha == $sha) | .number][0] // empty')
+              [[ $pr =~ ^[0-9]+$ ]] && break
+              if ((try < 12)); then echo "No merged pull request for $SHA yet; retrying in 10 s." >&2; sleep 10; fi
+            done
             [[ $pr =~ ^[0-9]+$ ]] || return 0
             gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.merged_by.login // empty'
           }
