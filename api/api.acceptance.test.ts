@@ -11291,14 +11291,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     for(const key of [received,sent])assert.deepEqual(attachmentAccess(selfHosted,`arn:aws:s3:::${own}/${key}`,account),{get:true,put:true,orphan:true,otherTag:true},key);
   });
 
-  test('receiving CI manages the Ohio rule but cannot create or activate a set and refuses a missing or foreign set',async()=>{
+  test('receiving CI inspects the operator-owned Ohio rule and refuses a missing or foreign set',async()=>{
     const {spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
     const policy=JSON.parse(await readFile(new URL('../infra/aws-shared/receiving-deploy-policy.json',import.meta.url),'utf8'));
     const ses=policy.Statement.filter((s:Json)=>[s.Action].flat().some((a:string)=>a.startsWith('ses:')));
-    // Pulumi owns the four pool event destinations (N7) and nothing else on the sets: no create, suppression or sending change.
+    // CI only verifies the rule and four destinations. Publishing them is a separate operator action.
     const set=(region:string,name:string)=>`arn:aws:ses:${region}:YOUR_AWS_ACCOUNT_ID:configuration-set/${name}`;
-    assert.deepEqual(ses,[{Effect:'Allow',Action:['ses:DescribeActiveReceiptRuleSet','ses:DescribeReceiptRule','ses:CreateReceiptRule','ses:UpdateReceiptRule'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}},
-      {Effect:'Allow',Action:['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination','ses:UpdateConfigurationSetEventDestination','ses:DeleteConfigurationSetEventDestination'],
+    assert.deepEqual(ses,[{Effect:'Allow',Action:['ses:DescribeActiveReceiptRuleSet','ses:DescribeReceiptRule'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'us-east-2'}}},
+      {Effect:'Allow',Action:['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations'],
         Resource:[set('us-east-2','bane-transactional'),set('us-east-2','bane-marketing'),set('us-east-1','bane-trusted-transactional'),set('us-east-1','bane-trusted-marketing')]}]);
     // Feedback dead letters (Mythos 5.1 N-M3): each queue accepts only its own topic; Pulumi may subscribe only Ohio's feedback to the stage endpoint.
     const subscribe=policy.Statement.find((s:Json)=>s.Action==='sns:Subscribe');
