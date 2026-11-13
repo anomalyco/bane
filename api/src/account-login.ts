@@ -26,7 +26,7 @@ async function provider(runtime: Runtime) {
   const issuer = new URL(accountIssuer);
   const options = { signal: () => AbortSignal.timeout(6000) };
   const metadata = await oidc.processDiscoveryResponse(issuer, await oidc.discoveryRequest(issuer, options));
-  const client = { client_id: accountClient.id, id_token_signed_response_alg: accountClient.algorithm };
+  const client: oidc.Client = { client_id: accountClient.id, id_token_signed_response_alg: accountClient.algorithm };
   const jwk = JSON.parse(accountClient.privateKey) as JsonWebKey & {kid:string};
   const key = await crypto.subtle.importKey('jwk', jwk, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
   const authentication = oidc.PrivateKeyJwt({ key, kid: jwk.kid });
@@ -75,6 +75,11 @@ async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: P
       name=excluded.name,outcome=excluded.outcome,attempts=bane_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
 }
 
+// One retry when the server asks for a DPoP nonce: the handle stored it from the refusal.
+async function retryDPoPNonce<T>(attempt: () => Promise<T>) {
+  try { return await attempt(); } catch (error) { if (!oidc.isDPoPNonceError(error)) throw error; return attempt(); }
+}
+
 export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string) {
   const state = url.searchParams.get('state');
   if (!state || state.length > 256 || !binding || binding.length > 256) throw loginFailed();
@@ -84,14 +89,21 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   if (!flow) throw loginFailed();
   const { metadata, client, authentication, callback, options } = await provider(runtime);
   const params = oidc.validateAuthResponse(metadata, client, url, state);
-  const response = await oidc.authorizationCodeGrantRequest(metadata, client, authentication, params, callback, flow.verifier, options);
-  const tokens = await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce});
+  // The account service refuses a first-party client's code exchange without a DPoP proof (invalid_dpop_proof) and
+  // asks for its nonce first (use_dpop_nonce). One ephemeral key per sign-in proves the exchange and the userinfo
+  // read; an issuer that doesn't advertise DPoP gets none.
+  const DPoP = metadata.dpop_signing_alg_values_supported?.includes('ES256') ? oidc.DPoP(client, await oidc.generateKeyPair('ES256')) : undefined;
+  const { response, tokens } = await retryDPoPNonce(async () => {
+    const response = await oidc.authorizationCodeGrantRequest(metadata, client, authentication, params, callback, flow.verifier, { ...options, DPoP });
+    return { response, tokens: await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce}) };
+  });
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
   const requiredAcr = runtime.config.accountClient?.requiredAcr;
   const needUserInfo = (claims.email === undefined || claims.email_verified === undefined || !providerIdentity(claims)) && !!metadata.userinfo_endpoint;
+  const bound = tokens.token_type === 'dpop' ? { DPoP } : {};
   const profile = needUserInfo
-    ? await oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, options))
+    ? await retryDPoPNonce(async () => oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, { ...options, ...bound })))
     : claims;
   const address = verifiedEmail.safeParse(profile.email).data ?? null;
   const emailAtLogin = profile.email_verified === true ? address : null;
@@ -231,7 +243,11 @@ export async function accountBrowserRoute(c: Ctx) {
       return c.redirect(returnUrl,303);
     } catch (error) {
       const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
-      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error') });
+      // What failed, never a token or a claim: the error class, the issuer's error code and the library's message.
+      const failure = error as { name?: string; error?: unknown; status?: unknown; message?: unknown };
+      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error'), errorType: failure?.name,
+        issuerError: typeof failure?.error === 'string' ? failure.error.slice(0, 80) : undefined, issuerStatus: typeof failure?.status === 'number' ? failure.status : undefined,
+        detail: error instanceof ApiError ? undefined : String(failure?.message ?? '').slice(0, 200) });
       return c.redirect(`${origin}/?auth=${issue?.reason ?? 'error'}`,303);
     }
   }
