@@ -8328,6 +8328,67 @@
           "error"
         ]
       },
+      "RitualVersion": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The routing version. Routes and rituals share it, and it is the If-Match for saving either."
+          },
+          "endpoints": {
+            "type": "string",
+            "pattern": "^\\d+$",
+            "description": "Marks the latest endpoint change seen. Pass it back as endpoints to wait for the next one."
+          },
+          "changed": {
+            "type": "boolean",
+            "description": "version or endpoints moved past what you passed as after and endpoints."
+          },
+          "actor": {
+            "$ref": "#/components/schemas/RitualChangeActor"
+          }
+        },
+        "required": [
+          "version",
+          "endpoints",
+          "changed",
+          "actor"
+        ]
+      },
+      "RitualChangeActor": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "member",
+              "api_key",
+              "mcp"
+            ],
+            "description": "member is a person in the dashboard, api_key an API key, mcp an MCP client (or a temporary token it made)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The member’s name, the API key’s name or the MCP client and its profile label; null when it is gone. Never an email address."
+          },
+          "self": {
+            "type": "boolean",
+            "description": "The credential making this request made the change (another tab, say)."
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "self"
+        ],
+        "description": "Who made the change returned: the save behind version, or else the latest endpoint change. Null when nothing changed."
+      },
       "RitualCheck": {
         "type": "object",
         "properties": {
@@ -42905,6 +42966,195 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/inbox-connections' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"inboxes\": [\n    \"example\"\n  ],\n  \"client\": \"opencode\",\n  \"auth\": \"key\",\n  \"reply\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/rituals/version": {
+      "get": {
+        "operationId": "getRitualVersion",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "tags": [
+          "Rituals"
+        ],
+        "summary": "Read the rituals and routes version, or wait for it to change",
+        "description": "Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a ritual, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rituals so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.",
+        "parameters": [
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 2147483647,
+              "description": "The version you have. The call waits until the version differs from it."
+            },
+            "required": false,
+            "description": "The version you have. The call waits until the version differs from it.",
+            "name": "after",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,19}$",
+              "description": "The endpoints marker from the last response: also wait for an endpoint to be created, changed or deleted."
+            },
+            "required": false,
+            "description": "The endpoints marker from the last response: also wait for an endpoint to be created, changed or deleted.",
+            "name": "endpoints",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 25,
+              "default": 25,
+              "description": "Seconds to wait for a change (0–25). Ignored without after or endpoints."
+            },
+            "required": false,
+            "description": "Seconds to wait for a change (0–25). Ignored without after or endpoints.",
+            "name": "wait",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RitualVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { getRitualVersion } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await getRitualVersion({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://bane.mx/v1/rituals/version' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\""
           }
         ]
       }

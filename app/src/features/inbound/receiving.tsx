@@ -1,5 +1,6 @@
 // Receiving: Routes, Rituals and Endpoints, the words the API uses. One read (getInboundOverview) per screen.
 import { useState, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router'
 import { Check } from 'lucide-react'
 import { Button, DataTable, DropdownMenu, EmptyState, ErrorState, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
@@ -16,6 +17,7 @@ import { ago, expiresIn, receivingDomains, useOverview, type Overview, type Over
 import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets } from './parts'
 import { CreatedEndpointDialog, endpointStatusLabel, endpointStatusTone, NewEndpointDialog, type Endpoint } from './ritual-connections'
 import { RouteEditor } from './routing'
+import { actorText, useLiveVersion } from './live'
 import '../settings/settings.css'
 import './inbound.css'
 import './receiving.css'
@@ -179,6 +181,15 @@ export function ReceivingPage() {
   }
   const data = overview.data
   const manage = data?.manage ?? canAdminister
+  // Live: a route, ritual or endpoint saved elsewhere (an agent over MCP, an API key, another tab) refreshes the lists
+  // in place and says who saved it. This person's own saves refresh through their mutations and say nothing here.
+  const client = useQueryClient(), toast = useToast()
+  useLiveVersion(manage && !!data, change => {
+    if (change.first) return
+    void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] === 'inbound-overview' })
+    if (change.actor?.self && change.actor.type === 'member') return
+    toast(`${change.versionMoved ? 'Routes and rituals' : 'Endpoints'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
+  }, { endpoints: true })
   const firstAddress = manage && !!data && data.counts.address + data.counts.route === 0
   const counts = data && { routes: kindCount(data.counts, 'all'), rituals: data.rituals.length, endpoints: data.endpoints.length }
   return <div className="stack inbound-stack">

@@ -39,7 +39,8 @@ export interface McpOperation {
 // Money moves only from a signed-in owner or admin: charging the saved card, auto-recharge and the payment method are
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', ...DASHBOARD_MONEY]);
+// getRitualVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRituals.
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'revealWebhookSecret', 'getRitualVersion', ...DASHBOARD_MONEY]);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRituals', 'checkRitual', 'queryAudience', 'previewSegment']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -351,6 +352,7 @@ export const HUMAN_STEPS: Record<string, string> = {
   createBillingCardSetup: 'Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach Bane or an agent.',
   deleteBillingPaymentMethod: 'Human step: a signed-in owner or admin removes the saved card in the dashboard.',
   releaseSenderStanding: 'Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore.',
+  getRitualVersion: 'Dashboard step: the rituals page’s long poll, so a person sees an agent’s saves live. Agents read the version from rituals · config (getRituals).',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
 };
 /** Internal routes (Bane operators and support grants): never tools, and not listed in the customer coverage document. */

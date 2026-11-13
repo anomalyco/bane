@@ -1,6 +1,7 @@
 import { baneApi } from './bane.js';
 import type { Env } from './env.js';
 import { addressHash } from './tokens.js';
+import { log, logError } from './log.js';
 
 // Daily caps (review M5, R1): model turns, tickets and inbound mail, per person or sender and per budget, per UTC day in
 // D1. Budgets don't share: verified customers have their own ticket reserve, each intake address its own, so unverified
@@ -82,7 +83,7 @@ export async function ticketAllowed(env: Env, input: { verifiedUserId: string | 
 /** Keeps a message that went over a cap for the team's digest (bounded: 4,000 characters, 2,000 messages a day). */
 export async function holdOverCap(env: Env, held: { channel: Mailbox; reason: string; sender: string | null; dmarc: string | null; subject: string | null; text: string | null; messageId: string; threadId: string | null }) {
   const n = await countToday(env, 'overflow:kept', 2000);
-  console.warn(JSON.stringify({ level: 'warn', code: 'OVER_CAP_HELD', channel: held.channel, reason: held.reason, kept: n.ok }));
+  log('warn', { event: 'email', code: 'OVER_CAP_HELD', channel: held.channel, reason: held.reason, kept: n.ok });
   if (!n.ok) return;
   await env.DB.prepare('INSERT INTO overflow (day, channel, reason, sender, dmarc, subject, text, message_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(today(), held.channel, held.reason, held.sender?.slice(0, 254) ?? null, held.dmarc, held.subject?.slice(0, 200) ?? null, held.text?.slice(0, 4000) ?? null, held.messageId, held.threadId, Date.now()).run();
@@ -91,7 +92,7 @@ export async function holdOverCap(env: Env, held: { channel: Mailbox; reason: st
 /** Tells the team once a day that a global cap was reached (idempotent per day and kind). */
 export async function alertOnce(env: Env, kind: 'turns' | 'tickets' | 'mail', limit: number) {
   const first = await countToday(env, `alert:${kind}`, 1);
-  console.error(JSON.stringify({ level: 'error', code: 'SUPPORT_DAILY_CAP_REACHED', kind, limit }));
+  log('error', { event: 'cap', code: 'SUPPORT_DAILY_CAP_REACHED', kind, limit });
   if (!first.ok) return;
   const what = { turns: 'model-turn budget', tickets: 'verified-customer ticket reserve', mail: 'inbound mail cap' }[kind];
   try {
@@ -100,7 +101,7 @@ export async function alertOnce(env: Env, kind: 'turns' | 'tickets' | 'mail', li
         ? 'Until midnight UTC, chats show "support is busy" and support emails get a fixed reply saying the team will answer.'
         : 'Until midnight UTC, mail over the cap is kept and listed in tomorrow’s over-cap digest; nothing is dropped.', '',
         'Raise it with the matching LIMIT_* var, or check the conversations for abuse.'].join('\n') }, `cap-${kind}-${today()}`);
-  } catch (error) { console.error(JSON.stringify({ level: 'error', code: 'SUPPORT_CAP_ALERT_FAILED', message: String(error).slice(0, 200) })); }
+  } catch (error) { logError(error, { event: 'cap', code: 'SUPPORT_CAP_ALERT_FAILED' }); }
 }
 
 /** The daily cron (00:10 UTC): yesterday's over-cap digest to the team, and the retention sweep (review L2). */

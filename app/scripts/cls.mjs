@@ -17,6 +17,11 @@
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
+// Live rituals (`live`): on Driftwood's rituals page, an agent's API key saves the open ritual once the page has settled
+// (`apply`: the change lands in the editor and the save bar names who made it), or after a keystroke in the editor
+// (`conflict`: the card offering their version or yours opens above the save bar). The pages' long poll on
+// /v1/rituals/version is always open by design, so it is left out of the network-idle wait.
+//
 // Support chat: the page loads, then the Help button opens the chat (the scripted demo conversation) and the agent's
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
@@ -34,7 +39,7 @@ import { availableParallelism } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { seed, start } from './cls-fixture.mjs';
+import { liveSource, seed, start } from './cls-fixture.mjs';
 
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls');
@@ -63,6 +68,10 @@ const pages = ids => [
   ['Receiving · inbox', '/receiving/inbox', { from: '/receiving' }],
   ['Receiving · trace', '/receiving/trace', { from: '/receiving' }],
   ['Receiving · rituals', '/receiving/rituals', { from: '/receiving' }],
+  ['Receiving · rituals · no agent', '/receiving/rituals', { user: 'nia' }],
+  ['Receiving · rituals · agent', '/receiving/rituals', { user: 'kai', from: '/receiving' }],
+  ['Receiving · rituals · live update', '/receiving/rituals', { user: 'kai', live: 'apply' }],
+  ['Receiving · rituals · live conflict', '/receiving/rituals', { user: 'kai', live: 'conflict' }],
   ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
   ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
   ['Receiving · webhooks', '/receiving/webhooks', { from: '/receiving' }],
@@ -167,11 +176,11 @@ const probe = () => {
   // a request started in the last frame can't slip past the network events, and a body the app never reads (which
   // Chrome never reports finished) doesn't hold the measurement open.
   const track = pending => { state.fetches++; pending.finally(() => state.fetches--).catch(() => {}); return pending; };
-  const original = window.fetch;
-  window.fetch = function (...args) { return track(original.apply(this, args)); };
+  const original = window.fetch, held = url => String(url).includes('/v1/rituals/version');
+  window.fetch = function (...args) { const pending = original.apply(this, args); return held(args[0] instanceof Request ? args[0].url : args[0]) ? pending : track(pending); };
   for (const method of ['arrayBuffer', 'blob', 'bytes', 'formData', 'json', 'text']) {
     const read = Response.prototype[method];
-    if (read) Response.prototype[method] = function (...args) { return track(read.apply(this, args)); };
+    if (read) Response.prototype[method] = function (...args) { return held(this.url) ? read.apply(this, args) : track(read.apply(this, args)); };
   }
 };
 // Resolves once fonts are loaded, two frames have rendered and the main thread has gone idle.
@@ -182,7 +191,7 @@ function network(page) {
   const inflight = new Set(), waiters = [];
   let started = 0;
   const finish = request => { inflight.delete(request); if (!inflight.size) for (const done of waiters.splice(0)) done(); };
-  page.on('request', request => { inflight.add(request); started++; });
+  page.on('request', request => { if (request.url().includes(LONG_POLL)) return; inflight.add(request); started++; });
   page.on('response', response => { if (response.request().resourceType() === 'fetch') finish(response.request()); });
   page.on('requestfinished', finish);
   page.on('requestfailed', finish);
@@ -201,11 +210,14 @@ async function settle(page, net) {
   }
 }
 const sharp = n => Math.round(n * 10000) / 10000;
+// The live view's long poll (features/inbound/live.ts) stays open while its page does; it never counts as loading.
+const LONG_POLL = '/v1/rituals/version';
+let liveSaves = 0;
 
 // Masked addresses, in the page. A seeded mailbox address (cls-fixture.mjs) may be spelled out only where it is typed or
 // chosen (a field, a picker, a dialog) or in a code example; everywhere else the page holds its first two characters.
 const maskedLeaks = () => {
-  const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|example\.net|example\.com)\b/gi;
+  const SEEDED = /[A-Za-z0-9._%+*-]+@(?:[a-z0-9-]+\.)*(?:northwind\.example|lumenlabs\.example|fieldnotes\.example|driftwood\.example|example\.net|example\.com)\b/gi;
   const mailbox = value => value.slice(0, value.lastIndexOf('@')).replace(/\*/g, '') !== '';
   const exempt = el => !!el.closest('input, textarea, select, option, datalist, [contenteditable=""], [contenteditable="true"], pre, code, [role=dialog], [role=alertdialog]');
   const found = [], note = (what, value) => { if (found.length < 5) found.push(`${what} spells out ${value.slice(0, 2)}…`); };
@@ -323,6 +335,19 @@ async function measure(browser, job, fx) {
       const read = await page.evaluate(() => window.__cls.read());
       Object.assign(result, { cls: sharp(read.total), entries: read.entries });
     }
+    if (job.live) {
+      // The agent saves; the page must show it (`apply`) or offer the choice (`conflict`) without anything moving.
+      if (job.live === 'conflict') {
+        await page.click('.ritual-editor .cm-line >> nth=2');
+        await page.keyboard.press('End'); await page.keyboard.type(' // mine');
+        await page.waitForFunction(() => document.querySelector('.ritual-savebar')?.textContent.includes('Unsaved changes'), null, { timeout: 10_000 });
+      }
+      const saved = await fetch(origin + '/v1/rituals/scripts/triage', { method: 'PUT', headers: { authorization: `Bearer ${fx.liveKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'triage', source: liveSource(++liveSaves) }) });
+      if (!saved.ok) problems.push(`the agent's save failed: ${saved.status}`);
+      else await page.waitForSelector(job.live === 'conflict' ? '.ritual-incoming' : '.ritual-savebar__text--remote', { timeout: 30_000 }).catch(() => problems.push(`no ${job.live === 'conflict' ? 'conflict card' : 'live update'} after the agent's save`));
+      await settle(page, net);
+      if (job.mode === 'load') { const read = await page.evaluate(() => window.__cls.read()); Object.assign(result, { cls: sharp(read.total), entries: read.entries }); }
+    }
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
@@ -384,10 +409,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, device, support, mode: 'load', slug: slug + '-load' });
+    jobs.push({ name, path, user, scheme, device, support, live, mode: 'load', slug: slug + '-load' });
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });

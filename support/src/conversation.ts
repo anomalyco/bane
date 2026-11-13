@@ -271,7 +271,7 @@ export class SupportConversation extends DurableObject<Env> {
   // ---------- turns ----------
 
   private enqueueTurn(input: { text?: string; hidden?: boolean; greeting?: boolean; attachments?: string[] }) {
-    this.queue = this.queue.then(() => this.chatTurn(input)).catch(error => console.error(JSON.stringify({ level: 'error', code: 'TURN_FAILED', message: String(error).slice(0, 300) })));
+    this.queue = this.queue.then(() => this.chatTurn(input)).catch(error => logError(error, { event: 'chat', code: 'TURN_FAILED' }));
     this.ctx.waitUntil(this.queue);
   }
 
@@ -306,7 +306,7 @@ export class SupportConversation extends DurableObject<Env> {
     }
     // Fail closed before any model call: without the gateway key there is no agent, and the panel says so.
     if (!this.env.CONSOLE_GATEWAY_KEY) {
-      console.error(JSON.stringify({ level: 'error', code: 'SECRET_MISSING', secret: 'CONSOLE_GATEWAY_KEY' }));
+      log('error', { event: 'chat', code: 'SECRET_MISSING', secret: 'CONSOLE_GATEWAY_KEY' });
       this.broadcast({ type: 'error', code: 'TURN_FAILED', message: 'Support isn’t fully set up yet. Please email support@bane.mx.', retryable: false });
       return;
     }
@@ -332,7 +332,7 @@ export class SupportConversation extends DurableObject<Env> {
     } catch (error) {
       this.abort = null;
       const missing = error instanceof MissingSecret ? error.secret : null;
-      console.error(JSON.stringify({ level: 'error', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED', secret: missing, message: String(error).slice(0, 300) }));
+      logError(error, { event: 'chat', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED' });
       this.broadcast({ type: 'message.end', messageId, text: '', redacted: false });
       this.broadcast({ type: 'error', code: 'TURN_FAILED', message: missing ? 'Support isn’t fully set up yet. Please email support@bane.mx.' : 'Something went wrong on my side. Try again in a moment.', retryable: !missing });
       this.broadcast({ type: 'status', busy: false });
@@ -345,7 +345,7 @@ export class SupportConversation extends DurableObject<Env> {
     const checked = gate(final, this.gateScope(meta));
     if (!checked.ok) {
       redacted = true; final = REDACTED;
-      console.warn(JSON.stringify({ level: 'warn', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.reasons }));
+      log('warn', { event: 'chat', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.reasons });
       await this.harnessTicket(meta, internal('Answer held by the output gate', `The output gate held an answer (${checked.reasons.join(', ')}).`, input.text ?? '', 'Read the held answer in the transcript and reply to the customer by email.', 'guardrail'));
     }
     this.record({ id: messageId, role: 'assistant', kind: input.greeting ? 'first' : 'reply', text: final, at: new Date().toISOString(), tools });
@@ -443,14 +443,15 @@ export class SupportConversation extends DurableObject<Env> {
     const exists = await this.env.DB.prepare('SELECT id FROM tickets WHERE conversation_id = ?').bind(meta.conversationId).first();
     if (!exists) {
       const allowed = await ticketAllowed(this.env, { verifiedUserId: meta.verified ? meta.userId : null, mailbox: 'support', sender: meta.email, dmarcPass: dmarc === 'PASS' });
-      if (!allowed.ok) { console.warn(JSON.stringify({ level: 'warn', code: 'TICKET_CAP', scope: allowed.scope, reason: allowed.reason })); return { id: '', created: false, dueAt: 0, replyTo: null, refused: allowed.scope }; }
+      if (!allowed.ok) { log('warn', { event: 'ticket', code: 'TICKET_CAP', scope: allowed.scope, reason: allowed.reason }); return { id: '', created: false, dueAt: 0, replyTo: null, refused: allowed.scope }; }
     }
     const filed = await fileTicket(this.env, ctx, input);
     if (filed.created) {
       this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; });
+      log('info', { event: 'ticket', code: 'TICKET_FILED', ticket: filed.id, type: input.type, channel: meta.channel });
       // Email the team and, for a chat, open the customer's follow-up thread; a failure is retried by the alarm.
-      try { await notifyTeam(this.env, ctx, filed, input); } catch (error) { console.error(JSON.stringify({ level: 'error', code: 'TICKET_NOTIFY_FAILED', ticket: filed.id, message: String(error).slice(0, 200) })); await this.ctx.storage.setAlarm(Date.now() + 60_000); }
-      try { const sent = await openFollowUp(this.env, ctx, filed); if (sent) this.update(m => { m.threadId ??= sent.threadId; }); } catch (error) { console.error(JSON.stringify({ level: 'error', code: 'TICKET_FOLLOWUP_FAILED', ticket: filed.id, message: String(error).slice(0, 200) })); }
+      try { await notifyTeam(this.env, ctx, filed, input); } catch (error) { logError(error, { event: 'ticket', code: 'TICKET_NOTIFY_FAILED', ticket: filed.id }); await this.ctx.storage.setAlarm(Date.now() + 60_000); }
+      try { const sent = await openFollowUp(this.env, ctx, filed); if (sent) this.update(m => { m.threadId ??= sent.threadId; }); } catch (error) { logError(error, { event: 'ticket', code: 'TICKET_FOLLOWUP_FAILED', ticket: filed.id }); }
       if (meta.channel === 'chat') this.broadcast({ type: 'ticket.filed', ticketId: filed.id, ticketType: input.type, category: input.details.topic ?? input.type, replyTo: filed.replyTo, expect: expectation(input) });
     }
     return filed;
@@ -484,7 +485,10 @@ export class SupportConversation extends DurableObject<Env> {
     const next = this.sql.exec<{ message_id: string; thread_id: string; delivery_id: string; attempts: number; state: string }>("SELECT message_id, thread_id, delivery_id, attempts, state FROM support_inbox WHERE state IN ('new', 'confirmed') ORDER BY received_at LIMIT 1").toArray()[0];
     if (!next) return false;
     this.sql.exec('UPDATE support_inbox SET attempts = attempts + 1 WHERE message_id = ?', next.message_id);
-    const set = (state: string) => this.sql.exec('UPDATE support_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
+    const set = (state: string) => {
+      this.sql.exec('UPDATE support_inbox SET state = ? WHERE message_id = ?', state, next.message_id);
+      log(state === 'failed' ? 'error' : 'info', { event: 'email', channel: 'support', code: state === 'failed' ? 'EMAIL_FAILED' : undefined, state, messageId: next.message_id, attempt: next.attempts + 1 });
+    };
     let meta = this.meta()!;
     let message: InboundMessage;
     try { message = await api.message(next.message_id); }
@@ -549,7 +553,7 @@ export class SupportConversation extends DurableObject<Env> {
     const pending = await this.env.DB.prepare('SELECT conversation_id, sent_at FROM pending_confirms WHERE address_hash = ? AND sent_at > ?').bind(hash, now - 86_400_000).first<{ conversation_id: string; sent_at: number }>();
     if (pending && pending.conversation_id !== meta.conversationId && !meta.confirmSentAt) {
       this.sql.exec("UPDATE support_inbox SET state = 'rerouted' WHERE message_id = ?", next.message_id);
-      console.warn(JSON.stringify({ level: 'info', code: 'EMAIL_JOINS_PENDING_CONFIRM', from: meta.conversationId, to: pending.conversation_id }));
+      log('info', { event: 'email', code: 'EMAIL_JOINS_PENDING_CONFIRM', from: meta.conversationId, to: pending.conversation_id });
       await this.env.CONVERSATION.get(this.env.CONVERSATION.idFromName(pending.conversation_id)).enqueueInbound({ conversationId: pending.conversation_id, threadId: next.thread_id, messageId: next.message_id, deliveryId: 'reroute:pending_confirm' });
       return true;
     }
@@ -581,7 +585,7 @@ export class SupportConversation extends DurableObject<Env> {
       await this.env.DB.prepare("INSERT INTO conversations (id, channel, thread_id, created_at, updated_at) VALUES (?, 'email', ?, ?, ?)").bind(id, key, Date.now(), Date.now()).run();
     }
     this.sql.exec("UPDATE support_inbox SET state = 'rerouted' WHERE message_id = ?", next.message_id);
-    console.warn(JSON.stringify({ level: 'warn', code: 'EMAIL_REROUTED', reason, from: meta.conversationId, to: id }));
+    log('warn', { event: 'email', code: 'EMAIL_REROUTED', reason, from: meta.conversationId, to: id });
     await this.env.CONVERSATION.get(this.env.CONVERSATION.idFromName(id)).enqueueInbound({ conversationId: id, threadId: next.thread_id, messageId: next.message_id, deliveryId: `reroute:${reason}` });
   }
 
@@ -655,7 +659,7 @@ export class SupportConversation extends DurableObject<Env> {
         this.sql.exec('INSERT INTO support_attachments (id, key, type, size, width, height, source, name, message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', stored.id, stored.key, stored.type, stored.size, stored.width, stored.height, stored.source, stored.name, messageId, Date.now());
         ids.push(id);
       } catch (error) {
-        console.warn(JSON.stringify({ level: 'warn', code: 'EMAIL_ATTACHMENT_SKIPPED', reason: error instanceof ImageRejected ? error.code : 'FETCH_FAILED', message: String(error).slice(0, 200) }));
+        logError(error, { event: 'email', code: 'EMAIL_ATTACHMENT_SKIPPED', reason: error instanceof ImageRejected ? error.code : 'FETCH_FAILED' }, 'warn');
         skipped.push(`${safeName(part.filename, 'an image')} (not a readable PNG, JPEG or WebP)`);
       }
     }
@@ -688,7 +692,7 @@ export class SupportConversation extends DurableObject<Env> {
     // Email gets the link rule too: any URL outside Bane's own sites holds the reply.
     const checked = gate(reply, { ...this.gateScope(meta), emails: [sender], linkOrigins: LINK_ORIGINS });
     if (!checked.ok || !reply) {
-      console.warn(JSON.stringify({ level: 'warn', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.ok ? ['empty'] : checked.reasons }));
+      log('warn', { event: 'email', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.ok ? ['empty'] : checked.reasons });
       await this.harnessTicket(meta, internal('Email reply held by the output gate', `The output gate held an email reply (${checked.ok ? 'empty' : checked.reasons.join(', ')}).`, body.slice(0, 600), 'Read the thread and reply to the customer.', 'guardrail', [messageId]), dmarc);
       reply = 'Thanks for writing. I’ve passed this to the Bane team to check, and someone will reply here, usually within one business day.\n\nBane support (AI)';
     }
@@ -711,7 +715,7 @@ export class SupportConversation extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm(); await this.ctx.storage.deleteAll(); return;
     }
     try { while (await this.processInbox()) { /* one message at a time, in order */ } }
-    catch (error) { console.error(JSON.stringify({ level: 'error', code: 'INBOX_FAILED', message: String(error).slice(0, 300) })); await this.ctx.storage.setAlarm(Date.now() + 60_000); return; }
+    catch (error) { logError(error, { event: 'email', code: 'INBOX_FAILED' }); await this.ctx.storage.setAlarm(Date.now() + 60_000); return; }
     const idle = meta.channel === 'chat' ? CHAT_IDLE_MS : EMAIL_IDLE_MS;
     if (!meta.closedAt && Date.now() - meta.lastActivity >= idle) await this.close('idle');
     const after = this.meta()!;
@@ -728,6 +732,7 @@ export class SupportConversation extends DurableObject<Env> {
 }
 
 import { TOOLS } from './agent/tools.js';
+import { log, logError } from './log.js';
 const SPECS = new Map(TOOLS.map(t => [t.name, t]));
 function labels(tool: string, args: Record<string, unknown>) {
   return SPECS.get(tool)?.label(args) ?? { running: 'Working on it…', done: 'Done' };

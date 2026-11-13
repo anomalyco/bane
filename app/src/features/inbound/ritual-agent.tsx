@@ -1,0 +1,100 @@
+// "Work on this with OpenCode": the rituals page's one card for editing with an agent beside you. Folded, it is a
+// single line (the same height before and after the MCP approvals load, so nothing moves); unfolded, it holds the
+// setup for a client that isn't connected yet and prompts written for the ritual and address on screen.
+import { useState, type ReactNode } from 'react'
+import { Link } from 'react-router'
+import { Button, Tabs } from '../../components/ui'
+import { CopyAction } from '../../components/motion'
+import { PrivateAddress } from '../../components/PrivateAddress'
+import { useApiDef, useSession } from '../../data/context'
+import { queries } from '../../data/queries'
+import type { McpConnection } from '../../data/types'
+import { mcpClientConfig, mcpClientFiles, mcpClientNames } from '../../../../api/src/mcp-clients'
+import { useMcpUrl } from '../docs/connect-agent'
+import { guides } from './concepts'
+import '../docs/developer.css'
+
+const others = ['claude', 'cursor'] as const
+type Other = typeof others[number]
+
+/** A prompt shown with its address masked; the copy holds the real address. */
+type Prompt = { text: string; shown: ReactNode }
+function prompts(ritual: string, address: string | null): Prompt[] {
+  const at = address ?? 'my support address', shown = address ? <PrivateAddress value={address} /> : at
+  const name = ritual || 'triage'
+  return [
+    { text: `Read my Bane ritual '${name}' on ${at} and add a rule that labels refund requests and posts them to #support.`, shown: <>Read my Bane ritual ‘{name}’ on {shown} and add a rule that labels refund requests and posts them to #support.</> },
+    { text: `Explain why my Bane ritual '${name}' junked the last email to ${at}, and fix it if it shouldn't have.`, shown: <>Explain why my Bane ritual ‘{name}’ junked the last email to {shown}, and fix it if it shouldn’t have.</> },
+    { text: `Try my Bane ritual '${name}' on the last 5 emails to ${at} and tell me what it would do to each.`, shown: <>Try my Bane ritual ‘{name}’ on the last 5 emails to {shown} and tell me what it would do to each.</> },
+  ]
+}
+
+/** How Settings names an approval: its client, and the label of its entry (`?profile=`). */
+const connectionTitle = (app: McpConnection) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
+/** An approval that can edit rituals here: active, in this workspace, with manage and receiving tools. */
+const canEdit = (app: McpConnection, workspaceId: string | undefined) => app.status === 'active' && app.workspaceId === workspaceId && app.receiving && app.scopes.includes('bane:manage')
+
+export function RitualAgentCard({ ritual, address }: { ritual: string; address: string | null }) {
+  const [open, setOpen] = useState(false)
+  const [client, setClient] = useState<Other>('claude')
+  const workspaceId = useSession()?.identity?.workspaceId
+  const apps = useApiDef(queries.mcpConnections())
+  const url = useMcpUrl()
+  const active = (apps.data ?? []).filter(app => app.status === 'active')
+  const connected = active.find(app => canEdit(app, workspaceId))
+  // Connected but not able to edit rituals here: another workspace, no receiving tools, or read-only.
+  const limited = !connected ? active.find(app => app.workspaceId === workspaceId || app.workspaceId === null) ?? null : null
+  const status = apps.isPending ? 'Looking for a connected agent…'
+    : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>. Its saves show up here as it makes them.</>
+    : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rituals in this workspace yet.</>
+    : 'Ask an agent to write or fix this ritual; its saves show up here as it makes them.'
+  const command = url ? `opencode mcp add bane --url '${url}'` : ''
+  return <section className="ritual-agent" aria-labelledby="ritual-agent-title" data-open={open || undefined}>
+    <div className="ritual-agent__row">
+      <span className="ritual-agent__mark" data-connected={connected ? true : undefined} aria-hidden="true" />
+      <div className="ritual-agent__text">
+        <h2 id="ritual-agent-title" className="ritual-agent__title">Work on this with OpenCode</h2>
+        <p className="ritual-agent__status muted">{status}</p>
+      </div>
+      <Button size="sm" variant="ghost" aria-expanded={open} aria-controls="ritual-agent-body" onClick={() => setOpen(!open)}>{open ? 'Hide' : 'Show'}</Button>
+    </div>
+    <div id="ritual-agent-body" className="ritual-agent__body" inert={!open || undefined}>
+      <div className="ritual-agent__inner"><div className="ritual-agent__content stack">
+        {limited && <p className="ritual-agent__note">Rituals need full access with receiving tools, in this workspace. <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>Choose them in Settings</Link>, or connect again and approve them.</p>}
+        {!connected && <>
+          <div className="stack ritual-agent__step">
+            <h3 className="ritual-agent__heading">Add Bane to OpenCode</h3>
+            <div className="developer-snippet">
+              <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="OpenCode command"><code>{command || 'Loading this installation’s address…'}</code></pre>
+              {command && <CopyAction value={command} label="Copy the OpenCode command" variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />}
+            </div>
+            <p className="ritual-agent__hint muted">Then run <code>/mcps</code>, choose bane, sign in and approve full access with receiving tools for this workspace. Two accounts? Add <code>?profile=work</code> to the URL to label this one; it never changes access.</p>
+          </div>
+          <div className="stack ritual-agent__step">
+            <h3 className="ritual-agent__heading">Or another client</h3>
+            <Tabs label="MCP client" value={client} onValueChange={value => setClient(value as Other)} items={others.map(value => ({ value, label: mcpClientNames[value] }))} />
+            {/* Both configs share one cell, so switching never changes the height. */}
+            <div className="developer-client-panels">{others.map(value => {
+              const snippet = url ? JSON.stringify(mcpClientConfig(value, url, {}), null, 2) : ''
+              return <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client || undefined}>
+                <div className="developer-snippet">
+                  <pre className="developer-code" tabIndex={0} aria-label={`${mcpClientNames[value]} config`}><code>{snippet}</code></pre>
+                  {snippet && <CopyAction value={snippet} label={`Copy the ${mcpClientNames[value]} config`} variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />}
+                </div>
+                <p className="ritual-agent__hint muted">Merge it into <code>{mcpClientFiles[value]}</code>, then sign in to bane from the client.</p>
+              </div>
+            })}</div>
+          </div>
+        </>}
+        <div className="stack ritual-agent__step">
+          <h3 className="ritual-agent__heading">Ask it</h3>
+          <ul className="ritual-agent__prompts">{prompts(ritual, address).map(p => <li key={p.text} className="ritual-agent__prompt">
+            <span>{p.shown}</span>
+            <CopyAction value={p.text} label="Copy prompt" variant="ghost" size="sm" compact />
+          </li>)}</ul>
+        </div>
+        <p className="ritual-agent__hint muted"><Link to={guides.mcp}>How agents connect over MCP</Link></p>
+      </div></div>
+    </div>
+  </section>
+}

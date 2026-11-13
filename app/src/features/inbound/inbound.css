@@ -201,6 +201,60 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 @media (hover: none) { .ritual-savebar__kbd { display: none; } }
 /* Phone and tablet: above the bottom tab bar, full width. */
 .app-shell--compact .ritual-savebar { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--space-8)); width: 100%; }
+
+/* Live: what a save made elsewhere changed. Its lines take a flat tint that fades; the person's own typing never does. */
+.ritual-editor .cm-line.ritual-editor__changed { animation: ritual-changed 2.4s var(--ease-out-strong) both; }
+@keyframes ritual-changed { 0%, 25% { background-color: color-mix(in oklab, var(--color-info) 22%, transparent); } 100% { background-color: transparent; } }
+.ritual-savebar[data-remote] .ritual-savebar__dot { background: var(--color-info); }
+/* The buttons keep their size and place; a long state (“Updated by …” on a phone) wraps instead. */
+.ritual-savebar > .cluster { flex: none; }
+.ritual-savebar__text { min-width: 0; }
+.ritual-savebar__text--remote { animation: ritual-status-in 300ms var(--ease-out-strong); }
+@keyframes ritual-status-in { from { opacity: 0; filter: blur(2px); } }
+/* A version saved while you were editing: a card over the page just above the save bar, so nothing moves. */
+.ritual-incoming { position: absolute; left: 0; right: 0; bottom: calc(100% + var(--space-8)); display: grid; gap: var(--space-8); padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16); border-radius: var(--radius-lg); background: var(--color-layer-1); box-shadow: var(--shadow-popover); color: var(--color-text); transform-origin: 50% 100%; animation: ritual-incoming-in 250ms var(--ease-out-strong); }
+@keyframes ritual-incoming-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+.ritual-incoming p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.ritual-incoming__title strong { font-weight: 600; }
+.ritual-incoming .ritual-incoming__warn { color: var(--color-danger); }
+.ritual-incoming__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-8); }
+.ritual-diff { max-height: min(40vh, 20rem); overflow: auto; border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); background: var(--color-surface); animation: ui-appear 200ms ease-out; }
+.ritual-diff > div { width: max-content; min-width: 100%; }
+.ritual-diff > div + div { border-top: 1px solid var(--color-border-muted); }
+.ritual-incoming .ritual-diff__title { position: sticky; top: 0; padding: var(--space-4) var(--space-12); background: var(--color-surface); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ritual-diff__lines { margin: 0; padding: 0 0 var(--space-4); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* Code keeps its lines: a long one scrolls sideways instead of wrapping under the gutter. */
+.ritual-diff__line, .ritual-diff__gap { display: block; padding: 0 var(--space-12); white-space: pre; text-decoration: none; }
+.ritual-diff__line--add { background: color-mix(in oklab, var(--color-success) 14%, transparent); }
+.ritual-diff__line--del { background: color-mix(in oklab, var(--color-danger) 12%, transparent); color: var(--color-muted); }
+.ritual-diff__sign { display: inline-block; width: 2ch; color: var(--color-muted); user-select: none; }
+.ritual-diff__gap { color: var(--color-faint); }
+
+/* Work on this with OpenCode: one line folded (the same height before and after the approvals load), the setup and
+   prompts unfolded. */
+.ritual-agent { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
+.ritual-agent__row { display: flex; align-items: center; gap: var(--space-12); min-height: 56px; padding: var(--space-8) var(--space-8) var(--space-8) var(--space-16); }
+.ritual-agent__mark { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--color-border); transition: background-color 200ms ease; }
+.ritual-agent__mark[data-connected] { background: var(--color-success); }
+.ritual-agent__text { flex: 1; min-width: 0; }
+.ritual-agent__title { margin: 0; font-size: var(--text-sm); font-weight: 600; line-height: var(--leading-sm); }
+.ritual-agent__status { margin: 0; overflow: hidden; white-space: nowrap; font-size: var(--text-xs); line-height: var(--leading-xs); mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
+.ritual-agent__status strong { color: var(--color-text); font-weight: 500; }
+.ritual-agent__body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 250ms var(--ease-out-strong); }
+.ritual-agent[data-open] .ritual-agent__body { grid-template-rows: 1fr; }
+.ritual-agent__inner { min-height: 0; overflow: hidden; opacity: 0; transition: opacity 150ms ease; }
+.ritual-agent[data-open] .ritual-agent__inner { opacity: 1; transition-duration: 250ms; }
+.ritual-agent__content { padding: var(--space-4) var(--space-16) var(--space-16); }
+.ritual-agent__heading { margin: 0; font-size: var(--text-xs); font-weight: 600; line-height: var(--leading-xs); color: var(--color-muted); }
+.ritual-agent__step { gap: var(--space-8); }
+.ritual-agent__hint, .ritual-agent__note { margin: 0; font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
+.ritual-agent__prompts { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.ritual-agent__prompt { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-8) var(--space-4) var(--space-8) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+@media (prefers-reduced-motion: reduce) {
+  .ritual-incoming { animation: ui-appear 150ms ease-out; }
+  .ritual-savebar__text--remote { animation: ui-appear 150ms ease-out; }
+  .ritual-agent__body { transition: none; }
+}
 .endpoint-config { margin: 0; padding: var(--space-12); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-layer-1); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
 .endpoint-steps { display: grid; gap: var(--space-4); }
 .endpoint-steps p { margin: 0; font-size: var(--text-sm); }
