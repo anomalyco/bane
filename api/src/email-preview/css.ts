@@ -541,9 +541,9 @@ const applies = (mode: Dark, role: Role) => mode === 'chromium' || mode === 'inv
 
 function recolor(n: Node, s: Scope, role: Role): [string, Piece] | null {
   if (s.dark === 'none' || !applies(s.dark, role)) return null;
-  const c = parseColor(n);
-  if (!c) return null;
-  const t = format(transform(c, role, s));
+  const c = parseColor(n), d = c && transform(c, role, s);
+  if (!c || !d || d.every((v, i) => Math.abs(v - c[i]!) < 0.5 / (i === 3 ? 255 : 1))) return null;
+  const t = format(d);
   return [t, t.startsWith('#') ? 'word' : 'fn'];
 }
 
@@ -628,7 +628,7 @@ const SIZES = new Set(['width', 'height', 'min-width', 'max-width', 'min-height'
 
 function imageKeys(url: string, keys: Set<string>) {
   const data = /^\s*data:image\/([a-z0-9+.-]+)[;,]/i.exec(url);
-  const format = data?.[1] ?? /\.([a-z0-9]{2,5})(?:[?#][^]*)?$/i.exec(url)?.[1];
+  const format = data?.[1] ?? /\.(png|gif|jpe?g|webp|avif|svg|bmp|ico|tiff?|heic|heif|apng)(?:[?#][^]*)?$/i.exec(url)?.[1]?.replace(/^tif$/i, 'tiff').replace(/^heic$/i, 'heif');
   if (data && /^[^,]*;base64,/i.test(url.trim())) keys.add('image-base64');
   if (format) keys.add(`image-${format.toLowerCase().replace(/^jpeg$/, 'jpg').replace(/^svg\+xml$/, 'svg')}`);
 }
@@ -1070,12 +1070,13 @@ function feature(raw: Node[], s: Scope): Tri {
     const text = rawText(raw, '/');
     return text === null ? FALSE : unknown(`(${text})`);
   }
-  // Range syntax. Gmail's list has no range form; residual comparisons are written with `>` so no `<` reaches the output.
+  // Range syntax. Neither Gmail's list nor Yahoo's predates it; residual comparisons are written with `>` so no `<`
+  // reaches the output.
   if (s.fam === 'gmail') throw new MediaDrop();
   const at = t.findIndex(n => n.kind === 'ident');
-  if (at < 0) return FALSE;
+  if (at < 0 || s.fam === 'yahoo') return FALSE;
   const name = lower(t[at]);
-  if (!/^(?:device-)?(?:width|height|aspect-ratio)$|^resolution$/.test(name) || (s.fam === 'yahoo' && !YAHOO_MEDIA.has(`min-${name}`))) return FALSE;
+  if (!/^(?:device-)?(?:width|height|aspect-ratio)$|^resolution$/.test(name)) return FALSE;
   const op = (a: Node | undefined, b: Node | undefined): string => a?.kind === 'delim' && '<>='.includes(a.value) ? (b?.kind === 'delim' && b.value === '=' && a.value !== '=' ? `${a.value}=` : a.value) : '';
   const flip = (o: string) => o.replace(/^</, '#').replace(/^>/, '<').replace(/^#/, '>');
   const comparisons: [string, Node[]][] = [];
@@ -1135,12 +1136,9 @@ function mediaQuery(t: Node[], s: Scope): Tri {
 function media(prelude: Node[], s: Scope): { keep: boolean; cond: string | null } {
   if (!solid(prelude).length) return { keep: true, cond: null };
   try {
-    const residual: string[] = [];
-    for (const q of splitComma(prelude)) {
-      const r = mediaQuery(solid(q), s);
-      if (r.v === 1) return { keep: true, cond: null };
-      if (r.v === 2) residual.push(r.t);
-    }
+    // Every query is evaluated first: one Gmail rejects removes the whole rule even when another matches.
+    const results = splitComma(prelude).map(q => mediaQuery(solid(q), s)), residual = results.filter(r => r.v === 2).map(r => r.t);
+    if (results.some(r => r.v === 1)) return { keep: true, cond: null };
     return residual.length ? { keep: true, cond: residual.join(',') } : { keep: false, cond: null };
   } catch (e) {
     if (e instanceof MediaDrop) return { keep: false, cond: null };

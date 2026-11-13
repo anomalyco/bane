@@ -75,6 +75,17 @@ test('email preview engine: Word-only lint, Gmail account modes, safe rewrites a
   assert.match(emulate(long, { client: 'apple-mail-macos', theme: 'light' }).html, /TAIL/);
   assert.throws(() => lint('é'.repeat(132_000)), PreviewLimitError);
 });
+test('email preview engine: forced colors and opt-in media use the selected theme and device', async () => {
+  const { emulate } = await import('./src/email-preview/index.js');
+  const html = '<style>@media (prefers-color-scheme:dark){.card{color:#787123}} @media (max-width:500px){.card{padding:12px}}</style><p class="card" style="color:#202020;background:#ffffff">Total</p>';
+  const apple = (theme: 'light' | 'dark', device: 'desktop' | 'mobile') => emulate('<meta name="color-scheme" content="light dark">' + html, {client:'apple-mail-ios', theme, device}).html;
+  assert.match(apple('dark', 'mobile'), /#787123/); assert.match(apple('dark', 'mobile'), /padding:12px/);
+  assert.doesNotMatch(apple('light', 'desktop'), /#787123|padding:12px/);
+  const gmail = (client: 'gmail-web' | 'gmail-ios', source: string) => emulate(source, {client, theme:'dark'}).html;
+  assert.match(gmail('gmail-web', html), /background:#ffffff/);
+  assert.doesNotMatch(gmail('gmail-ios', html), /background:#ffffff|#787123/);
+  assert.match(gmail('gmail-ios', '<meta name="color-scheme" content="light only">' + html), /background:#ffffff/);
+});
 test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
   const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
   const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
