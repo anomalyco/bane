@@ -59,8 +59,8 @@ function tagFeature(el: Element): string {
   return `html-${tag}`;
 }
 
-function parse(html: string) {
-  const doc = boundedHtmlFragment(html, 'document');
+function parse(html: string, onParseError?: (error: {code: string}) => void) {
+  const doc = boundedHtmlFragment(html, 'document', {onParseError});
   if (!doc) throw new PreviewLimitError('HTML exceeds the preview complexity budget.');
   return doc;
 }
@@ -132,9 +132,9 @@ function size(html: string) {
   return bytes;
 }
 
-export function lint(html: string): Issue[] {
+export function lint(html: string, onParseError?: (error: {code: string}) => void): Issue[] {
   size(html);
-  const {keys, classicKeys} = analyze(parse(html), true), common = new Set(keys);
+  const {keys, classicKeys} = analyze(parse(html, onParseError), true), common = new Set(keys);
   return [...findings(keys, clients), ...findings(classicKeys.filter(key => !common.has(key)), ['outlook-classic-windows'])];
 }
 

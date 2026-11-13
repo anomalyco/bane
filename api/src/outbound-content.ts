@@ -62,11 +62,15 @@ export function decodeBase64(content: string, field = 'content'): Uint8Array {
 }
 
 /** Size caps and the SES banned-extension list are the only content rules; type, charset and file signatures are the caller's business. */
+export function blockedExtension(filename: string) {
+  // Windows ignores trailing dots and spaces when it opens a file, so "payload.exe. " is still an executable.
+  const name = filename.replace(/[. ]+$/, ''), dot = name.lastIndexOf('.'), extension = dot > 0 ? name.slice(dot + 1).trim().toLowerCase() : '';
+  return BANNED_EXTENSIONS.has(extension) ? extension : null;
+}
 export function validateAttachment<T extends AttachmentMetadataInput>(metadata: T, bytes: Uint8Array): T {
   if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most 8 MiB decoded.`);
-  // Windows ignores trailing dots and spaces when it opens a file, so "payload.exe. " is still an executable.
-  const name = metadata.filename.replace(/[. ]+$/, ''), dot = name.lastIndexOf('.'), extension = dot > 0 ? name.slice(dot + 1).trim().toLowerCase() : '';
-  if (BANNED_EXTENSIONS.has(extension)) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', `Amazon SES does not deliver .${extension} attachments.`, 'filename');
+  const extension = blockedExtension(metadata.filename);
+  if (extension) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', `Amazon SES does not deliver .${extension} attachments.`, 'filename');
   if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Inline attachments require contentId.', 'contentId');
   return metadata;
 }

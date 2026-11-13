@@ -29,6 +29,7 @@ import type { BillingGate } from './billing/types.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, senderDisplayName, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
+import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -39,7 +40,7 @@ const loadOpsUnsub = lazyModule(() => import('./operations.js'));
 const loadSendingSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 
 const MAX_ATTACHMENTS = MAX_ATTACHMENT_BYTES;
-const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
+export const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
 const MAX_BODY = 512 * 1024;
 // Outstanding (queued or attempting) mail per workspace is capped by the account's SES 24-hour quota, which
 // the dispatcher keeps synced in the limits tables: a day of backlog is plenty, the floor keeps sandbox and
@@ -736,13 +737,15 @@ async function validateHtmlUrls(html: string | undefined) {
     inspectHtml(html, root);
   }
 }
-export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
+export function estimatedMimeBytes(snapshot: Pick<EmailSnapshot,'raw'|'html'|'text'|'subject'>, rows: { size: number }[]) {
   // Count UTF-8 bytes without flattening all body parts into another full-size string
   // and allocating a second full-size buffer during dispatch.
   const bytes = [snapshot.raw, snapshot.html, snapshot.text, snapshot.subject].reduce<number>((n,part)=>n+(part ? Buffer.byteLength(part) : 0),0);
   // Conservatively reserve base64/MIME expansion, line folding and headers. This is an application cap, not SES's 40 MB maximum.
-  const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
-  if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
+  return Math.ceil(Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384);
+}
+export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
+  if (estimatedMimeBytes(snapshot, rows) > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
 }
 // The renderer owns the MIME content, not the envelope or custom headers. A
 // substituted Subject can contain physical header lines, including obsolete From : forms.
@@ -1168,6 +1171,32 @@ export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: strin
 }
 
 export function registerSending(app: App) {
+  app.openapi(createRoute({method:'post',path:'/v1/emails/check',operationId:'checkEmail',tags:['Emails'],security,
+    summary:'Check email sendability without sending', description:'Read-only 0–100 advisory score, not an inbox-placement probability or admission decision. Supply one draft (HTML or text), outbound email ID, or campaign ID. Uses visible retained content, cached From-domain facts, and workspace reputation for unrestricted readers. No DNS/asset fetches or paid screen. Scores use current evidence, not a historical delivery verdict. HTML has the preview lint’s 256 KiB UTF-8 and tree budgets. Marketing drafts are checked as supplied; Bane generates the unsubscribe headers and link for campaigns. MIME bytes are estimated.',
+    request:{body:json(CheckInput)},responses:{200:response(CheckResult),...errors}}),async c=>{
+    const a=actor(c,'read'), input=c.req.valid('json'); let mail:CheckMail;
+    if ('emailId' in input) {
+      const row=await findEmail(c.env.db,a,input.emailId);
+      // Rehydrate the frozen campaign snapshot once so From name, headers, and tracking describe the same copy as the body.
+      const s=row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(c.env,a,row) : row.snapshot;
+      const body=await visibleEmailContent(c.env,a,{...row,snapshot:s},row.untrustedContent);
+      if (!body.html && !body.text) throw new ApiError(422,'EMAIL_BODY_UNAVAILABLE','No retained HTML or plain text is available for checking.','emailId');
+      mail={from:row.from,fromName:s.fromName,subject:body.subject??'',stream:s.kind??'transactional',text:body.text??undefined,html:body.html??undefined,
+        headers:Object.fromEntries([...(s.headers??[]).map(h=>[h.Name,h.Value]),...(s.replyTo?.length ? [['Reply-To',s.replyTo[0]!]] : [])]),
+        previewText:s.previewText,tracking:s.tracking,attachments:await attachmentRows(c.env.db,a,body.attachments,false,!!s.mailbox && !!actorMailAccess(a))};
+    } else if ('campaignId' in input) {
+      const row=await findCampaign(c.env.db,a,input.campaignId), d=row.draft, audience=AudienceSpec.safeParse(d.audience);
+      const [rendered,recipients,files]=await Promise.all([renderCampaignContent(c.env,d,false),row.reviewId ? row.total : audience.success && !a.domains.length
+        ? wrapModuleLoad(()=>import('./audience.js')).then(m=>m.countCampaignAudience(c.env.db,a,audience.data)).then(r=>r.eligible) : undefined,attachmentRows(c.env.db,a,d.attachments)]);
+      if (!d.from || (!rendered.html && !rendered.text)) throw new ApiError(422,'CAMPAIGN_INCOMPLETE','Set a sender and add content before checking this campaign.','campaignId');
+      mail={from:d.from,fromName:d.fromName,subject:d.subject,stream:'marketing',...rendered,previewText:d.previewText,tracking:d.tracking,generatedUnsubscribe:true,
+        recipientCount:recipients===undefined ? undefined : Math.min(recipients,row.pacePerDay??Infinity),attachments:files,headers:d.replyTo?.[0]?{'Reply-To':d.replyTo[0]}:undefined};
+    } else mail=input;
+    const domain=splitMailbox(mail.from).address.split('@').at(-1)!.toLowerCase();
+    if (!senderDomainAllowed(a.domains,domain)) throw new ApiError(403,'DOMAIN_NOT_ALLOWED','The From domain is outside this key’s scope.','from');
+    const [{checkMail},{checkContext}]=await Promise.all([wrapModuleLoad(()=>import('./sendability.js')),wrapModuleLoad(()=>import('./sendability-context.js'))]);
+    return c.json(await checkMail(mail,await checkContext(c.env,a,domain)),200);
+  });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;

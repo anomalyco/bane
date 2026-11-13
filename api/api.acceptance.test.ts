@@ -1651,7 +1651,7 @@ describe('Public contract and authentication', () => {
       '/v1/audience-query/query': ['post'], '/v1/audience-query/plan': ['post'], '/v1/audience-query/apply': ['post'],
       '/v1/lists': ['get', 'post'], '/v1/lists/{id}/members': ['get', 'post'],
       '/v1/segments': ['get', 'post'], '/v1/segments/{id}/preview': ['post'],
-      '/v1/emails/send': ['post'], '/v1/emails/batch': ['post'], '/v1/emails/preview': ['post'], '/v1/emails': ['get'],
+      '/v1/emails/send': ['post'], '/v1/emails/batch': ['post'], '/v1/emails/preview': ['post'], '/v1/emails/check':['post'], '/v1/emails': ['get'],
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
@@ -5274,7 +5274,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
     // Read-only POSTs change nothing and do not require confirm.
-    for (const name of ['queryAudience', 'previewSegment', 'previewEmail']) {
+    for (const name of ['queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']) {
       const tool = catalog.tools.find((x: Json) => x.name === name);
       assert.ok(tool, name); assert.equal(tool.annotations.readOnlyHint, true, name); assert.equal(tool.inputSchema.properties.confirm, undefined, name);
     }
@@ -5880,6 +5880,36 @@ describe('Import property boundaries', () => {
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {
+  test('checkEmail scores drafts and scoped stored content offline without sending, resolving URLs or invoking the screen', async t => {
+    await simulatedSesFixture(t,async ({runtime,db,local,request})=>{
+      const path='/v1/emails/check', wid=runtime.config.workspaceId;
+      const key=async (permissions:string[],domains:string[]=[])=>ok(await local('POST','/v1/api-keys',{name:'Sendability fixture',permissions,domains}),201).secret;
+      const read=await key(['read']), scoped=await key(['read'],['shop.example.com']), send=await key(['send']);
+      const check=(body:Json,token=read)=>request('POST',path,token,body);
+      const good={from:'Shop <orders@shop.example.com>',subject:'Your order has shipped',html:'<p>Your order has shipped. Tracking details are available in your account.</p>',text:'Your order has shipped. Tracking details are available in your account.',stream:'transactional'};
+      error(await request('POST',path,undefined,good),401,'AUTH_REQUIRED');error(await check(good,send),403,'PERMISSION_DENIED');
+      error(await check({...good,from:'outside@example.net'},scoped),403,'DOMAIN_NOT_ALLOWED');
+      for(const invalid of [{},{...good,emailId:'both'},{...good,stream:'other'},{...good,html:'',text:''},{...good,from:'bad'},{emailId:'id',campaignId:'another'}])error(await check(invalid),422,'VALIDATION_FAILED');
+      const report=ok(await check(good,scoped)); assert.ok(Number.isInteger(report.score) && report.score>=90 && report.score<=100);assert.ok(['A','A+'].includes(report.grade));
+      assert.deepEqual(report.categories.map((c:Json)=>c.id),['authentication','content','headers','size','rendering','reputation']);
+      assert.ok(report.categories.every((c:Json)=>c.score>=0 && c.score<=100 && c.weight>=0));
+      const risky={...good,from:'orders@shop.example.com',stream:'marketing',subject:'YOU ARE A WINNER!!!',
+        html:'<p>Your monthly subscription has been renewed.</p><form action="https://192.0.2.1"><input></form><script src="https://example.net/never-fetch.js"></script><img src="http://192.0.2.1/pixel"><a href="https://bit.ly/fixture">Confirm</a>',text:'An unrelated synthetic fixture.'};
+      const bad=ok(await check(risky)), ids=bad.findings.map((f:Json)=>f.ruleId);
+      assert.ok(bad.score<report.score-20); for(const id of ['part-mismatch','display-name','off-brand-links','short-url','script','form','unsubscribe-post','postal-address','shouting'])assert.ok(ids.includes(id),id);
+      assert.ok(bad.findings.every((f:Json)=>f.title && f.detail && f.fix && f.category && f.severity));assert.doesNotMatch(JSON.stringify(bad),/never-fetch|192\.0\.2\.1|<script/i);
+      const bytes=ok(await check({...good,html:undefined,text:'é'.repeat(12289)})).findings.find((f:Json)=>f.ruleId==='screen-bytes');
+      assert.deepEqual(bytes.evidence,{screenedBytes:24578,limitBytes:24576,remainingBytes:-2});assert.equal(bytes.severity,'error');
+      error(await check({...good,html:'<div>'.repeat(400)}),413,'EMAIL_CHECK_LIMIT_EXCEEDED');
+      const foreign=unique('foreign-check');await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)',[foreign]);
+      const email=async (workspace:string)=>{const id=unique('checked-mail');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[id,workspace,REGION,good.subject,{...good,kind:'transactional',testCampaignId:null,attachments:[]}]);return id;};
+      assert.ok(ok(await check({emailId:await email(wid)},scoped)).score>0);error(await check({emailId:await email(foreign)}),404,'NOT_FOUND');
+      const campaign=async(workspace:string)=>{const id=unique('checked-campaign');await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft) VALUES($1,$2,$3)`,[id,workspace,{from:'newsletter@shop.example.com',fromName:'Shop',region:REGION,subject:'Updates',html:'<p>Updates from the shop.</p>',audience:{},attachments:[],defaults:{},tracking:false}]);return id;};
+      const c=ok(await check({campaignId:await campaign(wid)}));assert.ok(!c.findings.some((f:Json)=>f.ruleId.startsWith('unsubscribe-')));error(await check({campaignId:await campaign(foreign)}),404,'NOT_FOUND');
+      // No simulated send rows were inserted except the explicitly seeded terminal email.
+      assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n,1);
+    });
+  });
   test('previewEmail validates offline previews and reads only authorized, redacted outbound HTML', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const path = '/v1/emails/preview', wid = runtime.config.workspaceId, foreign = unique('preview-workspace');
