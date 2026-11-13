@@ -7163,7 +7163,7 @@ describe('Campaign authorization and dispatch credentials', () => {
 // sessions, invoices, payment and setup intents, refunds and credit notes, honouring idempotency keys, with switches for
 // declines, a 5xx before any effect, an answer lost after the effect, and refusals. No real key exists in this file.
 const STRIPE_TEST_BASE = 'https://stripe.test', STRIPE_TEST_WEBHOOK_SECRET = 'whsec_test';
-type FakeRule = { match: RegExp; times: number; code?: string };
+type FakeRule = { match: RegExp; times: number; code?: string; param?: string; message?: string };
 function decodeStripeForm(form: URLSearchParams): Json {
   const out: Json = {};
   for (const [key, value] of form) {
@@ -7225,6 +7225,16 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
   const route = (method: string, path: string, p: Json, query: URLSearchParams): [number, Json] => {
     const found = path.split('/').slice(2).map(decodeURIComponent).map(segment => objects.get(segment)).find(Boolean);
     const fields = [...query.entries()].filter(([k]) => k.startsWith('expand')).map(([, v]) => v);
+    // Parameters API 2026-10-28.endive no longer accepts, refused the way Stripe refuses them.
+    if (method === 'POST' && path === '/v1/checkout/sessions' && p.payment_method_types !== undefined) return error(400, 'invalid_request_error', undefined, { param: 'payment_method_types',
+      message: 'The `payment_method_types` parameter is no longer supported when creating a Checkout Session. Payment methods are now managed from your Dashboard settings.' });
+    if (method === 'POST' && /^\/v1\/(?:payment_intents|setup_intents)(?:\/[^/]+(?:\/confirm)?)?$/.test(path) && p.payment_method_types !== undefined)
+      return error(400, 'invalid_request_error', 'payment_method_types_no_longer_supported', { param: 'payment_method_types' });
+    if (method === 'POST' && path === '/v1/invoiceitems') for (const removed of ['unit_amount', 'price']) if (p[removed] !== undefined) return error(400, 'invalid_request_error', 'parameter_unknown', { param: removed });
+    if (method === 'POST' && path === '/v1/credit_notes' && p.reason !== undefined && !['duplicate', 'fraudulent', 'order_change', 'product_unsatisfactory'].includes(p.reason))
+      return error(400, 'invalid_request_error', undefined, { param: 'reason', message: 'Invalid reason: must be one of duplicate, fraudulent, order_change, or product_unsatisfactory' });
+    if (method === 'POST' && path === '/v1/refunds' && p.reason !== undefined && !['duplicate', 'fraudulent', 'requested_by_customer'].includes(p.reason))
+      return error(400, 'invalid_request_error', undefined, { param: 'reason' });
     switch (true) {
       case method === 'POST' && path === '/v1/customers': { const c = { id: next('cus'), object: 'customer', name: p.name, email: p.email, metadata: p.metadata, invoice_settings: {} }; objects.set(c.id, c); return [200, c]; }
       case method === 'POST' && /^\/v1\/customers\/[^/]+$/.test(path): return found ? [200, Object.assign(found, { invoice_settings: p.invoice_settings })] : missing();
@@ -7306,7 +7316,8 @@ function fakeStripe(t: TestContext, inTransaction: () => boolean) {
       else ({ status, body: json } = prior);
     } else {
       const refusal = take(fake.refused, line);
-      [status, json] = refusal ? error(400, 'invalid_request_error', refusal.code ?? 'synthetic_refusal') : route(method, path, params, url.searchParams);
+      [status, json] = refusal ? error(400, 'invalid_request_error', refusal.code ?? (refusal.param ? undefined : 'synthetic_refusal'), { ...(refusal.param ? { param: refusal.param } : {}), ...(refusal.message ? { message: refusal.message } : {}) })
+        : route(method, path, params, url.searchParams);
       json = structuredClone(json);
       if (key && status < 500) keys.set(key, { signature, status, body: json });
     }
@@ -7385,6 +7396,7 @@ describe('Billing: Stripe', () => {
       future: created.params.payment_intent_data.setup_future_usage, invoice: created.params.invoice_creation.enabled, attempt: created.params.metadata.bane_attempt, workspace: created.params.metadata.bane_workspace, env: created.params.metadata.bane_env },
       { mode: 'payment', amount: '5000', tax: 'exclusive', future: 'off_session', invoice: 'true', attempt: top.attemptId, workspace: wid, env: 'dev' });
     assert.equal(created.params.automatic_tax, undefined, 'Tax stays off until STRIPE_AUTOMATIC_TAX is set.');
+    assert.deepEqual([created.params.payment_method_types, created.params.allowed_payment_method_types], [undefined, { 0: 'card' }], 'Cards only, without the parameter API 2026-09-30.endive removed.');
     assert.equal([...fake.objects.values()].find(o => o.object === 'customer')!.name, 'Billing fixture', 'The customer name is one line.');
     assert.equal((await attempt(top.attemptId)).status, 'pending');
     assert.equal((await account())?.balance ?? '0', '0', 'Opening Checkout credits nothing.');
@@ -7496,6 +7508,8 @@ describe('Billing: Stripe', () => {
     await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 }), { status: 409, code: 'PAYMENT_METHOD_REQUIRED' });
     const setup = await saveCard();
     assert.equal((await attempt(setup)).status, 'succeeded'); assert.equal((await account()).card_last4, '4242');
+    const setupParams = fake.calls.find(c => c.path === '/v1/checkout/sessions' && c.params.mode === 'setup')!.params;
+    assert.deepEqual([setupParams.currency, setupParams.payment_method_types, setupParams.allowed_payment_method_types], ['usd', undefined, { 0: 'card' }]);
     await assert.rejects(stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 1999, monthlyCapCents: 5000 }), { status: 422 });
     await stripe.setAutoRecharge(runtime, wid, { enabled: true, thresholdCents: 1000, amountCents: 2500, monthlyCapCents: 5000 });
     const recharges = async () => (await db.query("SELECT id, status, failure_code FROM billing_payment_attempts WHERE workspace_id = $1 AND kind = 'recharge' ORDER BY created_at", [wid])).rows;
@@ -7766,6 +7780,29 @@ describe('Billing: Stripe', () => {
     assert.equal(outcomes.filter(o => o.status === 'fulfilled').length, 5);
     assert.ok(outcomes.every(o => o.status === 'fulfilled' || (o.reason as Json).code === 'TOP_UP_RATE_LIMITED'));
     assert.deepEqual([fake.count(/^POST \/v1\/checkout\/sessions$/), new Set(fake.calls.filter(c => c.path === '/v1/customers').map(c => c.key)).size], [5, 1]);
+  });
+  // Production, 2026-11-13: every top-up failed because Checkout no longer takes payment_method_types (API 2026-09-30.endive),
+  // and the log said only invalid_request_error. The fake refuses removed parameters like Stripe; the log carries Stripe's words.
+  test('Stripe refusals: a removed parameter is refused like Stripe does, and the log has Stripe\'s message and param but never a key or address', async t => {
+    const { runtime, db, fake, wid, attempt, stripe } = await stripeFixture(t);
+    const cfg = stripe.stripeConfig(runtime);
+    await assert.rejects(stripe.stripeRequest(cfg, 'POST', '/v1/checkout/sessions', { mode: 'payment', payment_method_types: ['card'] }),
+      (e: Json) => e instanceof stripe.StripeError && e.status === 400 && e.param === 'payment_method_types' && e.code === undefined && /no longer supported/.test(e.message));
+    await assert.rejects(stripe.stripeRequest(cfg, 'POST', '/v1/setup_intents', { payment_method_types: ['card'] }), { status: 400, code: 'payment_method_types_no_longer_supported' });
+    await assert.rejects(stripe.stripeRequest(cfg, 'POST', '/v1/invoiceitems', { unit_amount: 100 }), { status: 400, param: 'unit_amount' });
+    await assert.rejects(stripe.stripeRequest(cfg, 'POST', '/v1/credit_notes', { invoice: 'in_x', reason: 'requested_by_customer' }), { status: 400, param: 'reason' });
+    fake.refused.push({ match: /^POST \/v1\/checkout\/sessions$/, times: 1, param: 'line_items[0][price_data][unit_amount]', message: 'Invalid amount for owner@example.com (key sk_test_fake, whsec_test).' });
+    const warnings = t.mock.method(console, 'warn', () => {});
+    try { await assert.rejects(stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: 'owner@example.com' }), { status: 502, code: 'BILLING_PROVIDER_ERROR' }); }
+    finally { warnings.mock.restore(); }
+    const lines = warnings.mock.calls.map(c => String(c.arguments[0])), line = lines.find(l => l.includes('BILLING_STRIPE_ERROR'))!;
+    assert.ok(line, lines.join('\n'));
+    const logged = JSON.parse(line);
+    assert.deepEqual({ operation: logged.operation, status: logged.status, type: logged.type, param: logged.param, stripeCode: logged.stripeCode, message: logged.message },
+      { operation: 'checkout', status: 400, type: 'invalid_request_error', param: 'line_items[0][price_data][unit_amount]', stripeCode: null, message: 'Invalid amount for [email] (key [key], [secret]).' });
+    assert.ok(lines.every(l => !l.includes('sk_test_fake') && !l.includes('whsec_test') && !l.includes('owner@example.com')), 'No key, secret or address reaches a log line.');
+    const failed = (await db.query('SELECT id FROM billing_payment_attempts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1', [wid])).rows[0];
+    assert.deepEqual([(await attempt(failed.id)).status, (await attempt(failed.id)).failure_code], ['failed', 'invalid_request_error']);
   });
 });
 
