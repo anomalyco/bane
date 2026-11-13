@@ -44,11 +44,17 @@ const supportRequired = () => new ApiError(403, 'SUPPORT_GRANT_REQUIRED', 'This 
 /**
  * /v1/operator and /v1/operator/*: an operator's dashboard session, or the support platform through the SupportPlatform
  * service binding (src/support-platform.ts) on the support routes only, else 403. No bearer token is an operator: the
- * static platform token (BANE_SUPPORT_PLATFORM_TOKEN) is retired.
+ * static platform token (BANE_SUPPORT_PLATFORM_TOKEN) is retired. The one bearer credential here is a UI notes key
+ * (src/ui-notes.ts), and only on the requests notesKeyRoute names: reading UI notes and setting their status.
  */
 export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!c.env.config.multiTenant) throw operatorRequired();
-  if (c.req.header('authorization') !== undefined) throw operatorRequired();
+  if (c.req.header('authorization') !== undefined) {
+    const { notesKeyRoute, authenticateNotesKey } = await import('./ui-notes.js');
+    if (!notesKeyRoute(c.req.method, c.req.path) || c.env.platformCaller) throw operatorRequired();
+    await authenticateNotesKey(c);
+    return next();
+  }
   if (c.env.platformCaller === 'bane-support') {
     if (!c.req.path.startsWith('/v1/operator/support/')) throw operatorRequired();
     const { chargeGrantBudget, checkBudget } = await import('./auth.js');
@@ -60,6 +66,11 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const { authenticate } = await import('./auth.js');
   try { await authenticate(c, async () => {}); await requireOperator(c, 'operator:read'); }
   catch (error) { if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) throw operatorRequired(); throw error; }
+  // Staff UI notes are for UI_NOTES_SUBJECTS only: any other operator gets 404 before a body is even read.
+  if (/^\/v1\/operator\/ui-note(?:s|-keys)(?:\/|$)/.test(c.req.path)) {
+    const { uiNotesAllowed } = await import('./operator-identity.js');
+    if (!(await uiNotesAllowed(c.env.db, c.env.config.uiNotesSubjects, c.get('actor').keyId.slice(5)))) notFound('Endpoint');
+  }
   return next();
 };
 

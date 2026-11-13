@@ -11,6 +11,17 @@ export type OperatorRole = 'operator' | 'operator:read';
 /** The user's platform role as a scalar subquery, for a caller that reads it inside a larger statement. */
 export const operatorRoleOf = (userId: string | SQL) => sql`(SELECT role FROM platform_operators WHERE user_id=${userId})`;
 
+/**
+ * Whether this user may use staff UI notes (src/ui-notes.ts): the operator role and an identity whose issuer subject
+ * is in UI_NOTES_SUBJECTS. False, without a query, when the list is empty (the feature is off).
+ */
+export async function uiNotesAllowed(db: DbExecutor, subjects: { issuer: string; subject: string }[] | undefined, userId: string) {
+  if (!subjects?.length) return false;
+  const pairs = sql.join(subjects.map(s => sql`(${s.issuer}, ${s.subject})`), sql`, `);
+  return (await db.execute<{ ok: boolean }>(sql`SELECT EXISTS (SELECT FROM bane_oidc_identities i JOIN platform_operators p ON p.user_id = i.user_id AND p.role = 'operator'
+    WHERE i.user_id = ${userId} AND (i.issuer, i.subject) IN (${pairs})) AS ok`)).rows[0]?.ok === true;
+}
+
 /** The user's platform role, or null. One indexed read. */
 export async function operatorRole(db: DbExecutor, userId: string) {
   return (await db.execute<{ role: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS role`)).rows[0]?.role ?? null;

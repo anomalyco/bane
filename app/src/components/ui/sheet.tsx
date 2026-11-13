@@ -62,7 +62,7 @@ export function Sheet({ open, onOpenChange, title, description, children, classN
   const handlers = useSheetDrag(() => onOpenChange(false))
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className="ui-dialog-overlay ui-sheet-overlay" />
-    <DialogPrimitive.Content className={['ui-sheet', className].filter(Boolean).join(' ')} aria-describedby={undefined} {...handlers}>
+    <DialogPrimitive.Content data-component="Sheet" className={['ui-sheet', className].filter(Boolean).join(' ')} aria-describedby={undefined} {...handlers}>
       <SheetOpenEffects />
       <div className="ui-sheet__grab" aria-hidden="true"><span /></div>
       <DialogPrimitive.Title className={hideTitle ? 'sr-only' : 'ui-sheet__title'}>{title}</DialogPrimitive.Title>
