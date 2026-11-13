@@ -341,8 +341,12 @@ export async function ingestTenantStatus(runtime: Runtime, event: NonNullable<Re
       EXISTS (SELECT FROM provider_pool_regions p WHERE p.feedback_topic_arn=${source.topicArn} AND p.region=${arnRegion} AND p.aws_account_id=${arnAccount})
       OR EXISTS (SELECT FROM provider_connection_regions r WHERE r.connection_id=c.id AND r.region=${arnRegion} AND r.feedback_topic_arn=${source.topicArn} AND c.aws_account_id=${arnAccount}))`);
   if (!owner) return refuse('SES_TENANT_NOT_OWNED');
+  const verified = await (await import('./ses-setup.js')).readTenantStatus(runtime, arnRegion!, event.arn, event.origin);
+  // An out-of-order hint is acknowledged without an audit entry, alert, pause or resume.
+  if (verified.status !== event.status || (verified.status === 'DISABLED' && verified.aggregate !== 'DISABLED')) return null;
+  event = { ...event, cause: verified.cause }; // Only SES can supply a reason, including the manual-switch exception.
   const ours = event.origin === 'CUSTOMER_MANAGED' && event.cause === 'Status manually updated.';
-  const pause = event.status === 'DISABLED' && !ours;
+  const pause = verified.status === 'DISABLED' && !ours;
   await runtime.db.transaction(tx => applyChange(tx, { workspaceId: owner.workspace_id, actor: { kind: 'system', via: 'ses' }, kind: 'tenant',
     ...(pause ? { step: 'pause', pauseKind: 'full', pause: { message: 'Hosted sending paused: AWS paused this workspace’s SES tenant. Bane reviews it with AWS before sending resumes.' },
       reasons: [{ code: 'SES_TENANT_PAUSED', metric: 'external', value: 0, count: 0, threshold: 0, minimum: 0, window: null, step: 'pause', message: event.cause ?? 'AWS paused the SES tenant.' }] } : {}),

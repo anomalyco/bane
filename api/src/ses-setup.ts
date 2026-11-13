@@ -807,6 +807,18 @@ export async function setTenantSendingStatus(runtime: Runtime, region: string, t
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
+/** Never use the cause or effective status in an SNS payload to make a standing decision. */
+export async function readTenantStatus(runtime: Runtime, region: string, arn: string, origin: 'AWS_SES' | 'CUSTOMER_MANAGED') {
+  const context = setupContext(20_000), c = await clients(runtime, region, context);
+  try {
+    const { ReputationEntity: entity } = await c.ses.send(new c.sdk.sesv2.GetReputationEntityCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: arn }), { abortSignal: context.signal });
+    const record = origin === 'AWS_SES' ? entity?.AwsSesManagedStatus : entity?.CustomerManagedStatus;
+    if (entity?.ReputationEntityReference !== arn || entity.ReputationEntityType !== 'RESOURCE' || !record?.Status || !entity.SendingStatusAggregate)
+      throw new ApiError(503, 'SES_TENANT_STATUS_UNCONFIRMED', 'SES did not confirm the requested tenant status.', undefined, true);
+    return { status: record.Status, cause: record.Cause?.slice(0, 300) ?? null, aggregate: entity.SendingStatusAggregate };
+  } finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
+}
+
 export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation',persistedName?:string|null,
   journal?:{arn:string|null;created:(arn:string)=>Promise<void>;fence:()=>Promise<void>}) {
   const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };

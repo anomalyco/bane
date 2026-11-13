@@ -53,6 +53,7 @@ jobs:
       stage: ${{ steps.stage.outputs.stage }}
       sha: ${{ steps.pin.outputs.sha }}
       pulumi: ${{ steps.paths.outputs.pulumi }}
+      tenant_status: ${{ steps.paths.outputs.tenant_status }}
     steps:
       # github.actor pushed or dispatched; a rerun keeps it and makes the
       # rerunner github.triggering_actor, so both are checked. The merge queue
@@ -188,6 +189,7 @@ jobs:
         run: |
           if [[ $EVENT == workflow_dispatch ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
+            echo 'tenant_status=true' >> "$GITHUB_OUTPUT"
             echo 'Dispatch always runs Pulumi.' >> "$GITHUB_STEP_SUMMARY"
           else
             bash .github/scripts/pulumi-has-work.sh "$STAGE" "$SHA"
@@ -348,6 +350,12 @@ jobs:
           pulumi-version: 3.274.1
           suppress-progress: true
 
+      - *stage-tip
+
+      - name: Verify operator-owned SES tenant status routing
+        if: steps.guard.outputs.skip != 'true' && needs.authorize.outputs.tenant_status == 'true'
+        run: bash .github/scripts/tenant-status-verify.sh
+
   deploy:
     name: Deploy ${{ needs.authorize.outputs.stage }} ${{ needs.authorize.outputs.sha }}
     needs: [authorize, pulumi]
@@ -379,9 +387,11 @@ jobs:
 
       # The dashboard's live support chat (app/src/components/SupportChat.tsx): on for every hosted workspace on dev;
       # in production only for Bane staff and free (billing-exempt) workspaces while it rolls out. "true" opens it to all.
+      # VITE_PUBLIC_URL makes the link-preview image URLs in index.html absolute for the stage's own host.
       - uses: ./.github/actions/build-release
         env:
           VITE_SUPPORT_CHAT: ${{ needs.authorize.outputs.stage == 'dev' && 'true' || 'staff' }}
+          VITE_PUBLIC_URL: ${{ needs.authorize.outputs.stage == 'dev' && 'https://dev.bane.mx' || 'https://bane.mx' }}
 
       # The environment picks the stage. No variable or secret name carries a
       # stage prefix: each stage reads the same keys from its own bane/<stage>/

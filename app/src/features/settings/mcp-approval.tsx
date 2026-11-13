@@ -9,10 +9,10 @@ import { useApiDef, useApiMutation, useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { McpApproval, Row, connectionTitle } from './hosted'
 
-// Where a pending MCP approval's 403 sends you (/settings/mcp/<id>). One MCP connection is one account: the account its
-// client signed in as at the account service. The page lists this browser's connected accounts with that one marked, and
-// acts only as the account you pick, never silently as the tab's account; with the right one active, the workspace pick
-// follows. "Use another account" adds an account through the account service's chooser.
+// One MCP connection (/settings/mcp/<id>), linked from Settings and the rituals page. One connection is one account: the
+// account its client signed in as at the account service. The page lists this browser's connected accounts with that one
+// marked, and acts only as the account you pick, never silently as the tab's account; with the right one active, its
+// default workspace follows. "Use another account" adds an account through the account service's chooser.
 export function McpApprovalPage() {
   const { id = '' } = useParams()
   const session = useSession()
@@ -52,10 +52,11 @@ export function McpApprovalPage() {
       : owner !== identity?.id ? <div className="cluster"><Button variant="primary" loading={switching} onClick={() => void continueAs(owner)}>Continue as {pickedAccount?.name || pickedAccount?.email || 'this account'}</Button></div>
       : null)}
     {ready && <>
-      <SectionHeader title="Workspace" />
+      <SectionHeader title="Default workspace" />
+      <p className="muted">Each tool call can name one of your workspaces; calls that name none use this one. Your role in a workspace decides what the client can do there.</p>
       {connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} />
         : !connection.data ? <div className="settings-rows"><div className="settings-row"><Skeleton width={200} height={20} /></div></div>
-        : connection.data.status === 'active' ? <div className="settings-rows"><McpApproval key={`${connection.data.id}:${connection.data.workspaceId}:${connection.data.receiving}`} app={connection.data} workspaces={identity?.workspaces ?? []} linked={false} onRevoke={() => revoke.mutate(connection.data!.id)} /></div>
+        : connection.data.status === 'active' ? <div className="settings-rows"><McpApproval key={`${connection.data.id}:${connection.data.workspaceId}`} app={connection.data} workspaces={identity?.workspaces ?? []} linked={false} onRevoke={() => revoke.mutate(connection.data!.id)} /></div>
         : <div className="settings-rows"><Row title={connectionTitle(connection.data)} hint={connection.data.clientId}>{connection.data.status === 'expired' ? 'Expired · reconnect the client' : 'Revoked · reconnect the client'}</Row></div>}
     </>}
   </div>

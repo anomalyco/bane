@@ -7,7 +7,7 @@
   document.documentElement.dataset.theme = theme
   document.documentElement.style.colorScheme = theme
   // The browser's own bars (a phone's status bar, Safari's toolbar) take the page's frame colour.
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#080808' : '#FAFAFA')
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.setAttribute('content', theme === 'dark' ? '#080808' : '#FAFAFA')
 })()
 
 // Start the session check while the app's scripts download. The app (data/live.ts) takes these

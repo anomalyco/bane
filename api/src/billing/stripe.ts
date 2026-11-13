@@ -22,7 +22,7 @@ type Params = { [key: string]: unknown };
 export type StripeObject = Record<string, any>;
 
 export class StripeError extends Error {
-  constructor(readonly status: number, readonly type: string, readonly code?: string, readonly declineCode?: string, readonly paymentIntent?: string, message = 'Stripe refused the request.') {
+  constructor(readonly status: number, readonly type: string, readonly code?: string, readonly declineCode?: string, readonly paymentIntent?: string, message = 'Stripe refused the request.', readonly param?: string) {
     super(message); this.name = 'StripeError';
   }
   /** No answer, or one Stripe asks us to retry: the request may or may not have taken effect. */
@@ -30,6 +30,17 @@ export class StripeError extends Error {
   get missing() { return this.code === 'resource_missing'; }
   /** The code Bane records and shows: the bank's decline reason when there is one. */
   get reason() { return this.declineCode ?? this.code ?? this.type; }
+}
+/**
+ * What a log line may say about a Stripe error: its status, type, codes, the parameter it names and Stripe's message,
+ * so a refusal is diagnosable from the Worker's logs. The message is Stripe's text; anything in it that looks like a
+ * key, a webhook secret or an email address is replaced first. Keys never reach a log.
+ */
+export function stripeErrorFields(error: unknown): Record<string, unknown> {
+  if (!(error instanceof StripeError)) return { reason: error instanceof Error ? error.name : 'error' };
+  const message = error.message.replace(/\b(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9_*.]+/g, '[key]').replace(/\bwhsec_[A-Za-z0-9_*.]+/g, '[secret]')
+    .replace(/[^\s@'"`<>()]+@[^\s@'"`<>()]+\.[A-Za-z]{2,}/g, '[email]');
+  return { status: error.status, type: error.type, reason: error.reason, stripeCode: error.code ?? null, declineCode: error.declineCode ?? null, param: error.param ?? null, message };
 }
 
 export const stripeLive = (cfg: Pick<StripeConfig, 'secretKey'>) => /^(?:sk|rk)_live_/.test(cfg.secretKey);
@@ -67,7 +78,8 @@ export async function stripeRequest<T extends StripeObject = StripeObject>(cfg: 
     const e = (json?.error ?? {}) as StripeObject;
     const pi = typeof e.payment_intent === 'string' ? e.payment_intent : typeof e.payment_intent?.id === 'string' ? e.payment_intent.id : undefined;
     last = new StripeError(response.ok ? 502 : response.status, typeof e.type === 'string' ? e.type : 'api_error', typeof e.code === 'string' ? e.code : undefined,
-      typeof e.decline_code === 'string' ? e.decline_code : undefined, pi, typeof e.message === 'string' ? e.message.slice(0, 300) : 'Stripe refused the request.');
+      typeof e.decline_code === 'string' ? e.decline_code : undefined, pi, typeof e.message === 'string' ? e.message.slice(0, 500) : 'Stripe refused the request.',
+      typeof e.param === 'string' ? e.param.slice(0, 200) : undefined);
     if (!last.uncertain) throw last;
   }
   throw last!;
@@ -132,6 +144,11 @@ export async function creditAttempt(runtime: Runtime, attemptId: string, paid: P
     const { attempt: a } = locked;
     if (!OPEN.includes(a.status)) {
       if (a.status !== 'succeeded') log('error', { code: 'BILLING_LATE_PAYMENT', workspaceId: a.workspace_id, attemptId, status: a.status, message: 'Stripe reports a payment for a closed attempt; credit or refund it by hand.' });
+      // Checkout creates its invoice after the payment: checkout.session.completed credits with no invoice, and
+      // invoice.paid arrives later. Record the invoice then (never replacing one), so the payment has its links and a
+      // refund goes through a credit note. Nothing about the credit changes.
+      else if (paid.invoice) await tx.execute(sql`UPDATE billing_payment_attempts SET stripe_invoice=${paid.invoice}, invoice_url=coalesce(invoice_url,${paid.invoiceUrl ?? null}),
+        invoice_pdf=coalesce(invoice_pdf,${paid.invoicePdf ?? null}), updated_at=now() WHERE id=${attemptId} AND status='succeeded' AND stripe_invoice IS NULL`);
       return a.status;
     }
     const facts = sql`charged_cents=coalesce(${paid.chargedCents ?? null}::int,charged_cents), tax_cents=coalesce(${paid.taxCents ?? null}::int,tax_cents),
@@ -252,7 +269,7 @@ export async function removePaymentMethod(runtime: Runtime, workspaceId: string)
   const pm = account?.stripe_payment_method;
   if (!pm) return;
   try { await stripeRequest(cfg, 'POST', `/v1/payment_methods/${encodeURIComponent(pm)}/detach`, {}, `detach:${pm}`); }
-  catch (error) { if (!(error instanceof StripeError) || error.uncertain || !(error.missing || error.code === 'payment_method_unexpected_state')) throw providerError(error); }
+  catch (error) { if (!(error instanceof StripeError) || error.uncertain || !(error.missing || error.code === 'payment_method_unexpected_state')) throw providerError(error, { operation: 'detach', workspaceId }); }
   await forgetCard(runtime.db, workspaceId, pm);
 }
 /** Forgets a saved card (and turns auto-recharge off) wherever it is saved, or only in one workspace. */
@@ -281,9 +298,9 @@ export async function setAutoRecharge(runtime: Runtime, workspaceId: string, set
 
 // ---------- top-ups ----------
 const MIN_CENTS = 2000, MAX_CENTS = 1_000_000, FIRST_MAX_CENTS = 50_000;
-function providerError(error: unknown): unknown {
+function providerError(error: unknown, context: Record<string, unknown> = {}): unknown {
   if (!(error instanceof StripeError)) return error;
-  log('warn', { code: 'BILLING_STRIPE_ERROR', status: error.status, type: error.type, reason: error.reason });
+  log('warn', { code: 'BILLING_STRIPE_ERROR', ...context, ...stripeErrorFields(error) });
   return error.uncertain ? new ApiError(503, 'BILLING_PROVIDER_UNAVAILABLE', 'Stripe did not answer. Try again in a minute.', undefined, true)
     : new ApiError(502, 'BILLING_PROVIDER_ERROR', 'Stripe refused the request. Try again or contact support.');
 }
@@ -328,9 +345,15 @@ async function openAttempt(runtime: Runtime, input: { workspaceId: string; kind:
 async function createRefused(runtime: Runtime, attemptId: string, error: unknown): Promise<unknown> {
   if (error instanceof StripeError && !error.uncertain) await runtime.db.execute(sql`UPDATE billing_payment_attempts SET status='failed', failure_code=${error.reason.slice(0, 100)},
     failure_message=${error.message}, settled_at=now(), updated_at=now() WHERE id=${attemptId} AND status='created'`);
-  return providerError(error);
+  return providerError(error, { operation: 'checkout', attemptId });
 }
 
+/**
+ * Cards only, for paying and for saving. API 2026-09-30.endive removed `payment_method_types` from Checkout (a 400);
+ * `allowed_payment_method_types` limits the dashboard's dynamic payment methods instead. Cards because auto-recharge
+ * charges the saved method off-session and settles synchronously, and a card has the fingerprint a dispute blocks.
+ */
+const CARD_ONLY = ['card'];
 async function startCheckout(runtime: Runtime, attemptId: string, input: { workspaceId: string; amountCents: number; billingEmail: string | null; setup: boolean }) {
   const cfg = stripeConfig(runtime);
   try {
@@ -339,10 +362,10 @@ async function startCheckout(runtime: Runtime, attemptId: string, input: { works
     const expiresAt = Math.floor(Date.now() / 1000) + 23 * 3600;
     const back = { success_url: `${runtime.config.publicUrl}/settings?billing=success&attempt=${attemptId}#billing`, cancel_url: `${runtime.config.publicUrl}/settings?billing=canceled#billing`, expires_at: expiresAt };
     const params: Params = input.setup
-      ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, payment_method_types: ['card'], metadata: meta, setup_intent_data: { metadata: meta }, ...back }
+      ? { mode: 'setup', currency: 'usd', customer, client_reference_id: attemptId, allowed_payment_method_types: CARD_ONLY, metadata: meta, setup_intent_data: { metadata: meta }, ...back }
       : { mode: 'payment', customer, client_reference_id: attemptId,
         line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: input.amountCents, tax_behavior: 'exclusive', product_data: { name: 'Bane credit' } } }],
-        payment_method_types: ['card', 'link'], payment_intent_data: { setup_future_usage: 'off_session', metadata: meta }, metadata: meta,
+        allowed_payment_method_types: CARD_ONLY, payment_intent_data: { setup_future_usage: 'off_session', metadata: meta }, metadata: meta,
         invoice_creation: { enabled: true, invoice_data: { metadata: meta } },
         custom_text: { submit: { message: 'Bane saves this card so auto-recharge can use it if you turn it on. Remove it any time in Settings → Billing.' } },
         ...(cfg.automaticTax ? { automatic_tax: { enabled: true }, customer_update: { address: 'auto', name: 'auto' }, tax_id_collection: { enabled: true }, billing_address_collection: 'required' } : {}),
@@ -424,7 +447,8 @@ export async function chargeSavedCard(runtime: Runtime, attemptId: string): Prom
     return await settleInvoice(runtime, attemptId, paid);
   } catch (error) {
     if (!(error instanceof StripeError)) throw error;
-    if (error.uncertain) { log('warn', { code: 'BILLING_CHARGE_UNCONFIRMED', workspaceId: a.workspace_id, attemptId, status: error.status }); return 'pending'; }
+    if (error.uncertain) { log('warn', { code: 'BILLING_CHARGE_UNCONFIRMED', workspaceId: a.workspace_id, attemptId, ...stripeErrorFields(error) }); return 'pending'; }
+    log('warn', { code: 'BILLING_STRIPE_ERROR', operation: 'charge', workspaceId: a.workspace_id, attemptId, kind: a.kind, ...stripeErrorFields(error) });
     // Any refusal Stripe won't change its mind about (a decline, 3DS, or a non-card one such as
     // customer_tax_location_invalid) ends the charge the same way: the invoice is voided and a recharge turns
     // auto-recharge off with one notice. Otherwise every trigger would open a new attempt and invoice (finding 2).
@@ -438,7 +462,7 @@ export async function voidInvoice(cfg: StripeConfig, invoiceId: string, key: str
   try { await stripeRequest(cfg, 'POST', `${path}/void`, {}, `${key}:void`); return true; }
   catch (error) {
     if (error instanceof StripeError && !error.uncertain) try { await stripeRequest(cfg, 'DELETE', path); return true; } catch { /* Neither open nor draft: reported below. */ }
-    log('warn', { code: 'BILLING_INVOICE_VOID_FAILED', invoiceId, reason: error instanceof StripeError ? error.reason : 'error' });
+    log('warn', { code: 'BILLING_INVOICE_VOID_FAILED', invoiceId, ...stripeErrorFields(error) });
     return false;
   }
 }
@@ -587,7 +611,9 @@ async function sendRefund(runtime: Runtime, refundId: string): Promise<string> {
       if (!line) throw new StripeError(400, 'invalid_request_error', 'invoice_line_missing', undefined, undefined, 'The invoice has no line to credit.');
       const lines = [{ type: 'invoice_line_item', invoice_line_item: line, amount }];
       const preview = await stripeRequest(cfg, 'GET', '/v1/credit_notes/preview', { invoice: r.stripe_invoice, lines });
-      note = await stripeRequest(cfg, 'POST', '/v1/credit_notes', { invoice: r.stripe_invoice, lines, refund_amount: preview.total, reason: 'requested_by_customer', metadata: meta }, key);
+      // No reason: credit notes take only duplicate, fraudulent, order_change or product_unsatisfactory, none of which is
+      // a refund of unused credit; requested_by_customer (a Refund's reason) is refused with a 400 here.
+      note = await stripeRequest(cfg, 'POST', '/v1/credit_notes', { invoice: r.stripe_invoice, lines, refund_amount: preview.total, metadata: meta }, key);
       const refunds: StripeObject[] = Array.isArray(note.refunds) ? note.refunds : [];
       const id = ref(note.refund) ?? ref(refunds[0]?.refund);
       refund = id ? await stripeRequest(cfg, 'GET', `/v1/refunds/${encodeURIComponent(id)}`) : null;
@@ -602,7 +628,7 @@ async function sendRefund(runtime: Runtime, refundId: string): Promise<string> {
   } catch (error) {
     if (!(error instanceof StripeError) || error.uncertain) throw error;
     await settleRefund(runtime, r.id, 'failed', { reason: error.reason });
-    throw providerError(error);
+    throw providerError(error, { operation: 'refund', refundId: r.id });
   }
 }
 

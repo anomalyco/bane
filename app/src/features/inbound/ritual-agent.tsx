@@ -6,7 +6,7 @@ import { Link } from 'react-router'
 import { Button, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApiDef, useSession } from '../../data/context'
+import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { McpConnection } from '../../data/types'
 import { mcpClientConfig, mcpClientFiles, mcpClientNames } from '../../../../api/src/mcp-clients'
@@ -19,31 +19,36 @@ type Other = typeof others[number]
 
 /** A prompt shown with its address masked; the copy holds the real address. */
 type Prompt = { text: string; shown: ReactNode }
-function prompts(ritual: string, address: string | null): Prompt[] {
+// With several workspaces the prompt names this one: the agent's calls act in the workspace they name, else its default.
+function prompts(ritual: string, address: string | null, workspace: string | null): Prompt[] {
   const at = address ?? 'my support address', shown = address ? <PrivateAddress value={address} /> : at
-  const name = ritual || 'triage'
+  const name = ritual || 'triage', mine = workspace ? `my Bane workspace '${workspace}'` : 'Bane', shownMine = workspace ? <>my Bane workspace ‘{workspace}’</> : 'Bane'
   return [
-    { text: `Read my Bane ritual '${name}' on ${at} and add a rule that labels refund requests and posts them to #support.`, shown: <>Read my Bane ritual ‘{name}’ on {shown} and add a rule that labels refund requests and posts them to #support.</> },
-    { text: `Explain why my Bane ritual '${name}' junked the last email to ${at}, and fix it if it shouldn't have.`, shown: <>Explain why my Bane ritual ‘{name}’ junked the last email to {shown}, and fix it if it shouldn’t have.</> },
-    { text: `Try my Bane ritual '${name}' on the last 5 emails to ${at} and tell me what it would do to each.`, shown: <>Try my Bane ritual ‘{name}’ on the last 5 emails to {shown} and tell me what it would do to each.</> },
+    { text: `In ${mine}, read my ritual '${name}' on ${at} and add a rule that labels refund requests and posts them to #support.`, shown: <>In {shownMine}, read my ritual ‘{name}’ on {shown} and add a rule that labels refund requests and posts them to #support.</> },
+    { text: `In ${mine}, explain why my ritual '${name}' junked the last email to ${at}, and fix it if it shouldn't have.`, shown: <>In {shownMine}, explain why my ritual ‘{name}’ junked the last email to {shown}, and fix it if it shouldn’t have.</> },
+    { text: `In ${mine}, try my ritual '${name}' on the last 5 emails to ${at} and tell me what it would do to each.`, shown: <>In {shownMine}, try my ritual ‘{name}’ on the last 5 emails to {shown} and tell me what it would do to each.</> },
   ]
 }
 
 /** How Settings names an approval: its client, and the label of its entry (`?profile=`). */
 const connectionTitle = (app: McpConnection) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
-/** An approval that can edit rituals here: active, in this workspace, with manage and receiving tools. */
-const canEdit = (app: McpConnection, workspaceId: string | undefined) => app.status === 'active' && app.workspaceId === workspaceId && app.receiving && app.scopes.includes('bane:manage')
+/** An approval that can edit rituals here: active with full access (bane:manage), for an owner or admin of this
+ * workspace. Its calls name the workspace they act in, so any of the account's approvals can work in this one. */
+const canEdit = (app: McpConnection, admin: boolean) => app.status === 'active' && admin && app.scopes.includes('bane:manage')
 
 export function RitualAgentCard({ ritual, address }: { ritual: string; address: string | null }) {
   const [open, setOpen] = useState(false)
   const [client, setClient] = useState<Other>('claude')
-  const workspaceId = useSession()?.identity?.workspaceId
+  const identity = useSession()?.identity
+  const admin = useWorkspaceAccess().canAdminister
+  const several = (identity?.workspaces?.length ?? 0) > 1
+  const workspace = several ? identity?.workspaces?.find(w => w.id === identity.workspaceId)?.name ?? null : null
   const apps = useApiDef(queries.mcpConnections())
   const url = useMcpUrl()
   const active = (apps.data ?? []).filter(app => app.status === 'active')
-  const connected = active.find(app => canEdit(app, workspaceId))
-  // Connected but not able to edit rituals here: another workspace, no receiving tools, or read-only.
-  const limited = !connected ? active.find(app => app.workspaceId === workspaceId || app.workspaceId === null) ?? null : null
+  const connected = active.find(app => canEdit(app, admin))
+  // Connected but not able to edit rituals here: read or send access only, or a member of this workspace.
+  const limited = !connected ? active[0] ?? null : null
   const status = apps.isPending ? 'Looking for a connected agent…'
     : connected ? <>Connected as <strong>{connectionTitle(connected)}</strong>. Its saves show up here as it makes them.</>
     : limited ? <><strong>{connectionTitle(limited)}</strong> is connected but can’t change rituals in this workspace yet.</>
@@ -60,7 +65,7 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
     </div>
     <div id="ritual-agent-body" className="ritual-agent__body" inert={!open || undefined}>
       <div className="ritual-agent__inner"><div className="ritual-agent__content stack">
-        {limited && <p className="ritual-agent__note">Rituals need full access with receiving tools, in this workspace. <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>Choose them in Settings</Link>, or connect again and approve them.</p>}
+        {limited && <p className="ritual-agent__note">{admin ? <>Rituals need full access. Connect the client again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rituals need an owner or admin of this workspace.'}</p>}
         {!connected && <>
           <div className="stack ritual-agent__step">
             <h3 className="ritual-agent__heading">Add Bane to OpenCode</h3>
@@ -68,7 +73,7 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
               <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="OpenCode command"><code>{command || 'Loading this installation’s address…'}</code></pre>
               {command && <CopyAction value={command} label="Copy the OpenCode command" variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />}
             </div>
-            <p className="ritual-agent__hint muted">Then run <code>/mcps</code>, choose bane, sign in and approve full access with receiving tools for this workspace. Two accounts? Add <code>?profile=work</code> to the URL to label this one; it never changes access.</p>
+            <p className="ritual-agent__hint muted">Then run <code>/mcps</code>, choose bane, sign in and approve full access. Its tools work in any of your workspaces; name this one in your prompt. Two Anomaly accounts? Add an entry for each, such as <code>bane-work</code>, and sign each in with its account.</p>
           </div>
           <div className="stack ritual-agent__step">
             <h3 className="ritual-agent__heading">Or another client</h3>
@@ -88,7 +93,7 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
         </>}
         <div className="stack ritual-agent__step">
           <h3 className="ritual-agent__heading">Ask it</h3>
-          <ul className="ritual-agent__prompts">{prompts(ritual, address).map(p => <li key={p.text} className="ritual-agent__prompt">
+          <ul className="ritual-agent__prompts">{prompts(ritual, address, workspace).map(p => <li key={p.text} className="ritual-agent__prompt">
             <span>{p.shown}</span>
             <CopyAction value={p.text} label="Copy prompt" variant="ghost" size="sm" compact />
           </li>)}</ul>

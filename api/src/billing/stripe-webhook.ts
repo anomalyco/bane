@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, log, type App, type Runtime } from '../core.js';
 import {
   applyCheckoutSession, closeDispute, failAttempt, forgetCard, fraudWarning, openDispute, readAttempt, reconcileAttempt, reconcileRefund,
-  settleInvoice, settleRefund, stripeConfig, stripeLive, voidInvoice, type AttemptRow, type StripeConfig, type StripeObject,
+  settleInvoice, settleRefund, stripeConfig, stripeErrorFields, stripeLive, voidInvoice, type AttemptRow, type StripeConfig, type StripeObject,
 } from './stripe.js';
 
 const TOLERANCE_S = 300, MAX_BODY = 512 * 1024;
@@ -144,7 +144,7 @@ export async function receiveStripeEvent(runtime: Runtime, event: StripeObject):
     const reason = error instanceof ApiError ? error.code : error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'error';
     await runtime.db.execute(sql`UPDATE billing_gateway_events SET status='failed', attempts=attempts+1, failure=${reason}
       WHERE stripe_event_id=${eventId} AND status NOT IN ('processed','ignored')`);
-    log('warn', { code: 'BILLING_WEBHOOK_FAILED', eventId, type, reason: error instanceof ApiError ? error.code : error instanceof Error ? error.name : 'error' });
+    log('warn', { code: 'BILLING_WEBHOOK_FAILED', eventId, type, ...(error instanceof ApiError ? { reason: error.code } : stripeErrorFields(error)) });
     return 'failed';
   }
 }
