@@ -60,6 +60,10 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 .ui-input::placeholder { color: var(--color-muted); opacity: 1; }
 .ui-input:disabled { background: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
 .ui-input[aria-invalid='true'] { outline-color: var(--color-danger); box-shadow: none; }
+/* A file field: the native picker button restyled as a small button inside the field. */
+.ui-input[type='file'] { display: flex; align-items: center; height: auto; min-height: var(--control-height); padding: 0; color: var(--color-muted); cursor: pointer; }
+.ui-input[type='file']::file-selector-button { height: calc(var(--control-height) - 8px); margin: 4px var(--space-8) 4px 4px; padding: 0 var(--space-12); border: 0; border-radius: 4px; background: var(--color-layer-2); color: var(--color-text); font: inherit; font-weight: var(--font-weight-bold); cursor: pointer; transition: background var(--motion-duration); }
+.ui-input[type='file']:hover::file-selector-button { background: var(--color-layer-3); }
 .ui-textarea { height: auto; min-height: 120px; resize: vertical; }
 .ui-field { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .ui-field__label { display: block; font-size: var(--text-sm); line-height: var(--leading-xs); }
@@ -145,6 +149,10 @@ a.ui-tab { text-decoration: none; }
 .ui-tone--danger { --tone-ink: var(--color-danger); --tone-marker: var(--color-danger-marker); --tone-bg: var(--color-danger-bg); --tone-border: var(--color-danger-border); }
 .ui-tone--info { --tone-ink: var(--color-info); --tone-marker: var(--color-info-marker); --tone-bg: var(--color-info-bg); --tone-border: var(--color-info-border); }
 .ui-status { display: inline-flex; align-items: center; gap: var(--space-6); min-height: 20px; padding: 1px var(--space-6); border: 1px solid var(--tone-border); border-radius: 4px; background: var(--tone-bg); color: var(--tone-ink); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+.ui-status { max-width: 100%; }
+.ui-status__label { min-width: 0; overflow: clip; text-overflow: ellipsis; }
+/* In a table cell a lone badge may reach across the cell's right padding, so a label a few pixels past the column still reads whole. */
+.ui-table td > .ui-status:only-child { max-width: calc(100% + var(--space-12)); margin-right: calc(-1 * var(--space-12)); }
 .ui-status__dot { width: 4px; height: 4px; flex-shrink: 0; background: var(--tone-marker); border-radius: 50%; }
 .ui-status-dot { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; white-space: nowrap; }
 .ui-status-dot > .ui-status__dot { width: 6px; height: 6px; }
@@ -224,6 +232,11 @@ a.ui-tab { text-decoration: none; }
 /* Cards: a table on a phone (DataTable). Full-bleed rows split by hairlines, every card of a table the same height. The
    title is the row's link, stretched over the card; controls in it sit above that link. */
 .ui-cards { margin-inline: calc(-1 * var(--bleed, 0px)); }
+/* On a phone the pagination row sits on the page gutter like the cards' text, and under a card list it adds no second rule beside the last card's. */
+@media (max-width: 640px) {
+  .ui-pagination { padding-inline: 0; }
+  .ui-cards + .ui-pagination { border-top: 0; }
+}
 .ui-cards__list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
 .ui-card { position: relative; display: flex; align-items: center; gap: var(--space-12); height: var(--table-row-height); padding: var(--space-12) var(--bleed, 0px); border-bottom: 1px solid var(--color-border-muted); overflow: hidden; transition: background-color 120ms ease; animation: row-appear 180ms ease-out; }
 .ui-card[data-clickable]:active { background: var(--color-hover); transition-duration: 0ms; }
@@ -247,6 +260,10 @@ a.ui-tab { text-decoration: none; }
 .ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
 .ui-card:has(.ui-card__link:focus-visible) { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 /* An empty list keeps a page of cards' height (filtering to nothing doesn't collapse the page), but its message sits at
+/* An address wider than its cell or card line shrinks to it (its first two characters and the blur stay in view; a revealed one is cut with an ellipsis and says the whole of it, PrivateAddress.tsx) instead of overflowing into the next column. */
+:is(.ui-table td, .ui-card__segment) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; text-overflow: ellipsis; }
+.ui-card__segment:has(> .private-address) { display: flex; white-space: pre; }
+.ui-table td .settings-cell-stack { min-width: 0; }
    the top, where the first card would be: centred in that height it fell below the fold of a phone. */
 .ui-cards .ui-table-empty { place-items: start center; border-top: 1px solid var(--color-border-muted); }
 

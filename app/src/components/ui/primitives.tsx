@@ -252,7 +252,9 @@ function statusTone(status: string): Tone {
   return 'neutral';
 }
 export function StatusBadge({ status, tone = statusTone(status) }: { status: string; tone?: Tone }) {
-  return <span data-component="StatusBadge" className={cx('ui-status', `ui-tone--${tone}`)}><span className="ui-status__dot" aria-hidden="true" />{formatLabel(status)}</span>;
+  const text = formatLabel(status);
+  return <span data-component="StatusBadge" className={cx('ui-status', `ui-tone--${tone}`)} onPointerEnter={event => { const label = event.currentTarget.lastElementChild; event.currentTarget.title = label && label.scrollWidth > label.clientWidth ? text : ''; }}><span className="ui-status__dot" aria-hidden="true" /><span className="ui-status__label">{text}</span></span>;
+// A badge in a cell narrower than its label shortens the label with an ellipsis and says the whole of it on hover.
 }
 // A status as one quiet line of a table cell: the tone's dot, the value itself (a host, say) and an optional muted note.
 // The note gives way first when the cell is narrow; `title` carries the whole text for whatever is clipped.
