@@ -27,6 +27,8 @@ if (stack !== "dev" && stack !== "production") throw new Error(`Unsupported Bane
 const stage = stages[stack];
 const production = stack === "production";
 const config = new pulumi.Config("bane");
+const nightmailCloud = !production && config.getBoolean("nightmailCloud") === true;
+const queuePrefix = nightmailCloud ? 'nightmail-dev' : stage.prefix;
 
 const roleArn = config.require("deployRoleArn");
 if (!roleArn.startsWith(`arn:aws:iam::${stage.account}:role/`)) {
@@ -44,7 +46,7 @@ function adopt(id: string, provider: pulumi.ProviderResource): pulumi.CustomReso
 const cloudflareAccountId = stage.cloudflareAccountId;
 const cloudflare = new cf.Provider("cloudflare", {}); // CLOUDFLARE_API_TOKEN
 for (const [purpose, queueId] of Object.entries(stage.queues)) {
-  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
+  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${queuePrefix}-${purpose}` }, {
     ...adopt(`${cloudflareAccountId}/${queueId}`, cloudflare), ignoreChanges: ["settings"],
   });
 }
@@ -54,7 +56,7 @@ for (const [purpose, queueId] of Object.entries(stage.queues)) {
 // stays as the legacy lane until drained (api/wrangler.<stage>.jsonc).
 for (const purpose of ['webhooks','feedback-dlq','feedback-v2','feedback-v2-dlq']) {
   const id = stage.extraQueues?.[purpose];
-  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${stage.prefix}-${purpose}` }, {
+  new cf.Queue(purpose, { accountId: cloudflareAccountId, queueName: `${queuePrefix}-${purpose}` }, {
     ...(id ? adopt(`${cloudflareAccountId}/${id}`, cloudflare) : { provider: cloudflare, protect: true }),
   });
 }
@@ -79,6 +81,17 @@ new cf.R2BucketLifecycle("mail-lifecycle", { accountId: cloudflareAccountId, buc
   { id: "ephemeral-safety-45d", enabled: true, conditions: { prefix: "e/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 45 * day } } },
   { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },
 ] }, { provider: cloudflare, protect: true });
+
+// Keep existing R2 resources protected under the original URNs. Adopt the standby pair in
+// addition; changing either existing physical name would request a bucket replacement.
+if (nightmailCloud) {
+  for (const purpose of ['mail', 'attachments']) {
+    const name = `nightmail-dev-${purpose}`;
+    new cf.R2Bucket(`nightmail-${purpose}`, { accountId: cloudflareAccountId, name, jurisdiction: 'default', storageClass: 'Standard' }, {
+      ...adopt(`${cloudflareAccountId}/${name}/default`, cloudflare), ignoreChanges: ['location'],
+    });
+  }
+}
 
 // The Hyperdrive config is not managed here. Cloudflare never returns origin.password, and
 // Pulumi fails to import the resource because the read state lacks that required property.
@@ -199,4 +212,12 @@ if (writeWorkerSecrets) {
   new cfV5.WorkersSecret("worker-runtime-credentials", {
     ...target, name: "AWS_RUNTIME_CREDENTIALS", secretText: pulumi.secret(pulumi.jsonStringify({ accessKeyId: key.id, secretAccessKey: key.secret })),
   }, { provider, retainOnDelete: true });
+  if (nightmailCloud) {
+    // Both scripts need the old runtime credential during this CF-only switch. Never
+    // rotate the IAM key, delete the old binding or move the SES receipt set here.
+    new cfV5.WorkersSecret('nightmail-dev-runtime-credentials', {
+      accountId: cloudflareAccountId, scriptName: 'nightmail-dev', name: 'AWS_RUNTIME_CREDENTIALS',
+      secretText: pulumi.secret(pulumi.jsonStringify({ accessKeyId: key.id, secretAccessKey: key.secret })),
+    }, { provider, retainOnDelete: true });
+  }
 }
