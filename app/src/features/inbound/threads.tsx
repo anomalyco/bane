@@ -36,7 +36,7 @@ function ThreadRow({ thread, addresses, own, showAddresses, selected, onSelect }
       <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt} title={`${date(thread.lastMessageAt)} ${time(thread.lastMessageAt)} UTC`}>{when(thread.lastMessageAt)}</time>
     </span>
     <span className="inbound-thread-row__subject" title={thread.subject || undefined}>{thread.subject || '(no subject)'}</span>
-    <span className="mailbox-thread-row__snippet">{thread.snippet}</span>
+    <span className="mailbox-thread-row__snippet" title={thread.snippet || undefined}>{thread.snippet}</span>
     {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
   </button></li>
 }
@@ -314,7 +314,7 @@ export function InboundPage() {
     <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
-        <div className="inbound-filter"><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
+        <div className="inbound-filter" data-address={addressId || undefined}><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
           options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => ({ value: address.id, label: address.address }))]} /></div>
         <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
         <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
@@ -323,7 +323,7 @@ export function InboundPage() {
           : threads.data.length ? <>
             <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} own={own} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/receiving">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />

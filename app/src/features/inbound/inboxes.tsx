@@ -227,7 +227,7 @@ function InboxDetail({ id }: { id: string }) {
       {b.status === 'expired' && <Alert tone="info">This inbox expired. New mail is still stored but held until it is erased on {date(b.deleteAfter)}.</Alert>}
       {b.usage.held > 0 && b.status !== 'deleting' && <Alert tone="warning">{number(b.usage.held)} {b.usage.held === 1 ? 'message is' : 'messages are'} held: stored and listed below, but not delivered to waiting agents or webhooks.</Alert>}
     </>}
-    {(!b || b.expiresAt) && <p className="muted inbox-facts-note">After it expires, new mail is held for 1 more day (stored and listed, not delivered), then the inbox and its mail are deleted. Over its message or size limit, new mail is held the same way.</p>}
+    <p className="muted inbox-facts-note">{b && !b.expiresAt ? 'It never expires. ' : 'After it expires, new mail is held for 1 more day (stored and listed, not delivered), then the inbox and its mail are deleted. '}Over its message or size limit, new mail is held the same way.</p>
     <section className="section stack" aria-labelledby="agent-inbox-messages">
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} actions={!folders.error && <Select className="inbox-folder" aria-label="Folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/>} />
       {folders.error && <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/>}
