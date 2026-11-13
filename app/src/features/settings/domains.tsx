@@ -113,6 +113,7 @@ function DomainsList() {
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} card /> },
         { ...columns[3], render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted">—</span> } },
         ...multiTenant ? [] : [{ ...columns[4], render: (row: Domain) => row.regionId }],
+        { ...columns.find(column => column.key === 'note')!, render: () => null, cardRender: row => sendingNote(row) ?? '' },
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
