@@ -2,8 +2,9 @@ import { ArrowUpRight } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { RegionCatalogEntry } from '../../data/types'
 import { label } from '../../lib/format'
-import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
-import { logColumnDefs } from '../logs/rows'
+import { LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
+import type { LogEntry } from '../../data/types'
+import { logColumnDefs, logColumns } from '../logs/rows'
 import './overview.css'
 
 // Hosted mail manages its region, so it shows no status; a bring-your-own connection shows its own state,
@@ -16,6 +17,13 @@ export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
 }
 
 export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as const
+// Latest emails are Logs' rows in a 790px column, so the table says what Logs says in fewer columns: the other party
+// is one column (who it went to, or who it came from; received mail is the one with the Received status), and the
+// direction and stream columns stay for phone cards only. Every address then gets room to read in full.
+const logColumn = (key: string) => logColumns.find(column => column.key === key)!
+export const latestColumnDefs: SkeletonColumn[] = logColumnDefs.map(column => column.key === 'direction' || column.key === 'from' || column.key === 'stream' ? { ...column, table: false as const }
+  : column.key === 'status' ? { ...column, width: 124 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: '32%' } : column)
+export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => ({ ...logColumn(column.key === 'contact' ? 'to' : column.key), ...column, render: column.key === 'contact' ? (row: LogEntry) => (row.direction === 'sent' ? logColumn('to') : logColumn('from')).render(row) : logColumn(column.key).render }))
 export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '60%' }, { key: 'sent', label: 'Recipients', width: '20%', align: 'right' as const, card: 'line' as const }, { key: 'delivered', label: 'Delivered', width: '20%', align: 'right' as const, card: 'inline' as const }]
 
 // Each skeleton has exactly the loaded block's dimensions (see overview.css), so swapping in the data moves nothing.
@@ -35,7 +43,7 @@ export function OverviewRouteSkeleton() {
   return <>
     <PageHeader title="Overview" actions={<div className="cluster ov-controls">{!multiTenant && <>{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></>}<Tabs value="24h" onValueChange={() => {}} disabled items={[{ value: '24h', label: '24h' }, { value: '7d', label: '7d' }, { value: '30d', label: '30d' }]} label="Time range" /><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div>} />
     <LoadingRegion label="Loading overview"><div className="ov-split">
-      <div className="ov-split__main"><FactsSkeleton /><ChartSkeleton /><section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="logs-table ov-table" columns={logColumnDefs} rows={7} /></section></div>
+      <div className="ov-split__main"><FactsSkeleton /><ChartSkeleton /><section className="ov-latest"><SectionHeader title="Latest emails" actions={<span className="ui-button ui-button--ghost ui-button--sm" aria-disabled="true">Logs <ArrowUpRight size={16} /></span>} /><TableSkeleton className="logs-table ov-table" columns={latestColumnDefs} rows={7} /></section></div>
       <aside className="ov-split__aside"><AsideSkeleton /></aside>
     </div></LoadingRegion>
   </>

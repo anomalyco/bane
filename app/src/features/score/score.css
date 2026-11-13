@@ -118,9 +118,10 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
   .next-steps a:hover > :first-child { text-decoration: underline; text-underline-offset: 4px; }
   .next-steps a:hover svg { transform: translate(2px, -2px); }
 }
-/* Phone: a compact breakdown, the six factors in two columns of label and value (no bars). 122px in every state. */
+/* Phone: a compact breakdown, the six factors in two columns of label and value (no bars), 45px rows (44px targets under a hairline). 185px in every state. */
 @media (max-width: 640px) {
-  .score-breakdown, .score-breakdown--loading { height: 122px; }
+  .score-breakdown, .score-breakdown--loading { height: 185px; }
+  .score-factors > li { height: 45px; }
   .score-factors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-24); }
   .score-factors > li > button { grid-template-columns: minmax(0, 1fr) auto; }
   .score-factors > li > button > .score-bar { display: none; }
@@ -130,13 +131,14 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .gauge-card > .gauge-alert { position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); box-shadow: 0 0 0 2px var(--color-surface); animation: gauge-alert-in 240ms var(--ease-out-strong) both; }
 @keyframes gauge-alert-in { from { opacity: 0; transform: scale(.4); } }
 
-/* Hosted: the limit the score sets. Four fixed lines (the first may wrap to two), 100px in every state. */
-.score-limit { display: flex; flex-direction: column; gap: var(--space-4); height: 100px; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; font-variant-numeric: tabular-nums; }
-.score-limit > p { height: 16px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.score-limit > .score-limit__headline { display: -webkit-box; height: 40px; color: var(--color-text); font-size: var(--text-sm); line-height: 20px; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.score-limit__note { display: flex; align-items: center; gap: var(--space-6); }
-.score-limit__note > span:first-child { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-success-marker); }
-.score-limit__note > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* Hosted: the limit the score sets. Four lines, each shown in full; the standing note may wrap, so 96px holds the longest
+   usual state and the block below never moves when the note changes. */
+.score-limit { display: flex; flex-direction: column; gap: var(--space-4); min-height: 96px; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; font-variant-numeric: tabular-nums; }
+.score-limit > p { margin: 0; text-wrap: pretty; }
+.score-limit > .score-limit__headline { color: var(--color-text); font-size: var(--text-sm); line-height: 20px; }
+.score-limit__note { display: flex; align-items: baseline; gap: var(--space-6); }
+.score-limit__note > span:first-child { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-success-marker); transform: translateY(-1px); }
+.score-limit__note > span:last-child { min-width: 0; }
 .score-limit__note[data-tone='warning'] > span:first-child { background: var(--color-warning-marker); }
 .score-limit__note[data-tone='danger'] > span:first-child { background: var(--color-danger-marker); }
 .score-limit__note[data-tone='warning'], .score-limit__note[data-tone='danger'] { color: var(--color-text); }
@@ -144,6 +146,13 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-explain { height: 20px; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--text-xs); line-height: var(--leading-xs); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 3px; cursor: pointer; transition: text-decoration-color var(--motion-duration); }
 @media (hover: hover) and (pointer: fine) { .score-explain:hover { text-decoration-color: currentColor; } }
 .score-explain:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-radius: 2px; }
+/* Phone: 44px targets for the limits link, the next steps and the standing card's link. */
+@media (max-width: 640px) {
+  .score-explain { position: relative; }
+  .score-explain::before { content: ''; position: absolute; inset: -12px -8px; }
+  .next-steps a { min-height: 44px; }
+  .standing-card__docs { display: inline-flex; align-items: center; min-height: 44px; margin-block: calc(-1 * var(--space-12)); }
+}
 
 /* Overview's standing card (Warn and up): tone from the step, three parts and the release action. */
 .standing-card { display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-12); border: 1px solid var(--tone-border); border-radius: var(--radius-sm); background: var(--tone-bg); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin-top: var(--space-24); }
@@ -178,7 +187,7 @@ button.gauge-card:focus-visible { outline: 2px solid var(--color-focus); outline
 .score-about__section h3 { font-size: var(--text-sm); font-weight: var(--font-weight-bold); }
 .score-about__section code { font-size: .92em; }
 .score-about__factors { margin: 0; padding: 0; list-style: none; }
-.score-about__factors > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-12); padding: var(--space-8) var(--space-8); margin: 0 calc(-1 * var(--space-8)); border-top: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
+.score-about__factors > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-12); padding: var(--space-8) var(--focus-reach); margin: 0 calc(-1 * var(--focus-reach)); border-top: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); scroll-margin: var(--space-8); }
 .score-about__factors > li[data-focus] { background: var(--color-layer-2); }
 .score-about__factors > li > p { grid-column: 1 / -1; font-size: var(--text-xs); line-height: var(--leading-xs); }
 .score-about__factor-name { display: flex; align-items: baseline; gap: var(--space-8); font-weight: var(--font-weight-bold); }
