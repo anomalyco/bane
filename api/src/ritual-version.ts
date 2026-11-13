@@ -34,7 +34,7 @@ const Query = z.object({
 }).strict();
 
 /** Who a change came from, by the credential types the routing history and the audit trail record. */
-const fromVersion = (w: string, version: number) => sql`SELECT CASE actor_type WHEN 'dashboard' THEN 'member' WHEN 'apiKey' THEN 'api_key' ELSE 'mcp' END AS kind,
+const fromVersion = (w: string, version: number) => sql`SELECT CASE actor_type WHEN 'dashboard' THEN 'member' WHEN 'apiKey' THEN 'api_key' WHEN 'mcp' THEN 'mcp' WHEN 'agentToken' THEN 'mcp' END AS kind,
   CASE WHEN actor_type = 'dashboard' THEN substr(actor_id, 6) ELSE actor_id END AS id FROM mail_routing_versions WHERE workspace_id = ${w} AND version = ${version}`;
 const fromAudit = (w: string, id: string) => sql`SELECT CASE e.actor_type WHEN 'member' THEN 'member' WHEN 'api_key' THEN 'api_key' WHEN 'mcp_grant' THEN 'mcp' WHEN 'agent_token' THEN 'mcp' END AS kind,
   CASE WHEN e.actor_type = 'agent_token' THEN (SELECT t.grant_id FROM agent_tokens t WHERE t.id = e.actor_id AND t.workspace_id = ${w}) ELSE e.actor_id END AS id
