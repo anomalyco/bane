@@ -15,8 +15,11 @@ export type Guide = { id: string; title: string; summary: string; body: () => Re
 function Code({ children, label }: { children: string; label: string }) {
   return <div className="docs-quickstart-code"><pre className="docs-code" tabIndex={0} aria-label={label}><code>{children}</code></pre><CopyAction value={children} label={`Copy ${label}`} variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
 }
+const slug = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+// Each section has an anchor (/docs/rituals#sender-lists); a # beside the heading shows on hover and focus.
 function Section({ title, children }: { title: string; children: ReactNode }) {
-  return <section className="docs-section"><h2>{title}</h2>{children}</section>
+  const id = slug(title)
+  return <section id={id} className="docs-section"><h2><Link className="docs-anchor" to={{ hash: id }}>{title}</Link></h2>{children}</section>
 }
 function Table({ head, rows }: { head: string[]; rows: ReactNode[][] }) {
   return <div className="docs-table-scroll"><table className="docs-table"><thead><tr>{head.map(h => <th key={h} scope="col">{h}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}</tbody></table></div>

@@ -97,6 +97,16 @@ function OperationPage({ document, operation: raw }: {document: Document; operat
   const sample = operation.samples.find(item => item.label === language) ?? operation.samples[0]
   const body = operation.requestBody?.content?.['application/json']?.schema
   const parameters = operation.parameters.map(parameter => resolve(document, parameter))
+  // Statuses with the same description and body (the ten "Request failed" rows) are one row.
+  const responses = useMemo(() => {
+    const rows: { statuses: string[]; response: Schema; schema?: Schema }[] = []
+    for (const [status, response] of Object.entries(operation.responses)) {
+      const schema = response.content?.['application/json']?.schema
+      const same = rows.find(row => row.response.description === response.description && JSON.stringify(row.schema) === JSON.stringify(schema))
+      if (same) same.statuses.push(status); else rows.push({ statuses: [status], response, schema })
+    }
+    return rows
+  }, [operation.responses])
   return <article className="docs-operation">
     <header className="docs-operation-header">
       <h1>{operation.summary}</h1>
@@ -111,7 +121,9 @@ function OperationPage({ document, operation: raw }: {document: Document; operat
     </section>}
     {parameters.length > 0 && <section className="docs-section"><h2>Parameters</h2><div className="docs-field-list">{parameters.map(parameter => <div className="docs-field" key={`${parameter.in}:${parameter.name}`}><div><code>{parameter.name}</code>{parameter.required && <span className="docs-required">required</span>}<span className="docs-type">{parameter.in} · {typeLabel(document, parameter.schema)}</span></div>{parameter.description && <p>{parameter.description}</p>}</div>)}</div></section>}
     {body && <section className="docs-section"><h2>Request body</h2><SchemaDefinition document={document} input={body} /></section>}
-    <section className="docs-section"><h2>Responses</h2><div className="docs-responses">{Object.entries(operation.responses).map(([status, response]) => { const schema = response.content?.['application/json']?.schema; return <details key={status} open={status.startsWith('2')}><summary><code>{status}</code><span>{response.description}</span></summary>{schema && <SchemaDefinition document={document} input={schema} />}</details> })}</div></section>
+    <section className="docs-section"><h2>Responses</h2><div className="docs-responses">{responses.map(({ statuses, response, schema }) => schema
+      ? <details key={statuses[0]} open={statuses[0]!.startsWith('2')}><summary><code>{statuses.join(', ')}</code><span>{response.description}</span></summary><SchemaDefinition document={document} input={schema} /></details>
+      : <div key={statuses[0]} className="docs-response"><code>{statuses.join(', ')}</code><span>{response.description}</span></div>)}</div></section>
   </article>
 }
 
