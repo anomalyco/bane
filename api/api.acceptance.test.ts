@@ -3791,16 +3791,20 @@ describe('Hosted MCP OAuth and tools', () => {
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
-      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, platformToken = `bane_ops_${hex()}`;
+      const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
-        support: { platformToken, url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
-      secrets.add(platformToken);
+        support: { url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
       const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
         const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
         const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
         return { status: res.status, body: parsed, headers: res.headers };
       };
+      // The support platform: the SupportPlatform service-binding entrypoint (src/worker.ts) wraps exactly this, with
+      // the runtime marked as the binding's caller. No token: the binding is the credential.
+      const { supportPlatform, supportPlatformAllows } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
       const admin = await sessionFixture(t), member = await sessionFixture(t), operator = await sessionFixture(t), outsider = await sessionFixture(t);
@@ -3903,22 +3907,28 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([claims.jti, claims.aud, claims.workspace.id, claims.user.id, claims.shareContent, claims.requestIds], [handoff.id, 'bane-support', wid, manager!.userId, true, [createdRequest]]);
       ok(await send('POST', '/v1/contact-support', session(member), { shareContent: false }), 201);
 
-      // The support platform's server verifies an emailed request and mints a grant for that one user.
-      const service = bearer(platformToken);
+      // The support platform verifies the handoff it was given: Bane checks its own signature and the stored row.
+      const checked = await platform.verifyHandoff(handoff.token);
+      assert.ok(checked.ok); assert.deepEqual([checked.handoff.id, checked.handoff.userId, checked.handoff.workspace.id, checked.handoff.shareContent, checked.handoff.usedAt, checked.handoff.message], [handoff.id, manager!.userId, wid, true, null, 'Why did my key stop working?']);
+      assert.deepEqual(await platform.verifyHandoff(`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`), { ok: false, code: 'HANDOFF_INVALID' });
+      const otherKey = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, { verifyHandoffToken } = await import('./src/support-platform.js');
+      assert.deepEqual(await verifyHandoffToken({ ...runtime.config, support: { signingKey: { kty: 'OKP', crv: 'Ed25519', d: otherKey.d, x: otherKey.x } } }, handoff.token), { ok: false, code: 'HANDOFF_INVALID' }, 'Another installation’s key does not verify it.');
+      assert.deepEqual(await verifyHandoffToken(runtime.config, handoff.token, Date.now() + 11 * 60_000), { ok: false, code: 'HANDOFF_EXPIRED' });
+      // The support platform verifies an emailed request and mints a grant for that one user.
       const dmarc = { kind: 'dmarc', result: 'pass', aligned: true, messageId: '<support-1@example.com>' };
-      const verified = ok(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
+      const verified = ok(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email.toUpperCase(), evidence: dmarc, ticketRef: 'T-1' }));
       assert.equal(verified.user.id, manager!.userId); assert.ok(verified.workspaces.some((w: Json) => w.id === wid && w.role === 'owner'));
-      assert.deepEqual(ok(await send('POST', '/v1/operator/support/verify-email', service, { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
+      assert.deepEqual(ok(await service('POST', '/v1/operator/support/verify-email', { email: 'nobody@example.org', evidence: { kind: 'magic_link', confirmedAt: new Date().toISOString() } })), { verified: false, user: null, workspaces: [] });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { ...dmarc, result: 'fail' } }), 422);
       // Evidence the platform could not have: a DMARC pass without the verified message, a magic link opened in the future.
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
-      error(await send('POST', '/v1/operator/support/verify-email', service, { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
-      const mint = (body: Json) => send('POST', '/v1/operator/support/grants', service, { reason: 'Customer asked about a revoked key', ...body });
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'dmarc', result: 'pass', aligned: true } }), 422);
+      error(await service('POST', '/v1/operator/support/verify-email', { email: manager!.email, evidence: { kind: 'magic_link', confirmedAt: new Date(Date.now() + 3_600_000).toISOString() } }), 422, 'EVIDENCE_INVALID');
+      const mint = (body: Json) => service('POST', '/v1/operator/support/grants', { reason: 'Customer asked about a revoked key', ...body });
       const grant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'handoff', handoffId: handoff.id }), 201);
       assert.match(grant.token, /^bane_support_[0-9a-f]{64}$/); secrets.add(grant.token);
       assert.deepEqual([grant.contentShared, grant.contentWorkspaceId, grant.workspaceIds, grant.handoffId], [true, wid, [wid], handoff.id], 'A handoff grant covers the handoff’s workspace.');
       error(await mint({ userId: manager!.userId, ticketRef: 'T-8', verification: 'handoff', handoffId: handoff.id }), 409, 'SUPPORT_HANDOFF_USED');
-      assert.equal(ok(await send('GET', `/v1/operator/support/handoffs/${handoff.id}`, service)).grantId, grant.id);
+      assert.equal(ok(await service('GET', `/v1/operator/support/handoffs/${handoff.id}`)).grantId, grant.id);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 409, 'SUPPORT_GRANT_ACTIVE');
       error(await mint({ userId: member.userId, ticketRef: 'T-9', verification: 'handoff', handoffId: handoff.id }), 404);
       const plain = ok(await mint({ userId: manager!.userId, ticketRef: 'T-2', verification: 'dmarc', ttlMinutes: 30 }), 201); secrets.add(plain.token);
@@ -3962,7 +3972,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Rate limit, revocation and expiry.
       await db.query('UPDATE support_grants SET used = 120 WHERE id = $1', [plain.id]);
       error(await send('GET', '/v1/support/context', bearer(plain.token)), 429, 'REQUEST_RATE_LIMITED');
-      ok(await send('POST', `/v1/operator/support/grants/${grant.id}/revoke`, service));
+      ok(await service('POST', `/v1/operator/support/grants/${grant.id}/revoke`));
       error(await send('GET', '/v1/support/context', support), 403, 'SUPPORT_GRANT_REQUIRED');
       const again = ok(await mint({ userId: manager!.userId, ticketRef: 'T-1', verification: 'dmarc' }), 201); secrets.add(again.token);
       await db.query(`UPDATE support_grants SET created_at = now() - interval '3 hours', expires_at = now() - interval '2 hours' WHERE id = $1`, [again.id]);
@@ -3998,20 +4008,467 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query(`UPDATE support_handoffs SET created_at = now() - interval '1 hour', expires_at = now() - interval '31 minutes' WHERE id = $1`, [late.id]);
       error(await mint({ userId: manager!.userId, ticketRef: 'T-7', verification: 'handoff', handoffId: late.id }), 404);
 
-      // Rotation: the previous platform token works until it is removed, and the trail names which one acted.
-      const nextToken = `bane_ops_${hex()}`; secrets.add(nextToken);
-      Object.assign(runtime.config.support!, { platformToken: nextToken, previousPlatformToken: platformToken });
-      ok(await send('GET', '/v1/operator/support/grants?ticketRef=T-5', service));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, bearer(nextToken)));
-      ok(await send('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`, service));
-      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE action = 'audit.read' AND actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id),
-        ['service:support-platform:current', 'service:support-platform:previous']);
-      Object.assign(runtime.config.support!, { previousPlatformToken: undefined });
-      error(await send('GET', '/v1/operator/support/grants', service), 403, 'OPERATOR_REQUIRED');
-
+      // The binding is narrow: only the support operator routes and grant reads, as service:bane-support, and no bearer
+      // token is an operator any more (the static platform token is retired).
+      error(await service('GET', '/v1/operator/support/grants?ticketRef=T-5'), 404, 'NOT_FOUND');
+      error(await service('GET', `/v1/operator/users/${manager!.userId}/audit?limit=1`), 404, 'NOT_FOUND');
+      assert.equal(supportPlatformAllows('GET', '/v1/support/../operator/users/x/audit'), false);
+      // Past its allow-list, the gate itself still refuses the binding everywhere else under /v1/operator.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/users/${manager!.userId}/audit`), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(bypass.status, 403);
+      // Any Authorization header on an operator route is refused, even through the binding's runtime.
+      const withBearer = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/handoffs/${handoff.id}`, { headers: bearer(`bane_ops_${hex()}`) }), { ...runtime, platformCaller: 'bane-support' });
+      assert.equal(withBearer.status, 403);
+      // Grant reads through the binding need the grant itself; the trail names the binding as the operator.
+      assert.equal((await platform.read('/v1/support/workspaces', theirs.token)).status, 200);
+      assert.equal((await platform.read('/v1/support/workspaces', `bane_support_${hex()}`)).status, 403);
+      assert.equal((await platform.call('GET', '/v1/support/workspaces')).status, 403, 'A /v1/support read without a grant.');
+      const used = await platform.verifyHandoff(handoff.token);
+      assert.ok(used.ok && used.handoff.usedAt && used.handoff.grantId === grant.id, JSON.stringify(used));
+      assert.deepEqual((await db.query(`SELECT DISTINCT actor_id FROM audit_events WHERE actor_id LIKE 'service:%' ORDER BY 1`)).rows.map(r => r.actor_id), ['service:bane-support']);
       // Review L4: an operator script's platform row without a user is not mirrored, and does not fail the script.
       await db.query(`INSERT INTO hosted_operator_audit(workspace_id, action, details) VALUES ('platform', 'set-operator', '{"userId": null}')`);
       assert.equal((await db.query(`SELECT FROM audit_events WHERE action = 'operator.set_operator' AND user_id IS NULL AND workspace_id IS NULL`)).rowCount, 0);
+    });
+  });
+
+  test('Support deliverability reads: weighted, one-workspace aggregates with rates, caps, redaction, findings and content consent', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' } });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      // Grants come from an operator's dashboard session (the support platform mints them the same way).
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support deliverability acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why mail goes to spam', ...body }), 201); secrets.add(grant.token); return grant; };
+      const handoff = ok(await local('POST', '/v1/contact-support', { shareContent: true, message: 'Gmail puts our newsletter in spam' }), 201);
+      const content = await mint({ userId: manager!.userId, ticketRef: 'D-1', verification: 'handoff', handoffId: handoff.id });
+      const plain = await mint({ userId: manager!.userId, ticketRef: 'D-2', verification: 'dmarc', workspaceIds: [wid] });
+      const both = await mint({ userId: manager!.userId, ticketRef: 'D-3', verification: 'dmarc' });
+      const theirs = await mint({ userId: outsider.userId, ticketRef: 'D-4', verification: 'magic_link' });
+      assert.deepEqual([content.contentWorkspaceId, plain.contentWorkspaceId, both.workspaceIds.length], [wid, null, 2]);
+      const support = bearer(content.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+
+      // Synthetic mail of one workspace over the last days: providers, outcomes, a campaign, screen refusals, a simulated email.
+      const tag = randomUUID().slice(0, 8), domain = `news-${tag}.example.com`, mailFrom = `mail.${domain}`, domainId = unique('dom'), campaignId = unique('cmp'), listId = unique('lst');
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [domainId, wid, domain, REGION]);
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      await db.query(`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,identity,created_at) VALUES ($1,$2,$1,'verified',$3,now() - interval '5 days')`, [wid, domain, JSON.stringify({ proven: true, mx: null, note: null,
+        ses: { DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true }, MailFromAttributes: { MailFromDomain: mailFrom, MailFromDomainStatus: 'SUCCESS' } },
+        dmarc: { status: 'none', record: 'v=DMARC1; p=none', source: domain, adkim: 'r', aspf: 'r', checkedAt: Date.now(), recommend: false, alignedMailFrom: mailFrom } })]);
+      type Mail = { id: string; to: string; status: string; outcomes: number; campaign?: string; kind?: string; subject?: string; error?: string; days?: number; simulated?: boolean; html?: string; text?: string };
+      const mails: Mail[] = [];
+      const mail = (n: number, m: Omit<Mail, 'id' | 'to'> & { to: (i: number) => string }) => { const made = Array.from({ length: n }, (_, i) => ({ ...m, id: unique('email'), to: m.to(i) })); mails.push(...made); return made; };
+      mail(36, { to: i => `reader${i}@gmail.com`, status: 'delivered', outcomes: 3, days: 2 });
+      const opens = mail(3, { to: i => `opener${i}@gmail.com`, status: 'delivered', outcomes: 3 | 16, days: 2 });
+      mail(1, { to: () => 'clicker@googlemail.com', status: 'delivered', outcomes: 3 | 16 | 32, days: 2 });
+      const complaints = mail(2, { to: i => `annoyed${i}@gmail.com`, status: 'complained', outcomes: 3 | 8, days: 1 });
+      const bounces = mail(4, { to: i => `gone${i}@outlook.com`, status: 'bounced', outcomes: 1 | 4, days: 1 });
+      mail(6, { to: i => `kept${i}@hotmail.co.uk`, status: 'delivered', outcomes: 3, days: 1 });
+      mail(5, { to: i => `staff${i}@corp-${tag}.example.org`, status: 'delivered', outcomes: 3, days: 1 });
+      const rejected = mail(2, { to: i => `promo${i}@gmail.com`, status: 'rejected', outcomes: 0, error: 'CONTENT_REJECTED_SPAM', subject: 'WIN A PRIZE '.repeat(20), days: 1 });
+      mail(1, { to: () => 'test@example.org', status: 'delivered', outcomes: 3, simulated: true, days: 1 });
+      const campaignMail = mail(20, { to: i => `fan${i}@yahoo.com`, status: 'delivered', outcomes: 3, campaign: campaignId, kind: 'marketing', days: 3 });
+      for (const m of campaignMail.slice(0, 2)) Object.assign(m, { status: 'bounced', outcomes: 1 | 4 });
+      const [lintable] = mail(1, { to: () => 'friend@icloud.com', status: 'delivered', outcomes: 3, subject: 'RE: hello', days: 1,
+        html: '<p>Hi {{name}}, your order shipped.</p><div style="display:none">secret words for filters only</div><a href="https://bit.ly/abc">www.shop.example.com</a> <a href="http://localhost:3000/track">track</a>', text: 'Hi {{name}}' });
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, error_code, event_outcomes, campaign_id, provider_id, created_at)
+        SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', m.subject, m.status, m.snapshot, m.simulated, m.error, m.outcomes, m.campaign, CASE WHEN m.outcomes & 1 <> 0 THEN 'ses-' || m.id END,
+          now() - make_interval(days => m.days) FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text, subject text, status text, snapshot jsonb, simulated boolean, error text, outcomes int, campaign text, days int)`,
+        [wid, REGION, `hello@${domain}`, JSON.stringify(mails.map(m => ({ id: m.id, to_address: m.to, subject: m.subject ?? 'Weekly news', status: m.status, simulated: !!m.simulated, error: m.error ?? null, outcomes: m.outcomes, campaign: m.campaign ?? null, days: m.days ?? 1,
+          snapshot: { from: `hello@${domain}`, to: [m.to], cc: [], bcc: [], replyTo: [], region: REGION, kind: m.kind ?? 'transactional', subject: m.subject ?? 'Weekly news', html: m.html ?? '<p>Weekly news</p>', text: m.text, attachments: [], tracking: true, headers: [] } })))]);
+      const event = (email: string, type: string, data: Json, simulated = false) => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at) VALUES ($1,$2,$3,$4,$5,$6,now() - interval '20 hours')`, [unique('event'), wid, email, type, JSON.stringify(data), simulated]);
+      for (const m of bounces) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'General', status: '5.7.515',
+        diagnosticCode: `smtp; 550 5.7.515 Access denied, ${domain} does not meet the required authentication level for ${m.to} from 192.0.2.${m.id.length % 200}` });
+      for (const m of campaignMail.slice(0, 2)) await event(m.id, 'bounce', { bounceType: 'Permanent', bounceSubType: 'NoEmail', status: '5.1.1', diagnosticCode: `smtp; 550 5.1.1 <${m.to}>: user unknown` });
+      for (const m of complaints) await event(m.id, 'complaint', { complaintFeedbackType: 'abuse' });
+      await event(opens[0]!.id, 'open', { isBotEvent: 'Likely' }); await event(opens[1]!.id, 'open', { isBotEvent: false }); await event(opens[2]!.id, 'open', {});
+      for (const m of rejected) await event(m.id, 'reject', { code: 'CONTENT_REJECTED_SPAM', screen: { spam: 0.97, model: 'jev-fixture', threshold: 0.9 } });
+      await db.query(`INSERT INTO hosted_screen_hourly(workspace_id,epoch,hour,screened,rejected) VALUES ($1,'-infinity',date_trunc('hour',now()) - interval '20 hours',50,2)`, [wid]);
+      await db.query(`INSERT INTO audience_consent_audit(id,workspace_id,contact_id,email,status,source,occurred_at) VALUES ($1,$2,'con_x','gone@outlook.com','unsubscribed','rfc8058-post',now() - interval '1 day')`, [unique('cns'), wid]);
+      // Standing: 15 days at 92, no ladder step; a limit request up to 25,000 qualifies.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at) VALUES ($1,'graded',100,92,92,95,10000,10000,'ok',now())`, [wid]);
+      await db.query(`INSERT INTO sender_score_daily(workspace_id,day,accepted,bounced,complained,score,quality,target,daily_limit,step)
+        SELECT $1,(now() AT TIME ZONE 'UTC')::date - n,100,1,0,92,95,92,10000,'ok' FROM generate_series(0,14) n`, [wid]);
+      // Audience: one list with role, mistyped and stale addresses, and an import whose contacts bounced since.
+      await db.query(`INSERT INTO audience_lists(id,workspace_id,name) VALUES ($1,$2,'Newsletter')`, [listId, wid]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed,suppression_reason,suppressed_at,observed_since,last_open_at)
+        SELECT 'con_'||$2||'_'||n, $1, CASE WHEN n <= 10 THEN 'info@corp'||n||'.example.org' WHEN n <= 12 THEN 'person'||n||'@gmial.com' ELSE 'person'||n||'@gmail.com' END,
+          CASE WHEN n <= 100 THEN 'subscribed' ELSE 'unknown' END, n BETWEEN 13 AND 16, CASE WHEN n BETWEEN 13 AND 15 THEN 'hard_bounce' WHEN n = 16 THEN 'complaint' END,
+          CASE WHEN n BETWEEN 13 AND 16 THEN now() - interval '1 day' END, CASE WHEN n <= 110 THEN now() - interval '200 days' END,
+          CASE WHEN n <= 50 THEN now() - interval '190 days' WHEN n <= 110 THEN now() - interval '3 days' END FROM generate_series(1,120) n`, [wid, tag]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1`, [wid, listId]);
+      await db.query(`INSERT INTO audience_imports(id,workspace_id,list_id,status,rows,errors,imported,created_at) VALUES ($1,$2,$3,'committed',
+        (SELECT jsonb_agg(jsonb_build_object('row',n,'email','person'||n||'@'||CASE WHEN n <= 12 THEN 'gmial.com' ELSE 'gmail.com' END,'properties','{}'::jsonb)) FROM generate_series(11,40) n),'[{"row":41,"field":"email","message":"invalid"}]',30,now() - interval '5 days')`, [unique('imp'), wid, listId]);
+      // A campaign whose draft breaks the screen's rules.
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total,prepared,expanded,created_at) VALUES ($1,$2,$3,'done',20,20,20,now() - interval '3 days')`, [campaignId, wid, JSON.stringify({ name: 'Early access', from: `hello@${domain}`, subject: 'SALE!!! EVERYTHING MUST GO',
+        region: REGION, tracking: true, attachments: [], audience: { listId }, defaults: { firstName: 'there' }, previewText: 'Big news',
+        html: '<p>Hi {{firstName}} {{plan}}, click here</p><img src="https://cdn.example.com/hero.png" width="600" height="1800"><a href="https://bit.ly/x">www.shop.example.com</a><a href="http://staging.shop.example.com/offer">Offer</a>' })]);
+
+      // Public DNS for the domain health read, answered here (no network): count the lookups it makes.
+      const dohRecords: Record<string, string[]> = { [`${domain}|TXT`]: ['"v=spf1 include:_spf.google.com include:amazonses.com ~all"'], [`_dmarc.${domain}|TXT`]: ['"v=DMARC1; p=none"'],
+        [`default._bimi.${domain}|TXT`]: ['"v=BIMI1; l=https://example.com/logo.svg"'], [`${mailFrom}|MX`]: [`10 feedback-smtp.${REGION}.amazonses.com.`], [`${mailFrom}|TXT`]: ['"v=spf1 include:amazonses.com ~all"'] };
+      // Swapped in by hand and back in finally: a second t.mock of fetch would restore the fixture's mock after the fixture
+      // restored the real fetch (mocks restore in creation order), leaving every later test without network.
+      const previous = globalThis.fetch, lookups: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'cloudflare-dns.com') return previous(input, init);
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!; lookups.push(`${name}|${type}`);
+        return Response.json({ Status: 0, Answer: (dohRecords[`${name}|${type}`] ?? []).map(data => ({ name: `${name}.`, type: type === 'MX' ? 15 : 16, data })) });
+      };
+      try {
+
+        // Route 8: standing history and the limit request rule.
+        const standing = (await get(`/v1/support/standing?requestedLimit=20000`)).data[0];
+        assert.equal(standing.history.days.length, 15); assert.deepEqual(Object.keys(standing.history.days[0]).sort(), ['accepted', 'bounced', 'complained', 'day', 'limit', 'quality', 'rejected', 'score', 'step']);
+        assert.deepEqual(standing.limitRequest, { eligibleForAutoApproval: true, reasons: [], maxAuto: 25000, requested: 20000 });
+        assert.deepEqual((await get('/v1/support/standing?requestedLimit=30000')).data[0].limitRequest.reasons.map((r: Json) => r.code), ['OVER_AUTO_MAXIMUM']);
+        await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,actor) VALUES ($1,$2,1,now() - interval '10 days','step','ok','warn','{"kind":"system"}')`, [unique('stev'), wid]);
+        await db.query(`UPDATE sender_score_daily SET score = 88 WHERE workspace_id = $1 AND day = (now() AT TIME ZONE 'UTC')::date - 3`, [wid]);
+        const refused = (await get('/v1/support/standing')).data[0];
+        assert.deepEqual(refused.limitRequest.reasons.map((r: Json) => r.code), ['SCORE_BELOW_90', 'RECENT_LADDER_STEP']);
+        assert.deepEqual(refused.history.changes.map((x: Json) => [x.kind, x.from, x.to]), [['step', 'ok', 'warn']]);
+
+        // Route 1: metrics, totals with numerators and denominators; per provider (gmail, microsoft, yahoo, apple, the corp domain).
+        const metrics = await get(`/v1/support/deliverability/metrics?since=${new Date(Date.now() - 7 * 86_400_000).toISOString()}`);
+        const real = mails.filter(m => !m.simulated);
+        assert.equal(metrics.workspaceId, wid); assert.ok(Date.parse(metrics.computedAt) > Date.now() - 60_000);
+        assert.deepEqual([metrics.totals.emails, metrics.totals.simulated, metrics.totals.hardBounced, metrics.totals.complained, metrics.totals.opened, metrics.totals.openedHuman, metrics.totals.clicked, metrics.totals.screenRejected, metrics.totals.unsubscribed],
+          [real.length, 1, 6, 2, 4, 2, 1, 2, 1]);
+        const accepted = real.filter(m => m.outcomes & 1).length;
+        assert.deepEqual(metrics.totals.rates.complaint, { numerator: 2, denominator: accepted, value: Math.round(2 / accepted * 1e6) / 1e6 });
+        assert.deepEqual(metrics.totals.rates.open, { numerator: 4, denominator: metrics.totals.delivered, value: Math.round(4 / metrics.totals.delivered * 1e6) / 1e6 });
+        assert.deepEqual(metrics.screen, { screened: 50, rejected: 2 });
+        assert.ok(metrics.buckets.every((b: Json) => /^\d{4}-\d{2}-\d{2}$/.test(b.at)) && metrics.groups === null);
+        const byProvider = await get(`/v1/support/deliverability/metrics?groupBy=provider`);
+        const group = (key: string) => byProvider.groups.find((g: Json) => g.key === key);
+        assert.deepEqual([group('gmail').complained, group('gmail').provider, group('microsoft').hardBounced, group('yahoo').emails, group(`corp-${tag}.example.org`).provider], [2, 'gmail', 4, 20, 'other']);
+        assert.ok(byProvider.findings.some((f: Json) => f.code === 'COMPLAINT_RATE' && f.scope === 'gmail' && f.evidence.complained === 2), JSON.stringify(byProvider.findings));
+        assert.ok(byProvider.findings.some((f: Json) => f.code === 'HARD_BOUNCE_RATE' && f.scope === 'microsoft' && f.severity === 'critical'));
+        const byStream = await get(`/v1/support/deliverability/metrics?groupBy=stream`);
+        assert.deepEqual(byStream.groups.map((g: Json) => [g.key, g.emails]).sort(), [['marketing', 20], ['transactional', real.length - 20]]);
+        assert.equal((await get(`/v1/support/deliverability/metrics?campaignId=${campaignId}`)).totals.hardBounced, 2);
+        assert.equal((await get(`/v1/support/deliverability/metrics?granularity=hour&groupBy=campaign`)).groups.find((g: Json) => g.key === campaignId), undefined, 'Hourly reads cover 48 hours by default.');
+        // At most 20 groups plus other: 25 recipient domains.
+        const many = Array.from({ length: 25 }, (_, i) => ({ id: unique('email'), to: `x@d${i}-${tag}.example.net` }));
+        await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated, created_at)
+          SELECT m.id, $1, $2, 'fixture', $3, jsonb_build_array(m.to_address), '[]', '[]', 'Hi', 'queued', '{"kind":"transactional"}', false, now() - interval '12 hours' FROM jsonb_to_recordset($4::jsonb) AS m(id text, to_address text)`,
+          [wid, REGION, `hello@${domain}`, JSON.stringify(many.map(m => ({ id: m.id, to_address: m.to })))]);
+        const capped = await get(`/v1/support/deliverability/metrics?groupBy=provider&since=${new Date(Date.now() - 8 * 86_400_000).toISOString()}`);
+        assert.equal(capped.groups.length, 21); assert.equal(capped.groups.at(-1).key, 'other'); assert.ok(capped.groups.at(-1).other && capped.groups.at(-1).emails > 0);
+        // Never an address in an aggregate.
+        const address = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/;
+        for (const body of [metrics, byProvider, capped]) assert.ok(!address.test(JSON.stringify(body)), 'Aggregates name domains, never addresses.');
+        error(await send('GET', '/v1/support/deliverability/metrics?granularity=hour&since=' + new Date(Date.now() - 4 * 86_400_000).toISOString(), support), 422, 'WINDOW_TOO_LONG');
+        error(await send('GET', '/v1/support/deliverability/metrics?since=' + new Date(Date.now() - 40 * 86_400_000).toISOString(), support), 422);
+
+        // Route 2: bounce reasons, grouped and redacted; the first-send rate; authentication findings.
+        const reasons = await get('/v1/support/deliverability/bounces');
+        const auth = reasons.groups.find((g: Json) => g.status === '5.7.515');
+        assert.deepEqual([auth.provider, auth.class, auth.subtype, auth.count, auth.campaigns], ['microsoft', 'bounce', 'Permanent/General', 4, []]);
+        assert.match(auth.diagnostic, /<address> from <ip>$/); assert.ok(auth.diagnostic.length <= 160);
+        assert.deepEqual(reasons.groups.find((g: Json) => g.status === '5.1.1').campaigns, [campaignId]);
+        assert.deepEqual(reasons.complaints, [{ feedbackType: 'abuse', count: 2 }]);
+        assert.deepEqual([reasons.firstSend.numerator, reasons.firstSend.denominator], [2, 20]);
+        assert.deepEqual(reasons.findings.map((f: Json) => f.code).sort(), ['AUTHENTICATION_REJECTED', 'FIRST_SEND_BOUNCES']);
+        assert.ok(!address.test(JSON.stringify(reasons)) && !/192\.0\.2\./.test(JSON.stringify(reasons)), 'Diagnostics are redacted.');
+        assert.deepEqual((await get('/v1/support/deliverability/bounces?provider=yahoo&type=bounce')).groups.map((g: Json) => g.status), ['5.1.1']);
+
+        // Route 3: domain health with one budgeted live DNS read (5 labels), then the 5-minute cache.
+        const health = await get(`/v1/support/domains/${domainId}/health`);
+        assert.deepEqual(lookups.sort(), Object.keys(dohRecords).sort());
+        assert.deepEqual([health.claim.sending, health.claim.dkim, health.claim.mailFrom.domain, health.claim.connection, health.alignment.verdict, health.alignment.returnPath], ['verified', 'SUCCESS', mailFrom, { kind: 'shared', region: REGION }, 'aligned', mailFrom]);
+        assert.deepEqual([health.dns.complete, health.dns.spf.includesAmazonSes, health.dns.spf.lookups, health.dns.spf.all, health.dns.dmarc.p, health.dns.dmarc.rua, health.dns.dmarc.source, health.dns.bimi.logo, health.dns.bimi.authority],
+          [true, true, 2, '~all', 'none', false, 'live', true, false]);
+        assert.deepEqual([health.dns.mailFrom.mx, health.volume.warmupAgeDays, health.streams.campaign], [[`feedback-smtp.${REGION}.amazonses.com`], 3, 20]);
+        assert.deepEqual(health.findings.map((f: Json) => f.code).sort(), ['BIMI_NOT_READY', 'DMARC_NO_REPORTS']);
+        assert.equal((await get(`/v1/support/domains/${domainId}/health`, bearer(plain.token))).computedAt, health.computedAt, 'Results are cached 60 seconds per workspace and parameters.');
+        lookups.length = 0;
+        const { liveDns } = await import('./src/deliverability.js');
+        assert.equal((await liveDns(domain, { domain: mailFrom, region: REGION }, null)).checkedAt, health.dns.checkedAt);
+        assert.deepEqual(lookups, [], 'Live DNS is cached for 5 minutes.');
+        error(await send('GET', `/v1/support/domains/${domainId}/health`, bearer(theirs.token)), 404);
+
+        // Route 4: the screen, with spam scores and subjects capped at 120 characters.
+        const screen = await get('/v1/support/screen');
+        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].spamScore, screen.rejections[0].model, screen.rejections[0].subject.length], [50, 2, 2, 0.97, 'jev-fixture', 120]);
+
+        // Route 5: campaigns with the campaign stats computation; content only with consent.
+        const campaigns = await get('/v1/support/campaigns');
+        const listed = campaigns.data.find((x: Json) => x.id === campaignId);
+        assert.deepEqual([listed.audience.listName, listed.stats.rates.bounce, listed.previewTextLength, 'content' in listed], ['Newsletter', { numerator: 2, denominator: 20, value: 0.1 }, 8, false]);
+        const detail = await get(`/v1/support/campaigns/${campaignId}`);
+        assert.match(detail.content.html, /hero\.png/); assert.equal((await get(`/v1/support/campaigns/${campaignId}`, bearer(plain.token))).content, null, 'No content without the customer’s opt-in.');
+        error(await send('GET', `/v1/support/campaigns/${campaignId}`, bearer(theirs.token)), 404);
+
+        // Route 6: lint; metadata always, content checks with consent (the probation screen's own HTML pass).
+        const emailLint = await get(`/v1/support/emails/${lintable!.id}/lint`);
+        assert.deepEqual([emailLint.metadata.subject.replyWithoutThread, emailLint.metadata.alignment.dkimAligned, emailLint.content.hiddenWords, emailLint.content.links.shorteners, emailLint.content.links.localOrStaging, emailLint.content.unresolvedTokens],
+          [true, true, 5, ['bit.ly'], ['localhost'], ['name']]);
+        assert.deepEqual(emailLint.findings.map((f: Json) => f.code).filter((code: string) => ['MISLEADING_REPLY_PREFIX', 'URL_SHORTENER', 'LINK_TEXT_MISMATCH', 'HIDDEN_TEXT', 'STAGING_LINKS', 'UNRESOLVED_TOKENS'].includes(code)).sort(),
+          ['HIDDEN_TEXT', 'LINK_TEXT_MISMATCH', 'MISLEADING_REPLY_PREFIX', 'STAGING_LINKS', 'UNRESOLVED_TOKENS', 'URL_SHORTENER']);
+        const metadataOnly = ok(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(plain.token)));
+        assert.deepEqual([metadataOnly.contentShared, metadataOnly.content], [false, null]); assert.ok(!JSON.stringify(metadataOnly).includes('bit.ly'));
+        const campaignLint = await get(`/v1/support/campaigns/${campaignId}/lint`);
+        assert.deepEqual([campaignLint.content.images.rulePasses, campaignLint.content.unresolvedTokens, campaignLint.content.links.plainHttp, campaignLint.metadata.listUnsubscribe], [false, ['plan'], 1, true]);
+        assert.ok(['IMAGE_TEXT_RATIO', 'URL_SHORTENER', 'STAGING_LINKS', 'SUBJECT_CAPITALS', 'SUBJECT_PUNCTUATION'].every(code => campaignLint.findings.some((f: Json) => f.code === code)), JSON.stringify(campaignLint.findings.map((f: Json) => f.code)));
+
+        // Route 7: audience health, counts only.
+        const audience = await get('/v1/support/audience/health');
+        const newsletter = audience.lists[0];
+        assert.deepEqual([newsletter.name, newsletter.contacts, newsletter.role, newsletter.typoDomains, newsletter.stale, newsletter.neverObserved, newsletter.suppressedBy, newsletter.subscribed], ['Newsletter', 120, 10, 2, 50, 10, { hard_bounce: 3, complaint: 1 }, 100]);
+        assert.deepEqual([audience.imports[0].imported, audience.imports[0].errors, audience.imports[0].contacts, audience.imports[0].hardBounce.numerator], [30, 1, 30, 3]);
+        assert.ok(['STALE_CONTACTS', 'ROLE_ADDRESSES', 'TYPO_DOMAINS', 'IMPORT_BOUNCES'].every(code => audience.findings.some((f: Json) => f.code === code)));
+        assert.ok(!address.test(JSON.stringify(audience)), 'Audience health never shows an address.');
+
+        // One workspace per aggregate; another customer's workspace is invisible; every read sets the 3-second timeout.
+        error(await send('GET', '/v1/support/deliverability/metrics', bearer(both.token)), 422, 'WORKSPACE_REQUIRED');
+        ok(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${second}`, bearer(both.token)));
+        error(await send('GET', `/v1/support/deliverability/metrics?workspaceId=${other}`, support), 404);
+        error(await send('GET', `/v1/support/emails/${lintable!.id}/lint`, bearer(theirs.token)), 404);
+        assert.equal(ok(await send('GET', '/v1/support/audience/health', bearer(theirs.token))).lists.length, 0);
+        // budgetedRead runs inside the fixture's transaction as a savepoint, so its SET LOCAL is still visible here.
+        assert.equal((await db.query('SHOW statement_timeout')).rows[0].statement_timeout, '3s');
+        // Each aggregate costs 5 of the grant's 120 a minute: 24 of them use it up, a cheap read then gets 429 too.
+        const fresh = await mint({ userId: manager!.userId, ticketRef: 'D-5', verification: 'dmarc', workspaceIds: [wid] });
+        for (let i = 0; i < 24; i++) ok(await send('GET', '/v1/support/screen', bearer(fresh.token)));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/screen', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+        error(await send('GET', '/v1/support/workspaces', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+        await db.query('UPDATE support_grants SET used = 119 WHERE id = $1', [fresh.id]);
+        ok(await send('GET', '/v1/support/workspaces', bearer(fresh.token)));
+        // Every read is audited like the other support routes.
+        assert.ok((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action = 'support.read' AND actor_id = $1 AND summary->>'route' = '/v1/support/deliverability/metrics'`, [content.id])).rows[0].n >= 8);
+      } finally { globalThis.fetch = previous; }
+    });
+  });
+
+  test('Support request logs: Workers Logs lines of the grant’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start' }, observability: undefined });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN }), bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+      const rid = () => `req_${randomUUID().replaceAll('-', '')}`;
+      const operator = await sessionFixture(t), outsider = await sessionFixture(t), other = unique('other-ws'), second = unique('second-ws'), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2),($3,$3,$3)', [other, second, ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$5,$6,'member'),($7,$8,$9,'member')`,
+        [unique('mem'), other, outsider.userId, unique('mem'), second, manager!.userId, unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[operator.userId, outsider.userId]]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support request logs acceptance fixture')`, [operator.userId]);
+      const mint = async (body: Json) => { const grant = ok(await send('POST', '/v1/operator/support/grants', session(operator), { reason: 'Customer asked why their sends fail', verification: 'dmarc', ...body }), 201); secrets.add(grant.token); return grant; };
+      const grant = await mint({ userId: manager!.userId, ticketRef: 'L-1', workspaceIds: [wid] }), both = await mint({ userId: manager!.userId, ticketRef: 'L-2' });
+      const support = bearer(grant.token), get = async (path: string, who = support) => ok(await send('GET', path, who));
+      assert.deepEqual(both.workspaceIds.sort(), [wid, second].sort());
+
+      // Not configured (a Node installation, or no token yet): available false, and nothing is asked.
+      const unconfigured = await get('/v1/support/requests');
+      assert.deepEqual([unconfigured.available, unconfigured.reason, unconfigured.groups, unconfigured.totals, unconfigured.retention], [false, 'not_configured', [], { errors: 0, truncated: false }, '3 days']);
+      assert.deepEqual(Object.keys(unconfigured).sort(), ['available', 'computedAt', 'groups', 'reason', 'retention', 'totals', 'window']);
+      const untraced = await get(`/v1/support/requests/${rid()}`);
+      assert.deepEqual([untraced.found, untraced.logs, untraced.logsAvailable], [false, [], false]);
+
+      // Workers Logs, answered here: the grant's lines, and lines it must never see even when Cloudflare returns them.
+      runtime.config.observability = { token: 'cf-observability-fixture-token', accountId: 'f'.repeat(32), script: 'bane-fixture' };
+      const minutes = (n: number) => Date.now() - n * 60_000, ids = Array.from({ length: 7 }, rid), domainIds = [rid(), rid()], failed = rid(), shared = rid();
+      const line = (minutesAgo: number, source: Json, script = 'bane-fixture') => ({ dataset: 'cloudflare-workers', timestamp: minutes(minutesAgo),
+        $metadata: { id: randomUUID(), message: 'POST https://bane.mx/v1/emails?to=private@example.org', url: 'https://bane.mx/v1/emails?to=private@example.org', region: 'IAD' },
+        $workers: { scriptName: script, eventType: 'fetch', outcome: 'ok' },
+        source: { level: 'warn', timestamp: new Date(minutes(minutesAgo)).toISOString(), service: 'worker', deploy: 'abc1234', event: 'request', method: 'POST', route: '/v1/emails', status: 422,
+          code: 'VALIDATION_FAILED', field: 'to', durationMs: 12.345, principal: 'apiKey', workspace: wid, ...source } });
+      const events = [
+        ...ids.map((requestId, i) => line(i + 1, { requestId })),
+        line(20, { requestId: domainIds[0], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard',
+          message: 'secret message text from private@example.org', ip: '203.0.113.9', userAgent: 'curl/8.4.0', url: '/v1/domains/dom_1?token=abcdef', body: { html: 'private body words' } }),
+        line(25, { requestId: domainIds[1], method: 'GET', route: '/v1/domains/:id', status: 404, code: 'NOT_FOUND', principal: 'dashboard' }),
+        line(30, { requestId: failed, status: 500, code: 'INTERNAL_ERROR', databaseCode: '57014', stack: 'at handler (src/emails.ts:1:1)' }),
+        line(35, { requestId: rid(), method: 'GET', route: '/v1/contacts/someone@example.org', status: 404, code: 'NOT_FOUND' }),
+        line(2, { requestId: shared, workspace: second, route: '/v1/campaigns', code: 'CAMPAIGN_NOT_READY' }),
+        // Never this grant's: another customer's workspace, the grant's own support reads, another Worker, a non-request line.
+        line(3, { requestId: ids[0], workspace: other, route: '/v1/other-secret', code: 'OTHER_WORKSPACE_CODE' }),
+        line(4, { requestId: rid(), workspace: other, status: 500, code: 'OTHER_WORKSPACE_CODE' }),
+        line(5, { requestId: rid(), route: '/v1/support/context', principal: 'support', code: 'WORKSPACE_REQUIRED' }),
+        line(6, { requestId: rid(), code: 'OTHER_SCRIPT' }, 'bane-support'),
+        line(7, { requestId: rid(), event: undefined, status: 500, code: 'NOT_A_REQUEST_LINE' }),
+        line(8, { requestId: rid(), workspace: undefined, status: 401, code: 'UNAUTHORIZED_NO_WORKSPACE' }),
+      ];
+      let outage: { status: number; body: Json } | null = null;
+      const asked: { url: string; authorization: string | null; body: Json }[] = [], warnings: string[] = [];
+      // Swapped in by hand and back in finally (see the deliverability test).
+      const previous = globalThis.fetch, warn = console.warn;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname !== 'api.cloudflare.com') return previous(input, init);
+        asked.push({ url: url.href, authorization: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+        if (outage) return Response.json(outage.body, { status: outage.status });
+        return Response.json({ success: true, errors: [], messages: [], result: { run: { id: 'run' }, events: { count: events.length, events } } });
+      };
+      console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+      try {
+        const eq = (key: string, value: unknown, type = 'string') => ({ key, operation: 'eq', type, value });
+        const workspaceGroup = (list: string[]) => ({ kind: 'group', filterCombination: 'or', filters: list.map(id => eq('workspace', id)) });
+        const listed = await get('/v1/support/requests');
+        // The query: this account and Worker, the token, request lines of the grant's workspace only, errors only, 24 hours.
+        assert.equal(asked.length, 1);
+        const [query] = asked;
+        assert.equal(query!.url, `https://api.cloudflare.com/client/v4/accounts/${'f'.repeat(32)}/workers/observability/telemetry/query`);
+        assert.equal(query!.authorization, 'Bearer cf-observability-fixture-token');
+        assert.deepEqual([query!.body.view, query!.body.limit, query!.body.dry, query!.body.parameters.datasets, query!.body.timeframe.to - query!.body.timeframe.from], ['events', 1000, true, ['cloudflare-workers'], 86_400_000]);
+        assert.deepEqual(query!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), { key: 'status', operation: 'gte', type: 'number', value: 400 }]);
+        // Grouped, most frequent first; the samples are each group's latest five; never another workspace's or a non-customer line.
+        assert.deepEqual([listed.available, listed.reason, listed.retention, listed.totals], [true, undefined, '3 days', { errors: 11, truncated: false }]);
+        assert.deepEqual(listed.groups.map((g: Json) => [g.route, g.method, g.status, g.code, g.principal, g.count]), [
+          ['/v1/emails', 'POST', 422, 'VALIDATION_FAILED', 'apiKey', 7], ['/v1/domains/:id', 'GET', 404, 'NOT_FOUND', 'dashboard', 2],
+          ['/v1/emails', 'POST', 500, 'INTERNAL_ERROR', 'apiKey', 1], ['unmatched', 'GET', 404, 'NOT_FOUND', 'apiKey', 1]]);
+        const [emails, domains] = listed.groups;
+        assert.deepEqual([emails.sampleRequestIds, emails.firstSeen, emails.lastSeen], [ids.slice(0, 5), new Date(events[6]!.timestamp).toISOString(), new Date(events[0]!.timestamp).toISOString()]);
+        assert.deepEqual(domains.sampleRequestIds, domainIds);
+        assert.ok(listed.groups.every((g: Json) => Object.keys(g).sort().join() === 'code,count,firstSeen,lastSeen,method,principal,route,sampleRequestIds,status'));
+        const text = JSON.stringify(listed);
+        for (const leak of [other, second, 'OTHER_WORKSPACE_CODE', '/v1/other-secret', 'WORKSPACE_REQUIRED', '/v1/support/', 'OTHER_SCRIPT', 'NOT_A_REQUEST_LINE', 'UNAUTHORIZED_NO_WORKSPACE',
+          'secret message', '203.0.113', 'curl', 'token=', 'private', '@', 'IAD', '57014', 'src/emails.ts', 'abc1234', 'cf-observability'])
+          assert.ok(!text.includes(leak), `The answer must not carry ${leak}: ${text}`);
+        // Cached 60 seconds per workspaces and parameters.
+        assert.equal((await get('/v1/support/requests')).computedAt, listed.computedAt); assert.equal(asked.length, 1);
+        // The filters reach Cloudflare and are applied here again: the stub returns every line whatever was asked.
+        const fives = await get('/v1/support/requests?status=5xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 500 }]);
+        assert.deepEqual(fives.groups.map((g: Json) => [g.code, g.count, g.sampleRequestIds]), [['INTERNAL_ERROR', 1, [failed]]]);
+        const fours = await get('/v1/support/requests?status=4xx');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(3), [{ key: 'status', operation: 'gte', type: 'number', value: 400 }, { key: 'status', operation: 'lt', type: 'number', value: 500 }]);
+        assert.equal(fours.totals.errors, 10);
+        const narrowed = await get('/v1/support/requests?route=/v1/emails&code=VALIDATION_FAILED');
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters.slice(4), [eq('route', '/v1/emails'), eq('code', 'VALIDATION_FAILED')]);
+        assert.deepEqual(narrowed.groups.map((g: Json) => g.count), [7]);
+        // A grant over two workspaces asks for both; workspaceId narrows to one.
+        const wide = await get('/v1/support/requests', bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2].filters.map((f: Json) => f.value).sort(), [wid, second].sort());
+        assert.equal(wide.totals.errors, 12); assert.ok(wide.groups.some((g: Json) => g.code === 'CAMPAIGN_NOT_READY' && g.sampleRequestIds[0] === shared));
+        const onlySecond = await get(`/v1/support/requests?workspaceId=${second}`, bearer(both.token));
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters[2], workspaceGroup([second]));
+        assert.deepEqual(onlySecond.groups.map((g: Json) => [g.code, g.count]), [['CAMPAIGN_NOT_READY', 1]]);
+        error(await send('GET', `/v1/support/requests?workspaceId=${other}`, support), 404);
+        // Windows: at most 3 days back, since before until.
+        error(await send('GET', `/v1/support/requests?since=${new Date(Date.now() - 4 * 86_400_000).toISOString()}`, support), 422, 'WINDOW_TOO_OLD');
+        error(await send('GET', `/v1/support/requests?since=${new Date().toISOString()}&until=${new Date(Date.now() - 60_000).toISOString()}`, support), 422, 'INVALID_DATE_RANGE');
+        const before = asked.length;
+        error(await send('GET', '/v1/support/requests?route=/v1/emails?to=x', support), 422);
+        assert.equal(asked.length, before, 'A refused read asks nothing.');
+
+        // One request: its lines in the grant's workspaces only (the stub also returns another workspace's line with that ID).
+        const traced = await get(`/v1/support/requests/${ids[0]}`);
+        assert.deepEqual(asked.at(-1)!.body.parameters.filters, [eq('$workers.scriptName', 'bane-fixture'), eq('event', 'request'), workspaceGroup([wid]), eq('requestId', ids[0])]);
+        assert.ok(asked.at(-1)!.body.timeframe.to - asked.at(-1)!.body.timeframe.from >= 3 * 86_400_000);
+        assert.deepEqual([traced.found, traced.logsAvailable, traced.logs.length, traced.note], [true, true, 1, 'Logged, but it changed nothing Bane stores: see logs for its route, status and error code.']);
+        assert.deepEqual(traced.logs[0], { at: new Date(events[0]!.timestamp).toISOString(), route: '/v1/emails', method: 'POST', status: 422, code: 'VALIDATION_FAILED', durationMs: 12.3, principal: 'apiKey', workspaceId: wid });
+        assert.deepEqual((await get(`/v1/support/requests/${shared}`)).logs, [], 'A line of a workspace outside the grant is never shown.');
+        assert.equal((await get(`/v1/support/requests/${shared}`, bearer(both.token))).logs[0].workspaceId, second);
+
+        // Cloudflare failing: 200 with available false, a warning with the HTTP status only, and no cached failure.
+        warnings.length = 0; outage = { status: 500, body: { success: false, errors: [{ code: 10000, message: 'Authentication error for private@example.org' }] } };
+        const since = new Date(Date.now() - 3_600_000).toISOString();
+        const down = await get(`/v1/support/requests?since=${since}`);
+        assert.deepEqual([down.available, down.reason, down.groups, down.totals.errors], [false, 'unavailable', [], 0]);
+        const downTrace = await get(`/v1/support/requests/${ids[1]}`);
+        assert.deepEqual([downTrace.logsAvailable, downTrace.logs, downTrace.found], [false, [], false]);
+        outage = { status: 200, body: { success: false, errors: [{ message: 'Invalid filter' }] } };
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).reason, 'unavailable');
+        const logged = warnings.flatMap(w => { try { return [JSON.parse(w) as Json]; } catch { return []; } }).filter(w => w.code === 'SUPPORT_LOGS_UNAVAILABLE');
+        assert.deepEqual(logged.map(w => w.status), [500, 500, 200]);
+        assert.ok(!warnings.join().includes('Authentication error') && !warnings.join().includes('cf-observability'));
+        outage = null;
+        assert.equal((await get(`/v1/support/requests?since=${since}`)).available, true, 'A failure is not cached.');
+
+        // Each request read costs 5 of the grant's 120 a minute.
+        const fresh = await mint({ userId: manager!.userId, ticketRef: 'L-3', workspaceIds: [wid] });
+        await get(`/v1/support/requests/${ids[2]}`, bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 5);
+        for (let i = 0; i < 23; i++) await get('/v1/support/requests', bearer(fresh.token));
+        assert.equal((await db.query('SELECT used FROM support_grants WHERE id = $1', [fresh.id])).rows[0].used, 120);
+        error(await send('GET', '/v1/support/requests', bearer(fresh.token)), 429, 'REQUEST_RATE_LIMITED');
+      } finally { globalThis.fetch = previous; console.warn = warn; }
+    });
+  });
+
+  test('Support staff sign-in: an operator session gets a 2-minute staff token for the support site; only the binding verifies it, and only while they are an operator', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const jwk = (generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json), key = { kty: 'OKP' as const, crv: 'Ed25519' as const, d: jwk.d as string, x: jwk.x as string };
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [], support: { url: 'https://support.example.com/start', signingKey: key } });
+      const app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const { supportPlatform, supportPlatformAllows, signSupportToken } = await import('./src/support-platform.js');
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const operator = await sessionFixture(t), member = await sessionFixture(t);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator:read', 'support staff sign-in acceptance fixture')`, [operator.userId]);
+      const callback = 'https://support.example.com/staff/callback';
+      const signIn = (to: string, who = operator) => send('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(to)}`, session(who));
+
+      // An operator's dashboard session: 302 to exactly the callback, carrying a 2-minute EdDSA JWS with today's key ID.
+      const signed = await signIn(callback);
+      assert.equal(signed.status, 302, JSON.stringify(signed.body));
+      const location = new URL(signed.headers.get('location')!);
+      assert.deepEqual([location.origin + location.pathname, [...location.searchParams.keys()], signed.headers.get('cache-control')], [callback, ['staff'], 'no-store']);
+      const token = location.searchParams.get('staff')!, [header, payload, signature] = token.split('.') as [string, string, string];
+      const head = JSON.parse(Buffer.from(header, 'base64url').toString()), claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
+      const jwks = ok(await send('GET', '/v1/public/support-keys'));
+      assert.deepEqual([head.alg, head.kid], ['EdDSA', jwks.keys[0].kid]);
+      const verifier = await crypto.subtle.importKey('jwk', jwks.keys[0], { name: 'Ed25519' }, false, ['verify']);
+      assert.ok(await crypto.subtle.verify({ name: 'Ed25519' }, verifier, Buffer.from(signature, 'base64url'), new TextEncoder().encode(`${header}.${payload}`)));
+      assert.deepEqual([claims.iss, claims.aud, claims.sub, claims.email, claims.role, claims.exp - claims.iat], [runtime.config.publicUrl, 'bane-support-staff', operator.userId, operator.email, 'operator:read', 120]);
+      assert.match(claims.jti, /^sst_[0-9a-f]{32}$/); assert.ok(Math.abs(claims.iat - Date.now() / 1000) < 60);
+      const audit = (await db.query(`SELECT actor_type, actor_id, user_id, workspace_id, internal, summary FROM audit_events WHERE action = 'support.staff_sign_in' AND actor_id = $1`, [operator.userId])).rows;
+      assert.deepEqual(audit.map(r => [r.actor_type, r.user_id, r.workspace_id, r.internal, r.summary.jti]), [['operator', operator.userId, null, true, claims.jti]]);
+
+      // The support Worker verifies it through the binding: the operator as they are now, and the jti and expiry for single use.
+      assert.deepEqual(await platform.verifyStaff(token), { ok: true, staff: { userId: operator.userId, email: operator.email, role: 'operator:read' }, jti: claims.jti, expiresAt: new Date(claims.exp * 1000).toISOString() });
+
+      // Refused: a session that is not an operator's, any other return, the binding asking for a sign-in, a dashboard verifying.
+      error(await signIn(callback, member), 403, 'OPERATOR_REQUIRED');
+      for (const wrong of [`${callback}?next=/tickets`, `${callback}#x`, `${callback}/`, 'https://support.example.com/staff/other', 'https://support.example.com/start', 'https://evil.example.com/staff/callback',
+        'http://support.example.com/staff/callback', 'https://support.example.com.evil.example/staff/callback', 'https://staff@support.example.com/staff/callback', '/staff/callback', 'not a url'])
+        error(await signIn(wrong), 422, 'RETURN_URL_INVALID');
+      assert.equal(supportPlatformAllows('GET', '/v1/operator/support/staff-sign-in'), false);
+      assert.equal(supportPlatformAllows('POST', '/v1/operator/support/staff/verify'), true);
+      const viaBinding = await platform.call<Json>('GET', `/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`);
+      assert.deepEqual([viaBinding.status, viaBinding.body.error.code], [404, 'NOT_FOUND']);
+      // Past its allow-list, the route itself still refuses the binding.
+      const bypass = await app.fetch(new Request(`${PUBLIC_ORIGIN}/v1/operator/support/staff-sign-in?return=${encodeURIComponent(callback)}`), { ...runtime, platformCaller: 'bane-support' });
+      assert.deepEqual([bypass.status, bypass.headers.get('location')], [403, null]);
+      error(await send('POST', '/v1/operator/support/staff/verify', session(operator), { token }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+      error(await send('POST', '/v1/operator/support/staff/verify', session(member), { token }), 403, 'OPERATOR_REQUIRED');
+
+      // Tokens Bane did not issue for staff sign-in, or that are past their two minutes, or whose subject is no operator.
+      const now = Math.floor(Date.now() / 1000), sign = (extra: Json, with_ = key) => signSupportToken(with_, { ...claims, ...extra });
+      const other = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json;
+      const invalid = [`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`, `${header}.${Buffer.from(JSON.stringify({ ...claims, sub: member.userId })).toString('base64url')}.${signature}`,
+        await sign({ aud: 'bane-support' }), await sign({ iss: 'https://other.example.com' }), await sign({ exp: now + 3600 }), await sign({ jti: 'sho_' + '0'.repeat(32) }),
+        await sign({}, { kty: 'OKP', crv: 'Ed25519', d: other.d, x: other.x }), '', 'a.b.c'];
+      for (const bad of invalid) assert.deepEqual(await platform.verifyStaff(bad), { ok: false, code: 'STAFF_INVALID' }, bad);
+      assert.deepEqual(await platform.verifyStaff(await sign({ iat: now - 300, exp: now - 180 })), { ok: false, code: 'STAFF_EXPIRED' });
+      assert.deepEqual(await platform.verifyStaff(await sign({ sub: member.userId })), { ok: false, code: 'NOT_OPERATOR' });
+      // Demoted since: the same valid token no longer signs them in, nor can they ask for another.
+      await db.query('DELETE FROM platform_operators WHERE user_id = $1', [operator.userId]);
+      assert.deepEqual(await platform.verifyStaff(token), { ok: false, code: 'NOT_OPERATOR' });
+      error(await signIn(callback), 403, 'OPERATOR_REQUIRED');
     });
   });
 
@@ -8971,7 +9428,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Node has no DO host; provide only its base constructor, storage and waitUntil.
       const { registerHooks } = await import('node:module');
       const hook = registerHooks({ resolve(specifier, context, next) {
-        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
       } });
       const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
       const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
@@ -18442,7 +18899,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         registerHooks({ resolve(specifier, context, next) {
           if (faultResolver) faultResolver(specifier);
           if (specifier === 'cloudflare:workers') {
-            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
+            return { shortCircuit: true, url: 'data:text/javascript,export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } } export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }' };
           }
           const resolved = next(specifier, context);
           loadedModules.add(resolved.url);

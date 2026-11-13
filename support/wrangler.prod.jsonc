@@ -1,0 +1,64 @@
+// Bane support, production (support.bane.mx): the support agent's Worker beside bane-production in anomaly-production. Service bindings
+// only work inside one account, so dev binds bane-dev and production binds bane-production. See support/README.md for
+// the one-time setup (D1 database, address, webhook, secrets) and the deploy.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bane-support",
+  "account_id": "15d29c8639fd3733b1b5486a2acfd968",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "support.bane.mx", "custom_domain": true }],
+  "minify": true,
+  // The system prompt and the voice guide are Markdown files bundled as text.
+  "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
+  "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }, { "name": "INTAKE", "class_name": "SupportIntake" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }, { "tag": "v2", "new_sqlite_classes": ["SupportIntake"] }],
+  // Created 2026-11-13 in anomaly-production (ENAM).
+  "d1_databases": [{ "binding": "DB", "database_name": "bane-support", "database_id": "89176622-b4a7-4075-af7c-5f479729f7b9", "migrations_dir": "migrations" }],
+  // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
+  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "bane-support-uploads" }],
+  // Downscales screenshots too large to send to the model (Cloudflare Images binding; optional in code).
+  "images": { "binding": "IMAGES" },
+  "services": [
+    // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
+    { "binding": "BANE", "service": "bane-production", "entrypoint": "SupportPlatform" },
+    // Bane's public API, called with the support address's inbox key.
+    { "binding": "BANE_API", "service": "bane-production" }
+  ],
+  // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
+  "ratelimits": [
+    { "name": "CHAT_START", "namespace_id": "8794101", "simple": { "limit": 5, "period": 60 } },
+    // Per sender address; and one key across all inbound mail at a higher rate (the Worker answers 503, Bane retries).
+    { "name": "EMAIL_IN", "namespace_id": "8794102", "simple": { "limit": 10, "period": 60 } },
+    { "name": "EMAIL_IN_GLOBAL", "namespace_id": "8794103", "simple": { "limit": 120, "period": 60 } }
+  ],
+  // 00:10 UTC: yesterday's over-cap digest to the team, and the retention sweep (src/limits.ts daily()).
+  "triggers": { "crons": ["10 0 * * *"] },
+  "vars": {
+    "STAGE": "production",
+    "PUBLIC_URL": "https://support.bane.mx",
+    "DASHBOARD_ORIGINS": "https://bane.mx",
+    "BANE_ORIGIN": "https://bane.mx",
+    "SUPPORT_ADDRESS": "support@bane.mx",
+    // The inbound address ID (adr_…) of SUPPORT_ADDRESS in the platform workspace (ws_90b0…); set after creating it.
+    "SUPPORT_ADDRESS_ID": "",
+    "TICKET_TO": "ryan@anoma.ly",
+    // Straight to tickets, never to the agent (src/intake.ts): their own webhook and inbox key.
+    "INTAKE_ADDRESSES": "abuse@bane.mx,privacy@bane.mx,legal@bane.mx",
+    // Console's inference gateway (Anthropic Messages API). The key is the CONSOLE_GATEWAY_KEY secret.
+    "GATEWAY_URL": "https://opencode.ai/inference/anthropic/v1"
+  },
+  // Secrets, set with `wrangler secret put <NAME> --config wrangler.prod.jsonc` (never through CI):
+  // CONSOLE_GATEWAY_KEY, SUPPORT_ROOT_SECRET, BANE_INBOUND_WEBHOOK_SECRET, BANE_SUPPORT_INBOX_KEY,
+  // BANE_INTAKE_WEBHOOK_SECRET, BANE_INTAKE_INBOX_KEY.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
+}
