@@ -41,8 +41,8 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
-  // The support chat: Help at the bottom of the sidebar (in the top bar on a phone or tablet), one conversation for the
-  // whole visit that stays open across pages.
+  // The support chat: Help in the page's bottom-right corner (in the top bar on a phone or tablet), one conversation for
+  // the whole visit that stays open across pages.
   const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
@@ -206,7 +206,7 @@ export function AppShell() {
     <TabBar links={links} intent={intent} footer={footer} locked={locked} />
     {supportHost}
   </div>
-  return <div className="app-shell">
+  return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
@@ -214,10 +214,11 @@ export function AppShell() {
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
       <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
-      <div className="sidebar-footer">{footer}{support.mode && <div className="sidebar-help"><SupportTrigger chat={support} /></div>}</div>
+      <div className="sidebar-footer">{footer}</div>
     </aside>
     {scoreHost}
     {main}
+    {support.mode && <SupportTrigger chat={support} floating />}
     {supportHost}
   </div>
 }

@@ -262,12 +262,26 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .contact-support__reference { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
 .contact-support__reference code { overflow-wrap: anywhere; }
 .contact-support__link { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; }
-/* Help (components/SupportChat.tsx): the support chat's button, bottom left of the sidebar, its glyph in line with the
-   page links above; in the top bar on a phone or tablet. A dot marks a reply that arrived while the chat was closed. */
-.sidebar-help { display: flex; margin-left: -6px; }
+/* Help (components/SupportChat.tsx). On a desktop: a small raised button in the page's bottom-right corner, clear of a
+   classic scrollbar, with the chat docked above it. Every page keeps its last line (pagination, a reply box) above the
+   button, and notices rise above it, or to the left of the open chat. On a phone or tablet: in the top bar. A dot marks a
+   reply that arrived while the chat was closed. */
+:root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
+.app-shell--support .page-surface { padding-bottom: calc(var(--space-16) + var(--launcher-size) + var(--space-8)); }
+.ui-button.support-launcher { position: fixed; right: var(--launcher-inset); bottom: var(--launcher-inset); z-index: 41; width: var(--launcher-size); height: var(--launcher-size); padding: 0; border-radius: var(--radius-sm); color: var(--color-muted); box-shadow: var(--shadow-popover); }
+.ui-button.support-launcher[aria-expanded='true'], .ui-button.support-launcher:focus-visible { color: var(--color-text); }
+@media (hover: hover) and (pointer: fine) { .ui-button.support-launcher:hover { color: var(--color-text); transition-duration: 0ms; } }
+.support-launcher__icons { display: inline-grid; place-items: center; }
+.support-launcher__icons > svg { grid-area: 1 / 1; transition: opacity 140ms ease-out, transform 240ms var(--ease-out-strong); }
+.support-launcher__icons > svg:last-child, [aria-expanded='true'] > .support-launcher__icons > svg:first-child { opacity: 0; transform: scale(.6) rotate(-45deg); }
+[aria-expanded='true'] > .support-launcher__icons > svg:last-child { opacity: 1; transform: none; }
+body:has(.support-launcher) .ui-toasts { right: var(--launcher-inset); bottom: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); }
+body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
 .support-trigger { position: relative; }
-.support-trigger[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
+.support-trigger:not(.support-launcher)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
 .support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
+.support-launcher::before { top: -2px; right: -2px; box-shadow: 0 0 0 2px var(--color-surface); }
 .support-trigger[data-unread]::before { opacity: 1; transform: none; }
 .mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: -8px; }
 .mobile-bar .support-trigger::before { top: 11px; right: 11px; }
+@media (prefers-reduced-motion: reduce) { .support-launcher__icons > svg { transform: none !important; transition: opacity 150ms ease-out !important; } }

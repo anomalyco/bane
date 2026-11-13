@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
-import { MessageCircleQuestionMark } from 'lucide-react'
+import { ChevronDown, MessageCircleQuestionMark } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
 import { IconButton } from './ui'
@@ -39,10 +39,14 @@ export function useSupportChat({ demoApi, hosted }: { demoApi: boolean; hosted: 
     setOpen: (next: boolean) => { if (next) setUsed(true); setOpen(next) } }
 }
 
-export function SupportTrigger({ chat }: { chat: SupportChat }) {
-  return <IconButton id="support-trigger" className="support-trigger" size="sm" label={chat.unread ? 'Help (new reply)' : 'Help'} aria-haspopup="dialog" aria-expanded={chat.open} aria-controls={chat.used ? 'support-panel' : undefined}
-    data-unread={chat.unread || undefined} onPointerEnter={chat.preload} onFocus={chat.preload} onPointerDown={chat.preload} onClick={() => chat.setOpen(!chat.open)}>
-    <MessageCircleQuestionMark size={16} />
+// Help: on a desktop a small raised button in the page's bottom-right corner (floating), whose icon turns into a chevron
+// while the chat is open above it; in the top bar on a phone or tablet.
+export function SupportTrigger({ chat, floating = false }: { chat: SupportChat; floating?: boolean }) {
+  const label = chat.open ? 'Close help' : chat.unread ? 'Help (new reply)' : 'Help'
+  return <IconButton id="support-trigger" className={floating ? 'support-trigger support-launcher' : 'support-trigger'} variant={floating ? 'secondary' : 'ghost'} size="sm" label={label}
+    aria-haspopup="dialog" aria-expanded={chat.open} aria-controls={chat.used ? 'support-panel' : undefined} data-unread={chat.unread || undefined}
+    onPointerEnter={chat.preload} onFocus={chat.preload} onPointerDown={chat.preload} onClick={() => chat.setOpen(!chat.open)}>
+    {floating ? <span className="support-launcher__icons" aria-hidden="true"><MessageCircleQuestionMark size={16} /><ChevronDown size={16} /></span> : <MessageCircleQuestionMark size={16} />}
   </IconButton>
 }
 
