@@ -56,20 +56,28 @@ function readCursor(cursor?: string) {
   if (!Number.isFinite(Date.parse(at))) throw new ApiError(422, 'INVALID_CURSOR', 'Use nextCursor from the previous page.', 'cursor');
   return { at, key: cursor.slice(split + 1) };
 }
-type Audit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string };
-/** Idempotency, If-Match and the audit row around one mutation, all in one transaction. */
-async function mutate<T>(c: Ctx, operator: OperatorIdentity, workspaceId: string, body: unknown, work: (tx: DbExecutor, expectVersion: number | undefined) => Promise<{ result: T; audit: Audit }>): Promise<T> {
+export type OperatorAudit = { action: string; before?: unknown; after?: unknown; reason: string; ticketRef?: string };
+/** What an Idempotency-Key is bound to: the method, path and body of the request that first used it. */
+export const operatorRequestHash = (c: Ctx, body: unknown) => createHash('sha256').update(JSON.stringify([c.req.method, c.req.path, body])).digest('hex');
+/** The audit row for one operator change. Call it inside the transaction that makes the change. */
+export const writeOperatorAudit = (tx: DbExecutor, c: Ctx, operator: OperatorIdentity, workspaceId: string, audit: OperatorAudit) => tx.execute(sql`INSERT INTO hosted_operator_audit(workspace_id,action,details,operator_id,via,reason,ticket_ref,request_id,before,after)
+  VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role })}::jsonb,${operator.userId},'console',${audit.reason},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
+    ${JSON.stringify(audit.before ?? null)}::jsonb,${JSON.stringify(audit.after ?? null)}::jsonb)`);
+/**
+ * Idempotency, If-Match and the audit row around one mutation, all in one transaction. Billing's operator tools use it
+ * too, with their own writer (the audit trail's billing.* rows, kept 7 years) instead of hosted_operator_audit.
+ */
+export async function mutate<T>(c: Ctx, operator: OperatorIdentity, workspaceId: string, body: unknown, work: (tx: DbExecutor, expectVersion: number | undefined) => Promise<{ result: T; audit: OperatorAudit }>,
+  writeAudit: (tx: DbExecutor, audit: OperatorAudit) => Promise<unknown> = (tx, audit) => writeOperatorAudit(tx, c, operator, workspaceId, audit)): Promise<T> {
   const key = c.req.header('Idempotency-Key'), match = c.req.header('If-Match'), expectVersion = match ? Number(match.replaceAll('"', '')) : undefined;
-  const hash = createHash('sha256').update(JSON.stringify([c.req.method, c.req.path, body])).digest('hex');
+  const hash = operatorRequestHash(c, body);
   return c.env.db.transaction(async tx => {
     if (key) {
       const { rows: [prior] } = await tx.execute<{ request_hash: string; response: T }>(sql`SELECT request_hash,response FROM operator_idempotency WHERE operator_id=${operator.userId} AND key=${key} FOR UPDATE`);
       if (prior) { if (prior.request_hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This Idempotency-Key was used for a different request.'); return prior.response; }
     }
     const { result, audit } = await work(tx, expectVersion);
-    await tx.execute(sql`INSERT INTO hosted_operator_audit(workspace_id,action,details,operator_id,via,reason,ticket_ref,request_id,before,after)
-      VALUES(${workspaceId},${audit.action},${JSON.stringify({ operatorRole: operator.role })}::jsonb,${operator.userId},'console',${audit.reason},${audit.ticketRef ?? null},${c.get('requestId') ?? null},
-        ${JSON.stringify(audit.before ?? null)}::jsonb,${JSON.stringify(audit.after ?? null)}::jsonb)`);
+    await writeAudit(tx, audit);
     if (key) await tx.execute(sql`INSERT INTO operator_idempotency(operator_id,key,request_hash,response) VALUES(${operator.userId},${key},${hash},${JSON.stringify(result)}::jsonb)`);
     return result;
   });

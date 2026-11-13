@@ -21,6 +21,8 @@ const AUTHENTICATED_CREATES = [
   /^\/v1\/(?:contacts|lists|segments|contact-imports|templates|template-assets|webhooks|api-keys|agent-tokens|endpoints|inbox-connections)$/,
   /^\/v1\/template-assets\/import$/,
   /^\/v1\/routing\/routes$/,
+  // A retried top-up returns the same Checkout link or charge instead of starting a second payment.
+  /^\/v1\/billing\/(?:top-ups|top-up-links)$/,
 ];
 const MAILBOX_CREATES = [/^\/v1\/inboxes$/, /^\/v1\/inbound\/(?:addresses|keys|webhooks)$/, /^\/v1\/inbound\/domains\/[^/]+\/subdomains$/];
 // Field names that hold credentials at any depth (createInbox nests its key under credential.secret).

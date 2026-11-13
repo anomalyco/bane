@@ -14,7 +14,9 @@ import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { AccountSwitcher } from './AccountSwitcher'
 import { StandingBanner } from './StandingBanner'
+import { BillingBanner } from './BillingBanner'
 import { LegalFooterLinks } from './LegalLinks'
+import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
@@ -41,6 +43,9 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
+  // The support chat: Help in the page's bottom-right corner (in the top bar on a phone or tablet), one conversation for
+  // the whole visit that stays open across pages.
+  const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant, staff: Boolean(session?.identity?.operator || session?.identity?.billing?.free) })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
@@ -181,8 +186,10 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     <LegalFooterLinks />
   </>
+  const supportHost = support.mode && <SupportHost chat={support} />
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <StandingBanner />
+    <BillingBanner />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
       {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
         : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
@@ -195,13 +202,15 @@ export function AppShell() {
     <header className="mobile-bar">
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
       <div className="mobile-bar__context">{context}</div>
+      {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
     </header>
     {scoreHost}
     {main}
     <TabBar links={links} intent={intent} footer={footer} locked={locked} />
+    {supportHost}
   </div>
-  return <div className="app-shell">
+  return <div className={support.mode ? 'app-shell app-shell--support' : 'app-shell'}>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
@@ -213,6 +222,8 @@ export function AppShell() {
     </aside>
     {scoreHost}
     {main}
+    {support.mode && <SupportTrigger chat={support} floating />}
+    {supportHost}
   </div>
 }
 

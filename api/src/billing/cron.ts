@@ -20,6 +20,11 @@ export async function billingHourly(runtime: Runtime): Promise<void> {
     VALUES ('billing:daily', (date_trunc('day', now() AT TIME ZONE 'UTC') + interval '1 day 5 minutes') AT TIME ZONE 'UTC')
     ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
   if (elected.length) await billingDaily(runtime);
+  // Free workspaces whose flag expired, or whose free owner changed, are re-evaluated before the hour is priced.
+  try {
+    const { rows: [r] } = await runtime.db.execute<{ n: number }>(sql`SELECT billing_free_sweep() AS n`);
+    if (r?.n) log('info', { code: 'BILLING_FREE_SWEPT', workspaces: r.n });
+  } catch (error) { log('error', { code: 'BILLING_FREE_SWEEP_FAILED', message: error instanceof Error ? error.message : String(error) }); }
   await settleClosedHours(runtime);
   // Prepaid credit expires 12 months after purchase: only real money moves, so only under enforce.
   if (cfg.mode === 'enforce') try { await creditExpiry(runtime); } catch (error) { log('error', { code: 'BILLING_CREDIT_EXPIRY_FAILED', message: error instanceof Error ? error.message : String(error) }); }

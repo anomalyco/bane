@@ -68,6 +68,16 @@ SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delive
 // The receiving MVP (routing, rituals, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
 // listed here by ID so the report shows it as skipped, never silently covered.
+// Billing: reads run in the plan-usage step. Moving money needs a signed-in owner (or, for a top-up link, a Stripe
+// Checkout session a person pays); the isolated acceptance suite covers them against a fake Stripe.
+Object.assign(SKIP, {
+  createBillingTopUp: dashboard,
+  updateBillingAutoRecharge: dashboard,
+  createBillingCardSetup: dashboard,
+  deleteBillingPaymentMethod: dashboard,
+  createBillingTopUpLink: 'Opens a Stripe Checkout session for a person to pay; covered by isolated acceptance with a fake Stripe.',
+  getBillingPayment: 'Needs a run-owned payment; the E2E workspace never pays. Covered by isolated acceptance.',
+});
 const receivingMvp = 'Receiving MVP: covered by isolated acceptance; live steps follow the dev R2 mail-store rollout.';
 Object.assign(SKIP, {
   getRouting: receivingMvp,
@@ -943,10 +953,16 @@ async function run() {
     await step('Regional metrics, sender score and plan usage for this run window', async () => {
       const sender = await api('getSenderScore', {});
       check(sender.state === 'warmup' ? sender.score === null : sender.score !== null && sender.score >= 0 && sender.score <= 100, 'sender score outside its grading range');
-      // Plan & usage: pricing is information only, this run's sends are in the month, a manage key sees the received count
-      // (members and read-only keys get null), and the daily limit names its steps.
+      // Plan & usage: the price, this run's sends are in the month, a manage key sees the received count (members and
+      // read-only keys get null), and the daily limit names its steps.
       const usage = await api('getUsage', {});
-      check(usage.billing.enabled === false && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 3 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      // Billing as a manage key reads it: the balance and state, today's metered usage, and the ledger and payments pages.
+      const bill = await api('getBilling', {});
+      check(bill.balance !== null && bill.free.emails.limit === usage.pricing.freeEmails && ['off', 'shadow', 'enforce'].includes(bill.enforcement), 'billing summary without amounts for a manage key');
+      const metered = await api('getBillingUsage', { query: { granularity: 'day' } });
+      check(Array.isArray(metered.data) && metered.data.every(p => /^\d+$/.test(p.quantity)), 'billing usage is not a list of integer quantities');
+      for (const list of [await api('listBillingLedger', { query: { limit: 5 } }), await api('listBillingPayments', { query: { limit: 5 } })]) check(Array.isArray(list.data) && list.data.length <= 5, 'billing page over its limit');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
       check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
     });

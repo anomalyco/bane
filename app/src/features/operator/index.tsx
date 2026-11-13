@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Checkbox, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, StatusBadge, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge, Switch, Tabs, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingStep } from '../../data/types'
@@ -137,11 +137,20 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
     { ...def(domainColumnDefs, 'mailFrom'), render: d => yes(d.mailFrom), cardRender: d => `MAIL FROM ${d.mailFrom ? 'on' : 'off'}` },
     { ...def(domainColumnDefs, 'dmarc'), render: d => d.dmarc ? label(d.dmarc) : 'None', cardRender: d => `DMARC ${d.dmarc ?? 'none'}` },
   ]
+  const billing = useQuery({ queryKey: ['operator', 'billing', data.workspace.id], queryFn: ({ signal }) => operatorApi.billing(data.workspace.id, signal) })
+  const [freeAction, setFreeAction] = useState<FreeAction | null>(null)
+  const personFree = (userId: string) => billing.data?.free.people.find(p => p.userId === userId)?.free ?? null
   const memberColumns: Column<OperatorMember>[] = [
     { ...def(memberColumnDefs, 'email'), render: m => <PrivateAddress value={m.email} /> },
     { ...def(memberColumnDefs, 'role'), render: m => label(m.role) },
     { ...def(memberColumnDefs, 'user'), render: m => <span className="op-muted-id">{m.userId}</span> },
+    { ...def(memberColumnDefs, 'billing'), render: m => !billing.data ? <SkeletonText width={96} /> : personFree(m.userId)?.live ? <span className="op-cell" title={personFree(m.userId)!.reason}>Free account{personFree(m.userId)!.until ? ` · until ${when(personFree(m.userId)!.until)}` : ''}</span> : <span className="muted">Billed</span> },
+    { ...def(memberColumnDefs, 'actions'), render: m => canAct && billing.data ? <DropdownMenu label={`Billing for ${m.email}`} title="Billing" items={[personFree(m.userId)
+      ? { label: 'End free account…', onSelect: () => setFreeAction({ kind: 'person', on: false, userId: m.userId, key: crypto.randomUUID() }) }
+      : { label: 'Make account free…', onSelect: () => setFreeAction({ kind: 'person', on: true, userId: m.userId, key: crypto.randomUUID() }) }]} /> : null },
   ]
+  const free = billing.data?.free
+  const billingState = !free ? null : free.free ? `Free (not billed) · ${free.via === 'workspace' ? 'workspace flag' : 'an owner’s free account'}${free.until ? ` · until ${when(free.until)}` : ''}` : `Billed · ${label(billing.data?.account?.paid_mode ?? 'prepaid')}`
   const campaignColumns: Column<OperatorCampaign>[] = [
     { ...def(campaignColumnDefs, 'name'), render: c => <span className="op-cell">{c.name}</span> },
     { ...def(campaignColumnDefs, 'state'), render: c => <StatusBadge status={c.state} /> },
@@ -179,7 +188,19 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
     </div>
     <section className="op-section"><SectionHeader title="Factors" /><DataTable className="op-table" rows={score.factors} rowKey={f => f.key} columns={factorColumns} empty={<EmptyState title="No factors yet" />} /></section>
     <section className="op-section"><SectionHeader title="Domains" /><DataTable className="op-table" rows={data.domains} rowKey={d => d.name} columns={domainColumns} empty={<EmptyState title="No domains" />} /></section>
+    <section className="op-section" aria-labelledby="op-billing"><SectionHeader title={<span id="op-billing">Billing</span>} />
+      <dl className="op-rows op-rows--single">
+        <div><dt>Billing</dt><dd title={billingState ?? undefined}>{billingState ?? <SkeletonText width={220} />}</dd></div>
+        <div><dt>Free (not billed)</dt><dd className="op-free">{!free ? <ControlSkeleton width={36} /> : <>
+          <span title={canAct ? undefined : 'Needs the operator role'}><Switch label={<span className="sr-only">Free (not billed)</span>} checked={Boolean(free.workspace && !free.workspace.expired)} disabled={!canAct}
+            onCheckedChange={on => setFreeAction({ kind: 'workspace', on, key: crypto.randomUUID() })} /></span>
+          <span className="muted op-cell" title={free.workspace?.reason ?? undefined}>{free.workspace ? `${free.workspace.expired ? 'Ended' : 'Since'} ${when(free.workspace.expired ? free.workspace.until : free.workspace.at)}${!free.workspace.expired && free.workspace.until ? ` · until ${when(free.workspace.until)}` : ''} · ${free.workspace.reason ?? ''}` : 'This workspace’s own flag'}</span>
+        </>}</dd></div>
+        <div><dt>Free owners</dt><dd>{!free ? <SkeletonText width={160} /> : number(free.people.filter(p => p.role === 'owner' && p.free?.live).length)}</dd></div>
+      </dl>
+    </section>
     <section className="op-section"><SectionHeader title="Members" /><DataTable className="op-table" rows={data.members} rowKey={m => m.userId} columns={memberColumns} empty={<EmptyState title="No members" />} /></section>
+    <FreeDialog action={freeAction} workspaceId={data.workspace.id} onClose={() => setFreeAction(null)} />
     <section className="op-section"><SectionHeader title="Campaigns" /><DataTable className="op-table" rows={data.campaigns} rowKey={c => c.id} columns={campaignColumns} empty={<EmptyState title="No active or quarantined campaigns" />} /></section>
     <Timeline workspaceId={data.workspace.id} />
   </div>
@@ -233,6 +254,42 @@ const actionCopy: Record<ActionKind, { title: string; description: string; confi
   campaign: { title: 'Release this campaign?', description: 'The quarantined campaign resumes where it stopped.', confirm: 'Release campaign', done: 'Campaign released' },
 }
 // Each opening has its own Idempotency-Key, and every submit sends If-Match with the standing version it was decided on.
+// Free (not billed): a workspace's own flag, or a person's (every workspace they own while they own it). Operators only;
+// the reason goes into the audit log. An end date is optional.
+type FreeAction = { kind: 'workspace' | 'person'; on: boolean; userId?: string; key: string }
+function FreeDialog({ action, workspaceId, onClose }: { action: FreeAction | null; workspaceId: string; onClose: () => void }) {
+  const last = useRef(action)
+  if (action) last.current = action
+  const shown = action ?? last.current
+  const title = !shown ? '' : shown.kind === 'workspace' ? shown.on ? 'Make this workspace free?' : 'Bill this workspace again?' : shown.on ? 'Make this person’s account free?' : 'End this person’s free account?'
+  const description = !shown ? undefined : shown.kind === 'workspace'
+    ? shown.on ? 'It is never gated or charged; usage is still measured. The customer sees “Free plan (courtesy of Anomaly)”.' : 'Usage settled from now on is charged again, unless an owner has a free account.'
+    : shown.on ? 'Every workspace this person owns is free while they own it. It binds to their sign-in, not their email.' : 'The workspaces they own are billed again unless they are free on their own.'
+  return <Dialog open={action !== null} onOpenChange={next => { if (!next) onClose() }} title={title} description={description}>
+    {shown && <FreeForm key={shown.key} action={shown} workspaceId={workspaceId} onClose={onClose} />}
+  </Dialog>
+}
+function FreeForm({ action, workspaceId, onClose }: { action: FreeAction; workspaceId: string; onClose: () => void }) {
+  const client = useQueryClient(), toast = useToast()
+  const [reason, setReason] = useState(''), [ticket, setTicket] = useState(''), [until, setUntil] = useState(''), [tried, setTried] = useState(false)
+  const reasonError = reason.trim().length < 10 ? 'At least 10 characters.' : reason.trim().length > 1000 ? 'At most 1,000 characters.' : ''
+  const untilError = until && !(Date.parse(until) > Date.now()) ? 'A time in the future.' : ''
+  const mutation = useMutation({
+    mutationFn: () => {
+      const input = { free: action.on, reason, ticketRef: ticket, until: until ? new Date(until).toISOString() : null }, guard = { idempotencyKey: action.key }
+      return action.kind === 'workspace' ? operatorApi.workspaceFree(workspaceId, input, guard) : operatorApi.personFree(action.userId!, input, guard)
+    },
+    onSuccess: () => { toast(action.on ? 'Marked free' : 'Billed again', 'success'); void client.invalidateQueries({ queryKey: ['operator'] }); onClose() },
+  })
+  function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!reasonError && !untilError) mutation.mutate() }
+  return <form className="op-dialog-fields" onSubmit={submit} noValidate>
+    {action.on && <Field label="Ends" hint="Optional. Empty means no end date." error={tried ? untilError : ''}><Input type="datetime-local" value={until} onChange={event => setUntil(event.target.value)} /></Field>}
+    <Field label="Reason" hint="Goes into the audit log." error={tried ? reasonError : ''}><Textarea value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} /></Field>
+    <Field label="Ticket" hint="Optional: the support ticket ID or URL."><Input value={ticket} maxLength={200} onChange={event => setTicket(event.target.value)} /></Field>
+    {mutation.error && <Alert tone="danger">{mutation.error instanceof Error ? mutation.error.message : 'Couldn’t complete the action.'}</Alert>}
+    <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>{action.on ? 'Make free' : 'Bill again'}</Button></div>
+  </form>
+}
 function ActionDialog({ action, workspace, onClose }: { action: PendingAction | null; workspace: OperatorWorkspace; onClose: () => void }) {
   const last = useRef(action)
   if (action) last.current = action
