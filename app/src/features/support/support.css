@@ -2,12 +2,12 @@
    growing out of it; the page stays usable beside it. Phone: a sheet above the tab bar. Motion is micro only: the
    panel's open and close, entrances, the caret, the tool steps' marks and labels. Under reduced motion each keeps a
    short fade and loses its travel. */
-.support-panel { --dock: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); position: fixed; right: var(--launcher-inset); bottom: var(--dock); z-index: 40; display: flex; flex-direction: column; width: min(400px, calc(100vw - var(--sidebar-width) - 2 * var(--launcher-inset))); height: min(640px, calc(100dvh - var(--dock) - var(--launcher-inset))); overflow: hidden; background: var(--color-surface); color: var(--color-text); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); outline: none; transform-origin: calc(100% - var(--launcher-size) / 2) calc(100% + var(--space-12) + var(--launcher-size) / 2); opacity: 0; transform: translateY(6px) scale(.97); visibility: hidden; transition: opacity 140ms ease-out, transform 160ms ease-out, visibility 0s 160ms; }
+.support-panel { --dock: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); --rest: max(var(--dock), calc(var(--keyboard-inset, 0px) + var(--space-8))); position: fixed; right: var(--launcher-inset); bottom: var(--rest); z-index: 40; display: flex; flex-direction: column; width: min(400px, calc(100vw - var(--sidebar-width) - 2 * var(--launcher-inset))); height: min(640px, calc(100dvh - var(--rest) - 84px)); overflow: hidden; background: var(--color-surface); color: var(--color-text); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); outline: none; transform-origin: calc(100% - var(--launcher-size) / 2) calc(100% + var(--space-12) + var(--launcher-size) / 2); opacity: 0; transform: translateY(6px) scale(.97); visibility: hidden; transition: opacity 140ms ease-out, transform 160ms ease-out, visibility 0s 160ms; }
 .support-panel[data-open] { opacity: 1; transform: none; visibility: visible; transition: opacity 180ms var(--ease-out-strong), transform 260ms var(--ease-out-strong), visibility 0s; }
 @starting-style { .support-panel[data-open] { opacity: 0; transform: translateY(6px) scale(.97); } }
 /* A tablet (the compact shell, wider than a phone): Help is in the top bar, so the card hangs from under it on the right,
    above the tab bar. */
-.app-shell--compact .support-panel:not(.support-panel--sheet) { inset: calc(var(--mobile-bar-height) + env(safe-area-inset-top)) var(--page-inset) calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--page-inset)) auto; width: min(400px, calc(100vw - 2 * var(--page-inset))); height: auto; max-height: 720px; transform-origin: right top; }
+.app-shell--compact .support-panel:not(.support-panel--sheet) { inset: calc(var(--mobile-bar-height) + env(safe-area-inset-top)) var(--page-inset) max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--page-inset)), calc(var(--keyboard-inset, 0px) + var(--page-inset))) auto; width: min(400px, calc(100vw - 2 * var(--page-inset))); height: auto; max-height: 720px; transform-origin: right top; }
 
 /* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. */
 .support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: 14px 14px 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
@@ -32,6 +32,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-panel__subtitle-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: support-fade 200ms ease-out; }
 .support-panel__actions { display: flex; align-items: center; gap: 2px; }
 
+/* The card keeps 84 px free at the top, so on a short window it never covers a page's header actions (44 px tall on touch). */
 /* The conversation grows down from the top; while the reader is at the bottom it follows the newest line. */
 .support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; }
 .support-log:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
@@ -50,7 +51,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-text a { color: var(--color-accent); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
 .support-text a:hover { text-decoration-color: currentColor; }
 .support-text code { padding: 1px 4px; border-radius: 4px; background: var(--color-layer-2); font-size: 12px; }
-.support-text pre { padding: var(--space-8) var(--space-12); overflow-x: auto; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: 12px; line-height: 18px; }
+.support-text pre { padding: var(--space-8) var(--space-12); overflow-wrap: anywhere; white-space: pre-wrap; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: 12px; line-height: 18px; }
 .support-text pre code { padding: 0; background: none; }
 .support-message--notice .support-text { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* The person's own messages: on the right, in a quiet block. No tails, no avatar. */
@@ -96,7 +97,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 /* Cards in the conversation: the consent request and the filed ticket. */
 .support-card { padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-card-in 280ms var(--ease-out-strong) both; }
 .support-message[data-restored] .support-card { animation: none; }
-.support-card p { margin: 0; }
+.support-card p { margin: 0; overflow-wrap: anywhere; }
 .support-card__body { margin-top: var(--space-4); color: var(--color-muted); }
 .support-card__actions { display: grid; margin-top: var(--space-12); }
 .support-card__choice, .support-card__resolved { grid-area: 1 / 1; display: flex; align-items: center; gap: var(--space-8); margin: 0; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s; }
@@ -136,6 +137,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .ui-button.support-composer__send { width: 28px; height: 28px; border-radius: 4px; }
 .support-composer__box:has(.support-composer__attach) { padding-left: 4px; }
 .ui-button.support-composer__attach { width: 28px; height: 28px; color: var(--color-muted); }
+.ui-button.support-composer__send::after, .ui-button.support-composer__attach::after { inset: -4px; }
 @media (hover: hover) and (pointer: fine) { .ui-button.support-composer__attach:hover:not(:disabled) { color: var(--color-text); transition-duration: 0ms; } }
 
 /* Screenshots waiting to be sent, over the bottom of the conversation in two fixed layers (SupportPanel.tsx, TRAY_LINE and

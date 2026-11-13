@@ -60,7 +60,7 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   }
   return <>
     {phone && <div className="support-overlay" data-open={open || undefined} aria-hidden="true" onClick={close} />}
-    {phone && open && <SheetOpenEffects />}
+    {(phone || touch) && open && <SheetOpenEffects />}
     <section ref={panel} id="support-panel" className={cx('support-panel', phone && 'support-panel--sheet')} role="dialog" aria-modal="false" aria-labelledby="support-title"
       data-open={open || undefined} data-busy={busy || undefined} tabIndex={-1} onKeyDown={onKeyDown} {...drag} {...drop}>
       {phone && <div className="ui-sheet__grab" aria-hidden="true"><span /></div>}
@@ -85,7 +85,7 @@ function Header({ state, store, onClose }: { state: ChatState; store: SupportSto
     <BaneMark className="support-panel__mark" size={16} />
     <div className="support-panel__heading">
       <h2 id="support-title">{hello?.agent.name ?? 'Bane support'}</h2>
-      <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text">{subtitle}</span></p>
+      <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text" title={subtitle}>{subtitle}</span></p>
     </div>
     <div className="support-panel__actions">
       <DropdownMenu label="Conversation options" title="Conversation" items={[
@@ -125,7 +125,7 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
       else if (performance.now() - touched.current < 600) pinned.current = false
     }}>
     <div ref={inner} className="support-log__inner">
-      {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.id} message={message} store={store} />)}
+      {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
       {typing && <p className="support-message support-typing" aria-label="Bane support is writing"><Caret /></p>}
       <InlineStatus state={state} store={store} />
     </div>
@@ -145,7 +145,7 @@ function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () =
 }
 
 // An answer as it arrived: text, the quiet progress lines of what the agent checked, and the cards it asked for.
-function AgentMessage({ message, store }: { message: ChatMessage; store: SupportStore }) {
+function AgentMessage({ message, store, closed }: { message: ChatMessage; store: SupportStore; closed: boolean }) {
   const groups: Array<{ key: string; tools: Extract<Part, { kind: 'tool' }>[] } | { key: string; part: Exclude<Part, { kind: 'tool' }>; index: number }> = []
   message.parts.forEach((part, index) => {
     const previous = groups.at(-1)
@@ -153,12 +153,12 @@ function AgentMessage({ message, store }: { message: ChatMessage; store: Support
     else groups.push({ key: `p${index}`, part, index })
   })
   const lastPart = message.parts.at(-1)
-  const waiting = message.streaming && lastPart?.kind !== 'text' && !message.parts.some(part => part.kind === 'tool' && part.state === 'running' || part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing'))
+  const waiting = message.streaming && lastPart?.kind !== 'text' && lastPart?.kind !== 'ticket' && !message.parts.some(part => part.kind === 'tool' && part.state === 'running' || part.kind === 'consent' && (part.state === 'open' || part.state === 'allowing'))
   return <article className={cx('support-message', 'support-message--agent', message.kind === 'notice' && 'support-message--notice')} data-restored={message.restored || undefined}>
     {groups.map(group => 'tools' in group
       ? <ul key={group.key} className="support-tools">{group.tools.map(tool => <ToolLine key={tool.id} label={tool.label} state={tool.state} />)}</ul>
       : group.part.kind === 'text' ? <StreamText key={group.key} text={group.part.text} live={message.streaming} last={group.index === message.parts.length - 1} restored={message.restored} />
-      : group.part.kind === 'consent' ? <ConsentCard key={group.key} part={group.part} onDecide={decision => { if (group.part.kind === 'consent') decide(store, group.part.request.requestId, decision) }} />
+      : group.part.kind === 'consent' ? <ConsentCard key={group.key} part={group.part} closed={closed} onDecide={decision => { if (group.part.kind === 'consent') decide(store, group.part.request.requestId, decision) }} />
       : <TicketCard key={group.key} part={group.part} />)}
     {waiting && <p className="support-typing"><Caret /></p>}
   </article>
@@ -228,15 +228,15 @@ function ToolLine({ label, state }: { label: string; state: 'running' | 'done' |
   </li>
 }
 
-function ConsentCard({ part, onDecide }: { part: Extract<Part, { kind: 'consent' }>; onDecide: (decision: 'allow' | 'deny') => void }) {
+function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: 'consent' }>; closed: boolean; onDecide: (decision: 'allow' | 'deny') => void }) {
   const decided = part.state === 'allow' || part.state === 'deny'
   return <div className="support-card support-consent" data-state={part.state} role="group" aria-label="Allow access to email content">
     <p className="support-card__title">Let Bane support read the content of your emails in <strong>{part.request.workspace.name}</strong> for this conversation.</p>
     <p className="support-card__body">{part.request.why}</p>
     <div className="support-card__actions">
       <div className="support-card__choice" data-active={!decided || undefined} aria-hidden={decided || undefined}>
-        <Button variant="primary" size="sm" loading={part.state === 'allowing'} disabled={decided} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('allow')}>Allow</Button>
-        <Button size="sm" disabled={decided || part.state === 'allowing'} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('deny')}>Not now</Button>
+        <Button variant="primary" size="sm" loading={part.state === 'allowing'} disabled={decided || closed} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('allow')}>Allow</Button>
+        <Button size="sm" disabled={decided || closed || part.state === 'allowing'} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('deny')}>Not now</Button>
       </div>
       <p className="support-card__resolved" data-active={decided || undefined} data-decision={decided ? part.state : undefined} aria-hidden={!decided || undefined}>
         {part.state === 'deny' ? 'Not shared. Bane support won’t read your emails.' : <><Check size={14} strokeWidth={2.5} aria-hidden="true" />Allowed for this conversation</>}
