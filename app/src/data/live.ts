@@ -201,7 +201,9 @@ export function createLiveApi(): BaneApi {
       get: async (id, signal) => {
         const { email, content, events, contact } = await call(`/emails/${idPath(id)}/detail`, 'GET', undefined, signal)
         return { ...mapEmail(email), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor, contact }
-      }
+      },
+      check: (input, signal) => call<import('./types').SendabilityReport>('/emails/check', 'POST', input, signal),
+      preview: async ({ source, ...options }, signal) => (await call<{ previews: import('./types').ClientPreview[] }>('/emails/preview', 'POST', { ...source, ...options }, signal)).previews,
     },
     campaigns: {
       list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, state: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,

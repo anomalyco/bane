@@ -14,6 +14,7 @@ import {
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
+import { EmailInsight, LOW_SENDABILITY, SendabilityWarning, useSendability } from '../../components/EmailInsight'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
@@ -343,6 +344,9 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
             {personalized.map(key => key === 'email' ? <div key={key} className="campaign-compose-row"><span>{'{{email}}'}</span><span className="muted">Always the contact’s email address</span></div>
               : <div key={key} className="campaign-compose-row"><label htmlFor={`campaign-fallback-${key}`}>{`{{${key}}}`}</label><Input id={`campaign-fallback-${key}`} placeholder={placeholderLabel[key] ? `Used when ${placeholderLabel[key]}, e.g. there` : `Used when a contact has no ${key}`} value={form.defaults?.[key] ?? ''} aria-invalid={!form.defaults?.[key]?.trim() || undefined} onChange={event => change('defaults', { ...formRef.current.defaults, [key]: event.target.value })} disabled={controlsDisabled} /></div>)}
           </section>}
+          {/* The saved draft is checked: autosave (800 ms after typing stops) is the debounce, and the score then covers what
+              Bane sends: the rendered layout, the unsubscribe link it adds and the audience size. */}
+          <div className="email-insight campaign-insight"><EmailInsight source={accepted ? { kind: 'campaign', id: accepted.id, revision: accepted.revision ?? 0 } : null} pending={dirty || pending} warnBelow={LOW_SENDABILITY} placeholder="Name the campaign to check it. Drafts save automatically." /></div>
         </div>
       </div>
     </section>
@@ -615,6 +619,9 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const sentSomething = (campaign.counts?.total ?? 0) > 0
   const finished = ['done', 'canceled'].includes(campaign.status) || (campaign.status === 'failed' && !campaignResumable(campaign))
   const cancellable = !draft && !campaign.archivedAt && !scheduledView && (['preparing', 'sending', 'paused'].includes(campaign.status) || campaignResumable(campaign))
+  const sendability = useSendability(draft && !readinessError ? { kind: 'campaign', id: campaign.id, revision: campaign.revision ?? 0 } : null)
+  const lowScore = Boolean(sendability.data && sendability.data.score < LOW_SENDABILITY)
+  const scoreNote = lowScore ? ` Its sendability score is ${sendability.data!.score} of 100.` : ''
   const previewHtml = (html: string) => keys.length ? html.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g, (_, key: string) => escapeHtml(fallbacks[key] ? String(fallbacks[key]) : sampleValue(key))) : html
   return <div className="stack campaign-review">
     <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && (sentSomething ? <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link> : <Button disabled title="Each email appears in Logs once sending starts">View logs</Button>)}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
@@ -674,9 +681,11 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         {error && <Alert tone="danger">{error}</Alert>}
         {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
         <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+        {/* Below the actions, so the result never moves them. */}
+        {lowScore && <SendabilityWarning report={sendability.data!} action={<p className="campaign-sendability-link"><Link to={campaignRoute(campaign, 'edit')}>See every finding in the editor</Link></p>} />}
       </section>}
     </div>
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost} You can reschedule or unschedule it until it starts sending.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends. You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${scoreNote} You can reschedule or unschedule it until it starts sending.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost} Consent is checked again as each email sends.${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
   </div>
 }

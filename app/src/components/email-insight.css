@@ -1,0 +1,125 @@
+/* EmailInsight: Sendability beside How it renders when there is room, stacked in narrower containers (the campaign
+   sheet, a phone) with the preview full width. The loading skeleton uses the same grid, so the first result replaces
+   it in place. */
+.ei { container-type: inline-size; }
+.ei-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-32); }
+.ei-score-col, .ei-render-col { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
+.ei .ui-section-header { min-height: var(--control-height); margin-bottom: 0; }
+@container (min-width: 880px) {
+  .ei-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); }
+  .ei-render-col { border-left: 1px solid var(--color-border); padding-left: var(--space-28); }
+}
+.ei-status { min-width: 8ch; font-size: var(--text-xs); text-align: right; }
+.ei-retry { margin-top: var(--space-8); }
+.ei code { font-family: var(--font-mono); font-size: .92em; }
+
+.ei [data-grade='aplus'] { --grade-fill: var(--grade-aplus); }
+.ei [data-grade='a'] { --grade-fill: var(--grade-a); }
+.ei [data-grade='b'] { --grade-fill: var(--grade-b); }
+.ei [data-grade='c'] { --grade-fill: var(--grade-c); }
+.ei [data-grade='d'] { --grade-fill: var(--grade-d); }
+.ei [data-grade='f'] { --grade-fill: var(--grade-f); }
+
+/* The score: a calm number, its grade and one thin bar. */
+.ei-score { display: flex; flex-direction: column; gap: var(--space-8); }
+.ei-score__line { display: flex; align-items: baseline; gap: var(--space-4); font-variant-numeric: tabular-nums; }
+.ei-score__value { font-size: var(--text-xl); line-height: var(--leading-xl); font-weight: var(--font-weight-bold); }
+.ei-score__max { color: var(--color-muted); }
+.ei-score__grade { margin-left: var(--space-8); color: var(--grade-fill); font-family: var(--font-mono); font-size: 13px; font-weight: 700; letter-spacing: .04em; }
+.ei-score__note { font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ei-bar { display: block; height: 2px; overflow: hidden; border-radius: 1px; background: var(--color-layer-3); }
+.ei-bar > span { display: block; height: 100%; background: var(--grade-fill, var(--color-faint)); transform-origin: left; transition: transform 300ms var(--ease-out-strong); }
+.ei-bar--score { height: 4px; border-radius: 2px; }
+
+.ei-categories { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12) var(--space-16); margin: 0; padding: 0; list-style: none; }
+.ei-categories li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; row-gap: var(--space-4); }
+.ei-categories__label { min-width: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); overflow-wrap: anywhere; }
+.ei-categories__value { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.ei-categories .ei-bar { grid-column: 1 / -1; }
+.ei-categories__note { margin-top: calc(-1 * var(--space-8)); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* Findings, by severity: the rule's title opens its detail and evidence; the fix is always shown. */
+.ei-findings { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.ei-finding { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: var(--space-12); padding: var(--space-12) 0; border-bottom: 1px solid var(--color-border-muted); }
+.ei-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--tone-marker); }
+.ei-finding__body { min-width: 0; }
+.ei-finding__title { position: relative; display: inline-flex; align-items: center; gap: var(--space-4); max-width: 100%; padding: 0; border: 0; border-radius: 2px; background: none; color: var(--color-text); font: inherit; font-weight: var(--font-weight-bold); text-align: left; }
+.ei-finding__title::before { content: ''; position: absolute; inset: -10px -8px; }
+.ei-finding__title > svg { flex-shrink: 0; color: var(--color-faint); transition: transform 200ms var(--ease-out-strong), color 100ms ease-out; }
+.ei-finding__title[aria-expanded='true'] > svg { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .ei-finding__title:hover > svg { color: var(--color-text); transition-duration: 200ms, 0ms; } }
+.ei-finding__fix { margin-top: 2px; color: var(--color-muted); font-size: var(--text-sm); }
+.ei-finding__detail { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out-strong), opacity 150ms ease-out; }
+.ei-finding__detail[data-open] { grid-template-rows: 1fr; opacity: 1; }
+.ei-finding__detail > div { display: flex; flex-direction: column; gap: var(--space-8); min-height: 0; overflow: clip; font-size: var(--text-sm); }
+.ei-finding__detail > div > :first-child { margin-top: var(--space-8); }
+.ei-evidence { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-4) var(--space-12); margin: 0; font-size: var(--text-xs); }
+.ei-evidence > div { display: contents; }
+.ei-evidence dt { color: var(--color-muted); }
+.ei-evidence dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.ei-finding__rule { color: var(--color-faint); font-size: var(--text-xs); }
+.ei-clear { display: flex; align-items: center; gap: var(--space-8); color: var(--color-success); font-size: var(--text-sm); }
+.ei-warning-fixes { margin: var(--space-8) 0 0; padding-left: 1.25em; }
+.ei-warning-fixes li + li { margin-top: var(--space-4); }
+
+/* How it renders. */
+.ei-support { display: flex; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-sm); }
+.ei-support .ei-dot { flex-shrink: 0; }
+.ei-caption { margin-top: calc(-1 * var(--space-4)); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ei-segmented { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--radius-sm); background: var(--color-layer-2); }
+.ei-segmented > button { position: relative; height: 24px; padding: 0 var(--space-8); border: 0; border-radius: 4px; background: transparent; color: var(--color-muted); font: inherit; font-size: var(--text-xs); font-weight: var(--font-weight-bold); transition: background-color 100ms ease-out, color 100ms ease-out, transform 160ms var(--ease-out-strong); }
+.ei-segmented > button[aria-checked='true'] { background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); }
+.ei-segmented > button:active { transform: scale(.97); }
+@media (hover: hover) and (pointer: fine) { .ei-segmented > button:hover:not([aria-checked='true']) { color: var(--color-text); transition-duration: 0ms; } }
+@media (pointer: coarse) { .ei-segmented > button::before { content: ''; position: absolute; inset: -10px -1px; } }
+
+/* The frame's box takes the measured height before the frame loads; the frame fades in over the last one. */
+.ei-frame { position: relative; box-sizing: content-box; overflow: clip; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-layer-1); transition: height 200ms var(--ease-out-strong); }
+.ei-frame[data-first] { transition: none; }
+.ei-frame:has(iframe:focus-visible) { outline: var(--focus-width) solid var(--color-focus); outline-offset: var(--focus-offset); }
+.ei-frame iframe { position: absolute; top: 0; display: block; border: 0; outline: 0; background: transparent; color-scheme: normal; transform-origin: 0 0; opacity: 0; transition: opacity 200ms ease-out; }
+.ei-frame iframe[data-loaded] { opacity: 1; }
+.ei-frame[data-pending] iframe[data-loaded] { opacity: .5; }
+.ei-frame--empty { display: grid; place-items: center; height: 160px; font-size: var(--text-sm); }
+
+.ei-issues { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border-muted); }
+.ei-issues li { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-4) var(--space-12); min-height: 36px; padding: var(--space-6) 0; border-bottom: 1px solid var(--color-border-muted); font-size: var(--text-sm); }
+.ei-issues .ei-dot { margin-top: 0; }
+.ei-issues__name { min-width: 0; overflow-wrap: anywhere; }
+.ei-issues__link { position: relative; display: inline-flex; align-items: center; gap: var(--space-4); color: var(--color-muted); font-size: var(--text-xs); text-decoration: none; white-space: nowrap; }
+.ei-issues__link::before { content: ''; position: absolute; inset: -12px -6px; }
+@media (hover: hover) and (pointer: fine) { .ei-issues__link:hover { color: var(--color-text); } }
+@container (max-width: 479px) {
+  .ei-issues li { grid-template-columns: 8px minmax(0, 1fr) auto; }
+  .ei-issues__link { grid-column: 2 / -1; justify-self: start; }
+}
+
+.ei-categories--loading { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ei--placeholder .ui-section-header { min-height: var(--control-height); margin-bottom: var(--space-8); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ei-frame, .ei-bar > span, .ei-finding__title > svg { transition: none; }
+  .ei-finding__detail { transition: opacity 150ms ease-out; }
+}
+
+/* Where pages place it: after a sent email's identifiers, and on the campaign editor's paper after the content. */
+.email-insight { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+/* Below a sent email's body and timeline, the body no longer stretches to fill the page: the panel's result then
+   never moves it, at any window height. */
+.page-surface .email-detail-page:has(> .email-insight) > .email-detail-grid { flex: none; }
+.campaign-insight { margin-top: var(--space-24); padding-top: var(--space-16); border-top-color: var(--color-border); }
+.campaign-sendability-link { margin-top: var(--space-8); }
+/* The paper stays light in either theme and sets only some tokens: the panel takes the light values of the rest. */
+.campaign-compose-sheet .ei {
+  color-scheme: light;
+  --color-layer-1: #FAFAFA; --color-layer-2: #F2F2F2; --color-layer-3: #EEEEEE; --color-faint: #737373; --color-border-muted: rgb(0 0 0 / 8%); --color-hover: rgb(0 0 0 / 4%);
+  --color-success: #167F3E; --color-success-marker: #2EAF5A; --color-success-bg: #E7F9EA; --color-success-border: #B8E9C1;
+  --color-warning-marker: #E7AF36; --color-warning-bg: #FEFAEC; --color-warning-border: #F7E5B5;
+  --color-danger-marker: #D92E3C; --color-danger-bg: #FCECEB; --color-danger-border: #F2BBB7;
+  --color-info-marker: #3250DF; --color-info-bg: #ECF1FE; --color-info-border: #C3D4FD; --color-neutral-marker: #737373;
+  --grade-aplus: #13804A; --grade-a: #2EAF5A; --grade-b: #3B5CF6; --grade-c: #E7AF36; --grade-d: #EE7B30; --grade-f: #D92E3C;
+  --shadow-button: 0 1px 1.5px rgb(0 0 0 / 10%), 0 0 0 .5px rgb(0 0 0 / 14%);
+}
+.ei-notes { display: flex; flex-direction: column; gap: var(--space-8); }
+.ei-group { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ei-notes .ei-finding__title { font-weight: var(--font-weight-regular); }
