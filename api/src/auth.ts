@@ -81,7 +81,9 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     if (/^(?:bane|os)_agent_/.test(token)) {
       const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
       const temporary = await verifyAgentToken(c.env.config, token);
-      const grant = temporary && await getMcpGrantActor(c.env, temporary.grant);
+      // The approval acts in the workspace the token was minted in (a call names it; the token keeps it).
+      const minted = temporary && (await c.env.db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM agent_tokens WHERE id = ${temporary.id} AND grant_id = ${temporary.grant}`)).rows[0];
+      const grant = temporary && minted && await getMcpGrantActor(c.env, temporary.grant, minted.workspace_id);
       const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
       if (!temporary || !grant || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw invalid();
       const limit = c.env.config.apiRateLimitPerMinute;
@@ -111,7 +113,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       let grant:Actor|null=null;
       if (key.grant_id) {
         const {getMcpGrantActor}=await wrapModuleLoad(()=>import('./mcp-auth.js'));
-        grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id);
+        grant=await getMcpGrantActor(c.env,'mcp_'+key.grant_id,key.workspace_id);
         if (grant?.workspaceId!==key.workspace_id || !grant.permissions.includes('manage')) throw new ApiError(401,'AUTH_INVALID','The originating management approval is no longer active.');
       } else rememberFingerprint(hash);
       c.set('actor', { grantId:grant?.grantId, receivingConsent:grant?.receivingConsent, keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });

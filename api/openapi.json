@@ -91,10 +91,12 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "The default workspace: where the connection's tool calls act when they name none. Null: the person's only workspace, else their last-used one. Each call can name another workspace of theirs."
           },
           "receiving": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Deprecated, always false. Receiving tools follow the role: an owner or admin of the workspace a call names, with the bane:manage scope."
           },
           "profile": {
             "type": [
@@ -171,15 +173,16 @@
           "workspaceId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 200
+            "maxLength": 200,
+            "description": "One of your workspaces. Until one is set, calls use your only workspace, else the one you used last."
           },
           "receiving": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Deprecated and ignored: receiving follows the role."
           }
         },
         "required": [
-          "workspaceId",
-          "receiving"
+          "workspaceId"
         ],
         "additionalProperties": false
       },
@@ -18355,6 +18358,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Sets an MCP connection's default workspace, for tool calls that name none.",
         "parameters": [
           {
             "schema": {
@@ -18509,12 +18513,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@banemx/sdk/client';\nimport { bindMcpConnection } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await bindMcpConnection({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"workspaceId\": \"workspace_123\",\n    \"receiving\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { bindMcpConnection } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await bindMcpConnection({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"workspaceId\": \"workspace_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections/resource_123/workspace' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"workspaceId\": \"workspace_123\",\n  \"receiving\": false\n}'"
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections/resource_123/workspace' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"workspaceId\": \"workspace_123\"\n}'"
           }
         ]
       }

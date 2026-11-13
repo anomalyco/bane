@@ -40,8 +40,13 @@ export function mcpSnippet(client: McpClient, url: string, auth: McpAuth): strin
   return client === 'claude' && !('bearer' in auth) ? claudeAddCommand(url) : JSON.stringify(mcpClientConfig(client, url, auth), null, 2);
 }
 
-/** The steps after pasting the config, per client and sign-in. */
+/** The steps after pasting the config, per client and sign-in. A signed-in client acts as the person, in any of their
+ * workspaces: each call names one, else the default. */
 export function mcpClientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
+  const steps = clientSteps(client, auth);
+  return auth === 'oauth' ? [...steps, 'Its tools work in any of your workspaces: name one in your prompt, or it uses your default (ask it to list your workspaces).'] : steps;
+}
+function clientSteps(client: McpClient, auth: 'key' | 'oauth'): string[] {
   const file = mcpClientFiles[client];
   if (client === 'opencode') return auth === 'key'
     ? [`Merge this into your project or global ${file}, keeping your other servers.`, 'OpenCode connects on save; /mcps shows bane as connected.']
