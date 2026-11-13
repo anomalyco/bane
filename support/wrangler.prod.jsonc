@@ -43,8 +43,8 @@
     "DASHBOARD_ORIGINS": "https://bane.mx",
     "BANE_ORIGIN": "https://bane.mx",
     "SUPPORT_ADDRESS": "support@bane.mx",
-    // The inbound address ID (adr_…) of SUPPORT_ADDRESS in the platform workspace (ws_90b0…); set after creating it.
-    "SUPPORT_ADDRESS_ID": "",
+    // The inbound address ID (mbx_…) of SUPPORT_ADDRESS in the platform workspace (ws_90b0…), created 2026-11-13.
+    "SUPPORT_ADDRESS_ID": "mbx_7e7e64495349496691b2ca188cf48b6e",
     "TICKET_TO": "ryan@anoma.ly",
     // Straight to tickets, never to the agent (src/intake.ts): their own webhook and inbox key.
     "INTAKE_ADDRESSES": "abuse@bane.mx,privacy@bane.mx,legal@bane.mx",
