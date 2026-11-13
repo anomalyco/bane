@@ -2,7 +2,6 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { Input } from '../../components/ui'
 import { NamedAddress } from '../../components/PrivateAddress'
-import { useMasking } from '../../lib/privacy'
 import './sender-input.css'
 
 type Sender = { name: string; email: string }
@@ -56,7 +55,6 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
   const [active, setActive] = useState(-1)
   const [touched, setTouched] = useState(false)
   const [editing, setEditing] = useState(false)
-  const masking = useMasking()
   const input = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLDivElement>(null)
   const listId = useId()
@@ -76,8 +74,8 @@ export function CampaignSenderInput({ name, email, domains, disabled = false, on
     : parsed && !allowed(parsed) ? 'Choose an address on a verified domain.'
     : candidates.length ? 'Choose a sender address.' : 'Enter a valid sender email address.'
   const showError = touched && (!parsed || !allowed(parsed))
-  // A complete address is shown masked (like every address in the dashboard) until the field is focused or clicked; the input stays mounted, hidden, so focus moves into it without a blur.
-  const masked = masking && !editing && !!parsed
+  // A complete address is shown as PrivateAddress (masked until hovered, in full with privacy mode off, like every address in the dashboard) until the field is focused or clicked; the input stays mounted, hidden, so focus moves into it without a blur.
+  const masked = !editing && !!parsed
   function edit() {
     if (disabled) return
     flushSync(() => setEditing(true))
