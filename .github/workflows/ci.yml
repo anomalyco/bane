@@ -270,19 +270,20 @@ jobs:
           key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('api/bun.lock', 'app/bun.lock') }}
       - if: steps.changes.outputs.run == 'true'
         run: for pkg in api app; do (cd "$pkg" && bun install --frozen-lockfile); done
-      # Builds the dashboard, then measures it with the runner's Google Chrome against the Postgres service.
+      # Builds the dashboard (build already type-checked it), then measures it with Chrome against Postgres.
       - name: Measure layout shift on every page
         if: steps.changes.outputs.run == 'true'
         working-directory: app
         env:
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
-        run: bun run cls
+        run: ./node_modules/.bin/vite build && node scripts/cls.mjs
       - name: Upload the shift sources
         if: failure() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cls-shift-sources
           path: app/.cls/
+          include-hidden-files: true
           retention-days: 14
 
   # The support Worker (support/, the AI support agent's backend): types, the deployable bundle, and its tests, which
