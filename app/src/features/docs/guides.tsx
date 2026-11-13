@@ -148,7 +148,7 @@ export const guides: Guide[] = [
     body: () => <>
       <Section title="Two ways to connect">
         <Table head={['', 'What the agent can reach', 'Set up']} rows={[
-          [<strong key="a">Sign in as you</strong>, 'What you approve in the browser: read, send or full access, or only agent inboxes you pick. It signs in with your dashboard’s Google account.', 'The config below, then sign in from your client.'],
+          [<strong key="a">Sign in as you</strong>, 'What you approve in the browser: read, send or full access. It signs in with your Anomaly account (Google); choose its workspace and receiving tools in Settings → Account.', 'The config below, then sign in from your client.'],
           [<strong key="b">One agent inbox</strong>, 'Only that inbox: read its mail and, if allowed, reply. Nothing else in the workspace.', <Link key="c" to="/api-keys?connect=1">Connect an agent</Link>],
         ]} />
         <p>Every connection is listed in <Link to="/api-keys">API keys</Link>: sign-ins under <strong>Connected agents</strong>, inbox keys with the other keys. Revoke one there, or an inbox key from its inbox’s page.</p>

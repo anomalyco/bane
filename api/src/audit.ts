@@ -194,8 +194,8 @@ export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContex
 
 // ---------- reading the trail ----------
 
-/** The person behind a user ID, for display. One place to change when #89 moves users to bane_users. */
-export const userEmail = (userId: SQL) => sql`(SELECT email FROM auth_user WHERE id = ${userId})`;
+/** The person behind a user ID, for display (identity is the issuer subject; the address is display only). */
+export const userEmail = (userId: SQL) => sql`(SELECT email FROM bane_users WHERE id = ${userId})`;
 
 export const AuditEntry = z.object({
   id: z.string().describe('Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_.'),
@@ -326,7 +326,7 @@ export function registerAudit(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/users/{id}/audit', operationId: 'operatorUserAudit',
     request: { params: z.object({ id: z.string().min(1).max(200) }), query: AuditFilters }, responses: { 200: response(z.object({ data: z.array(OperatorEntry), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     const operator = await requireOperator(c, 'operator:read'), id = c.req.valid('param').id;
-    if (!(await c.env.db.execute(sql`SELECT FROM auth_user WHERE id = ${id}`)).rowCount) notFound('User');
+    if (!(await c.env.db.execute(sql`SELECT FROM bane_users WHERE id = ${id}`)).rowCount) notFound('User');
     return c.json(await operatorTrail(c, operator, { userId: id }, c.req.valid('query'), []), 200);
   });
 }

@@ -970,6 +970,7 @@ export function createMockApi(): BaneApi {
         const tokens = s.agentTokens ??= []
         tokens.forEach(token => { if (token.grantId === connectionId) token.revokedAt ??= now() })
       }),
+      bindMcpConnection: (connectionId, input, signal) => run(signal, true, s => { Object.assign(find(s.mcpConnections ??= [], connectionId, 'MCP connection'), input, { updatedAt: now() }) }),
     },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),

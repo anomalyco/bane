@@ -243,7 +243,7 @@ export function registerSupportOperator(app: App) {
     // Only a verified email of a signed-in user maps to an account. One statement: the lookup and its audit row.
     const audit = auditInsert(operatorContext(c, operator), { action: 'support.verify_email', workspaceId: null, userId: sql`u.id`, target: { type: 'user', id: sql`u.id` },
       details: { evidence: body.evidence, ticket: body.ticketRef }, ticketRef: body.ticketRef ?? null, internal: true }, { from: sql`u` });
-    const { rows: [row] } = await c.env.db.execute<{ id: string; name: string; workspaces: z.infer<typeof Workspaces> }>(sql`WITH u AS (SELECT id, name FROM auth_user WHERE lower(email) = lower(${body.email}) AND email_verified LIMIT 1),
+    const { rows: [row] } = await c.env.db.execute<{ id: string; name: string; workspaces: z.infer<typeof Workspaces> }>(sql`WITH u AS (SELECT id, name FROM bane_users WHERE lower(email) = lower(${body.email}) AND email_verified LIMIT 1),
       logged AS (${audit})
       SELECT u.id, u.name, coalesce((SELECT json_agg(json_build_object('id', w.id, 'name', w.name, 'role', m.role) ORDER BY w.name, w.id) FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
         WHERE m.user_id = u.id), '[]') AS workspaces FROM u`);
@@ -395,7 +395,7 @@ export function registerSupport(app: App) {
   }).openapi('SupportContext');
   app.openapi(createRoute({ ...meta('getSupportContext', 'Start here: one compact summary of the customer for a support conversation: who they are, their workspaces and roles, sending setup and limits, domains and their verification, failures in the last 24 hours, open enforcement, the last 20 audit entries and request IDs to drill into.'), path: '/v1/support/context', request: { query: WorkspaceFilter }, responses: { 200: response(Context), ...errors } }), async c => {
     const { scope, ids: list, workspaces } = scoped(c), admin = workspaces.filter(w => w.role !== 'member').map(w => w.id), db = c.env.db;
-    const { rows: [user] } = await db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM auth_user WHERE id = ${scope.userId}`);
+    const { rows: [user] } = await db.execute<{ id: string; name: string | null; email: string | null; created_at: string | null }>(sql`SELECT id, name, email, created_at::text FROM bane_users WHERE id = ${scope.userId}`);
     const { rows: [handoff] } = await db.execute<{ id: string; page: string | null; request_ids: string[]; message: string | null; created_at: string }>(sql`SELECT h.id, h.page, h.request_ids, h.message, h.created_at::text
       FROM support_grants g JOIN support_handoffs h ON h.id = g.handoff_id WHERE g.id = ${scope.grantId}`);
     const [summaries, domains, recent, activity, stand] = [await workspaceSummaries(db, workspaces), await domainSummaries(db, list, 50), await failures(db, list), await customerTrail(db, admin, AuditFilters.parse({ limit: 20 })), await standings(db, list)];

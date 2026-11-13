@@ -374,7 +374,7 @@ export function noticeText(o: { workspace: string; step: Step; reasons: Reason[]
 export const notifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
   const [event] = (await runtime.db.execute<{ kind: string; to_step: Step; reasons: Reason[]; details: Record<string, unknown>; name: string; recipients: string[] }>(sql`SELECT e.kind,e.to_step,e.reasons,e.details,w.name,
-      ARRAY(SELECT u.email FROM workspace_members m JOIN auth_user u ON u.id=m.user_id WHERE m.workspace_id=e.workspace_id AND m.role IN ('owner','admin') ORDER BY u.email LIMIT 20) AS recipients
+      ARRAY(SELECT u.email FROM workspace_members m JOIN bane_users u ON u.id=m.user_id WHERE m.workspace_id=e.workspace_id AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20) AS recipients
     FROM standing_events e JOIN workspaces w ON w.id=e.workspace_id WHERE e.id=${String(payload.eventId)} AND e.workspace_id=${job.workspaceId}`)).rows;
   if (!event || !event.recipients.length) return;
   if (!from || !sender || !runtime.config.multiTenant) { log('info', { code: 'STANDING_NOTIFY_SKIPPED', workspaceId: job.workspaceId, step: event.to_step, reason: 'BANE_NOTIFY_FROM or the platform workspace is not configured' }); return; }

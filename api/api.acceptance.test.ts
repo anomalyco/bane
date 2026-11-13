@@ -1,5 +1,4 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
-import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
@@ -52,11 +51,10 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 }
 
 // Run against the actual server and normal background-job runner with bun run test.
-// Requires its BETTER_AUTH_SECRET and paired DATABASE_URL (localhost only) or
+// Requires its BANE_ROOT_SECRET and paired DATABASE_URL (localhost only) or
 // explicit API_FIXTURE_DATABASE_URL. Allow AUTH_TEST_EMAIL (operator@example.com)
-// and AUTH_TEST_GOOGLE_DOMAIN (example.com) in that server's Google access policy.
-// Synthetic DB identities exercise session authorization, NOT real Google OAuth.
-// HTTP scenarios use the actual server. Explicitly labeled Google callback and SES
+// in the server's exact email allowlist. Synthetic identities exercise native sessions.
+// HTTP scenarios use the actual server. Explicitly labeled OIDC callback and SES
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const BENCH = process.env.BANE_BENCH === '1';
@@ -489,13 +487,15 @@ test('rituals: microbenchmarks (CPU per message, warm IR)',{skip:!BENCH},async t
 // No stragglers in this workload: advance the result writer on completed claims,
 // not the host's wall clock. The blocked-SES test exercises the partial flush.
 const budgetDispatch = { lanes: 1, batchSize: 24, sendConcurrency: 6, schedulePartialFlush: () => () => {} };
-const AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
-if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BETTER_AUTH_SECRET to sign synthetic local session fixtures; no scenarios were run.');
+const AUTH_SECRET = process.env.BANE_ROOT_SECRET;
+if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BANE_ROOT_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
 const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-bane.session_token' : 'bane.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
-const AUTH_DOMAIN = process.env.AUTH_TEST_GOOGLE_DOMAIN ?? 'example.com';
+// The operator's issuer subject (= its user ID). Self-hosted access is by subject: AUTH_ALLOWED_SUBJECTS lists it.
+const AUTH_SUBJECT = process.env.AUTH_TEST_SUBJECT ?? 'acceptance-operator';
+const AUTH_DOMAIN = 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
 const identity = await probe.json().catch(() => null) as { service?: string } | null;
@@ -590,24 +590,23 @@ type SessionFixture = { userId: string; sessionId: string; token: string; cookie
 let authDb: pg.Client | undefined;
 let manager: SessionFixture | undefined;
 let fixtureWorker: ReturnType<typeof import('./src/adapters/node.js').nodeRuntime> | undefined;
-async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; googleAccount?: boolean } = {}): Promise<SessionFixture> {
-  const userId = unique('acceptance-user');
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; linked?: boolean; userId?: string } = {}): Promise<SessionFixture> {
+  const userId = options.userId ?? unique('acceptance-user');
   const sessionId = unique('acceptance-session');
-  const token = unique('acceptance-token');
-  const email = options.email ?? `${unique('acceptance-google')}@${AUTH_DOMAIN}`;
-  const cookie = `${COOKIE_NAME}=${encodeURIComponent(`${token}.${await makeSignature(token, AUTH_SECRET!)}`)}`;
+  const token = createHash('sha256').update(randomUUID()).digest('base64url');
+  const email = options.email ?? `${unique('acceptance-oidc')}@${AUTH_DOMAIN}`;
+  const cookie = `${COOKIE_NAME}=${token}`;
   secrets.add(token);
   secrets.add(cookie);
   await db.query('BEGIN');
   try {
     // Never overwrite/reuse an existing user's email or credentials. A collision
     // fails the fixture; choose a dedicated AUTH_TEST_EMAIL rather than deleting it.
-    await db.query(`INSERT INTO auth_user (id, name, email, email_verified, google_hosted_domain)
-      VALUES ($1, $2, $3, $4, $5)`, [userId, 'Synthetic acceptance operator', email, options.verified ?? true, options.hostedDomain === undefined ? AUTH_DOMAIN : options.hostedDomain]);
-    if (options.googleAccount !== false) await db.query(`INSERT INTO auth_account (id, provider_id, account_id, user_id)
-      VALUES ($1, 'google', $2, $3)`, [unique('acceptance-account'), unique('acceptance-google-sub'), userId]);
-    await db.query(`INSERT INTO auth_session (id, token, expires_at, user_id)
-      VALUES ($1, $2, $3, $4)`, [sessionId, token, new Date(Date.now() + 3_600_000), userId]);
+    const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
     await db.query('ROLLBACK');
@@ -618,13 +617,13 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
 async function sessionFixture(t: TestContext, options: Parameters<typeof seedSession>[1] = {}): Promise<SessionFixture> {
   assert.ok(authDb, 'Synthetic session database must be bootstrapped first.');
   const fixture = await seedSession(authDb, options);
-  cleanup(t, async () => { await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]); });
+  cleanup(t, async () => { await authDb!.query('DELETE FROM bane_users WHERE id = $1', [fixture.userId]); });
   return fixture;
 }
 before(async () => {
   authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
   await authDb.connect();
-  manager = await seedSession(authDb, { email: AUTH_EMAIL, hostedDomain: null });
+  manager = await seedSession(authDb, { email: AUTH_EMAIL, userId: AUTH_SUBJECT, hostedDomain: null });
   const identity = ok(await http('GET', '/v1/me', MANAGER));
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
@@ -640,10 +639,341 @@ before(async () => {
 after(async () => {
   await fixtureWorker?.close();
   if (authDb) {
-    try { if (manager) await authDb.query('DELETE FROM auth_user WHERE id = $1', [manager.userId]); }
+    try { if (manager) await authDb.query('DELETE FROM bane_users WHERE id = $1', [manager.userId]); }
     finally { await authDb.end(); }
   }
 });
+test('OIDC migration links only connected subjects; nobody is adopted by email', async t => {
+  const db = await fixtureDatabase(t);
+  const schema = 'oidc_' + randomUUID().replaceAll('-', '');
+  await db.query('BEGIN');
+  try {
+    await db.query(`CREATE SCHEMA ${schema}; SET LOCAL search_path TO ${schema}`);
+    for (const file of ['006_google_auth', '038_workspaces', '042_workspace_selection']) {
+      await db.query(await readFile(new URL(`./migrations/${file}.sql`, import.meta.url), 'utf8'));
+    }
+    await db.query(`INSERT INTO auth_user(id, name, email, email_verified) VALUES
+      ('connected','Ada','ada@example.org', true), ('legacy','Lee','lee@example.org', true);
+      INSERT INTO auth_account(id, account_id, provider_id, user_id) VALUES
+      ('link','["https://id.example.org","A"]','account','connected'),('old','123','google','legacy')`);
+    await db.query(await readFile(new URL('./migrations/270_oidc_identities.sql', import.meta.url), 'utf8'));
+    assert.deepEqual((await db.query('SELECT * FROM bane_oidc_identities')).rows, [
+      {issuer:'https://id.example.org', subject:'A', user_id:'connected'},
+    ]);
+    // Identity is (issuer, subject). The legacy Google user with the same verified address is not linked, and
+    // there is no claim-by-email path at all: an operator binds a subject explicitly.
+    assert.equal((await db.query("SELECT to_regclass('bane_legacy_claims') AS t")).rows[0].t, null);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM pg_proc WHERE proname='claim_bane_legacy_user'")).rows[0].n, 0);
+    assert.deepEqual((await db.query("SELECT id FROM bane_users ORDER BY id")).rows, [{id:'connected'},{id:'legacy'}]);
+  } finally {
+    await db.query('ROLLBACK');
+  }
+});
+
+test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
+  const {drizzle} = await import('drizzle-orm/node-postgres');
+  const {loadConfig} = await import('./src/config.js');
+  const {createApp} = await import('./src/app.js');
+  const db = await fixtureDatabase(t), app = createApp();
+  const origin = 'https://dashboard.example.org', issuer = 'https://oidc-login.example.org';
+  const approved = `${randomUUID()}@example.org`, keys = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const rp = generateKeyPairSync('ec',{namedCurve:'P-256'});
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({PUBLIC_URL:origin, ACCOUNT_ISSUER:issuer, ACCOUNT_CLIENT_ID:'dashboard',
+    ACCOUNT_CLIENT_PRIVATE_KEY:JSON.stringify({...rp.privateKey.export({format:'jwk'}),kid:'rp'}), BANE_ROOT_SECRET:'local-fixture-'.repeat(4), MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', AUTH_STAFF_GOOGLE_DOMAINS:'example.org'}),
+    db:drizzle(db), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
+  const {PROVIDER_IDENTITY_CLAIM} = await import('./src/account-policy.js');
+  let nonce = '', email = approved, verified = true, subject = randomUUID(), useUserInfo = false;
+  // The provider identity behind the sign-in (Google Workspace domain); email never admits anyone.
+  let providerName = 'google', providerHd: string | null = 'example.org', providerVerified = true;
+  const upstream = () => providerHd ? {[PROVIDER_IDENTITY_CLAIM]:{provider:providerName,sub:'g-'+subject,email,email_verified:providerVerified,hd:providerHd}} : {};
+  // The first half exercises an installation without a required context; hosted config always sets one.
+  runtime.config.accountClient!.requiredAcr=undefined;
+  const googleAcr = 'urn:anomaly:acr:google';
+  let tokenAcr: string | undefined = googleAcr, peer = 0, pushed: URLSearchParams | undefined;
+  t.mock.method(globalThis,'fetch',async (url: string|URL, init?: RequestInit) => {
+    assert.equal(new URL(url).origin,issuer);
+    switch(new URL(url).pathname) {
+      case '/.well-known/openid-configuration': return Response.json({issuer,authorization_endpoint:issuer+'/authorize',token_endpoint:issuer+'/token',jwks_uri:issuer+'/keys',userinfo_endpoint:issuer+'/userinfo',pushed_authorization_request_endpoint:runtime.config.accountClient?.requiredAcr ? issuer+'/par' : undefined});
+      case '/par': {
+        pushed = new URLSearchParams(String(init?.body));
+        assert.equal(pushed.get('client_id'),'dashboard');
+        assert.ok(pushed.get('client_assertion'));
+        assert.deepEqual(JSON.parse(pushed.get('claims')!),{id_token:{acr:{essential:true,values:[googleAcr]},[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
+        assert.equal(pushed.get('scope'),'openid profile email');
+        assert.ok(pushed.get('state'));assert.ok(pushed.get('nonce'));assert.ok(pushed.get('code_challenge'));
+        return Response.json({request_uri:'urn:fixture:request',expires_in:60},{status:201});
+      }
+      case '/userinfo': return Response.json({sub:subject,email,email_verified:verified,acr:googleAcr,...upstream()});
+      case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
+      case '/token': {
+        const form=new URLSearchParams(String(init?.body)); assert.ok(form.get('client_assertion')); assert.ok(form.get('code_verifier'));
+        const now=Math.floor(Date.now()/1000),body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:subject,nonce,acr:tokenAcr,...(useUserInfo?{}:{email,email_verified:verified,...upstream()})}]
+          .map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
+        return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
+      }
+      default: throw Error('unexpected issuer endpoint');
+    }
+  });
+  const request = (path:string, method:string, cookie='', body?:object) => app.fetch(new Request(origin+path,{method,headers:{origin,cookie,'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`},body:body?JSON.stringify(body):undefined}),runtime);
+  async function login(authorizationError?:string) {
+    peer++; pushed=undefined;
+    const start=await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+    assert.equal(start.status,200); const front=new URL((await start.json() as {url:string}).url).searchParams;
+    if (runtime.config.accountClient?.requiredAcr) assert.deepEqual([...front],[['client_id','dashboard'],['request_uri','urn:fixture:request']]);
+    else assert.deepEqual(JSON.parse(front.get('claims')!),{id_token:{[PROVIDER_IDENTITY_CLAIM]:{essential:true}}});
+    const params = pushed ?? front;
+    nonce=params.get('nonce')!;assert.equal(params.get('code_challenge_method'),'S256');
+    const cookie=start.headers.getSetCookie()[0]!.split(';')[0]!,path='/api/auth/callback/account?'+new URLSearchParams({...(authorizationError?{error:authorizationError}:{code:'fixture'}),state:params.get('state')!,iss:issuer});
+    assert.equal((await request(path,'GET')).headers.get('location'),origin+'/?auth=error');
+    const result=await request(path,'GET',cookie);
+    assert.equal((await request(path,'GET',cookie)).headers.get('location'),origin+'/?auth=error');
+    return result;
+  }
+  const subjects=[subject];
+  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
+  const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM bane_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
+  // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
+  // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
+  // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
+  for (const [name,hd,googleVerified] of [['google',null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
+    providerName=name;providerHd=hd;providerVerified=googleVerified;
+    assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${name}/${hd}/${googleVerified}`);
+    assert.deepEqual(await attempt(),{acr:googleAcr,provider:hd===null?null:name,provider_hd:hd,outcome:'not_approved'});
+  }
+  // The address is not an identity input: an unverified one neither blocks a staff admission nor its session.
+  providerName='google';providerHd='example.org';providerVerified=true;verified=false;
+  const result=await login();assert.equal(result.headers.get('location'),origin+'/');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
+  assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
+  verified=true;
+  const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
+  // A staff sign-up starts its own workspace, named after the person (#92's naming).
+  assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved}'s workspace`);
+  const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
+  assert.deepEqual(members.data.map(m=>[m.userId,m.email]),[[me.id,approved]]);
+  assert.equal((await db.query('SELECT FROM auth_user WHERE id=$1',[me.id])).rowCount,0);
+  const oldInvitation=randomUUID();
+  await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[oldInvitation,me.workspaceId,approved,me.id]);
+  email=`changed-${approved}`;useUserInfo=true;
+  const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request('/v1/me','GET',session)).status,401);
+  runtime.config.accountClient!.requiredAcr=googleAcr;
+  const sessionCount = async () => (await db.query('SELECT count(*) FROM bane_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
+  const before = await sessionCount();
+  for (const wrong of [undefined,'urn:anomaly:acr:passkey']) {
+    tokenAcr=wrong;
+    const refused=await login();
+    assert.equal(refused.headers.get('location'),origin+'/?auth=google_required');
+    assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+  }
+  assert.equal((await login('unmet_authentication_requirements')).headers.get('location'),origin+'/?auth=google_required');
+  assert.equal((await login('interaction_required')).headers.get('location'),origin+'/?auth=interaction_required');
+  assert.equal(await sessionCount(),before);
+  tokenAcr=googleAcr;
+  const accepted=await login();assert.equal(accepted.headers.get('location'),origin+'/');
+  assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+  assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
+  assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
+  verified=false;const unverified=await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
+  // An address change ends older sessions; the new session of the same admitted subject works without a verified address.
+  assert.equal((await request('/v1/me','GET',newSession)).status,401);
+  const unverifiedSession=unverified.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request('/v1/me','GET',unverifiedSession)).status,200);
+  verified=true;subject=randomUUID();subjects.push(subject);email=approved;
+  const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',reassignedSession,{})).status,200);
+  assert.equal((await request('/api/auth/sign-out','POST',reassignedSession)).status,200);
+  assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
+  assert.equal((await request('/api/auth/sign-out','POST',session)).status,200);
+  assert.equal((await request('/v1/me','GET',session)).status,401);
+  // A seat bound by subject (scripts/cutover-fresh-start.ts --owner-sub): a refused subject the operator bound to a
+  // user lands in that user's workspace with its role. Addresses never decide: the same address under another
+  // subject gets nothing.
+  subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerHd=null;
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
+  assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
+  const seatId=randomUUID();
+  await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
+  await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
+  await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
+  const seated=await login();assert.equal(seated.headers.get('location'),origin+'/');
+  const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
+  assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
+  subject=randomUUID();subjects.push(subject);
+  assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
+  // Workspace creation follows the sign-in's staff status, not the address.
+  const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
+  assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+});
+
+test('MCP account resource validates issuer JWT, workspace scope and single-use DPoP proof', async t => {
+  const { drizzle } = await import('drizzle-orm/node-postgres');
+  const { loadConfig } = await import('./src/config.js');
+  const { authorizeResource, protectedResourceMetadata } = await import('./src/oidc-resource.js');
+  const db = await fixtureDatabase(t);
+  const issuer = 'https://resource-test.example.org', resource = 'https://bane.example.org/mcp';
+  const runtime: import('./src/core.js').Runtime = { config:loadConfig({ PUBLIC_URL:'https://bane.example.org', ACCOUNT_ISSUER:issuer, AUTH_ALLOWED_SUBJECTS:`subject,${AUTH_SUBJECT}`, BANE_ROOT_SECRET:'fixture-only-'.repeat(4) }), db:drizzle(db), snsCertificateState:new SnsCertificateState(),
+    storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}} };
+  const signer = generateKeyPairSync('ec', {namedCurve:'P-256'}), holder = generateKeyPairSync('ec', {namedCurve:'P-256'});
+  const jwk = holder.publicKey.export({format:'jwk'});
+  t.mock.method(globalThis, 'fetch', async (url: string | URL) => {
+    assert.equal(new URL(url).origin, issuer);
+    return new URL(url).pathname === '/keys' ? Response.json({keys:[{...signer.publicKey.export({format:'jwk'}),kid:'fixture',alg:'ES256'}]}) :
+      Response.json({issuer, jwks_uri:issuer+'/keys'});
+  });
+  const jwt = (key: typeof signer.privateKey, header: object, claims: object) => {
+    const body = [header, claims].map(part=>Buffer.from(JSON.stringify(part)).toString('base64url')).join('.');
+    return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
+  };
+  const now = Math.floor(Date.now()/1000);
+  const claims = {iss:issuer, aud:resource, sub:'subject', client_id:'fixture', iat:now, exp:now+300, jti:randomUUID(), scope:'bane:read'};
+  const token = (extra: object = {}) => jwt(signer.privateKey,{alg:'ES256',typ:'at+jwt',kid:'fixture'},{...claims,...extra});
+  const run = (access: string, proof?: string) => authorizeResource(runtime, new Request(resource,{method:'POST',headers:{authorization:`${proof?'DPoP':'Bearer'} ${access}`,...(proof?{DPoP:proof}:{})}}),async a=>Response.json(a.permissions));
+  await db.query('BEGIN');
+  try {
+    assert.ok(manager);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
+    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Bane',authorization_servers:[issuer],scopes_supported:['bane:read','bane:send','bane:manage'],bearer_methods_supported:['header'],scope_descriptions:{'bane:read':'Read workspace data.','bane:send':'Send email from the workspace.','bane:manage':'Manage workspace mail and resources.'}});
+    assert.deepEqual(await (await run(token())).json(),['read']);
+    for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
+    assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
+    // Google-only covers MCP: every access token, refreshed ones included, must carry the configured acr.
+    runtime.config.accountRequiredAcr='urn:anomaly:acr:google';
+    for(const acr of [undefined,'urn:anomaly:acr:passkey','urn:anomaly:acr:github','urn:anomaly:acr:google ']) {
+      const refused=await run(token({acr,jti:randomUUID()}));
+      assert.equal(refused.status,401);
+      assert.match(refused.headers.get('www-authenticate')!,/^Bearer error="insufficient_user_authentication".*acr_values="urn:anomaly:acr:google"$/);
+      const body=await refused.json() as {jsonrpc:string;error:{code:number;message:string}};
+      assert.equal(body.jsonrpc,'2.0');assert.equal(body.error.code,-32000);assert.match(body.error.message,/Google/);
+    }
+    assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
+    runtime.config.accountRequiredAcr=undefined;
+    // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
+    await db.query('UPDATE bane_users SET email_verified=false WHERE id=$1',[manager.userId]);
+    assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read']);
+    await db.query('UPDATE bane_users SET email_verified=true WHERE id=$1',[manager.userId]);
+    assert.equal((await run(token({scope:'openid'}))).status,403);
+    const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
+    const bound=token({cnf:{jkt:thumbprint}});
+    assert.equal((await run(bound)).status,401);
+    const proof=jwt(holder.privateKey,{typ:'dpop+jwt',alg:'ES256',jwk},{iat:now,jti:randomUUID(),htm:'POST',htu:resource,ath:createHash('sha256').update(bound).digest('base64url')});
+    assert.equal((await run(bound,proof)).status,200);
+    assert.equal((await run(bound,proof)).status,401);
+    assert.equal((await run(token({jti:randomUUID()}))).status,200);
+    const grants=await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,claims.client_id]);
+    assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
+    const {createApp}=await import('./src/app.js');const app=createApp();
+    const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
+    const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
+    const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
+    assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
+    assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
+    assert.equal((await run(token({jti:randomUUID(),iat:now+1}))).status,403,'A new JWT cannot restore a revoked client');
+    const denied=await run('expired-legacy-token');assert.equal(denied.status,401);assert.match(denied.headers.get('www-authenticate')!,/resource_metadata=/);
+    // MCP clients and the live dev E2E (mcpChallenge) read a JSON-RPC error body.
+    const deniedBody=await denied.json() as {jsonrpc:string;id:null;error:{code:number;message:string}};
+    assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
+    const bind=(id:string,body:object,cookie?:string,env?:typeof dashboard)=>call(`/v1/mcp-connections/${id}/workspace`,'POST',body,cookie,env);
+    assert.equal((await bind(grants.rows[0].id,{workspaceId:'default',receiving:false})).status,409,'A revoked approval cannot be rebound');
+    // With several workspaces, a new client's approval waits unbound until the user chooses one in Bane.
+    const suffix=randomUUID().slice(0,8);
+    for(const [workspace,role] of [['mcp-admin','admin'],['mcp-member','member']]) {
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$2)',[workspace+suffix,workspace+suffix]);
+      await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),manager.userId,workspace+suffix,role]);
+    }
+    let tick=2;const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++});
+    const actor=async()=>authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({workspaceId:a.workspaceId,receivingConsent:a.receivingConsent}));
+    const pending=await run(multi());
+    assert.equal(pending.status,403);assert.match(pending.headers.get('www-authenticate')!,/^Bearer error="insufficient_scope"/);
+    assert.deepEqual(await pending.json(),{jsonrpc:'2.0',error:{code:-32000,message:'Choose a workspace for this MCP client in Bane: https://bane.example.org/settings/account'},id:null});
+    const unbound=await db.query('SELECT id,workspace_id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi']);
+    assert.deepEqual(unbound.rows.map(r=>r.workspace_id),[null]);
+    const multiId=unbound.rows[0].id as string;
+    const listed=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
+    assert.deepEqual([listed?.workspaceId,listed?.receiving],[null,false]);
+    assert.equal((await bind(multiId,{workspaceId:'mcp-member'+suffix,receiving:true})).status,403,'Receiving needs an owner or admin');
+    assert.equal((await bind(multiId,{workspaceId:'missing'+suffix,receiving:false})).status,403);
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:false,extra:true})).status,422);
+    const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
+    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
+    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
+    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
+    const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
+    assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true},`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,404,'Only the approving user can bind it');
+    assert.equal((await run(multi())).status,403);
+    const chosen=await bind(multiId,{workspaceId:'mcp-admin'+suffix,receiving:false});
+    assert.equal(chosen.status,200);assert.deepEqual(await chosen.json(),{id:multiId,workspaceId:'mcp-admin'+suffix,receiving:false});
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
+    assert.equal((await bind(multiId,{workspaceId:'default',receiving:true})).status,200);
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'default',receivingConsent:true});
+    const after=(await (await call('/v1/mcp-connections')).json() as {data:{id:string;workspaceId:string|null;receiving:boolean}[]}).data.find(g=>g.id===multiId);
+    assert.deepEqual([after?.workspaceId,after?.receiving],['default',true]);
+    // Once a single membership remains, an unbound approval (here: its workspace was deleted) binds by itself,
+    // without the receiving consent given for the old workspace.
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-admin'+suffix]);
+    await db.query("UPDATE bane_resource_grants SET workspace_id=NULL WHERE id=$1",[multiId]);
+    assert.deepEqual(await (await actor()).json(),{workspaceId:'mcp-admin'+suffix,receivingConsent:false});
+  } finally { await db.query('ROLLBACK'); }
+});
+
+test('MCP cutover expires legacy approvals and tokens but keeps the objects they created',async t=>{
+  assert.ok(manager);
+  const db=await fixtureDatabase(t);
+  await db.query('BEGIN');
+  try {
+    for(const table of ['oauth_client','oauth_consent','oauth_access_token','oauth_refresh_token','agent_tokens','mail_grant_objects','api_keys','bane_expired_approvals','bane_resource_grants']) {
+      await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP`);
+    }
+    await db.query('CREATE TRIGGER mail_grant_removed AFTER DELETE ON mail_grant_objects FOR EACH ROW EXECUTE FUNCTION mail_disable_grant_object()');
+    await db.query("INSERT INTO oauth_client(id,client_id,name,redirect_uris) VALUES('client','legacy-client','Old app','{}')");
+    await db.query("INSERT INTO oauth_consent(id,client_id,user_id,scopes,created_at,updated_at) VALUES('consent','legacy-client',$1,'{bane:read}',now(),now())",[manager.userId]);
+    for(const table of ['oauth_access_token','oauth_refresh_token']) await db.query(`INSERT INTO ${table}(id,token,user_id,client_id,scopes,created_at,expires_at) VALUES('id','fixture',$1,'legacy-client','{bane:read}',now(),now()+interval '1 day')`,[manager.userId]);
+    await db.query("INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES('agent','default','mcp_consent','[\"read\"]','[]','fixture',now()+interval '1 day')");
+    await db.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT k,'default',k,k,k,'[\"read\"]','[]' FROM unnest(ARRAY['derived','independent']) k");
+    await db.query("INSERT INTO mail_grant_objects VALUES('consent','default','api_key','derived')");
+    const migrate=await readFile(new URL('./migrations/276_expire_mcp_legacy.sql',import.meta.url),'utf8');
+    await db.query(migrate);await db.query(migrate);
+    assert.equal((await db.query('SELECT FROM oauth_client WHERE NOT disabled')).rowCount,0);
+    for(const table of ['oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE revoked IS NULL OR expires_at>now()`)).rowCount,0);
+    assert.equal((await db.query('SELECT FROM agent_tokens WHERE revoked_at IS NULL')).rowCount,0);
+    // Objects a retired approval created keep working; only the approval itself and its tokens expire.
+    assert.deepEqual((await db.query('SELECT id FROM api_keys WHERE revoked_at IS NULL ORDER BY id')).rows,[{id:'derived'},{id:'independent'}]);
+    assert.equal((await db.query('SELECT FROM mail_grant_objects')).rowCount,0);
+    assert.deepEqual((await db.query("SELECT kind,resource FROM bane_retired_grant_objects WHERE grant_id='consent'")).rows,[{kind:'api_key',resource:'derived'}]);
+    const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
+    const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
+    const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections',{headers:{cookie:manager.cookie}}),runtime);
+    const {data}=await response.json() as {data:{clientId:string;status:string}[]};
+    assert.deepEqual(data.map(g=>[g.clientId,g.status]),[['legacy-client','expired']]);
+  } finally {await db.query('ROLLBACK');}
+});
+
+// Ported from #90: the connection list shows a client's self-chosen name as one short line of drawn characters.
+test('an MCP client name is shown as one short line of the characters that are drawn',async t=>{
+  assert.ok(manager);
+  const db=await fixtureDatabase(t);
+  await db.query('BEGIN');
+  try {
+    const names:Record<string,string>={long:`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`,
+      shaped:'\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D',blank:'\u034F\u00AD\u206A',cells:'\u2800 \u3164\u{E0041}\uFEFF'};
+    for(const [id,name] of Object.entries(names)) await db.query("INSERT INTO bane_expired_approvals(id,user_id,client_id,name,scopes,created_at,updated_at) VALUES($1,$2,$1,$3,'{bane:read}',now(),now())",['legacy_name_'+id,manager.userId,name]);
+    const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
+    const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
+    const {data}=await (await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections?limit=100',{headers:{cookie:manager.cookie}}),runtime)).json() as {data:{id:string;name:string|null}[]};
+    const shown=(id:string)=>data.find(g=>g.id==='legacy_name_'+id)?.name;
+    const label=`Desk helper notes ${'x'.repeat(142)}`;
+    assert.equal(label.length,160);
+    assert.equal(shown('long'),label,'Reordering marks, invisible and control characters go; the name is cut at 160.');
+    assert.equal(shown('shaped'),'👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support','Joiners and one variation selector that shape what is drawn stay.');
+    assert.equal(shown('blank'),null,'A name with nothing to draw is no name.');
+    assert.equal(shown('cells'),null);
+  } finally {await db.query('ROLLBACK');}
+});
+
 test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
   if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
   const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');
@@ -1107,8 +1437,8 @@ describe('Public contract and authentication', () => {
   });
 });
 
-describe('Google dashboard sessions and current-policy authorization', () => {
-  test('approved synthetic Google sessions identify the operator and reject obsolete test-mode requests without exposing credentials', async t => {
+describe('OIDC dashboard sessions and current-policy authorization', () => {
+  test('approved synthetic dashboard sessions identify the operator and reject obsolete test-mode requests without exposing credentials', async t => {
     const me = ok(await http('GET', '/v1/me', MANAGER));
     assert.equal(me.id, manager!.userId);
     assert.equal(me.email, AUTH_EMAIL);
@@ -1118,9 +1448,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'live' })).environment, undefined);
     error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-opensend-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
-    assert.equal(inspected.user.id, manager!.userId);
-    assert.equal(inspected.user.emailVerified, true);
-    assert.equal(inspected.user.googleHostedDomain, undefined, 'Google hd is protected server-side identity data.');
+    assert.equal(inspected.id, manager!.userId);
     assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
     const machine = await keyFixture(t, { permissions: ['read'] });
     const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-bane-environment': 'live' }));
@@ -1130,31 +1458,6 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(machineMe.environment, undefined, 'Dashboard headers cannot elevate an API key into live scope.');
     assert.deepEqual(machineMe.permissions, ['read']);
     for (const field of ['token', 'secret', 'cookie', 'accessToken', 'refreshToken']) assert.equal(me[field], undefined);
-  });
-
-  test('dashboard activity renews old sessions in both the browser and database, but not on every request', async t => {
-    for (const path of ['/v1/me', '/api/auth/get-session']) {
-      const fixture = await sessionFixture(t);
-      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-      // This includes sessions issued before the rolling policy: still valid but near the old cutoff.
-      await authDb!.query("UPDATE auth_session SET expires_at = now() + interval '30 minutes' WHERE id = $1", [fixture.sessionId]);
-      const expiry = async () => Number((await authDb!.query('SELECT extract(epoch FROM expires_at) * 1000 AS ms FROM auth_session WHERE id = $1', [fixture.sessionId])).rows[0].ms);
-      const old = await expiry();
-      await authDb!.query("UPDATE auth_account SET provider_id = 'detached' WHERE user_id = $1", [fixture.userId]);
-      const denied = await http('GET', path, undefined, undefined, headers);
-      if (path === '/v1/me') error(denied, 401, 'AUTH_REQUIRED'); else assert.equal(ok(denied), null);
-      assert.equal(await expiry(), old, 'A removed Google link cannot extend a session.');
-      await authDb!.query("UPDATE auth_account SET provider_id = 'google' WHERE user_id = $1", [fixture.userId]);
-      const renewed = await http('GET', path, undefined, undefined, headers); ok(renewed);
-      const cookies = renewed.headers.getSetCookie();
-      const token = cookies.find(value => value.startsWith(`${COOKIE_NAME}=`));
-      assert.ok(token && /;\s*Max-Age=604800(?:;|$)/i.test(token), 'The browser must receive a full seven-day session cookie.');
-      assert.ok(cookies.some(value => value.split('=')[0].endsWith('.session_data')), 'The short cache cookie is a separate Set-Cookie header.');
-      const active = await expiry();
-      assert.ok(Math.abs(active - Date.now() - 7 * 86400_000) < 60_000, 'Cookie and database expiry must agree.');
-      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, { ...headers, cookie: token.split(';')[0] })).id, fixture.userId);
-      assert.equal(await expiry(), active, 'A fresh session should not be rewritten on every dashboard request.');
-    }
   });
 
   test('invalid Bearer credentials never fall back to a valid dashboard cookie; machine writes need no Origin', async t => {
@@ -1177,350 +1480,33 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await http('POST', '/v1/contacts', undefined, { email }, headers), 403, 'CSRF_ORIGIN_INVALID');
       assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, 'Rejected CSRF writes must never create a contact.');
       error(await http('POST', '/api/auth/sign-out', undefined, {}, headers), 403, 'CSRF_ORIGIN_INVALID');
-      error(await http('POST', '/api/auth/sign-in/social', undefined, { provider: 'google' }, headers), 403, 'CSRF_ORIGIN_INVALID');
+      error(await http('POST', '/api/auth/sign-in/account', undefined, { callbackURL: PUBLIC_ORIGIN }, headers), 403, 'CSRF_ORIGIN_INVALID');
       assert.equal(ok(await http('GET', '/v1/me', MANAGER)).id, manager!.userId, 'Rejected sign-out cannot revoke the valid session.');
     }
   });
 
-  test('each request rechecks verified Google identity and exact allowlists, not cached session inspection', async t => {
-    const fixture = await sessionFixture(t);
-    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-    const initial = await http('GET', '/v1/me', undefined, undefined, headers);
-    assert.equal(ok(initial).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
-    // Replay the same credentials as a browser, including its signed session-data cache.
-    const sessionData = initial.headers.getSetCookie().map(value => value.split(';')[0]!).filter(value => value.includes('session_data='));
-    assert.ok(sessionData.length);
-    for (const cookie of sessionData) secrets.add(cookie);
-    headers.cookie = [fixture.cookie, ...sessionData].join('; ');
-    const cases = [
-      { email: fixture.email, verified: false, hd: AUTH_DOMAIN, account: true, reason: 'Unverified email' },
-      { email: fixture.email, verified: true, hd: AUTH_DOMAIN, account: false, reason: 'Missing Google account' },
-      { email: `${unique('unapproved')}@unapproved.invalid`, verified: true, hd: null, account: true, reason: 'Unapproved identity' },
-      { email: fixture.email, verified: true, hd: null, account: true, reason: 'Email suffix alone is not Google hd' },
-      { email: `${unique('suffix')}@unapproved.invalid`, verified: true, hd: `${AUTH_DOMAIN}.evil.invalid`, account: true, reason: 'Allowed-domain suffix attack' },
-      { email: `${unique('prefix')}@unapproved.invalid`, verified: true, hd: `evil${AUTH_DOMAIN}`, account: true, reason: 'Allowed-domain prefix attack' },
-    ];
-    for (const state of cases) {
-      await authDb!.query('UPDATE auth_user SET email = $2, email_verified = $3, google_hosted_domain = $4 WHERE id = $1', [fixture.userId, state.email, state.verified, state.hd]);
-      await authDb!.query('UPDATE auth_account SET provider_id = $2 WHERE user_id = $1', [fixture.userId, state.account ? 'google' : 'not-google']);
-      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-      if (!state.account) error(await http('GET', '/v1/inbound/threads', undefined, undefined, { ...headers, 'x-bane-environment': 'live' }), 401, 'AUTH_REQUIRED');
-      assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null, state.reason);
-      const email = address();
-      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
-      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state.reason} must prevent all API writes.`);
-    }
-    await authDb!.query('UPDATE auth_user SET email = $2, email_verified = true, google_hosted_domain = $3 WHERE id = $1', [fixture.userId, fixture.email, AUTH_DOMAIN]);
-    assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'Restoring this fixture’s current Google policy evidence must restore access without replacing its cookie.');
-    await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
-    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-    assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null);
-  });
-
-  test('profile forgery, password login, non-Google providers and account linking are not public authentication paths', async t => {
-    const fixture = await sessionFixture(t, { email: `${unique('unapproved')}@unapproved.invalid`, hostedDomain: null });
-    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-    for (const path of ['/update-user', '/sign-in/email', '/sign-up/email', '/link-social', '/change-email', '/get-access-token', '/callback/github']) {
-      error(await http(path.startsWith('/callback/') ? 'GET' : 'POST', `/api/auth${path}`, undefined,
-        path.startsWith('/callback/') ? undefined : { email: AUTH_EMAIL, googleHostedDomain: AUTH_DOMAIN, provider: 'google', password: 'synthetic-never-valid' }, headers), 404, 'NOT_FOUND');
-    }
-    for (const body of [
-      { provider: 'github' }, { provider: 'google', googleHostedDomain: AUTH_DOMAIN },
-      { provider: 'google', idToken: { token: 'forged' } }, { provider: 'google', scopes: ['openid', 'email'] },
-      { provider: 'google', profile: { email: AUTH_EMAIL, email_verified: true, hd: AUTH_DOMAIN } },
-    ]) error(await http('POST', '/api/auth/sign-in/social', undefined, body, headers), 422, 'AUTH_INPUT_INVALID');
-    const stored = (await authDb!.query('SELECT email, google_hosted_domain FROM auth_user WHERE id = $1', [fixture.userId])).rows[0];
-    assert.equal(stored.email, fixture.email);
-    assert.equal(stored.google_hosted_domain, null, 'Client-provided hd must never become verified Google evidence.');
-    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-  });
-
-  test('expired, revoked, deleted and tampered sessions deny API access; sign-out revokes its persisted session', async t => {
-    for (const state of ['expired', 'revoked', 'deleted', 'tampered', 'sign-out']) {
-      const fixture = await sessionFixture(t);
-      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
-      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId);
-      if (state === 'expired') await authDb!.query('UPDATE auth_session SET expires_at = $2 WHERE id = $1', [fixture.sessionId, new Date(Date.now() - 60_000)]);
-      if (state === 'revoked') await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
-      if (state === 'deleted') await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]);
-      if (state === 'tampered') headers.cookie = `${COOKIE_NAME}=${encodeURIComponent(`${fixture.token}.forged-signature`)}`;
-      if (state === 'sign-out') {
-        const signedOut = await http('POST', '/api/auth/sign-out', undefined, {}, headers);
-        assert.equal(ok(signedOut).success, true);
-        assert.match(signedOut.headers.get('set-cookie') ?? '', /bane\.session_token=/);
-        assert.equal((await authDb!.query('SELECT id FROM auth_session WHERE id = $1', [fixture.sessionId])).rowCount, 0);
+  test('workspace selection, invitations and role checks', async mx => {
+      const t=mx, [{createApp},{loadConfig},{drizzle}]=await Promise.all([import('./src/app.js'),import('./src/config.js'),import('drizzle-orm/node-postgres')]);
+      const app=createApp(),origin='https://mock-oauth.bane.dev';
+      const pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL}); cleanup(t,()=>pool.end());
+      const runtime:import('./src/core.js').Runtime={db:drizzle(pool),config:loadConfig({...process.env,PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google'}),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused')},async get(){throw Error('unused')},async delete(){throw Error('unused')}}};
+      const local=async(method:string,path:string,body?:Json,cookie?:string,headers:Record<string,string>={})=>http(method,path,undefined,body,{origin,...(cookie?{cookie}:{}),...headers},5000,origin,r=>app.fetch(r,runtime));
+      const base='/v1/workspaces/current',select=(id:string)=>({'X-Bane-Workspace':id});
+      const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+      async function workspaceFixture(email:string,own:boolean){
+        const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
+        await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
+        const org={id:'ws_'+randomUUID().replaceAll('-',''),name:'Fixture organization',slug:unique('slug')};
+        if(own){await pool.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[f.userId]);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
+        return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
       }
-      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
-      const email = address();
-      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
-      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state} sessions must not write.`);
-    }
-  });
-
-  test('forged OAuth callback state and code cannot create an identity or session', async () => {
-    const before = (await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0];
-    // Never create a valid state or call Google's authorization/token endpoints.
-    // Invalid state must fail locally before exchanging the deliberately fake code.
-    const reply = await http('GET', `/api/auth/callback/google?state=${unique('never-issued')}&code=${unique('forged-code')}`);
-    assert.equal(reply.status, 302, diagnostic(reply));
-    assert.equal(reply.headers.get('location'), `${PUBLIC_ORIGIN}/?auth=error`);
-    assert.ok(!reply.headers.get('set-cookie')?.includes(`${COOKIE_NAME}=`), 'An invalid callback must not issue a session cookie.');
-    assert.deepEqual((await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0], before);
-  });
-
-  test('MOCK GOOGLE TRANSPORT: real OAuth state/callback lifecycle persists trusted claims, rejects denied profiles, and fails closed on configuration', async t => {
-    const [{ createApp }, { drizzle }] = await Promise.all([import('./src/app.js'), import('drizzle-orm/node-postgres')]);
-    const app = createApp();
-    const origin = 'https://mock-oauth.bane.dev';
-    const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
-    const runtime: import('./src/core.js').Runtime = {
-      db: drizzle(authDb!), snsCertificateState: new SnsCertificateState(),
-      storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
-      config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1, dailyHeadroomPercent: 10 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
-    };
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-    const kid = unique('mock-google-signing-key');
-    const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
-    let profile: Json = {};
-    let jwtFault = '';
-    let expectedCode = '';
-    let expectedNonce: string | null = null;
-    let tokenCalls = 0;
-    let certCalls = 0;
-    const transport = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
-      const request = new Request(input, init);
-      if (request.url === 'https://oauth2.googleapis.com/token') {
-        tokenCalls++;
-        const form = new URLSearchParams(await request.text());
-        assert.equal(form.get('code'), expectedCode, 'Only the current synthetic callback may exchange a code.');
-        assert.equal(form.get('redirect_uri'), `${origin}/api/auth/callback/google`);
-        assert.ok(form.get('code_verifier'), 'The actual OAuth callback must retain its generated PKCE verifier.');
-        const now = Math.floor(Date.now() / 1000);
-        const head = Buffer.from(JSON.stringify({ alg: jwtFault === 'unsigned' ? 'none' : 'RS256', kid, typ: 'JWT' })).toString('base64url');
-        const payload: Json = { iss: 'https://accounts.google.com', aud: runtime.config.googleClientId, iat: now, exp: now + 300, ...profile, ...(expectedNonce ? { nonce: expectedNonce } : {}) };
-        if (jwtFault === 'audience') payload.aud = 'wrong-client.apps.googleusercontent.com';
-        if (jwtFault === 'issuer') payload.iss = 'https://attacker.invalid';
-        if (jwtFault === 'expired') { payload.iat = now - 120; payload.exp = now - 60; }
-        if (jwtFault === 'missing-exp') delete payload.exp;
-        const claims = Buffer.from(JSON.stringify(payload)).toString('base64url');
-        const input = `${head}.${claims}`;
-        const signature = Buffer.from(sign('RSA-SHA256', Buffer.from(input), privateKey));
-        if (jwtFault === 'signature') signature[0] = signature[0]! ^ 1;
-        const idToken = `${input}.${jwtFault === 'unsigned' ? '' : signature.toString('base64url')}`;
-        return Response.json({ access_token: 'synthetic-access-token', refresh_token: 'synthetic-refresh-token', id_token: idToken, token_type: 'Bearer', expires_in: 300, scope: 'openid email profile' });
-      }
-      if (request.url === 'https://www.googleapis.com/oauth2/v3/certs') {
-        certCalls++;
-        return Response.json({ keys: [jwk] });
-      }
-      throw new Error(`Unexpected network request in mocked Google transport: ${new URL(request.url).origin}`);
-    });
-    async function local(method: string, path: string, body?: Json, cookie?: string, headers: Record<string, string> = {}): Promise<Reply> {
-      const response = await app.fetch(new Request(`${origin}${path}`, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime);
-      const text = await response.text();
-      let parsed: unknown = text;
-      try { parsed = JSON.parse(text); } catch { /* Redirects intentionally have no JSON body. */ }
-      return { status: response.status, body: parsed, headers: response.headers };
-    }
-    const fixtureEmails: string[] = [];
-    const states: string[] = [];
-    cleanup(t, async () => {
-      await authDb!.query('DELETE FROM api_request_budgets WHERE workspace_id = $1', [runtime.config.workspaceId]);
-      for (const email of fixtureEmails) await authDb!.query('DELETE FROM auth_user WHERE email = $1', [email]);
-      for (const state of states) await authDb!.query('DELETE FROM auth_verification WHERE identifier = $1', [state]);
-    });
-    let approvedCookie = '';
-    const returningSub = unique('mock-returning-sub');
-    const returningEmail = `${unique('mock-returning')}@example.com`;
-    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string; notApproved?: boolean; invitee?: boolean }> = [
-      { allowed: true, email: emailAllowed, hd: undefined, verified: true },
-      { allowed: true, email: `${unique('mock-domain')}@example.com`, hd: 'example.com', verified: true },
-      { allowed: false, email: `${unique('mock-unverified')}@example.com`, hd: 'example.com', verified: false },
-      { allowed: false, email: `${unique('mock-denied')}@unapproved.invalid`, hd: undefined, verified: true },
-      { allowed: false, email: `${unique('mock-suffix')}@unapproved.invalid`, hd: 'example.com.evil.invalid', verified: true },
-      { allowed: false, email: `${unique('mock-email-suffix')}@example.com`, hd: undefined, verified: true },
-      ...['signature', 'audience', 'issuer', 'expired', 'missing-exp', 'unsigned'].map(jwtFault => ({ allowed: false, email: `${unique(`mock-jwt-${jwtFault}`)}@example.com`, hd: 'example.com', verified: true, jwtFault })),
-      { allowed: true, email: returningEmail, hd: 'example.com', verified: true, sub: returningSub },
-      { allowed: true, email: returningEmail, hd: 'second.example.com', verified: true, sub: returningSub },
-      { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
-      { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
-    ];
-    let profileName = 'Mock provider identity';
-    async function login(scenario: typeof scenarios[number], callbackURL = `${origin}/`) {
-      fixtureEmails.push(scenario.email);
-      jwtFault = scenario.jwtFault ?? '';
-      profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: profileName, email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
-      const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
-      const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
-      const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
-      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL, disableRedirect: true },undefined,{'x-bane-client-ip':`192.0.2.${fixtureEmails.indexOf(scenario.email)+1}`});
-      const authorization = new URL(ok(start).url);
-      assert.equal(authorization.origin, 'https://accounts.google.com');
-      assert.deepEqual(authorization.searchParams.get('scope')!.split(' ').sort(), ['email', 'openid', 'profile']);
-      assert.equal(authorization.searchParams.get('access_type'), 'online');
-      assert.equal(authorization.searchParams.get('include_granted_scopes'), null);
-      const state = authorization.searchParams.get('state');
-      assert.ok(state);
-      states.push(state);
-      expectedNonce = authorization.searchParams.get('nonce');
-      const stateCookie = start.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
-      assert.ok(stateCookie, 'The real sign-in endpoint must issue a state-binding cookie.');
-      expectedCode = unique('mock-authorization-code');
-      const previousCalls = tokenCalls;
-      const callback = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
-      assert.equal(tokenCalls, previousCalls + 1, 'The real callback must exchange this code exactly once through the mocked transport.');
-      assert.equal(callback.status, 302, diagnostic(callback));
-      const users = await authDb!.query('SELECT id, email_verified, google_hosted_domain FROM auth_user WHERE email = $1', [scenario.email]);
-      if (scenario.allowed) {
-        assert.equal(callback.headers.get('location'), callbackURL);
-        assert.equal(users.rowCount, 1, 'An approved real callback must create its user through the normal Better Auth lifecycle.');
-        assert.equal(users.rows[0].email_verified, true);
-        assert.equal(users.rows[0].google_hosted_domain, scenario.hd ?? null);
-        if (subjectBefore.length) assert.equal(users.rows[0].id, subjectBefore[0].id, 'Returning Google sub must refresh the same user, never swap identities.');
-        const account = (await authDb!.query('SELECT * FROM auth_account WHERE user_id = $1', [users.rows[0].id])).rows[0];
-        assert.ok(account);
-        assert.equal(account.provider_id, 'google');
-        assert.equal(account.account_id, profile.sub);
-        for (const field of ['access_token', 'refresh_token', 'id_token', 'password', 'scope']) assert.equal(account[field], null, 'Google token material must not remain in the account row.');
-        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Host-bane.session_token='));
-        assert.ok(sessionCookie, 'A successful callback must issue the __Host- prefixed session cookie.');
-        assert.doesNotMatch(sessionCookie, /;\s*Domain=/i, 'A __Host- cookie is host-only.');
-        assert.match(sessionCookie, /;\s*Path=\/(?:;|$)/i);
-        assert.match(sessionCookie, /;\s*HttpOnly/i);
-        assert.match(sessionCookie, /;\s*Secure/i);
-        assert.match(sessionCookie, /;\s*SameSite=Lax/i);
-        assert.ok(/;\s*Max-Age=604800(?:;|$)/i.test(sessionCookie), 'A new Google login must last seven days in the browser.');
-        approvedCookie = sessionCookie.split(';')[0];
-        secrets.add(approvedCookie);
-        // M9: a first-time invitee's session has no workspace until the recipient joins.
-        if (scenario.invitee) error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
-        else {
-          const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));
-          assert.equal(me.id, users.rows[0].id);
-          assert.equal(me.email, scenario.email);
-        }
-      } else {
-        // A verified identity outside the hosted allow-list is told sign-up is invite-only; every other failure stays generic.
-        assert.equal(callback.headers.get('location'), `${origin}/?auth=${scenario.notApproved ? 'not_approved' : 'error'}`);
-        assert.equal(users.rowCount, userBefore.length, 'Denied profile/JWT must not provision another identity.');
-        assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
-        assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
-        assert.deepEqual((await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows, sessionsBefore, 'Denied profile/JWT must not create any session.');
-        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Host-bane.session_token=')));
-      }
-      const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
-      assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
-      assert.equal(tokenCalls, previousCalls + 1, 'Consumed OAuth state cannot exchange a code twice.');
-      return approvedCookie;
-    }
-    for (const scenario of scenarios) await login(scenario);
-    assert.ok(certCalls > 0, 'The normal provider path must verify the mocked JWT against mocked Google JWKS, not merely decode claims.');
-    assert.ok(approvedCookie);
-    runtime.config.allowedEmails = [];
-    runtime.config.allowedDomains = [];
-    error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
-    const blockedEmail = address();
-    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 401, 'AUTH_REQUIRED');
-    runtime.config.googleClientSecret = undefined;
-    error(await local('GET', '/v1/me', undefined, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
-    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
-    error(await local('POST', '/api/auth/sign-in/social', { provider: 'google' }), 503, 'AUTH_NOT_CONFIGURED');
-    assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [blockedEmail])).rowCount, 0);
-    await t.test('MX: atomic Google signup, invited roles, workspace selection and isolation', async mx => {
-      const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
-      cleanup(t, () => pool.end());
-      runtime.db = drizzle(pool);
-      Object.assign(runtime.config, { multiTenant: true, googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
-      const base = '/v1/workspaces/current', workspaces: string[] = [];
-      cleanup(t, async () => {
-        for (const wid of workspaces) {
-          await pool.query('DELETE FROM audience_contacts WHERE workspace_id = $1', [wid]);
-          await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
-          await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
-        }
-      });
-      const ownerEmail = `${unique('mx-owner')}@example.com`, otherEmail = `${unique('mx-owner')}@example.com`, guestEmail = `${unique('mx-guest')}@outside.invalid`;
-      const newOwner = async (email: string) => {
-        const cookie = await login({ allowed: true, email, verified: true, hd: 'example.com' });
-        const [first, simultaneous] = await Promise.all([local('GET', '/v1/workspaces', undefined, cookie), local('GET', '/v1/workspaces', undefined, cookie)]);
-        const memberships = ok(first).data; assert.deepEqual(ok(simultaneous).data, memberships);
-        assert.equal(memberships.length, 1); const [org] = memberships; workspaces.push(org.id);
-        assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's workspace"); assert.notEqual(org.id, 'default');
-        return { cookie, org };
-      };
-      const a = await newOwner(ownerEmail);
-      const unsolicited = ok(await local('POST', `${base}/invitations`, { email: otherEmail, role: 'member' }, a.cookie), 201);
-      const b = await newOwner(otherEmail); // No link: exactly one personal workspace, despite the pending invitation.
-      assert.notEqual(a.org.id, b.org.id); assert.notEqual(a.org.slug, b.org.slug);
-      const acceptedPath = `/v1/workspaces/invitations/${unsolicited.id}/accept`;
-      assert.equal(ok(await local('POST', acceptedPath, undefined, b.cookie)).workspaceId, a.org.id);
-      const invitedMember = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.email === otherEmail);
-      ok(await local('DELETE', `${base}/members/${invitedMember.id}`, undefined, a.cookie));
-      const select = (id: string) => ({ 'X-OpenSend-Workspace': id });
-      error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
-      const invitedEmail = `${unique('mx-invited-owner')}@example.com`;
-      const linked = ok(await local('POST', `${base}/invitations`, {email:invitedEmail,role:'member'}, b.cookie),201);
-      const invitedCookie = await login({allowed:true,email:invitedEmail,verified:true,hd:'example.com'},linked.acceptUrl);
-      const before = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
-      assert.equal(before.length,1,'Signing in through an invitation link must not join the workspace before the recipient confirms it.');
-      const personal = before[0];assert.equal(personal.role,'owner');assert.notEqual(personal.id,b.org.id);workspaces.push(personal.id);
-      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,personal.id);
-      const preview = ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie));
-      assert.deepEqual({...preview,expiresAt:undefined},{id:linked.id,workspaceId:b.org.id,workspaceName:b.org.name,workspaceSlug:b.org.slug,inviterName:'Mock provider identity',inviterEmail:otherEmail,role:'member',status:'pending',expiresAt:undefined});
-      error(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,a.cookie),404); // Only the invited address can review it.
-      assert.equal(ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data.length,1,'Reviewing an invitation changes nothing.');
-      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
-      const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
-      assert.equal(joined.length,2);assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
-      assert.deepEqual(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaces,joined,'GET /v1/me lists the same memberships as the deprecated GET /v1/workspaces.');
-      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id,'Join selects the workspace the recipient confirmed.');
-      assert.equal(ok(await local('GET',`/v1/workspaces/invitations/${linked.id}`,undefined,invitedCookie)).status,'accepted');
-      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
-      const extra = ok(await local('POST', '/v1/workspaces', { name: ' Automated ' }, b.cookie), 201); workspaces.push(extra.id);
-      assert.equal(extra.name, 'Automated'); assert.equal(extra.role, 'owner'); assert.notEqual(extra.id, b.org.id);
-      const extraMe = ok(await local('GET', '/v1/me', undefined, b.cookie, select(extra.id)));
-      assert.equal(extraMe.workspaceId, extra.id); assert.equal(extraMe.role, 'owner'); assert.notEqual(extraMe.connection?.state, 'ready');
-      assert.equal((await pool.query('SELECT default_region FROM ses_installation_settings WHERE workspace_id = $1', [extra.id])).rows[0]?.default_region, runtime.config.regions[0]);
-      const burst = await Promise.all(Array.from({ length: 9 }, (_, i) => local('POST', '/v1/workspaces', { name: `Burst ${i}` }, b.cookie)));
-      for (const reply of burst) if (reply.status === 201) workspaces.push(reply.body.id);
-      assert.deepEqual(burst.map(reply => reply.status).sort(), [...Array(8).fill(201), 409], 'Concurrent creates stop at ten owned workspaces.');
-      error(await local('POST', '/v1/workspaces', { name: 'Eleventh' }, b.cookie), 409, 'WORKSPACE_LIMIT');
-      // Later steps use b's original workspace: reselect it and drop the extras.
-      ok(await local('GET', '/v1/me', undefined, b.cookie, select(b.org.id)));
-      for (const wid of workspaces.splice(workspaces.indexOf(extra.id))) {
-        await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
-        await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
-      }
-      runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
-      const deniedEmail = `${unique('mx-denied')}@outside.invalid`;
-      cleanup(t, async () => { await pool.query('DELETE FROM access_requests WHERE email = ANY($1)', [[deniedEmail, guestEmail]]); });
-      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
-      // The rolled-back sign-up leaves the verified address as an access request, and nothing else.
-      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mock provider identity', hosted_domain: null, attempts: 1 }]);
-      // The visitor controls the display name: control and format characters never reach the table.
-      profileName = 'Mallory\u0007\u202e\nEvil';
-      await login({ allowed: false, notApproved: true, email: deniedEmail, verified: true });
-      profileName = 'Mock provider identity';
-      assert.deepEqual((await pool.query('SELECT name, hosted_domain, attempts FROM access_requests WHERE email = $1', [deniedEmail])).rows, [{ name: 'Mallory Evil', hosted_domain: null, attempts: 2 }]);
-      const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
-      assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
-      const guestSub = unique('guest-sub');
-      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub });
-      await login({ allowed: false, notApproved: true, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
-      assert.equal((await pool.query('SELECT attempts FROM access_requests WHERE email = $1', [guestEmail])).rows[0]?.attempts, 2);
-      const guest = await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
-      // M9: signing in through the link joins nothing, even for an account with no other way in. The
-      // session can review the invitation it followed and accept it with the recipient's own click.
-      assert.equal((await pool.query('SELECT FROM workspace_members m JOIN auth_user u ON u.id = m.user_id WHERE u.email = $1', [guestEmail])).rowCount, 0);
-      for (const path of ['/v1/workspaces', '/v1/emails', '/v1/domains', '/v1/workspaces/current/members']) error(await local('GET', path, undefined, guest), 401);
-      const review = ok(await local('GET', `/v1/workspaces/invitations/${invitation.id}`, undefined, guest));
-      assert.deepEqual([review.status, review.workspaceId, review.role], ['pending', a.org.id, 'member']);
-      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
-      const me = ok(await local('GET', '/v1/me', undefined, guest));
-      assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
-      assert.deepEqual(me.workspaces, [{ id: a.org.id, name: a.org.name, slug: a.org.slug, role: 'member' }], 'The joined workspace, and nothing the invitation did not grant.');
-      error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
+      const ownerEmail=address(), otherEmail=address(), guestEmail=address();
+      const a=await workspaceFixture(ownerEmail,true), b=await workspaceFixture(otherEmail,true), guest=(await workspaceFixture(guestEmail,false)).cookie;
+      const invitation=ok(await local('POST',`${base}/invitations`,{email:guestEmail,role:'member'},a.cookie),201);
+      error(await local('GET','/v1/me',undefined,guest),401);
+      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${invitation.id}/accept`,undefined,guest)).workspaceId,a.org.id);
+      const me=ok(await local('GET','/v1/me',undefined,guest));assert.equal(me.role,'member');
+      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'SIGNUP_NOT_APPROVED');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
@@ -1792,15 +1778,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.deepEqual((await getSetup('?groups=receiving,receivingReply,mailfrom')).groups,['receivingReply'],'Preserve the existing MX; a non-default MAIL FROM stays manual.');
           const manual=ok(await local('POST',detail+'/mail-from',{mailFromDomain:`email.${name}`},b.cookie));
           const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
-          const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'synthetic-root-'.repeat(4),PUBLIC_URL:origin};
+          const {loadConfig}=await import('./src/config.js'), env={BANE_ROOT_SECRET:'synthetic-root-'.repeat(4),PUBLIC_URL:origin};
           const pem=privateKey.export({type:'pkcs1',format:'pem'}).toString().replaceAll('\n','\\n');
           for(const invalid of [{DOMAIN_CONNECT_KEY_ID:'_dck1'},{DOMAIN_CONNECT_PRIVATE_KEY:pem},
             ...['invalid-pem',generateKeyPairSync('rsa',{modulusLength:1024}).privateKey.export({type:'pkcs1',format:'pem'}),generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({type:'pkcs8',format:'pem'})].map(k=>({DOMAIN_CONNECT_KEY_ID:'_dck1',DOMAIN_CONNECT_PRIVATE_KEY:k.toString()}))]) {
             assert.throws(()=>loadConfig({...env,...invalid}),{code:'CONFIG_INVALID'});
           }
           runtime.config.domainConnect=loadConfig({...env,DOMAIN_CONNECT_PRIVATE_KEY:pem,DOMAIN_CONNECT_KEY_ID:'_dck1'}).domainConnect;
-          const {getDashboardActor}=await import('./src/google-auth.js');
-          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const {getDashboardActor}=await import('./src/dashboard-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}));
           const authQueries=queries.mock.callCount()-authStart, setupStart=queries.mock.callCount();
           const before=requests.length, offered=await getSetup(), url=new URL(offered.applyUrl), params=url.searchParams;
           const total=queries.mock.callCount()-setupStart; assert.equal(total-authQueries,1); dc.diagnostic(`GET dns-setup: ${total-authQueries} domain statement; ${total} pg round trips including dashboard auth.`);
@@ -1959,8 +1945,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const park=()=>pool.query("UPDATE jobs SET created_at=now()-interval '21 seconds',available_at=now()+interval '16 minutes',payload=payload||'{\"poll\":40}'::jsonb WHERE id=$1",[job.id]);
           await park(); const firstWake=wakes;
           ok(await local('GET',detail,undefined,undefined,{authorization:`Bearer ${key}`})); assert.equal(wakes,firstWake,'API-key reads must not nudge the runner.');
-          const {getDashboardActor}=await import('./src/google-auth.js');
-          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const {getDashboardActor}=await import('./src/dashboard-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}));
           const authQueries=queries.mock.callCount()-authStart;
           const readPending=()=>local('GET',detail,undefined,b.cookie), startPending=queries.mock.callCount();
           assert.equal(ok(await readPending()).verified,false); const pendingQueries=queries.mock.callCount()-startPending;
@@ -2016,7 +2002,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const recommended=(d:Json)=>d.dns.filter((r:Json)=>r.purpose==='dmarc').map((r:Json)=>r.value);
             try {
               await gradedSender(pool,b.org.id); // Marketing needs more than the calibrating 100 a day, which is all transactional reserve.
-              const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:origin,MULTI_TENANT:'true'};
+              const {loadConfig}=await import('./src/config.js'), env={BANE_ROOT_SECRET:'fixture-'.repeat(6),PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google'};
               assert.equal(loadConfig(env).requireDmarcForBulk,false);assert.equal(loadConfig({...env,MX_REQUIRE_DMARC_FOR_BULK:'true'}).requireDmarcForBulk,true);
               assert.equal(checked.dmarc.status,'missing');assert.deepEqual(recommended(checked),['v=DMARC1; p=none']);
               await accepted(await marketing());runtime.config.requireDmarcForBulk=true;
@@ -2554,7 +2540,6 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       });
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       assert.equal(ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length, 0);
-      await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
       const memberRegions = ok(await local('GET', '/v1/regions', undefined, guest));
       assert.ok(memberRegions.data.some((r: Json) => r.enabled && r.region === memberRegions.defaultRegion));
       for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', `/v1/regions/${memberRegions.defaultRegion}/discovery`, `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
@@ -2623,11 +2608,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await local('POST', `/v1/workspaces/invitations/${revoked.id}/accept`, undefined, guest), 404);
       const rejoin = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'member' }, a.cookie), 201);
       // A removed member signing in through a new link rejoins only by accepting it (M9).
-      await login({ allowed: true, invitee: true, email: guestEmail, verified: true, sub: guestSub }, rejoin.acceptUrl);
       error(await local('GET', '/v1/me', undefined, guest), 401);
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${rejoin.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const invited = ok(await local('POST', `${base}/members`, { email: guestEmail, role:'admin' }, b.cookie), 201);
-      const returning = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      const returning = guest;
       assert.equal(ok(await local('GET', '/v1/me', undefined, returning)).workspaceId, a.org.id, 'An unsolicited invitation must not switch an existing member into another workspace.');
       const accept = `/v1/workspaces/invitations/${invited.id}/accept`;
       error(await local('POST', accept, undefined, a.cookie), 404);
@@ -2649,70 +2633,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       error(await local('GET', '/v1/me', undefined, removed, select(a.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
       assert.equal(await originAllowed(runtime, runtime.db, { ...queued, actorKeyId: `user_${removed === guest ? me.id : owner.userId}` }), false);
     });
-    transport.mock.restore();
-  });
-
-  test('LIVE GOOGLE OAUTH: approved login and denied Google identity require browser verification', {
-    skip: 'NOT RUN by synthetic fixtures. Manually complete real Google login and denied-identity flows with configured OAuth credentials; seeding does not verify OAuth, consent, provider claims, redirect registration, or browser cookies.',
-  }, () => {});
 });
 
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
   const writableScope = 'bane:read bane:manage offline_access';
   const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
-  function protectOAuth(reply: Reply): Reply {
-    if (reply.body && typeof reply.body === 'object') for (const [field, value] of Object.entries(reply.body)) {
-      if (typeof value === 'string' && /token|secret|^url$/.test(field)) secrets.add(value);
-    }
-    return reply;
-  }
-  async function registerClient(t: TestContext, db: pg.Client, metadata: Json = {}, request = http): Promise<Reply> {
-    const name = unique('acceptance-mcp-client');
-    const reply = protectOAuth(await request('POST', '/api/auth/oauth2/register', undefined, {
-      client_name: name, redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: writableScope, ...metadata,
-    }));
-    if (typeof reply.body?.client_id === 'string') cleanup(t, async () => {
-      // Client-owned consents, resource links and tokens cascade; never delete another client's grants.
-      await db.query('DELETE FROM oauth_client WHERE client_id = $1 AND name = $2', [reply.body.client_id, name]);
-    });
-    return reply;
-  }
   async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope, request = http) {
-    const client = ok(await registerClient(t, db, { scope }, request), 201);
-    const redirectUri = 'http://127.0.0.1/callback';
-    const verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
-    secrets.add(verifier);
-    const state = unique('acceptance-mcp-state');
-    const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
-      scope, state, resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-    const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
-    assert.equal(authorization.redirect, true);
-    assert.equal(typeof authorization.url, 'string');
-    const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN);
-    assert.equal(consentUrl.origin, PUBLIC_ORIGIN);
-    assert.equal(consentUrl.pathname, '/mcp/consent');
-    const oauthQuery = consentUrl.search.slice(1);
-    secrets.add(oauthQuery);
-    const approval = ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
-    assert.equal(typeof approval.url, 'string');
-    const callback = new URL(approval.url);
-    assert.equal(`${callback.origin}${callback.pathname}`, redirectUri);
-    assert.equal(callback.searchParams.get('state'), state);
-    const code = callback.searchParams.get('code');
-    assert.ok(code, 'Approved OAuth consent must issue an authorization code.');
-    secrets.add(code);
-    const tokenReply = protectOAuth(await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({
-      grant_type: 'authorization_code', client_id: client.client_id, redirect_uri: redirectUri, code, code_verifier: verifier, resource: resourceUrl,
-    }).toString(), { 'content-type': 'application/x-www-form-urlencoded' }));
-    const tokens = ok(tokenReply);
-    assert.equal(typeof tokens.access_token, 'string');
-    assert.equal(typeof tokens.refresh_token, 'string');
-    assert.equal(String(tokens.token_type).toLowerCase(), 'bearer');
-    const grant = await db.query('SELECT id FROM oauth_consent WHERE client_id = $1 AND user_id = $2', [client.client_id, manager!.userId]);
-    assert.equal(grant.rowCount, 1);
-    return { token: tokens.access_token as string, refreshToken: tokens.refresh_token as string, clientId: client.client_id as string, consentId: grant.rows[0].id as string };
+    const { mintResourceToken } = await import('./scripts/fixture-issuer.js');
+    const issued = mintResourceToken(resourceUrl,manager!.userId,scope);
+    const first=await request('POST','/mcp',issued.token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
+    assert.equal(first.status,200,diagnostic(first));
+    cleanup(t,async()=>{ await db.query('DELETE FROM bane_resource_grants WHERE grant_key=$1',[issued.consentId]); });
+    return issued;
   }
   async function rpc(token: string, method: string, params: Json = {}, path = '/mcp?codemode=true'): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
@@ -2734,150 +2667,6 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(JSON.parse(result.content[0].text), output);
     return output;
   }
-
-  test('an MCP client name is shown as one short line of the characters that are drawn', async t => {
-    await simulatedSesFixture(t, async ({ db, local, request }) => {
-      // Register a client under this name, open its approval page, approve it, and read it back from the connections list.
-      async function shown(registered: string) {
-        const client = ok(await registerClient(t, db, { client_name: registered }, request), 201);
-        const redirectUri = 'http://127.0.0.1/callback', verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
-        secrets.add(verifier);
-        const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri, scope: writableScope, state: unique('acceptance-mcp-state'),
-          resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-        const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
-        const oauthQuery = new URL(authorization.url, PUBLIC_ORIGIN).search.slice(1);
-        secrets.add(oauthQuery);
-        const consent = await request('GET', `/mcp/consent?${oauthQuery}`, MANAGER, undefined, { accept: 'text/html' });
-        assert.equal(consent.status, 200);
-        ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
-        const listed = ok(await local('GET', '/v1/mcp-connections')).data.find((row: Json) => row.clientId === client.client_id);
-        return { html: String(consent.body), listed: listed.name as string | null };
-      }
-      // Reordering marks, an invisible character, a line break and a control character inside an over-long name.
-      const long = await shown(`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`), label = `Desk helper notes ${'x'.repeat(142)}`;
-      assert.equal(label.length, 160);
-      assert.ok(long.html.includes(`<h1>Allow ${label} to access Bane?</h1>`), 'The heading names the client on one line.');
-      assert.ok(long.html.includes(`has not verified "${label}".`));
-      assert.doesNotMatch(long.html, /[\u0007\u200B\u202A-\u202E\u2066-\u2069]|x{143}/u);
-      assert.equal(long.listed, label, 'Connections list the same name the approval page showed.');
-      // Joiners and a variation selector that shape what is drawn stay; a soft hyphen, a grapheme joiner and stray joiners go.
-      const shaped = await shown('\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D');
-      assert.equal(shaped.listed, '👩\u200D💻 ❤\uFE0F می\u200Cخواهم Support');
-      assert.ok(shaped.html.includes(`<h1>Allow ${shaped.listed} to access Bane?</h1>`));
-      // Names with nothing to draw get the default label and no name in the list.
-      for (const blank of ['\u034F\u00AD\u206A', '\u2800 \u3164\u{E0041}\uFEFF', '\u0301\u200D\uFE0F']) {
-        const none = await shown(blank);
-        assert.ok(none.html.includes('<h1>Allow This MCP client to access Bane?</h1>'), JSON.stringify(blank));
-        assert.ok(none.html.includes('has not verified "This MCP client".'));
-        assert.equal(none.listed, null);
-      }
-    });
-  });
-
-  test('legacy MCP scopes and signed grant authorize only the original consent', async t => {
-    await simulatedSesFixture(t, async ({ db, request }) => {
-      const {token, consentId}=await oauthGrant(t,db,'opensend:read offline_access',request);
-      const claims=JSON.parse(Buffer.from(token.split('.')[1]!,'base64url').toString());
-      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.ok(claims.scope.split(' ').includes('bane:read'));
-      await db.query("UPDATE oauth_consent SET reference_id=replace(reference_id,'bane:read','opensend:read'), scopes=array_replace(scopes,'bane:read','opensend:read') WHERE id=$1",[consentId]);
-      const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'}),kid=randomUUID();
-      await db.query("INSERT INTO auth_jwks(id,public_key,private_key,created_at,alg,crv) VALUES($1,$2,'fixture-only',now()-interval '1 day','ES256','P-256')",[kid,JSON.stringify(publicKey.export({format:'jwk'}))]);
-      const encode=(v:unknown)=>Buffer.from(JSON.stringify(v)).toString('base64url');
-      const legacy=(grant:string)=>{
-        const data=encode({alg:'ES256',typ:'at+jwt',kid})+'.'+encode({...claims,bane_grant:undefined,opensend_grant:grant,scope:'opensend:read'});
-        return data+'.'+Buffer.from(sign('sha256',Buffer.from(data),{key:privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
-      };
-      const rpc=(bearer:string)=>request('POST','/mcp',bearer,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
-      assert.ok(ok(await rpc(legacy(claims.bane_grant))).result.tools.length);
-      assert.equal((await rpc(legacy('mcp_unknown'))).status,401);
-      const wire=t.mock.method(db,'query'), [header, payload] = token.split('.');
-      const unknown = () => [encode({alg:'ES256',typ:'at+jwt',kid:randomUUID()}),payload,Buffer.alloc(64).toString('base64url')].join('.');
-      for (let i=0; i<8; i++) {
-        assert.equal((await rpc(unknown())).status,401);
-        assert.equal((await rpc([header,payload,Buffer.alloc(64,i).toString('base64url')].join('.'))).status,401);
-      }
-      assert.equal(wire.mock.callCount(),0,'Neither unknown kids nor bad signatures for a cached key touch PostgreSQL');
-      const later=Date.now()+61_000, clock=t.mock.method(Date,'now',()=>later);
-      assert.equal((await rpc(unknown())).status,401);const cold=wire.mock.callCount();assert.ok(cold>0);
-      assert.equal((await rpc(unknown())).status,401);assert.equal(wire.mock.callCount(),cold,'Key rotation permits one refresh per minute');
-      clock.mock.restore();wire.mock.restore();
-    });
-  });
-
-  test('092 migrates a stored refresh grant without widening the next access token',async t=>{
-    await simulatedSesFixture(t,async({db,request})=>{
-      const {refreshToken,clientId,consentId}=await oauthGrant(t,db,'bane:read offline_access',request);
-      // Keep the real opaque token and grant linkage, but restore their pre-092 spellings.
-      for (const table of ['oauth_consent','oauth_refresh_token','oauth_access_token']) {
-        await db.query(`UPDATE ${table} SET scopes=array_replace(scopes,'bane:read','opensend:read'),reference_id=replace(reference_id,'bane:read','opensend:read') WHERE client_id=$1`,[clientId]);
-      }
-      const stored=async()=>(await db.query('SELECT scopes,reference_id FROM oauth_refresh_token WHERE client_id=$1',[clientId])).rows[0];
-      const before=await stored();assert.ok(before.scopes.includes('opensend:read'));
-      const {readFile}=await import('node:fs/promises');
-      await db.query(await readFile(new URL('./migrations/092_bane_scopes.sql',import.meta.url),'utf8'));
-      const expected=['bane:read','offline_access'];const after=await stored();
-      assert.deepEqual(after.scopes.toSorted(),expected);assert.equal(after.reference_id,before.reference_id.replace('opensend:read','bane:read'));
-      const tokens=ok(protectOAuth(await request('POST','/api/auth/oauth2/token',undefined,new URLSearchParams({grant_type:'refresh_token',client_id:clientId,refresh_token:refreshToken,resource:resourceUrl}).toString(),{'content-type':'application/x-www-form-urlencoded'})));
-      assert.deepEqual(tokens.scope.split(' ').sort(),expected);
-      const claims=JSON.parse(Buffer.from(tokens.access_token.split('.')[1],'base64url').toString());
-      assert.equal(claims.bane_grant,'mcp_'+consentId);assert.deepEqual(claims.scope.split(' ').sort(),expected);
-    });
-  });
-
-  test('hosted MCP bounds registration per peer and hour without weakening desktop redirect validation', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
-      const register = (metadata: Json = {}, ip = '192.0.2.1') => registerClient(t, db, metadata, (m,p,k,b) => request(m,p,k,b,{'x-opensend-client-ip':ip}));
-      for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
-        const client = ok(await register({ redirect_uris: [redirect] }), 201);
-        assert.equal(client.application_type, 'native');
-        assert.equal(client.token_endpoint_auth_method, 'none');
-        assert.deepEqual(client.redirect_uris, [redirect]);
-      }
-      for (const metadata of [
-        { application_type: 'web', redirect_uris: ['http://127.0.0.1/callback'] },
-        { redirect_uris: ['http://example.com/callback'] },
-        { redirect_uris: ['http://127.0.0.1/callback', 'https://example.com/callback'] },
-        { redirect_uris: ['http://127.0.0.1.evil.example/callback'] },
-        { redirect_uris: ['http://user:password@127.0.0.1/callback'] },
-        { redirect_uris: ['http://127.0.0.1/callback#fragment'] },
-      ]) {
-        const reply = await register(metadata);
-        assert.equal(reply.status, 400, diagnostic(reply));
-        assert.equal(typeof reply.body.error, 'string', diagnostic(reply));
-        assert.equal(reply.body.client_id, undefined, diagnostic(reply));
-      }
-      ok(await register(), 201); // 10th registration attempt.
-      const limited = await register(); assert.equal(limited.status, 429); assert.ok(limited.headers.get('retry-after'));
-      ok(await register({}, '192.0.2.2'), 201);
-      await db.query("UPDATE api_request_budgets SET window_start=window_start-interval '1 hour' WHERE workspace_id=$1 AND used=11", [runtime.config.workspaceId]);
-      ok(await register(), 201);
-    });
-  });
-
-  test('hourly retention removes only old OAuth registrations without consent, access or refresh tokens, and access requests after 90 days', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
-      const { cleanup } = await import('./src/maintenance.js');
-      const ids: string[] = [];
-      for (let i=0; i<5; i++) ids.push(ok(await registerClient(t,db,{},request),201).client_id);
-      const [unused,fresh,consented,access,refresh] = ids;
-      await db.query("UPDATE oauth_client SET created_at=now()-interval '8 days' WHERE client_id=ANY($1) AND client_id<>$2", [ids,fresh]);
-      await db.query("INSERT INTO oauth_consent(id,client_id,scopes,created_at,updated_at) VALUES ($1,$1,'{}',now(),now())", [consented]);
-      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,now()+interval '1 hour',now(),'{}')", [access]);
-      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,$2,now()+interval '1 hour',now(),'{}')", [refresh,manager!.userId]);
-      const [stale, recent] = [`${unique('stale-request')}@outside.invalid`, `${unique('recent-request')}@outside.invalid`];
-      await db.query("INSERT INTO access_requests(email,last_requested_at) VALUES ($1,now()-interval '91 days'),($2,now()-interval '89 days')", [stale, recent]);
-      const expired=unique('expired');
-      await db.query("INSERT INTO auth_verification(id,identifier,value,expires_at) VALUES($1,$1,'fixture',now())",[expired]);
-      await db.query('INSERT INTO auth_session(id,token,user_id,expires_at) VALUES($1,$1,$2,now())',[expired,manager!.userId]);
-      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES($1,$1,$2,$3,now(),now(),'{}')",[expired,refresh,manager!.userId]);
-      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES($1,$1,$2,now(),now(),'{}')",[expired,access]);
-      await cleanup(runtime);
-      for(const table of ['auth_verification','auth_session','oauth_access_token','oauth_refresh_token'])assert.equal((await db.query(`SELECT FROM ${table} WHERE id=$1`,[expired])).rowCount,0);
-      const remaining = (await db.query('SELECT client_id FROM oauth_client WHERE client_id=ANY($1)', [ids])).rows.map(row=>row.client_id);
-      assert.deepEqual(remaining.sort(), ids.filter(id=>id!==unused).sort());
-      assert.deepEqual((await db.query('SELECT email FROM access_requests WHERE email=ANY($1)', [[stale, recent]])).rows, [{ email: recent }]);
-    });
-  });
 
   test('hosted MCP advertises both catalogs and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
@@ -3125,29 +2914,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
       let tools=await listing();assert.ok(passwords.every(op=>!tools.has(op)));
       error(await http('GET','/v1/inboxes/fixture/app-passwords',managed.token),403,'ADMIN_REQUIRED');
-      const prev=(await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1',[consentId])).rows[0].reference_id;
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|boxes:mbx_scoped_fixture' WHERE id=$1",[consentId,prev]);const list=await rpc(token,'tools/list');assert.ok(list.tools.some((x:Json)=>x.name==='listInboxes'));assert.ok(!list.tools.some((x:Json)=>x.name==='getCurrentIdentity'||x.name==='applyRituals'||x.name==='createAgentToken'));
-      const budget=(await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used;const listAgain=await rpc(token,'tools/list');assert.ok(listAgain.tools.length);assert.equal((await db.query('SELECT used FROM api_request_budgets WHERE key_id=$1',['mcp_'+consentId])).rows[0].used,budget+1);
-      const denied=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{}}});assert.equal(denied.isError,true);const merged=await rpc(token,'tools/call',{name:'rituals',arguments:{action:'apply',confirm:true,body:{}}},'/mcp');assert.equal(merged.structuredContent.error.code, denied.structuredContent.error.code);
-      const inboxTools = (await rpc(token,'tools/list',{},'/mcp?toolsets=admin')).tools;
-      const sendActions = inboxTools.find((tool:Json)=>tool.name==='reply').inputSchema.properties.action.enum;
-      assert.deepEqual(sendActions, ['reply']);
-      await t.test('L1: inbox-only descriptions advertise no workspace, outbound attachment or thread-start actions', () => {
-        const descriptions = new Map<string,string>(inboxTools.map((tool:Json)=>[tool.name,tool.description]));
-        assert.match(descriptions.get('reply')!, /reply/i);
-        assert.doesNotMatch(descriptions.get('reply')!, /start|create/i);
-        assert.match(descriptions.get('messages')!, /wait/i);
-        assert.doesNotMatch(descriptions.get('messages')!, /workspace|inbound|search|events|update/i);
-        assert.match(descriptions.get('attachments')!, /inbox/i);
-        assert.doesNotMatch(descriptions.get('attachments')!, /outgoing|outbound|upload|delete|inbound/i);
-      });
-      const hiddenStart = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'reply',action:'start'}},'/mcp');
-      assert.equal(hiddenStart.structuredContent.error.code,'TOOL_UNAVAILABLE');
-      for (const [path,name,args] of [['/mcp','reply',{action:'start'}],['/mcp?codemode=true','createInboundThread',{}]] as const) {
-        const refused = await rpc(token,'tools/call',{name,arguments:args},path);
-        assert.equal(refused.structuredContent.error.code,'EPHEMERAL_REPLY_ONLY');
-      }
-      await db.query("UPDATE oauth_consent SET reference_id=$2||'|receiving' WHERE id=$1",[consentId,prev]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
+      await db.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1',[consentId]);const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // A mail client password outlives the token that asks for it, so a temporary token cannot issue one. It can still list them.
       error(await http('POST','/v1/inboxes/fixture/app-passwords',managed.token,{name:'fixture',protocols:['imap']}),403,'CREDENTIAL_DELEGATION_FORBIDDEN');
@@ -3165,7 +2932,9 @@ describe('Hosted MCP OAuth and tools', () => {
       const listed=ok(await http('POST','/mcp?toolsets=endpoints',token,{jsonrpc:'2.0',id:31,method:'tools/list',params:{}},rpcHeaders)).result.tools.map((x:Json)=>x.name);assert.ok(listed.includes('endpoints')&&listed.includes('inboundWebhooks')&&!listed.includes('rituals'),listed.join());
       const checked=await rpc(token,'tools/call',{name:'checkRitual',arguments:{body:{source:'export default function route(email,ctx){endpoints["mcp-alerts"]({text:email.subject})}'}}});assert.equal(checked.structuredContent.ok,true,redact(checked));
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
-      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',id,jsonb_build_object('resource',resources[1],'hosted',true)) AS ok FROM oauth_consent WHERE id=$1",[consentId])).rows[0].ok;
+      // The policy the server passes (receivingPolicy): this shard is self-hosted, so the address must be allowlisted.
+      const grantPolicy={hosted:false,subjects:(process.env.AUTH_ALLOWED_SUBJECTS??'').split(',').map(e=>e.trim())};
+      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)||$2::jsonb) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId,JSON.stringify(grantPolicy)])).rows[0].ok;
       assert.equal(await live(),true);
       await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
       secrets.add(parent.secret);grantKeys.push(parent.id);
@@ -3178,7 +2947,7 @@ describe('Hosted MCP OAuth and tools', () => {
         ['DELETE','/v1/routing/routes/billing',undefined],['DELETE','/v1/routing/routes/test',undefined],['POST','/v1/routing/versions/1/restore',undefined]] as const)
         error(await http(method,path,child.secret,body,{'if-match':'1'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
-      await db.query('UPDATE oauth_consent SET reference_id=$2 WHERE id=$1',[consentId,prev]);
+      await db.query('UPDATE bane_resource_grants SET receiving=false WHERE grant_key=$1',[consentId]);
       assert.equal(await live(),false);
       const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
@@ -3197,13 +2966,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await db.query('SELECT id FROM api_keys WHERE id=ANY($1) AND revoked_at IS NOT NULL',[grantKeys])).rowCount,2,'Both credential generations are revoked with their approval.');
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
+    assert.equal(revokedConnection.status, 403, diagnostic(revokedConnection));
   });
 
   test('R1: grant edits preserve the human attachment chain across revocation', async t => {
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const box=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
       const rituals=[{key:'guard',source:'export default function route(email){block()}'},{key:'note',source:'export default function route(email){label("note")}'},{key:'extra',source:'export default function route(email){label("extra")}'}];
       const binding=(ritual:string)=>({target:box.address,ritual,continue:false});
@@ -3242,7 +3011,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.equal(hidden.structuredContent.error.code,'TOOL_UNAVAILABLE');
         // tear witness (recheck of #51): with receiving consent but no manage, mailbox administration was listed although
         // mailboxAuth (actorMailAccess) refuses it. Every GET must be listed exactly when REST, as this grant, does not refuse it.
-        await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+        await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
         const receiving=await listed(true);
         for(const name of ['listInboundKeys','listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
         assert.ok(receiving.has('getRouting')&&receiving.has('getRituals')&&receiving.has('sendEmail'));
@@ -3259,7 +3028,7 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         assert.ok(gets>=80,String(gets));
         // As a workspace member the same approval also loses the owner and admin areas.
-        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[runtime.config.workspaceId,consentId]);
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[runtime.config.workspaceId,consentId]);
         for(const codemode of [true,false]){
           const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
           for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
@@ -3292,12 +3061,12 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await request('GET', '/v1/inbound/addresses', secret), 403, 'ADMIN_REQUIRED');
       }
       // With receiving consent the same credentials read it, and both catalogs offer it.
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [manage.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [manage.consentId]);
       assert.deepEqual(await offered(manage.token), [true, true]);
       for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
       // A read approval with receiving consent: REST refuses it (mailboxAuth needs a manage credential), so it is not offered.
       const read = await oauthGrant(t, db, 'bane:read offline_access', request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [read.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [read.consentId]);
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
       const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId))!; assert.ok(reader?.receivingConsent);
@@ -3328,7 +3097,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // The revoke commits between this request's authorization and the row that ties the new key to the approval.
       const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
         const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
-        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM oauth_consent WHERE id=$1',[consentId]).then(()=>query.apply(this,args));}
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM bane_resource_grants WHERE grant_key=$1',[consentId]).then(()=>query.apply(this,args));}
         return query.apply(this,args);} as typeof pg.Client.prototype.query);
       let result:Json;
       try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
@@ -3340,7 +3109,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('N-L1: human guards fail to junk when an input loses its grant, not when an independent input is available',async t=>{
     await simulatedSesFixture(t,async({db,local,request})=>{
       const {token,consentId}=await oauthGrant(t,db,writableScope,request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const boxes:string[]=[];for(let n=0;n<3;n++)boxes.push(ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201).address);
       const rituals=[{key:'listed',source:'export default function route(email){if(lists.has("deny",email.from.address)) block()}'},{key:'scored',source:'export default function route(email){const r=omens(email,{q:"Is review needed?"});if(r.q>0.5) block()}'},{key:'other',source:'export default function route(email){label("human")}'}];
       const config={rituals,attachments:rituals.map((r,i)=>({ritual:r.key,target:boxes[i]})),senderLists:{deny:['system@example.invalid']}};
@@ -3358,7 +3127,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('an endpoint held when its approval is removed resumes only with its URL', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { token, consentId } = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [consentId]);
       const toolAs = async (bearer: string, name: string, args: Json) => { const r = ok(await request('POST', '/mcp?codemode=true', bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { confirm: true, ...args } } }, rpcHeaders)).result; assert.equal(r.isError, false, redact(r)); };
       const tool = (name: string, args: Json) => toolAs(token, name, args);
       const slack = 'https://hooks.slack.com/services/T0FIXTURE/B0FIXTURE/fixturefixturefixture';
@@ -3413,7 +3182,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // A resume decides on the endpoint as it is when the update runs. Here a second approval that changed the
       // endpoint is removed after the resume has read the endpoint and before it writes.
       const second = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [second.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [second.consentId]);
       await toolAs(second.token, 'updateEndpoint', { name: 'untouched', body: { perMinute: 30 } });
       ok(await local('PATCH', '/v1/endpoints/untouched', { paused: true }));
       const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
@@ -3421,7 +3190,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         if (this !== db || removed || !/FROM mail_endpoints d JOIN mailbox_webhooks h/.test(text)) return query.apply(this, args);
         removed = true;
-        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]); return rows; });
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
       try { error(await local('PATCH', '/v1/endpoints/untouched', { paused: false }), 409, 'ENDPOINT_URL_REQUIRED'); } finally { wire.mock.restore(); }
       assert.equal(removed, true);
@@ -3440,7 +3209,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // A write by a key an approval created reads the approval again inside its transaction, not only when the request
       // was authenticated. Here the approval is removed between the two reads: the write is refused and nothing changes.
       const third = await oauthGrant(t, db, writableScope, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [third.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [third.consentId]);
       const key = ok(await request('POST', '/mcp?codemode=true', third.token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'held fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
       secrets.add(key);
       ok(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { description: 'Events, again' }));
@@ -3448,8 +3217,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         // The first read of the approval authenticates the key; the second is the write's own.
-        if (this !== db || !/from "oauth_consent"/.test(text) || ++reads !== 2) return query.apply(this, args);
-        return query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [third.consentId]).then(() => query.apply(this, args));
+        if (this !== db || !/FROM bane_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
+        return query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [third.consentId]).then(() => query.apply(this, args));
       } as typeof pg.Client.prototype.query);
       try { error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
       assert.equal(reads, 2);
@@ -3465,13 +3234,13 @@ describe('Hosted MCP OAuth and tools', () => {
     // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.
     const db = await fixtureDatabase(t);
     const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
     const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
     const { token, consentId } = await oauthGrant(t, db, writableScope, request);
-    await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1", [consentId]);
+    await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1", [consentId]);
     const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
     secrets.add(key);
     const hook = ok(await request('POST', '/v1/inbound/webhooks', MANAGER, { url: 'https://example.com/hooks/race-events', eventTypes: ['message.received'] }, live), 201);
@@ -3493,7 +3262,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await pausedAt;
       let settled = false;
       const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
-      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%oauth_consent%'")).rows[0].n > 0;
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%bane_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the write holds.');
       assert.equal(settled, false);
@@ -3523,7 +3292,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const first=await queue(child.secret);await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[first])).rows[0].status,'accepted');
       const second=await queue(child.secret),control=await queue(independent.secret);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const domain=unique('mdom');await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'receive.example',$3,'active')",[domain,wid,REGION]);
       await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')",[wid,REGION]);
       const box=ok(await local('POST','/v1/inbound/addresses',{address:'support@receive.example'}),201);
@@ -3538,16 +3307,16 @@ describe('Hosted MCP OAuth and tools', () => {
       for(const path of [`${detail}?includeDelivery=true`,'/v1/inbound/messages?includeDelivery=true',`${detail}/raw`,`${detail}/parts/fixture`])error(await request('GET',path,parent.secret),403,'ADMIN_REQUIRED');
       assert.deepEqual(ok(await request('GET',`${detail}?includeDelivery=true`,dashboardKey.secret)).envelopeTo,['recipient@example.net']);
       error(await request('GET',`${detail}/parts/fixture`,dashboardKey.secret),404);
-      await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=true WHERE client_id=$1',[clientId]);
       for(const [id,from] of [[child.id,'sender@example.com'],[mbk.id,box.address]])assert.equal(await allowed(id,from),false);
       await run('email.dispatch');
       for(const emailId of [second,mailboxEmail])assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[emailId])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[control])).rows[0].status,'accepted');
       // Non-deleting lapse: the client and both key rows remain live, but the
       // approving user no longer has management authority in this workspace.
-      await db.query('UPDATE oauth_client SET disabled=false WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=false WHERE client_id=$1',[clientId]);
       const afterDemotion=await queue(child.secret);
-      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT user_id FROM oauth_consent WHERE id=$2)",[wid,consentId]);
+      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[wid,consentId]);
       assert.equal((await db.query('SELECT FROM api_keys WHERE id=$1 AND revoked_at IS NULL',[child.id])).rowCount,1);
       assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
       await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
@@ -3576,12 +3345,12 @@ describe('Hosted MCP OAuth and tools', () => {
       t.after(() => { runtime.webhookFetch = transport; });
       // While the approval is not active (its client is switched off here), nothing is posted to a webhook tied to it.
       // The delivery fails unsent, and can be retried by hand once the approval is active again.
-      await db.query('UPDATE oauth_client SET disabled=true WHERE client_id=$1', [clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=true WHERE client_id=$1', [clientId]);
       const [idle, free] = [await test(made.id), await test(untouched.id)];
       await run('operation.webhook');
       assert.deepEqual(posted, [hook('untouched').url]);
       assert.deepEqual([await delivery(idle), await delivery(free)], [{ status: 'failed', last_error: 'APPROVAL_INACTIVE' }, { status: 'delivered', last_error: null }]);
-      await db.query('UPDATE oauth_client SET disabled=false WHERE client_id=$1', [clientId]);
+      await db.query('UPDATE bane_resource_grants SET revoked=false WHERE client_id=$1', [clientId]);
       ok(await local('POST', `/v1/webhooks/${made.id}/deliveries/${idle}/retry`), 202);
       await run('operation.webhook');
       assert.deepEqual(posted.splice(0), [hook('untouched').url, hook('made').url]);
@@ -3635,8 +3404,8 @@ describe('Hosted MCP OAuth and tools', () => {
         let reads = 0;
         const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
           const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
-          if (this !== db || !/from "oauth_consent"/.test(text) || ++reads !== 2) return query.apply(this, args);
-          return query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]).then(() => query.apply(this, args));
+          if (this !== db || !/FROM bane_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
+          return query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]).then(() => query.apply(this, args));
         } as typeof pg.Client.prototype.query);
         try { error(await request(method, `/v1/webhooks/${untouched.id}${suffix}`, secondKey), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
         assert.equal(reads, 2);
@@ -3649,7 +3418,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         if (this !== db || removed || !/from "operation_webhooks"/.test(text)) return query.apply(this, args);
         removed = true;
-        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM oauth_consent WHERE id=$1', [second.consentId]); return rows; });
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
       try { error(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: false }), 409, 'WEBHOOK_URL_REQUIRED'); } finally { wire.mock.restore(); }
       assert.equal(removed, true);
@@ -3663,7 +3432,7 @@ describe('Hosted MCP OAuth and tools', () => {
     // the webhook; the owner's URL resumes it with a secret the rotation never saw.
     const db = await fixtureDatabase(t);
     const [{ createApp }, { nodeRuntime }] = await Promise.all([import('./src/app.js'), import('./src/adapters/node.js')]);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET, GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const app = createApp(), runtime = instance.runtime;
@@ -3690,7 +3459,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await pausedAt;
       let settled = false;
       const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
-      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%oauth_consent%'")).rows[0].n > 0;
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%bane_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the rotation holds.');
       assert.equal(settled, false);
@@ -3706,63 +3475,11 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.notEqual(current, rotated);
   });
 
-  test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
-      const wid = runtime.config.workspaceId, uid = manager!.userId;
-      const connection = unique('conn');
-      // Simulation can use a cold connection, but must still require a verified sender claim on MX.
-      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
-      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
-      error(await local('POST','/v1/emails/send',mail()),403,'SENDER_DOMAIN_NOT_VERIFIED');
-      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1 AND name='example.com'",[wid]);
-      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
-      const deniedClient = ok(await registerClient(t, db, {}, request), 201);
-      const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
-        scope: writableScope, resource: resourceUrl, state: unique('state'), code_challenge: createHash('sha256').update(randomUUID()).digest('base64url'), code_challenge_method: 'S256' });
-      const denied = await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' });
-      assert.equal(denied.status, 400, 'A member must not authorize manage scope.');
-      assert.equal((await db.query('SELECT id FROM oauth_consent WHERE client_id=$1', [deniedClient.client_id])).rowCount, 0);
-      const { token, refreshToken, clientId, consentId } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
-      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp?codemode=true',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
-      assert.equal((await call('getCurrentIdentity')).structuredContent.workspaceId, wid);
-      const send = async () => {
-        const reply = await call('sendEmail', { body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
-        assert.equal(reply._meta.status, 202, redact(reply)); return reply.structuredContent.id;
-      };
-      const first = await send(); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
-      const oldMail = await send();
-      const { reference_id: reference } = (await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1', [consentId])).rows[0];
-      assert.match(reference, /^mcp_v2_/);
-      const oldReference = reference.replace(/^mcp_v2_/, 'mcp_');
-      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [oldReference, consentId]);
-      await db.query('UPDATE oauth_refresh_token SET reference_id=$1 WHERE client_id=$2 AND reference_id=$3', [oldReference, clientId, reference]);
-      assert.equal((await request('POST', '/mcp', token, { jsonrpc:'2.0', id:1, method:'tools/list', params:{} }, rpcHeaders)).status, 401);
-      const refresh = await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({ grant_type:'refresh_token', client_id:clientId, refresh_token:refreshToken, resource:resourceUrl }).toString(), { 'content-type':'application/x-www-form-urlencoded' });
-      assert.equal(refresh.status, 400); assert.equal(refresh.body.error, 'invalid_grant');
-      await run('email.dispatch');
-      assert.deepEqual((await db.query('SELECT status,provider_id FROM sending_emails WHERE id=$1', [oldMail])).rows, [{status:'canceled',provider_id:null}]);
-      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [reference, consentId]);
-      const lostProof = await send(); await db.query("UPDATE domain_claims SET sending_state='failed' WHERE workspace_id=$1",[wid]); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still permit sending at dispatch.');
-      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1",[wid]);
-      const second = await send();
-      await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
-      assert.equal((await call('getCurrentIdentity')).structuredContent.role, 'member', 'An existing member grant must not grow on promotion.');
-      await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, uid]);
-      await run('email.dispatch');
-      assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [second])).rows[0].error_code, 'ORIGIN_KEY_REVOKED');
-    });
-  });
-
-  // Ryan: support and operator routes are admin-only. Every route under /v1/operator and /v1/support, real or not, answers
-  // every customer credential with the same 403 and no data. The loop reads the route table, so new routes are covered.
   test('Support and operator routes: customers get 403 everywhere; operators read the audited trail; a support grant reads only its customer', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
       const signing = generateKeyPairSync('ed25519').privateKey.export({ format: 'jwk' }) as Json, platformToken = `bane_ops_${hex()}`;
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [],
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [],
         support: { platformToken, url: 'https://support.example.com/start', signingKey: { kty: 'OKP', crv: 'Ed25519', d: signing.d, x: signing.x } } });
       secrets.add(platformToken);
       const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
@@ -3778,6 +3495,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [other, ops]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'admin'),($4,$2,$5,'member'),($6,$7,$8,'member'),($9,$10,$11,'owner')`,
         [unique('mem'), wid, admin.userId, unique('mem'), member.userId, unique('mem'), ops, operator.userId, unique('mem'), other, outsider.userId]);
+      // The session fixture also makes each user an owner of 'default'; here each belongs only where it was placed.
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[admin.userId, member.userId, operator.userId, outsider.userId]]);
 
       // Every customer credential type.
       const keys: Record<string, string> = {};
@@ -3986,7 +3705,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
       const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[manager.consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[manager.consentId]);
       const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
@@ -4043,7 +3762,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      await db.query("UPDATE oauth_consent SET reference_id=reference_id||'|receiving' WHERE id=$1",[consentId]);
+      await db.query("UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1",[consentId]);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -4275,10 +3994,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(mergedDenied.isError, true); assert.equal(mergedDenied.structuredContent.error.code, denied.structuredContent.error.code);
     const hidden = await rpc(token,'tools/call',{name:'describe_tool',arguments:{resource:'contacts',action:'create'}},'/mcp');
     assert.equal(hidden.structuredContent.error.code, 'TOOL_UNAVAILABLE');
-    const deletion = await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId });
+    const deletion = await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER);
     assert.equal(deletion.status, 200, diagnostic(deletion));
     const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
-    assert.equal(revoked.status, 401, diagnostic(revoked));
+    assert.equal(revoked.status, 403, diagnostic(revoked));
     assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
     assert.equal((await http('GET', '/v1/me', delegated.token)).status, 401, 'A delegated token dies with its approval.');
     const key = await keyFixture(t);
@@ -4294,8 +4013,8 @@ describe('DB region catalog and explicit SES setup', () => {
       import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'), import('./src/db/sending.js'),
     ]);
     const db = await fixtureDatabase(t);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-ses-client', GOOGLE_CLIENT_SECRET: 'synthetic-ses-client-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'true',
       S3_BUCKET: 'synthetic-ses-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -5806,10 +5525,12 @@ describe('Dashboard API capabilities', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId;
       const { refreshStanding } = await import('./src/standing.js');
-      // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs.
+      // Every row lands early today (UTC), so the day buckets cannot straddle midnight while the test runs, and never
+      // after now(): a row dated ahead (in the first minutes after midnight) would hide the late email below from the
+      // dashboard cache's revision, the newest created_at.
       const insert = (count: number, options: { status?: string; outcomes?: number; error?: string | null; simulated?: boolean; campaign?: boolean; daysAgo?: number; to?: string } = {}) => db.query(
         `INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, error_code, created_at)
-         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', jsonb_build_array($11::text), '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n)
+         SELECT $1 || n, $2, $3, 'fixture', $10, 'hello@score.example', jsonb_build_array($11::text), '[]', '[]', 'Score fixture', '{}', $4, $5::text, CASE WHEN $5::text IN ('suppressed', 'rejected') THEN NULL ELSE 'provider-' || $1 || n END, $6, $7, least(now(), date_trunc('day', now(), 'UTC') - make_interval(days => $9::int) + make_interval(secs => n))
          FROM generate_series(1, $8::int) n`,
         [unique('score-'), wid, REGION, options.simulated ?? false, options.status ?? 'delivered', options.outcomes ?? 3, options.error ?? null, count, options.daysAgo ?? 0, options.campaign ? 'campaign_fixture' : null, options.to ?? 'recipient@example.com']);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Score reader', permissions: ['read'] }), 201); secrets.add(key.secret);
@@ -5864,8 +5585,9 @@ describe('Dashboard API capabilities', () => {
       const changed = await local('GET', '/v1/sender-score');
       assert.deepEqual([changed.headers.get('x-bane-sender-score-cache'), changed.body.standing.step], ['miss', 'warn']);
       // A new email changes the workspace's activity, so the next dashboard read is computed again rather than served stale.
+      // clock_timestamp(), not now(): the fixture's transaction started before the rows above, so now() could equal theirs.
       await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, created_at)
-        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', now())`, [unique('score-late-'), wid, REGION]);
+        VALUES ($1, $2, $3, 'fixture', 'hello@score.example', '["late@example.com"]', '[]', '[]', 'Late', '{}', false, 'queued', clock_timestamp())`, [unique('score-late-'), wid, REGION]);
       const fresh = await local('GET', '/v1/sender-score');
       assert.deepEqual([fresh.status, fresh.headers.get('x-bane-sender-score-cache')], [200, 'miss']);
       // PR92 P2: only emails and email events move the key. A contact consent change, which a member can make as often as
@@ -5936,7 +5658,7 @@ describe('Dashboard API capabilities', () => {
       const first = await list('limit=1');
       assert.equal(error(await local('GET', `/v1/logs?limit=1&direction=sent&cursor=${first.nextCursor}`), 422).code, 'INVALID_CURSOR');
       // A dashboard member (hosted workspaces have members) reads mail on live addresses only, without delivery details or the spam verdict.
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
       const { rows: [{ role }] } = await db.query('SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [wid, manager!.userId]);
       await db.query("UPDATE workspace_members SET role = 'member' WHERE workspace_id = $1 AND user_id = $2", [wid, manager!.userId]);
       const member = await list('limit=10'), memberSpam = await list('status=spam'), memberClean = await list('status=received');
@@ -6522,8 +6244,8 @@ describe('Operational configuration and public event boundaries', () => {
   test('SES Auto Validation feedback records its subtype and suppresses the contact distinctly from a hard bounce', { skip: DATABASE_FIXTURE_SKIP }, async t => {
     const [{ nodeRuntime }, { operationJobs }] = await Promise.all([import('./src/adapters/node.js'), import('./src/operations.js')]);
     const db = await fixtureDatabase(t);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-validation-client', GOOGLE_CLIENT_SECRET: 'synthetic-validation-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-validation-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -6842,8 +6564,8 @@ describe('Operational configuration and public event boundaries', () => {
       return nativeFetch(`${loopback}/certificate`, { method: request.method, headers: request.headers, redirect: request.redirect, signal: request.signal });
     });
     const db = await fixtureDatabase(t);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-      GOOGLE_CLIENT_ID: 'synthetic-redirect-client', GOOGLE_CLIENT_SECRET: 'synthetic-redirect-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+      ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -7021,8 +6743,8 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
-  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
-    GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
+    ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
     PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
@@ -7033,7 +6755,12 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime.config.simulatedSes.latencyMs = 0;
   const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
-  const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network is forbidden in simulated SES acceptance scenarios.'); });
+  const fetchIssuer=globalThis.fetch; let unexpectedNetwork=0;
+  t.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
+    const url=new URL(input instanceof Request?input.url:String(input));
+    if(url.origin===process.env.ACCOUNT_ISSUER && url.hostname==='127.0.0.1') return fetchIssuer(input,init);
+    unexpectedNetwork++; throw Error('Network is forbidden in simulated SES acceptance scenarios.');
+  });
   try {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
@@ -7072,7 +6799,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         }
       }
       await scenario({ runtime, db, local, run, jobs, request, fetch: req => Promise.resolve(app.fetch(req, runtime)) });
-      assert.equal(network.mock.callCount(), 0, 'No provider, webhook, certificate or credential network request is allowed.');
+      assert.equal(unexpectedNetwork,0,'Only the loopback fixture issuer may be contacted.');
       throw rollback;
     });
   } catch (cause) { if (cause !== rollback) throw cause; }
@@ -7119,10 +6846,10 @@ test('MX deployment variables remain fallbacks and BANE variables take precedenc
   const {loadConfig,CONFIG_KEYS}=await import('./src/config.js');
   const flags={MX_PLATFORM_AWS_ACCOUNT:'000000000001',MX_REGIONAL_SENDING:'true',MX_TRUSTED_POOL:'true',MX_BYO_V2:'true',MX_ALLOW_SES_SANDBOX:'true',MX_REQUIRE_DMARC_FOR_BULK:'true',MX_PLACEMENT_SHADOW:'false',MX_PLACEMENT_DBL_ZONE:'fixture.invalid'};
   for (const key of Object.keys(flags)) assert.ok(CONFIG_KEYS.includes(key),'Workers must pass the legacy binding to loadConfig');
-  const config=loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,...flags});
+  const config=loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,...flags});
   assert.deepEqual([config.platformAccount,config.regionalSending,config.trustedPool,config.byoV2,config.allowSesSandbox,config.requireDmarcForBulk,config.placementShadow,config.placementDblZone],['000000000001',true,true,true,true,true,false,'fixture.invalid']);
-  assert.equal(loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,...flags,BANE_REGIONAL_SENDING:'false'}).regionalSending,false);
-  for (const key of ['BANE_PLATFORM_AWS_ACCOUNT','MX_PLATFORM_AWS_ACCOUNT']) assert.throws(()=>loadConfig({MULTI_TENANT:'true',PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:AUTH_SECRET,[key]:'438095551154'}),{status:503,code:'PLATFORM_ACCOUNT_RETIRED'});
+  assert.equal(loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,...flags,BANE_REGIONAL_SENDING:'false'}).regionalSending,false);
+  for (const key of ['BANE_PLATFORM_AWS_ACCOUNT','MX_PLATFORM_AWS_ACCOUNT']) assert.throws(()=>loadConfig({MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:AUTH_SECRET,[key]:'438095551154'}),{status:503,code:'PLATFORM_ACCOUNT_RETIRED'});
 });
 
 test('cached dashboard responses accept the old expiry header and write only the new one',async()=>{
@@ -7245,7 +6972,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       if (failure) { assert.equal(child.status,1);assert.match(child.stderr,failure);return child.stdout; }
       assert.equal(child.status,0,child.stderr);return child.stdout+child.stderr;
     };
-    const config={PUBLIC_URL:PUBLIC_ORIGIN,BETTER_AUTH_SECRET:randomUUID()},plain='fixture signing secret',aad='default:live:fixture';
+    const config={PUBLIC_URL:PUBLIC_ORIGIN,BANE_ROOT_SECRET:randomUUID()},plain='fixture signing secret',aad='default:live:fixture';
     const encrypted=await encrypt({config:loadConfig(config)},plain,aad);
     await db.query("INSERT INTO operation_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES('fixture','default','https://fixture.invalid','[]',$1)",[encrypted]);
     const read=async()=>(await db.query("SELECT encrypted_secret FROM operation_webhooks WHERE id='fixture'")).rows[0].encrypted_secret;
@@ -7260,7 +6987,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       await db.query('DROP TABLE bane_migrations');
     });
     await mt.test('wrong webhook root fails before ledger rename or migration writes',async()=>{
-      migrate({BETTER_AUTH_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: BETTER_AUTH_SECRET differs/);
+      migrate({BANE_ROOT_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs/);
       assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('bane_migrations') AS t")).rows[0].t,null);
       assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='092_bane_scopes.sql'")).rowCount,0);
       assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
@@ -7284,9 +7011,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     });
     assert.equal((await db.query("SELECT name FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
     assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
-    assert.match(migrate({BETTER_AUTH_SECRET:config.BETTER_AUTH_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
-    const next={...config,BETTER_AUTH_SECRET:randomUUID()};
-    assert.match(migrate({...next,PREVIOUS_BETTER_AUTH_SECRET:config.BETTER_AUTH_SECRET}),/WEBHOOK_SECRETS_REKEYED/);
+    assert.match(migrate({BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
+    const next={...config,BANE_ROOT_SECRET:randomUUID()};
+    assert.match(migrate({...next,PREVIOUS_BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEYED/);
     const rotated=await read();assert.notEqual(rotated,encrypted);assert.equal(await decrypt({config:loadConfig(next)},rotated,aad),plain);
     await db.query("DELETE FROM oauth_client WHERE id='legacy'; DELETE FROM operation_webhooks WHERE id='fixture'; DELETE FROM ses_installation_settings WHERE workspace_id='default'");
   });
@@ -7341,7 +7068,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -7397,7 +7124,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
     // The old pool and tenants are ready: the exact README command reads the isolated DB and must not call AWS.
     await db.query('UPDATE provider_pool_regions SET receiving_checked_at=now()');
-    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
+    const guard="globalThis.fetch=()=>{process.exitCode=2;throw Error('Unexpected network request')}",env={PATH:process.env.PATH,DATABASE_URL:url.href,BANE_ROOT_SECRET:AUTH_SECRET,PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:old,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture',AWS_SECRET_ACCESS_KEY:'fixture',AWS_EC2_METADATA_DISABLED:'true'};
     // The generated Worker ProcessEnv includes deployment-only bindings; this Node child gets only the fixture allowlist.
     const result=(await import('node:child_process')).spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(guard),'--import','tsx','--input-type=module'],{input:code,env:env as unknown as NodeJS.ProcessEnv,encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,result.stderr);assert.equal(result.stdout.trim(),'');
@@ -8050,10 +7777,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t,async({runtime,db,local,jobs})=>{
       const {loadConfig}=await import('./src/config.js'), {operationJobs}=await import('./src/operations.js');
       const {SESv2Client}=await import('@aws-sdk/client-sesv2'), tls=(await import('node:tls')).default,{EventEmitter}=await import('node:events');
-      const cfg={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:'https://fixture.example.com'};
+      const cfg={BANE_ROOT_SECRET:'fixture-'.repeat(6),PUBLIC_URL:'https://fixture.example.com'};
       assert.equal(loadConfig({...cfg,BANE_PLACEMENT_SHADOW:'true'}).placementShadow,false);
-      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true'}).placementShadow,true);
-      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',BANE_PLACEMENT_SHADOW:'false'}).placementShadow,false);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google'}).placementShadow,true);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLACEMENT_SHADOW:'false'}).placementShadow,false);
       const wid=runtime.config.workspaceId,oh='us-east-2',type='domain.placement',zone='licensed-dbl.invalid';
       const create=(name:string)=>local('POST','/v1/domains',{name});
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
@@ -8087,7 +7814,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       Object.assign(runtime.config,{multiTenant:true,placementShadow:false});
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')`,[wid,oh]);
       await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
-      await db.query(`UPDATE auth_user SET google_hosted_domain='example.com',email_verified=true WHERE id=$1`,[manager!.userId]);
       await db.query(`UPDATE workspace_members m SET created_at=w.created_at FROM workspaces w WHERE m.workspace_id=w.id AND w.id=$1`,[wid]);
       const prior=ok(await create('off.example.com'),201);
       assert.equal((await jobs(type)).length,0); runtime.config.placementShadow=true;
@@ -8100,7 +7826,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return (await db.query('SELECT * FROM domain_placement_shadow WHERE domain_id=$1',[id])).rows[0];
       };
       runtime.config.multiTenant=false;assert.equal(await run(added.id),undefined);assert.equal(wire.length,0);runtime.config.multiTenant=true;
-      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,9);assert.equal(first.policy_version,2);
+      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,7);assert.equal(first.policy_version,2);
       assert.ok(first.reasons.includes('dbl_unconfigured'));assert.equal(first.signals.dbl,'unconfigured');assert.ok(first.recorded_at>=first.started_at);
       assert.equal(wire.filter(u=>u.includes('rdap.verisign.com')).length,1);assert.ok(wire.some(u=>u.endsWith('/domain/example.com')));
       assert.deepEqual(wire.filter(u=>u.includes('type=A')).map(u=>new URL(u).searchParams.get('name')),['first.example.com'],'No DBL or second site resolution.');
@@ -8109,7 +7835,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(ok(await create(added.name),201),added);assert.equal((await jobs(type)).length,1);
       runtime.config.placementDblZone=zone;
       const profile=async(host:string)=>run(ok(await create(host),201).id);
-      const trusted=await profile('yes.example.com');assert.equal(trusted.decision,'virginia');assert.equal(trusted.signals.verifiedSignup,true);
+      const trusted=await profile('yes.example.com');assert.equal(trusted.decision,'ohio');assert.equal(trusted.signals.verifiedSignup,false);
       assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE domain_id=$1',[trusted.domain_id])).rows[0].region,oh);
       const lookalike=await profile('xn--pypal-4ve.com');assert.equal(lookalike.decision,'hold');assert.ok(lookalike.reasons.includes('brand_lookalike'));
       mode='listed';const listed=await profile('bad.example.com');assert.equal(listed.decision,'hold');assert.ok(listed.reasons.includes('blocklisted'));
@@ -8122,7 +7848,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
       for(const [i,term] of ['+all','all','?all','mx','~all','-all'].entries()) {
         spfRecord='v=spf1 '+term;const sample=await profile(`spf-${i}.example.com`),closed=['~all','-all'].includes(term);
-        assert.equal(sample.signals.exact.spf,closed,spfRecord);assert.equal(sample.score,closed?9:8,spfRecord);
+        assert.equal(sample.signals.exact.spf,closed,spfRecord);assert.equal(sample.score,closed?7:6,spfRecord);
       }
       await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
       const shared=await profile('store.wordpress.com');assert.equal(shared.signals.root,'store.wordpress.com');assert.equal(shared.signals.ageDays,null);
@@ -8180,8 +7906,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{trustedProvision},{setDomainPool},{adoptIdentities},{ensureRegionSettings},{JobDeferred},{SESv2Client},{SNSClient},{STSClient},{SESClient},{S3Client}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/trusted-pool.js'),import('./scripts/set-domain-pool.js'),import('./scripts/adopt-identities.js'),import('./src/ses-region-state.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),wid='ws_'+randomUUID().replaceAll('-',''),va='us-east-1',oh='us-east-2',acct='000011112222',tenant='bane-trusted-'+wid,
-      topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
-    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+      topic=`arn:aws:sns:${va}:${acct}:bane-trusted-feedback`,tenantArn=`arn:aws:ses:${va}:${acct}:tenant/${tenant}/tenant-fixture`,flags={MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',SES_FEEDBACK_URL:'https://ses-acceptance.bane.dev/v1/events/ses'};
+    const instance=nodeRuntime({...flags,DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-trusted',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
@@ -8296,9 +8022,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const db=await fixtureDatabase(t),oh='us-east-2',acct='000033334444',host=`${unique('platform')}.test`,publicUrl=`https://${host}`;
     const [owner,other]=[0,1].map(()=>'ws_'+randomUUID().replaceAll('-','')) as [string,string];
     const tenant=`bane-probation-${owner}`,arn=`arn:aws:ses:${oh}:${acct}:identity/${host}`,inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,feedback=`arn:aws:sns:${oh}:${acct}:bane-feedback`,bucket=`bane-${acct}-mail-${oh}`;
-    const env={MULTI_TENANT:'true',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
-    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',
-      AUTH_ALLOWED_DOMAINS:'example.com',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+    const env={MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_PLATFORM_AWS_ACCOUNT:acct,BANE_PLATFORM_DOMAIN_WORKSPACE:owner,PUBLIC_URL:publicUrl};
+    const instance=nodeRuntime({...env,BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLACEMENT_SHADOW:'false',DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',
+      ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1),($2,$2,$2)',[owner,other]);
     cleanup(t,async()=>{
@@ -8735,7 +8461,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -9754,6 +9480,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const f = await hostedHoldFixture(runtime, db);
       await gradedSender(db, f.wid, 10000);
       // The same owner opens a second workspace while the first is paused (it inherits the sponsor, as signup does).
+      // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
+      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
       const other = ok(await local('POST', '/v1/workspaces', { name: 'Second synthetic workspace' }), 201).id;
       await db.query(`UPDATE workspaces SET quota_sponsor='sponsor-fixture' WHERE id=ANY($1)`, [[f.wid, other]]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, f.pool]);
@@ -9895,6 +9623,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.hostedSendCaps.firstWeek=2;
       const set=(state:string,reason:string)=>setWorkspaceExemption(db,[wid,state,'--reason',reason]);
       await assert.rejects(set('on',''),/Usage:/); await assert.rejects(set('on','No connection'),/No Hosted connection/);
+      // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
+      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[manager!.userId]);
       const other=ok(await local('POST','/v1/workspaces',{name:'Other synthetic workspace'}),201).id;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
       for (const [workspace,host] of [[wid,domain],[other,'ordinary.example']]) {
@@ -11183,14 +10913,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await request('GET', '/v1/operator/workspaces', key.secret), 403, 'OPERATOR_REQUIRED');
       // The role is granted only by the script (audited), never by a workspace role.
       const { setOperator } = await import('./scripts/set-operator.js');
-      await assert.rejects(setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'short']), /Usage/);
-      await assert.rejects(setOperator(db, ['nobody@example.net', 'operator', '--reason', 'Synthetic operator grant']), /No user/);
-      await setOperator(db, [AUTH_EMAIL, 'operator:read', '--reason', 'Synthetic support helper']);
+      await assert.rejects(setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'short']), /Usage/);
+      await assert.rejects(setOperator(db, ['nobody-subject', 'operator', '--reason', 'Synthetic operator grant']), /No user/);
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic support helper']);
       assert.equal(ok(await local('GET', '/v1/me')).operator, 'operator:read');
       assert.deepEqual(ok(await local('GET', '/v1/operator/workspaces')).data.filter((w: Json) => w.workspaceId === wid), [], 'A workspace in good standing is not in the queue.');
       assert.equal(ok(await local('GET', `/v1/operator/workspaces?q=${wid}`)).data[0].workspaceId, wid);
       error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }), 403, 'OPERATOR_REQUIRED');
-      await setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
       const page = ok(await local('GET', base));
       assert.deepEqual([page.standing.step, page.score.limit.daily, page.connection.paused, page.members[0].email], ['ok', 2000, false, AUTH_EMAIL]);
       const version = page.standing.version;
@@ -11250,7 +10980,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         .map(r => r.d).sort((a: Json, b: Json) => a.sequence - b.sequence);
       assert.deepEqual(published.map((d: Json) => [d.previousStep, d.step, d.actor.kind]), [['ok', 'pause', 'operator'], ['pause', 'warn', 'operator'], ['warn', 'restrict', 'operator'], ['restrict', 'warn', 'operator']]);
       assert.ok(!JSON.stringify(published).includes(manager!.userId) && !JSON.stringify(published).includes('Confirmed abuse'));
-      await setOperator(db, [AUTH_EMAIL, 'off', '--reason', 'Synthetic offboarding']);
+      await setOperator(db, [AUTH_SUBJECT, 'off', '--reason', 'Synthetic offboarding']);
       error(await local('GET', '/v1/operator/workspaces'), 403, 'OPERATOR_REQUIRED');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE action='set-operator' AND operator_id=$1`, [manager!.userId])).rows[0].n, 3);
     });
@@ -11373,7 +11103,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A second list-quality quarantine needs an operator.
       await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE_HIGH","message":"x"}',quarantines=2 WHERE id=$1`, [c.id]);
       error(await local('POST', `${path}/resume`, {}), 409, 'QUARANTINE_REVIEW_REQUIRED');
-      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_EMAIL, 'operator', '--reason', 'Synthetic Bane operator']);
+      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
       ok(await local('POST', `/v1/operator/campaigns/${c.id}/release`, { reason: 'Reviewed the list source with the customer' }));
       assert.equal((await view()).state, 'sending');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-release-campaign'`, [wid])).rows[0].n, 1);
@@ -11495,7 +11225,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for(const path of ['/mcp/login','/mcp/consent']) assert.equal((await guardPublicRequest(path,new Headers(),peer,work)).status,429);
     assert.equal(reads,40);
     await simulatedSesFixture(t,async({runtime,db})=>{
-      const {reserveSignIn}=await import('./src/google-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
+      const {reserveSignIn}=await import('./src/dashboard-auth.js'),headers=new Headers({'x-bane-client-ip':'192.0.2.255'});
       for(let i=0;i<8;i++) await reserveSignIn(runtime,headers);
       await assert.rejects(reserveSignIn(runtime,headers),{code:'AUTH_STATE_LIMIT'});
       const {digest}=await import('./src/core.js'); await db.query('UPDATE auth_state_slots SET expires_at=now() WHERE peer=$1',[await digest('192.0.2.255')]);
@@ -15182,7 +14912,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/jobs.js'), import('./src/jobs.js'),
     ]);
     const session = await fixtureDatabase(t);
-    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
@@ -16881,7 +16611,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('runtime key rotation publishes a complete pair and only definitive SES credential failures retry',async t=>{
     const {loadConfig}=await import('./src/config.js');
-    const legacy={BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:PUBLIC_ORIGIN,AWS_ACCESS_KEY_ID:'old',AWS_SECRET_ACCESS_KEY:'old-secret',AWS_SESSION_TOKEN:'old-token'};
+    const legacy={BANE_ROOT_SECRET:AUTH_SECRET,PUBLIC_URL:PUBLIC_ORIGIN,AWS_ACCESS_KEY_ID:'old',AWS_SECRET_ACCESS_KEY:'old-secret',AWS_SESSION_TOKEN:'old-token'};
     const pair={accessKeyId:'new',secretAccessKey:'new-secret'};
     assert.deepEqual(loadConfig({...legacy,AWS_RUNTIME_CREDENTIALS:JSON.stringify(pair)}).aws,pair);
     assert.throws(()=>loadConfig({...legacy,AWS_RUNTIME_CREDENTIALS:'{}'}),{code:'CONFIG_INVALID'});
@@ -16914,13 +16644,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { dispatchDue }, { credentialFingerprint, discoveryTarget }, { loadConfig }] = await Promise.all([
         import('@aws-sdk/client-sesv2'), import('./src/dispatcher.js'), import('./src/ses-region-state.js'), import('./src/config.js'),
       ]);
-      const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
-      assert.throws(()=>loadConfig({...base,MULTI_TENANT:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'true'}),/requires TYPESAFE_API_KEY/);
+      const base = { BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
+      assert.throws(()=>loadConfig({...base,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'true'}),/requires TYPESAFE_API_KEY/);
       assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
       for (const flag of ['BANE_REGIONAL_SENDING', 'BANE_TRUSTED_POOL', 'BANE_BYO_V2']) {
-        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true' }), { code: 'CONFIG_INVALID' }, `${flag} needs the platform account.`);
-        assert.throws(() => loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '12345' }), { code: 'CONFIG_INVALID' });
-        assert.equal(loadConfig({ ...base, MULTI_TENANT: 'true', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
+        assert.throws(() => loadConfig({ ...base, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', [flag]: 'true' }), { code: 'CONFIG_INVALID' }, `${flag} needs the platform account.`);
+        assert.throws(() => loadConfig({ ...base, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '12345' }), { code: 'CONFIG_INVALID' });
+        assert.equal(loadConfig({ ...base, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
       }
       assert.equal(loadConfig({ ...base, BANE_REGIONAL_SENDING: 'true' }).platformAccount, undefined, 'Single-tenant installs need no platform account.');
       assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
@@ -17027,7 +16757,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const { createApp } = await import('./src/app.js');
     const { loadConfig } = await import('./src/config.js');
     const encodedRuntime = {
-      config: loadConfig({ BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', DEFAULT_SES_REGION: REGION, AUTH_GOOGLE_CLIENT_ID: 'id', AUTH_GOOGLE_CLIENT_SECRET: 'secret', AUTH_ALLOWED_DOMAINS: AUTH_DOMAIN }),
+      config: loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', DEFAULT_SES_REGION: REGION, OLD_FIXTURE_CLIENT_ID: 'id', OLD_FIXTURE_CLIENT_SECRET: 'secret' }),
       db: {} as import('./src/core.js').Database,
       storage: { put: async () => {}, get: async () => null, delete: async () => {} },
     };
@@ -17036,7 +16766,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(localEncodedSes.status, 422);
     assert.equal(((await localEncodedSes.json()) as Json).error?.code, 'VALIDATION_FAILED');
     const localEncodedJwks = await encodedApp.fetch(new Request(`${PUBLIC_ORIGIN}/api/%61uth/jwks`, { method: 'OPTIONS' }), encodedRuntime);
-    assert.equal(localEncodedJwks.status, 405);
+    assert.equal(localEncodedJwks.status, 404);
 
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
@@ -17120,7 +16850,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             await client.query("INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,'Cold',1,now())", [thrId, wid]);
             await client.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,domain_id,subject,from_address,attachment_count,verdicts) VALUES($1,$2,'inbound',$3,'us-east-2',$4,'Cold','a@example.net',1,jsonb_build_object('virus','PASS'))", [msgId, wid, thrId, mdomId]);
             await client.query("INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,disposition,sha256,bucket,storage_key) VALUES($1,$2,$3,'doc.pdf','application/pdf',4,'attachment',$4,'pool-cold-mail',$5)", [attId, wid, msgId, '0'.repeat(64), 'workspaces/' + wid + '/att/' + msgId + '/' + attId]);
-            const config = loadConfig({ WORKSPACE_ID: wid, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
+            const config = loadConfig({ WORKSPACE_ID: wid, BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
             const res = await createApp().fetch(new Request('https://dev.bane.mx/v1/inbound/messages/' + msgId + '/attachments/' + attId, { headers: { authorization: 'Bearer ' + secret } }), { db: tx, config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } });
             assert.equal(res.status, 200);
             const payload = await res.json();
@@ -17150,7 +16880,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await store.get('k'))?.body.byteLength, 12);
         await store.delete('k');
         const [{ copyWorkspaceRaw }, { mailboxS3 }, { loadConfig }] = await Promise.all([import(mod('src/mailbox-mime.js')), import(mod('src/mailbox-setup.js')), import(mod('src/config.js'))]);
-        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
+        const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' });
         const client = await mailboxS3({ config, db: {}, storage: store }, 'default', 'us-east-2', 'fixture');
         try { await copyWorkspaceRaw(client, 'us-east-2', 'fixture', 'staging/m1', 'workspaces/default/raw/m1.eml', ['a@example.com'], 'raw'); }
         finally { client.destroy(); }
@@ -17166,7 +16896,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           throw new Error('Unexpected STS body: ' + body);
         };
         const [{ caller, assume }, { loadConfig }] = await Promise.all([import(mod('src/provider-credentials.js')), import(mod('src/config.js'))]);
-        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
         assert.equal((await caller('us-east-2', config.aws)).Account, '111122223333');
         assert.equal((await assume({ config, db: {}, storage: {} }, 'us-east-2', 'arn:aws:iam::222233334444:role/Bane-0123456789abcdef0123', 'ext-1')).accessKeyId, 'ASIAEXAMPLE');
       `),
@@ -17186,7 +16916,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           throw new Error('Unexpected fetch in ses-setup: ' + url);
         };
         const [{ discoverSes, scanRegionPage }, { loadConfig }] = await Promise.all([import(mod('src/ses-setup.js')), import(mod('src/config.js'))]);
-        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
         const runtime = { config, storage: {}, db: {} };
         const report = await discoverSes(runtime, { region: 'us-east-2', installationId: 'inst_1' });
         assert.equal(report.account?.id, '111122223333');
@@ -17208,7 +16938,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         };
         const [{ checkReputationAlerts }, { loadConfig }] = await Promise.all([import(mod('src/reputation-alerts.js')), import(mod('src/config.js'))]);
         assert.equal([...loadedModules].some(u => u.includes('client-cloudwatch')), false, 'CloudWatch SDK must not load at import time.');
-        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
+        const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
         assert.equal(config.reputationAlertUrl, 'https://hooks.slack.com/services/fixture/reputation-alert');
         const runtime = { config, storage: {}, db: { select: () => ({ from: async () => [{ workspaceId: 'default', regions: ['us-east-2'] }] }) } };
         assert.equal(await checkReputationAlerts(runtime), 0);
@@ -17239,7 +16969,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           await drizzle(client).transaction(async tx => {
             const wid = 'ws_' + 'd'.repeat(32), reg = 'me-central-1', acct = '999988887777', secret = 'bane_' + '2'.repeat(64);
             const topic = 'arn:aws:sns:' + reg + ':' + acct + ':bane-feedback';
-            const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-do','cold-do-fixture')", [wid]);
             await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold_do',$2,$3::jsonb)", [wid, reg, JSON.stringify([reg])]);
             await client.query("INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier) VALUES($1,$2,$3,'ready','probation')", [reg, acct, topic]);
@@ -17319,7 +17049,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const [{ preparePoolReceiving }, { stagingJobs }, { createApp }, { loadConfig }] = await Promise.all([
           import(mod('src/mailbox-setup.js')), import(mod('src/mailbox-staging.js')), import(mod('src/app.js')), import(mod('src/config.js')),
         ]);
-        const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+        const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
         const bucket = await preparePoolReceiving({ config: { ...config, multiTenant: true }, db: {}, storage: {} }, 'us-east-2', '111122223333', async () => {});
         assert.equal(bucket, 'bane-111122223333-mail-us-east-2');
         const { PgDialect } = await import('drizzle-orm/pg-core');
@@ -17385,8 +17115,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           let workAcked = false;
           const env = {
             PUBLIC_URL: 'https://dev.bane.mx',
-            BETTER_AUTH_SECRET: 's'.repeat(32),
-            MULTI_TENANT: 'true',
+            BANE_ROOT_SECRET: 's'.repeat(32),
+            MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',
             DEFAULT_SES_REGION: 'us-east-2',
             ENABLE_LIVE_SES: 'false',
             WORK_QUEUE_NAME: 'bane-dev-work',
@@ -17429,7 +17159,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await client.connect();
         try {
           await client.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
-          const config = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
+          const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false', REPUTATION_ALERT_SLACK_URL: 'https://hooks.slack.com/services/fixture/reputation-alert' });
           const runtime = { db: drizzle(client), config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } };
           const knownId = await enqueue(runtime.db, { type: 'reputation.alert', workspaceId: 'default', payload: { region: 'us-east-2', metric: 'bounceRate', level: 'warning', previous: 'ok', value: 0.06 } });
           const unknownId = await enqueue(runtime.db, { type: 'unknown.syntheticJob', workspaceId: 'default', payload: {} });
@@ -17506,7 +17236,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             await client.query("INSERT INTO provider_connection_regions(connection_id,region,managed_tenant,tenant_state,scan_revision,scan_state) VALUES($1,'us-east-2',false,'ready',1,'scanning')", [cid]);
             await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'byo.scan',$2,$3::jsonb)", [scanJobId, widByo, JSON.stringify({ connectionId: cid, region: 'us-east-2', revision: 1, stage: 'account', run: 'run_scan_1' })]);
 
-            const byoConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://example.com/v5.yaml', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const byoConfig = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://example.com/v5.yaml', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             let failSts = true;
             faultResolver = (specifier) => {
               if (failSts && specifier === '@aws-sdk/client-sts') {
@@ -17528,7 +17258,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
             // Part B: CloudWatch import failure in readReputation and ses.discover must rethrow ModuleLoadError and never overwrite cached discovery.
             const widDisc = 'ws_' + '8'.repeat(32);
-            const discConfig = loadConfig({ WORKSPACE_ID: widDisc, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const discConfig = loadConfig({ WORKSPACE_ID: widDisc, BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             const fp = await credentialFingerprint(discConfig), targetUrl = discoveryTarget(discConfig);
             const priorCheckedAt = '2026-01-01T00:00:00.000Z';
             const priorReport = { region: 'us-east-2', checkedAt: priorCheckedAt, status: 'ready', provisioned: true, account: { id: '111122223333', productionAccess: true, sendingEnabled: true, enforcementStatus: 'HEALTHY', quota: { max24HourSend: 50000, maxSendRate: 100, sentLast24Hours: 0 } }, domains: [], identitiesTruncated: false, resources: { transactional: { name: 'bane-transactional', exists: true, owned: true, sendingEnabled: true, eventDestinationExists: true, eventWired: true, autoValidation: null }, marketing: { name: 'bane-marketing', exists: true, owned: true, sendingEnabled: true, eventDestinationExists: true, eventWired: true, autoValidation: null }, eventDestinationName: 'bane-sns', topic: { name: 'bane-feedback', arn: 'arn:aws:sns:us-east-2:111122223333:bane-feedback', exists: true, owned: true, policyReady: true, subscription: 'confirmed', rawMessageDelivery: false, subscriptionsTruncated: false, staleSubscriptions: 0 } }, feedbackUrl: 'https://dev.bane.mx/v1/events/ses', blockers: [], warnings: [], reputation: null };
@@ -17574,7 +17304,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             await client.query("INSERT INTO provider_connection_regions(connection_id,region,legacy,managed_tenant,sending_state,tenant_state,pool_tenant_name) VALUES($1,'us-east-1',false,true,'unprovisioned','pending',$2)", [cidTrusted, tenantName]);
             const trustedJobId = 'hosted.trusted:' + cidTrusted;
             await client.query("INSERT INTO jobs(id,type,workspace_id,payload) VALUES($1,'hosted.trusted',$2,$3::jsonb)", [trustedJobId, widTrusted, JSON.stringify({ connectionId: cidTrusted })]);
-            const trustedConfig = loadConfig({ BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT: 'true', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_TRUSTED_POOL: 'true', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
+            const trustedConfig = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_REGIONAL_SENDING: 'true', BANE_TRUSTED_POOL: 'true', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             let failSesv2 = true;
             faultResolver = (specifier) => {
               if (failSesv2 && specifier === '@aws-sdk/client-sesv2') {
@@ -17622,7 +17352,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             const jobId = 'campaign.run:' + campId;
             await client.query("INSERT INTO jobs(id,type,workspace_id,status,attempts,payload) VALUES($1,'campaign.run',$2,'pending',$3,$4::jsonb)", [jobId, wid, MAX_ATTEMPTS - 1, JSON.stringify({ campaignId: campId, run: 'run_c1' })]);
 
-            const config = loadConfig({ WORKSPACE_ID: wid, BETTER_AUTH_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false' });
+            const config = loadConfig({ WORKSPACE_ID: wid, BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false' });
             const runtime = { db: tx, config, storage: { put: async () => {}, get: async () => null, delete: async () => {} } };
 
             const warnLogs = [], errorLogs = [];
@@ -17699,8 +17429,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           let admissionAllowed = true;
           const env = {
             PUBLIC_URL: 'https://dev.bane.mx',
-            BETTER_AUTH_SECRET: 's'.repeat(32),
-            MULTI_TENANT: 'true',
+            BANE_ROOT_SECRET: 's'.repeat(32),
+            MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',
             DEFAULT_SES_REGION: 'us-east-2',
             ENABLE_LIVE_SES: 'false',
             HYPERDRIVE: { connectionString: scopedUrl.href },
@@ -17800,7 +17530,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           HOST: '127.0.0.1',
           PORT: '0',
           PUBLIC_URL: 'http://127.0.0.1',
-          BETTER_AUTH_SECRET: 's'.repeat(32),
+          BANE_ROOT_SECRET: 's'.repeat(32),
           DEFAULT_SES_REGION: 'us-east-2',
           ENABLE_LIVE_SES: 'false',
           S3_BUCKET: 'fixture',
@@ -17813,7 +17543,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const worker = (await import(mod('src/worker.js'))).default;
         const workerEnv = {
           PUBLIC_URL: 'https://dev.bane.mx',
-          BETTER_AUTH_SECRET: 's'.repeat(32),
+          BANE_ROOT_SECRET: 's'.repeat(32),
           DEFAULT_SES_REGION: 'us-east-2',
           ENABLE_LIVE_SES: 'false',
           HYPERDRIVE: { connectionString: dbUrl },
@@ -17868,7 +17598,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
 test('Audit trail: sensitive actions each write one redacted row', async t => {
   await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-    const selfHosted = { multiTenant: false, allowedDomains: runtime.config.allowedDomains, allowedEmails: runtime.config.allowedEmails }, hosted = { multiTenant: true, allowedDomains: [], allowedEmails: [] };
+    const selfHosted = { multiTenant: false, allowedSubjects: runtime.config.allowedSubjects, staffGoogleDomains: runtime.config.staffGoogleDomains }, hosted = { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] };
     Object.assign(runtime.config, hosted);
     const { SESv2Client } = await import('@aws-sdk/client-sesv2');
     t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
@@ -17899,7 +17629,7 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.equal(invited.user_id, null); assert.deepEqual(invited.summary.after, { email: `invitee-${hex}@example.net`, role: 'member' });
     await audited(await call('DELETE', `/v1/workspaces/current/invitations?id=${invite.body.id}`), 'member.invite_revoke', ['invitation', invite.body.id]);
     const peer = unique('audit-peer'), membership = unique('mem');
-    await db.query("INSERT INTO auth_user (id, name, email, email_verified) VALUES ($1, 'Audit peer', $2, true)", [peer, `${peer}@example.net`]);
+    await db.query("INSERT INTO bane_users (id, name, email, email_verified) VALUES ($1, 'Audit peer', $2, true)", [peer, `${peer}@example.net`]);
     await db.query("INSERT INTO workspace_members (id, workspace_id, user_id, role) VALUES ($1, $2, $3, 'member')", [membership, wid, peer]);
     const promoted = await audited(await call('PATCH', `/v1/workspaces/current/members/${membership}`, { role: 'admin' }), 'member.role_change', ['member', membership]);
     assert.equal(promoted.user_id, peer); assert.deepEqual([promoted.summary.before, promoted.summary.after], [{ role: 'member' }, { role: 'admin' }]);

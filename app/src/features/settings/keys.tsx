@@ -105,17 +105,17 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
         {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id}
           empty={<EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with a Revoke button." />} columns={[
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: row => row.kind === 'mcp'
-            ? <TwoLines first={row.item.name || 'MCP client'} second={<PrivateAddress value={row.item.userEmail} />} />
+            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.status === 'active' && row.item.workspaceId === null ? 'Choose a workspace in Settings' : row.item.clientId} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} />,
             cardRender: row => row.kind === 'mcp' ? row.item.name || 'MCP client' : row.item.purpose },
           { key: 'access', label: 'Access', width: '30%', card: 'line', render: row => row.kind === 'mcp'
             ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)} second={row.item.scopes.map(scope => scope.replace('bane:', '').replaceAll('_', ' ')).join(', ')} />
             : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} />,
             cardRender: row => row.kind === 'mcp' ? `MCP · ${accessLabel(row.item.scopes.map(scope => scope.replace('bane:', '')), true)}` : `Agent token · ${accessLabel(row.item.permissions, false)}` },
-          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
+          { key: 'when', label: 'Connected / expires', width: '18%', card: 'line', render: row => row.kind === 'mcp' ? row.item.status==='expired'?'Expired':row.item.status==='revoked'?'Revoked':`Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
           { key: 'used', label: 'Last used', card: 'hide', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
           { key: 'actions', label: '', align: 'right', width: 100, card: 'end', render: row => row.kind === 'mcp'
-            ? <Button variant="danger" aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
+            ? <Button variant="danger" disabled={row.item.status==='expired'||row.item.status==='revoked'} aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
             : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button>,
             cardRender: row => row.kind === 'mcp' ? <DropdownMenu label={`Actions for ${row.item.name || 'MCP connection'}`} title={row.item.name || 'MCP connection'} items={[{ label: 'Revoke connection', destructive: true, onSelect: () => setRevokeConnection(row.item) }]} />
               : tokenInactive(row.item) ? null : <DropdownMenu label={`Actions for ${row.item.purpose}`} title={row.item.purpose} items={[{ label: 'Revoke token', destructive: true, onSelect: () => setRevokeToken(row.item) }]} /> },

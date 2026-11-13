@@ -57,7 +57,7 @@ Read-only. Builds on `6-knob-audit.md`; items already there are referenced, not 
 | `core.ts:150-164`, `worker.ts` | Postgres write per failed public request | Brute force | Edge rate limit only (Carbon #11) |
 | `mcp-catalog.ts:69-71` | `confirm:true` on every write incl. previews | None (LLMs pass it reflexively) | Remove (Carbon #47) |
 | `audience.ts:260` | `confirmResubscribe` 409 | Consent law | **Keep** |
-| `config.ts:11,19` + `google-auth.ts` | Signup allowlist | Launch gate | **Keep** until cleared |
+| `config.ts:11,19` + `dashboard-auth.ts` | Signup allowlist | Launch gate | **Keep** until cleared |
 | `domain-claims.ts:17-22`, migration 046 | Exclusive parent/child claims, `_opensend` TXT | Tenant hijack | **Keep** (essential) |
 | `operations.ts:571-619` | SNS signature/account binding | Spoofed feedback | **Keep** (essential) |
 

@@ -65,7 +65,7 @@ Create and migrate a database of its own, then mark it once as its owner. From `
 
 ```sh
 createdb tear_delivery
-DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_delivery BETTER_AUTH_SECRET=… PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts
+DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_delivery BANE_ROOT_SECRET=… PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts
 psql postgresql://…@127.0.0.1:5432/tear_delivery -c "DO \$\$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'bane-tear: disposable test database, every row may be changed or deleted'); END \$\$"
 export TEAR_DATABASE_URL=postgresql://…@127.0.0.1:5432/tear_delivery
 ```

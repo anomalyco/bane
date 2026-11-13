@@ -42,10 +42,15 @@ export interface Config {
   authSecret: string;
   mailGatewayToken?:string;
   previousAuthSecret?: string;
-  googleClientId?: string;
-  googleClientSecret?: string;
-  allowedEmails: string[];
-  allowedDomains: string[];
+  accountIssuer?: string;
+  accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
+  /** Required `acr` on ID tokens and on every MCP access token. Hosted installations always require Google. */
+  accountRequiredAcr?: string;
+  /** Self-hosted access policy: exact issuer subjects. Identity is (issuer, subject); addresses never admit anyone. */
+  allowedSubjects: string[];
+  /** Hosted staff: Google Workspace domains of the sign-in's provider identity (see account-policy.ts). */
+  staffGoogleDomains: string[];
+  /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   platformAccount?: string;

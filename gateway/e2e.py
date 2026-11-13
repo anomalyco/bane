@@ -138,7 +138,7 @@ def real_services():
             HOST="127.0.0.1",
             PORT=str(http),
             PUBLIC_URL=url,
-            BETTER_AUTH_SECRET=secret,
+            BANE_ROOT_SECRET=secret,
             DATABASE_URL=db,
             ENABLE_LIVE_SES="false",
             S3_BUCKET="mailgw",
@@ -147,10 +147,9 @@ def real_services():
             S3_SECRET_ACCESS_KEY=pw,
             MAILGW_API_TOKEN=key,
             API_BASE_URL=url,
-            AUTH_ALLOWED_EMAILS='operator@example.com',
-            AUTH_ALLOWED_DOMAINS='example.com',
-            GOOGLE_CLIENT_ID='fixture',
-            GOOGLE_CLIENT_SECRET='fixture',
+            AUTH_ALLOWED_SUBJECTS='gateway-operator',
+            ACCOUNT_CLIENT_ID='fixture',
+            ACCOUNT_CLIENT_PRIVATE_KEY='fixture',
         )
         sql("CREATE ROLE bane_mailgw_listen LOGIN CONNECTION LIMIT 2; GRANT CONNECT ON DATABASE fixture TO bane_mailgw_listen")
         run(["node", "--import", "tsx", "src/migrate.ts"], cwd=api, env=env)

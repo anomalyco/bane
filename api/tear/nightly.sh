@@ -21,10 +21,10 @@ for checker in "${checkers[@]}"; do
   case $checker in access) manifest=tear/Cargo.toml ;; admission|delivery|dispatch|inbox|ses) manifest=tear/$checker/Cargo.toml ;; *) echo "unknown checker $checker" >&2; exit 2 ;; esac
   db=tear_$checker url=postgresql://postgres:tear@127.0.0.1:$port/tear_$checker
   admin -c "CREATE DATABASE $db"
-  DATABASE_URL=$url BETTER_AUTH_SECRET=$secret PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts > "$out/$checker.migrate.log" 2>&1
+  DATABASE_URL=$url BANE_ROOT_SECRET=$secret PUBLIC_URL=http://127.0.0.1 node --import tsx src/migrate.ts > "$out/$checker.migrate.log" 2>&1
   admin -d "$db" -c "DO \$\$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'bane-tear: disposable test database, every row may be changed or deleted'); END \$\$"
   started=$SECONDS
-  if DATABASE_URL=$url TEAR_DATABASE_URL=$url BETTER_AUTH_SECRET=$secret cargo run --release --locked --quiet --manifest-path "$manifest" -- ci --seed "$seed" > "$out/$checker.log" 2>&1; then
+  if DATABASE_URL=$url TEAR_DATABASE_URL=$url BANE_ROOT_SECRET=$secret cargo run --release --locked --quiet --manifest-path "$manifest" -- ci --seed "$seed" > "$out/$checker.log" 2>&1; then
     echo "pass  $checker ($((SECONDS - started)) s)" | tee -a "$out/summary.txt"
   else
     echo "FAIL  $checker ($((SECONDS - started)) s): $out/$checker.log" | tee -a "$out/summary.txt"; failed+=("$checker")

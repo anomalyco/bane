@@ -2,9 +2,10 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
 import { ApiError, dashboardSession, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
-import { authUser } from './db/google-auth.js';
+import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
-import { approvedGoogleIdentity, invitationRecipient, verifiedDashboardUser } from './google-auth.js';
+import { invitationRecipient, verifiedDashboardUser } from './dashboard-auth.js';
+import { accountSessionPolicy } from './account-login.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
@@ -26,15 +27,16 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
     { action: 'member.join', workspaceId: sql`joined.workspace_id`, target: { type: 'member', id: sql`joined.id` }, after: sql`jsonb_build_object('role', joined.role)`, details: { invitationId } }, { from: sql`joined` });
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
+    JOIN bane_users recipient ON recipient.id=${userId} AND recipient.email_verified AND lower(recipient.email)=i.email
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
       AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner'))
-      AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter
+      AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter,recipient
   ), claimed AS (
     UPDATE workspace_invitations i SET status = 'accepted' FROM pending WHERE i.id = pending.id RETURNING i.workspace_id, i.role
   ), joined AS (
     INSERT INTO workspace_members (id, workspace_id, user_id, role) SELECT ${id('mem')}, workspace_id, ${userId}, role FROM claimed
     ON CONFLICT (workspace_id, user_id) DO NOTHING RETURNING id, workspace_id, role
-  ), audit AS (${audit}) UPDATE auth_user u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
+  ), audit AS (${audit}) UPDATE bane_users u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
   return result.rows[0]?.workspace_id;
 }
 
@@ -47,13 +49,13 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
   return !!result.rowCount;
 }
 
-// Called only in the transaction that *inserts* the Google user. Ordinary dashboard requests,
+// Called only in the transaction that *inserts* the OIDC user. Ordinary dashboard requests,
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
-  if (!allowSignup) return !!invitationId && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s workspace`, region);
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null) {
+  if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || 'Bane').slice(0, 105)}'s workspace`, region);
   return true;
 }
 
@@ -126,7 +128,7 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
     if (input.role === 'owner' && role !== 'owner') throw ownerRequired();
     const result = await db.execute<InviteRow>(sql`WITH invited AS (INSERT INTO workspace_invitations(id, workspace_id, email, role, inviter_id, expires_at)
       SELECT ${id('inv')}, ${wid}, ${input.email}, ${input.role}, ${uid}, now() + interval '7 days'
-      WHERE NOT EXISTS(SELECT 1 FROM workspace_members m JOIN auth_user u ON u.id = m.user_id WHERE m.workspace_id = ${wid} AND lower(u.email) = ${input.email})
+      WHERE NOT EXISTS(SELECT 1 FROM workspace_members m JOIN bane_users u ON u.id = m.user_id WHERE m.workspace_id = ${wid} AND lower(u.email) = ${input.email})
       ON CONFLICT (workspace_id, email) WHERE status = 'pending' DO UPDATE SET id = excluded.id, role = excluded.role, inviter_id = excluded.inviter_id, expires_at = excluded.expires_at, created_at = now()
       WHERE workspace_invitations.expires_at <= now()
       RETURNING id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt"
@@ -140,20 +142,22 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 export function registerWorkspaces(app: App) {
   // Deprecated alias: GET /v1/me returns the same list as `workspaces`, so the dashboard needs one request, not two.
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces', operationId: 'listWorkspaces', tags, security, deprecated: true,
-    description: 'Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.',
+    description: 'Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.',
     responses: { 200: response(z.object({ data: z.array(Workspace) })), ...errors } }), async c => c.json({ data: await memberships(c.env.db, dashboardSession(c).userId) }, 200));
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-Bane-Workspace.`,
+    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Bane-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
-    const a = dashboardSession(c), { name } = c.req.valid('json');
+    const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
-      const [user] = await db.select({ email: authUser.email, verified: authUser.emailVerified, hd: authUser.googleHostedDomain }).from(authUser).where(eq(authUser.id, a.userId)).for('update');
-      if (!user || !approvedGoogleIdentity(c.env, user.email, user.verified, user.hd)) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
+      const [user] = await db.select({id:baneUsers.id}).from(baneUsers).where(eq(baneUsers.id,a.userId)).for('update');
+      // Decided by the sign-in, never by an address: hosted staff (the provider identity), or a self-hosted allowed subject.
+      const allowed = user && (c.env.config.multiTenant ? policy?.staff === true : !!policy && c.env.config.allowedSubjects.includes(policy.subject));
+      if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c));
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
-      if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
+      if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
@@ -171,7 +175,7 @@ export function registerWorkspaces(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: `${base}/members`, operationId: 'listWorkspaceMembers', tags, security, responses: { 200: response(z.object({ data: z.array(Member) })), ...errors } }), async c => {
     const a = dashboardSession(c, true);
-    const rows = await c.env.db.select({ id: workspaceMembers.id, userId: authUser.id, role: workspaceMembers.role, email: authUser.email, name: authUser.name }).from(workspaceMembers).innerJoin(authUser, eq(authUser.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(authUser.email);
+    const rows = await c.env.db.select({ id: workspaceMembers.id, userId: workspaceMembers.userId, role: workspaceMembers.role, email: sql<string>`coalesce(${baneUsers.email}, '')`, name: baneUsers.name }).from(workspaceMembers).innerJoin(baneUsers, eq(baneUsers.id, workspaceMembers.userId)).where(eq(workspaceMembers.workspaceId, a.workspaceId)).orderBy(baneUsers.email,workspaceMembers.id);
     return c.json({ data: rows.map(row => Member.parse(row)) }, 200);
   });
   for (const [resource, operationId] of [['members', 'inviteWorkspaceMember'], ['invitations', 'createWorkspaceInvitation']] as const) {
@@ -199,14 +203,14 @@ export function registerWorkspaces(app: App) {
     return c.json({ id, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/workspaces/invitations/{id}', operationId: 'getWorkspaceInvitation', tags, security,
-    description: 'Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.',
+    description: 'Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.',
     request: { params: IdParams }, responses: { 200: response(InvitationPreview), ...errors } }), async c => {
     if (!c.env.config.multiTenant) return notFound('Endpoint');
-    const a = await verifiedDashboardUser(c.env, c.req.raw.headers), invitationId = c.req.valid('param').id;
+    const a = await verifiedDashboardUser(c.env, c.req.raw.headers,true), invitationId = c.req.valid('param').id;
     // Same conditions as claimInvitation for a pending invitation, plus the idempotent accepted case.
     const result = await c.env.db.execute<z.infer<typeof InvitationPreview>>(sql`SELECT i.id, i.workspace_id AS "workspaceId", w.name AS "workspaceName", w.slug AS "workspaceSlug",
         u.name AS "inviterName", u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
-      FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN auth_user u ON u.id = i.inviter_id
+      FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN bane_users u ON u.id = i.inviter_id
       JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
       WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.role IN ('owner','admin','member') AND (
         (i.status = 'pending' AND i.expires_at > now() AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner')))

@@ -423,13 +423,10 @@ jobs:
 
       - uses: ./.github/actions/build-release
 
-      # The environment picks the stage and its variables. No variable or secret
-      # name carries a stage prefix: both stages set AUTH_ALLOWED_*, and each
-      # reads the same keys from its own bane/<stage>/ folder below.
+      # The environment picks the stage. No variable or secret name carries a
+      # stage prefix: each stage reads the same keys from its own bane/<stage>/
+      # folder below. Sign-in policy is committed in wrangler.<stage>.jsonc.
       - name: Configure the stage
-        env:
-          AUTH_ALLOWED_DOMAINS: ${{ vars.AUTH_ALLOWED_DOMAINS }}
-          AUTH_ALLOWED_EMAILS: ${{ vars.AUTH_ALLOWED_EMAILS }}
         run: |
           case "$STAGE" in
             dev) public_url=https://dev.bane.mx; wrangler_config=wrangler.dev.jsonc ;;
@@ -439,8 +436,6 @@ jobs:
           {
             echo "PUBLIC_URL=$public_url"
             echo "WRANGLER_CONFIG=$wrangler_config"
-            echo "AUTH_ALLOWED_DOMAINS=$AUTH_ALLOWED_DOMAINS"
-            echo "AUTH_ALLOWED_EMAILS=$AUTH_ALLOWED_EMAILS"
           } >> "$GITHUB_ENV"
 
       # The deploy secrets live in AWS Secrets Manager as bane/<stage>/* and are
@@ -464,9 +459,8 @@ jobs:
         with:
           secret-ids: |
             DATABASE_URL,bane/${{ env.STAGE }}/DATABASE_URL
-            BETTER_AUTH_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
-            GOOGLE_CLIENT_ID,bane/${{ env.STAGE }}/GOOGLE_CLIENT_ID
-            GOOGLE_CLIENT_SECRET,bane/${{ env.STAGE }}/GOOGLE_CLIENT_SECRET
+            BANE_ROOT_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
+            ACCOUNT_CLIENT_PRIVATE_KEY,bane/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
             TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
           parse-json-secrets: false
 
@@ -510,8 +504,6 @@ jobs:
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
-          AUTH_ALLOWED_DOMAINS: ${{ env.AUTH_ALLOWED_DOMAINS }}
-          AUTH_ALLOWED_EMAILS: ${{ env.AUTH_ALLOWED_EMAILS }}
           DEPLOY_SHA: ${{ needs.authorize.outputs.sha }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 

@@ -12,6 +12,9 @@ export type McpConnection = {
     scopes: Array<string>;
     createdAt: string;
     updatedAt: string;
+    status: 'active' | 'revoked' | 'expired';
+    workspaceId: string | null;
+    receiving: boolean;
 };
 
 export type ApiError = {
@@ -34,8 +37,13 @@ export type ApiError = {
     };
 };
 
+export type McpConnectionBinding = {
+    workspaceId: string;
+    receiving: boolean;
+};
+
 /**
- * Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).
+ * The current workspace's hosted sending connection; null when self-hosted.
  */
 export type ConnectionSummary = {
     kind: 'shared' | 'byo';
@@ -4401,6 +4409,73 @@ export type ListMcpConnectionsResponses = {
 
 export type ListMcpConnectionsResponse = ListMcpConnectionsResponses[keyof ListMcpConnectionsResponses];
 
+export type BindMcpConnectionData = {
+    body: McpConnectionBinding;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/mcp-connections/{id}/workspace';
+};
+
+export type BindMcpConnectionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type BindMcpConnectionError = BindMcpConnectionErrors[keyof BindMcpConnectionErrors];
+
+export type BindMcpConnectionResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        workspaceId: string;
+        receiving: boolean;
+    };
+};
+
+export type BindMcpConnectionResponse = BindMcpConnectionResponses[keyof BindMcpConnectionResponses];
+
 export type RevokeMcpConnectionData = {
     body?: never;
     path: {
@@ -4537,7 +4612,7 @@ export type GetCurrentIdentityResponses = {
         host: string;
         connection: ConnectionSummary;
         /**
-         * Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted.
+         * A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
         workspaces: Array<Workspace> | null;
         /**

@@ -11,6 +11,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | Code Mode operation | Plain tool · action · toolset, or why it is a human step |
 |---|---|
 | `listMcpConnections` | `connections` · `list` · admin |
+| `bindMcpConnection` | `connections` · `bind` · admin |
 | `revokeMcpConnection` | `connections` · `revoke` · admin |
 | `getCurrentIdentity` | `settings` · `identity` · admin |
 | `createAgentToken` | `keys` · `createToken` · admin |

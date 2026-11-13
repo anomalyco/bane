@@ -39,13 +39,13 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "bane.session_token",
-        "description": "Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-bane.session_token",
-        "description": "Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
+        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
     "schemas": {
@@ -78,6 +78,23 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "revoked",
+              "expired"
+            ]
+          },
+          "workspaceId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "receiving": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -87,7 +104,10 @@
           "userEmail",
           "scopes",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "status",
+          "workspaceId",
+          "receiving"
         ]
       },
       "ApiError": {
@@ -136,6 +156,24 @@
         "required": [
           "error"
         ]
+      },
+      "McpConnectionBinding": {
+        "type": "object",
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "receiving": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "workspaceId",
+          "receiving"
+        ],
+        "additionalProperties": false
       },
       "ConnectionSummary": {
         "type": [
@@ -295,7 +333,7 @@
           "tenant",
           "sendingPause"
         ],
-        "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
+        "description": "The current workspace's hosted sending connection; null when self-hosted."
       },
       "Workspace": {
         "type": "object",
@@ -14855,6 +14893,187 @@
         ]
       }
     },
+    "/v1/mcp-connections/{id}/workspace": {
+      "post": {
+        "operationId": "bindMcpConnection",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpConnectionBinding"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "workspaceId": {
+                      "type": "string"
+                    },
+                    "receiving": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "workspaceId",
+                    "receiving"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@banemx/sdk/client';\nimport { bindMcpConnection } from '@banemx/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://bane.mx',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.BANE_API_KEY\n    : undefined,\n});\n\nconst result = await bindMcpConnection({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"workspaceId\": \"workspace_123\",\n    \"receiving\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://bane.mx/v1/mcp-connections/resource_123/workspace' \\\n  --header \"Authorization: Bearer $BANE_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"workspaceId\": \"workspace_123\",\n  \"receiving\": false\n}'"
+          }
+        ]
+      }
+    },
     "/v1/mcp-connections/{id}/revoke": {
       "post": {
         "operationId": "revokeMcpConnection",
@@ -15121,7 +15340,7 @@
                       "items": {
                         "$ref": "#/components/schemas/Workspace"
                       },
-                      "description": "Every workspace a signed-in multi-tenant dashboard session belongs to, with its role, by name; select one with X-Bane-Workspace. Null for API keys, MCP and agent tokens (they belong to workspaceId alone) and when self-hosted."
+                      "description": "A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted."
                     },
                     "operator": {
                       "type": [
@@ -15287,7 +15506,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.",
+        "description": "A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.",
         "requestBody": {
           "required": true,
           "content": {
@@ -54118,7 +54337,7 @@
           }
         ],
         "deprecated": true,
-        "description": "Deprecated: read workspaces from getCurrentIdentity (GET /v1/me), which returns the same list with the current identity. Lists your memberships. Dashboard requests can select a membership with X-Bane-Workspace (workspace ID); without it, the most recent selection is used. Workspace administration requires a Google session.",
+        "description": "Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.",
         "responses": {
           "200": {
             "description": "Success",
@@ -54268,7 +54487,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to 10 workspaces. Select it with X-Bane-Workspace.",
+        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.",
         "requestBody": {
           "required": true,
           "content": {
@@ -55715,7 +55934,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed: workspace, inviter and role. Reading it changes nothing; membership starts only with acceptWorkspaceInvitation.",
+        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

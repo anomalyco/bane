@@ -20,6 +20,11 @@
     "BANE_MAIL_BUCKET": "bane-dev-mail",
     "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://dev.bane.mx",
+    "ACCOUNT_ISSUER": "https://account.dev.anoma.ly",
+    "ACCOUNT_REQUIRED_ACR": "urn:anomaly:acr:google",
+    // Staff sign-up: the Google Workspace domain (hd) of the sign-in's provider identity, never an address.
+    "AUTH_STAFF_GOOGLE_DOMAINS": "anoma.ly",
+    "ACCOUNT_CLIENT_ID": "bane-dev",
     "MULTI_TENANT": "true",
     "BANE_PLATFORM_AWS_ACCOUNT": "905840579680",
     // The dedicated account only has the v8 policies: tenants and identities must be created with their pool tags.

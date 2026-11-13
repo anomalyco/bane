@@ -5,14 +5,24 @@ import type { Config } from './core.js';
 
 const optional = <T extends z.ZodType>(schema: T) => z.preprocess(v => v === '' ? undefined : v, schema.optional());
 const accountId = z.string().regex(/^\d{12}$/);
+export const GOOGLE_ACR = 'urn:anomaly:acr:google';
+const REMOVED_ALLOWLISTS = ['AUTH_ALLOWED_EMAILS', 'AUTH_ALLOWED_DOMAINS']; // Refused at startup when self-hosted, never read. premerge-identity: allowed
 const values = z.object({
-  BETTER_AUTH_SECRET: z.string().min(32),
+  BANE_ROOT_SECRET: z.string().min(32),
   MAILGW_API_TOKEN: optional(z.string().min(32)),
-  PREVIOUS_BETTER_AUTH_SECRET: optional(z.string().min(32)),
-  GOOGLE_CLIENT_ID: optional(z.string().min(1)),
-  GOOGLE_CLIENT_SECRET: optional(z.string().min(1)),
-  AUTH_ALLOWED_EMAILS: z.string().default(''),
+  PREVIOUS_BANE_ROOT_SECRET: optional(z.string().min(32)),
+  ACCOUNT_ISSUER: optional(z.url({ protocol: /^https$/ })),
+  ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
+  ACCOUNT_CLIENT_PRIVATE_KEY: optional(z.string().min(1)),
+  ACCOUNT_ID_TOKEN_ALG: z.enum(['ES256', 'RS256']).default('ES256'),
+  // Kept distinct from a missing value: self-hosted installations opt out with an explicit empty value.
+  ACCOUNT_REQUIRED_ACR: z.union([z.literal(''), z.string().max(256).regex(/^\S+$/)]).optional(),
+  // Self-hosted access: exact issuer subjects (never addresses). Find them with scripts/list-signin-attempts.ts.
+  AUTH_ALLOWED_SUBJECTS: z.string().default(''),
+  // Self-hosted: subjects that become owners of 'default' at their first sign-in, or * for every allowed subject.
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
+  // Hosted staff: Google Workspace domains (the provider identity's hd claim) that may sign up and create workspaces.
+  AUTH_STAFF_GOOGLE_DOMAINS: z.string().default(''),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   BANE_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
@@ -48,8 +58,7 @@ const values = z.object({
   HOSTED_SEND_CAP_FIRST_WEEK: z.coerce.number().int().positive().max(2147483647).default(100),
   HOSTED_SEND_CAP_SECOND_WEEK: z.coerce.number().int().positive().max(2147483647).default(1000),
   HOSTED_SEND_CAP_MATURE: z.coerce.number().int().positive().max(2147483647).default(10000),
-  AUTH_ALLOWED_DOMAINS: z.string().default(''),
-  // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
+  // Upgrade-only decryption input for pre-OIDC installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
   PUBLIC_URL: z.string().url(),
   SES_FEEDBACK_URL: optional(z.string().url().max(2048)),
@@ -98,6 +107,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
+  // Hosted sign-in and MCP are Google-only. A missing, empty or misspelled value must stop the
+  // installation instead of silently accepting every authentication method.
+  if (v.MULTI_TENANT==='true' && v.ACCOUNT_REQUIRED_ACR!==GOOGLE_ACR) throw new ApiError(503,'CONFIG_INVALID',`Hosted installations require ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
+  const requiredAcr = v.ACCOUNT_REQUIRED_ACR || undefined;
   let aws: Config['aws'] = v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId:v.AWS_ACCESS_KEY_ID, secretAccessKey:v.AWS_SECRET_ACCESS_KEY, sessionToken:v.AWS_SESSION_TOKEN } : undefined;
   if (v.AWS_RUNTIME_CREDENTIALS !== undefined) {
     try { aws = z.object({accessKeyId:z.string().min(1), secretAccessKey:z.string().min(1)}).strict().parse(JSON.parse(v.AWS_RUNTIME_CREDENTIALS)); }
@@ -115,13 +129,16 @@ export function loadConfig(input: Record<string, unknown>): Config {
       domainConnect={privateKey,keyId:v.DOMAIN_CONNECT_KEY_ID};
     } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
   }
-  if (Boolean(v.GOOGLE_CLIENT_ID) !== Boolean(v.GOOGLE_CLIENT_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither.');
-  if (v.PREVIOUS_BETTER_AUTH_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BETTER_AUTH_SECRET.');
-  const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
-  const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
-  if (defaultWorkspaceOwners !== '*' && defaultWorkspaceOwners.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Set DEFAULT_WORKSPACE_OWNERS to exact email addresses or a single *.');
-  const allowedDomains = list(v.AUTH_ALLOWED_DOMAINS).map(d => d.toLowerCase());
-  if (allowedEmails.some(e => !z.email().safeParse(e).success) || allowedDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact email addresses and domain names in the authentication allowlists, without wildcards or URLs.');
+  if (v.PREVIOUS_BANE_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BANE_ROOT_SECRET.');
+  // Email allowlists were removed: an issuer can assert a verified address its sign-in method never vouched for.
+  // A self-hosted installation that still sets one would silently lose its access policy, so refuse to start.
+  if (v.MULTI_TENANT !== 'true' && REMOVED_ALLOWLISTS.some(key => typeof input[key] === 'string' && (input[key] as string).trim()))
+    throw new ApiError(503, 'CONFIG_INVALID', `${REMOVED_ALLOWLISTS.join(' and ')} were removed. List issuer subjects in AUTH_ALLOWED_SUBJECTS (scripts/list-signin-attempts.ts shows them).`);
+  const allowedSubjects = list(v.AUTH_ALLOWED_SUBJECTS);
+  const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS);
+  const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
+  if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
+  if (staffGoogleDomains.length && requiredAcr !== GOOGLE_ACR) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR=${GOOGLE_ACR}.`);
   const regions = [v.DEFAULT_SES_REGION];
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
@@ -136,7 +153,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
-    workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
+    workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BANE_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_BANE_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     platformAccount: v.BANE_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.BANE_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.BANE_NOTIFY_FROM : undefined,
     support: v.MULTI_TENANT==='true' ? { platformToken: v.BANE_SUPPORT_PLATFORM_TOKEN, previousPlatformToken: v.BANE_SUPPORT_PLATFORM_TOKEN_PREVIOUS, url: v.BANE_SUPPORT_URL, signingKey: supportSigningKey } : undefined, receivingRedrive:v.BANE_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.BANE_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.BANE_REGIONAL_SENDING==='true' && v.BANE_TRUSTED_POOL==='true',
@@ -147,9 +164,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
     byoV2: v.MULTI_TENANT === 'true' && v.BANE_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
-    googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
-    encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
-    previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,
+    allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr,
+    accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly',
+    accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
+    encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
+    previousEncryptionKey: v.PREVIOUS_BANE_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_BANE_ROOT_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT },

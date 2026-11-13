@@ -61,8 +61,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
     switch (group) {
       case 'auth': return registerAuth;
       case 'auth-ui': {
-        const [{ registerMcpAuth }, { registerGoogleAuth }] = await Promise.all([import('./mcp-auth.js'), import('./google-auth.js')]);
-        return (target: App) => { registerMcpAuth(target); registerGoogleAuth(target); };
+        const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
+        return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); };
       }
       case 'audience': return (await import('./audience.js')).registerAudience;
       case 'audience-query': return (await import('./audience-query.js')).registerAudienceQuery;
@@ -145,8 +145,8 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   } });
   if (registerOpenApi) {
     app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', { type: 'http', scheme: 'bearer', description: 'A Bane API key. Credentials never belong in URLs.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
-    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'Google-approved Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'dashboardSession', { type: 'apiKey', in: 'cookie', name: 'bane.session_token', description: 'OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin.' });
+    app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Host-bane.session_token', description: 'OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin.' });
   } else {
     const rawOpenapi = app.openapi;
     app.openapi = ((route, handler, hook) => allowPath && !allowPath(route.path) ? app : rawOpenapi({ ...route, hide: true }, handler, hook)) as typeof app.openapi;
@@ -200,7 +200,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
     // Reviewing that invitation before joining authenticates the same way and changes nothing.
     if (c.req.method === 'GET' && /^\/v1\/workspaces\/invitations\/[^/]+$/.test(c.req.path)) return next();
-    // Provider redirects cannot carry a workspace header. This route authenticates the Google
+    // Provider redirects cannot carry a workspace header. This route authenticates the OIDC
     // session itself, then authorizes and selects the workspace from the signed return token.
     if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') return next();
@@ -258,7 +258,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // A deadlock or serialization victim was rolled back whole: retryable, not a 500 that tells clients never to retry.
     const conflict = !known && !invalidJson && databaseConflict(error);
     // An MCP approval revoked while its request ran: the object it would own has no grant left.
-    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_grant_id_fkey';
+    const grantRevoked = database.code === '23503' && database.constraint === 'mail_grant_objects_resource_grant_fkey';
     // A refused or dropped database connection is a retryable 503, not an internal error (see transientDatabaseError).
     const transient = !known && !invalidJson && transientDatabaseError(error);
     // Values Postgres cannot store come from the request: U+0000 in any text (22021, or 22P05 inside JSON) and a
@@ -305,17 +305,17 @@ export async function createOpenApiApp(): Promise<App> {
     doc: createOpenApiDocument(full), createLlmsText, createMarkdownDocs, createTagMarkdownDocs,
   }))), true);
   const [
-    { registerMcpAuth }, { registerGoogleAuth }, { registerAudience }, { registerAudienceQuery },
+    { registerMcpAuth }, { registerDashboardAuth }, { registerAudience }, { registerAudienceQuery },
     { registerTemplates }, { registerSending }, { registerOperations }, { registerSesRegions },
     { registerMailbox }, { registerWorkspaces }, { registerProviderConnections }, { registerMcp }, { registerPublicStats }, { registerOverviewSetup }, { registerOperator },
     { registerAudit }, { registerSupport, registerSupportOperator },
   ] = await wrapModuleLoad(() => Promise.all([
-    import('./mcp-auth.js'), import('./google-auth.js'), import('./audience.js'), import('./audience-query.js'),
+    import('./mcp-auth.js'), import('./dashboard-auth.js'), import('./audience.js'), import('./audience-query.js'),
     import('./templates.js'), import('./sending.js'), import('./operations.js'), import('./ses-regions.js'),
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
     import('./audit.js'), import('./support.js'),
   ]));
-  registerMcpAuth(full); registerGoogleAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
+  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full);

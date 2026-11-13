@@ -23,8 +23,8 @@
 | Logs and search | Email list, API request logs plus a Logs API, share-email links, 30-day retention | Email logs and events kept 30 days. Request logs exist only as server JSON (`api/README.md` §Errors, logs) | Gap: no request-log API or UI |
 | Analytics / deliverability | Per-email deliverability insights, metrics API, link checker, compatibility checker | `/v1/metrics`, campaign stats, SES reputation page with Slack alerts (`app/src/features/settings/reputation.tsx`) | Mixed |
 | Test mode | Test addresses: `delivered@`, `bounced@`, `complained@`, `suppressed@` resend.dev ([docs](https://resend.com/docs/knowledge-base/what-email-addresses-to-use-for-testing.md)) | `os_test_` keys run the full pipeline in simulation, but only emit sent and delivered events (`api/README.md` §benchmarks) | Better isolation, but no way to simulate a bounce or complaint |
-| First email | Send from `onboarding@resend.dev` before verifying a domain; managed `*.resend.app` address for receiving | Self-host setup, Google allowlist, then SES sandbox and verification | Gap |
-| Team / roles / SSO / MFA | Admin and Member roles, SSO add-on, MFA, Google or GitHub login ([team](https://resend.com/docs/dashboard/settings/team.md), [sso](https://resend.com/changelog/sso)) | Google sign-in only; every approved user is an admin; no teams (`api/README.md`) | Gap |
+| First email | Send from `onboarding@resend.dev` before verifying a domain; managed `*.resend.app` address for receiving | Self-host setup, verified-address allowlist, then SES sandbox and verification | Gap |
+| Team / roles / SSO / MFA | Admin and Member roles, SSO add-on, MFA, social login ([team](https://resend.com/docs/dashboard/settings/team.md), [sso](https://resend.com/changelog/sso)) | OIDC sign-in and workspace roles (`api/README.md`) | See current setup |
 | Audit logs | Not found in Resend's public docs (unsure) | No user-facing audit log | Opportunity |
 | API key permissions | `full_access` or `sending_access`, optional domain restriction ([docs](https://resend.com/docs/api-reference/api-keys/create-api-key.md)) | Read / send / manage, combined with live / test and domain restrictions; per-address inbound keys; short-lived agent tokens (`CreateApiKey`, `mcp/README.md`) | **OpenSend advantage** |
 | MCP / AI agents | Remote MCP with OAuth covering the full platform; skills; plugins for Claude, Cursor and Codex; CLI with an agent mode ([mcp](https://resend.com/docs/mcp-server.md)) | Hosted MCP with OAuth; test-mode read access by default; `confirm: true` on writes; idempotent thread sends; recipient guard (`mcp/README.md`) | OpenSend is safer; Resend is broader and easier to find |
@@ -51,7 +51,7 @@
 ## 3. Gaps that matter most, by priority
 
 **Must**
-- **Teams, roles, invites, and email/GitHub sign-in plus MFA.** A hosted multi-tenant service can't be Google-only with everyone as admin.
+- **Teams, roles, invites, and email/GitHub sign-in plus MFA.** A hosted multi-tenant service can't be single-provider with everyone as admin.
 - **First email in a minute.** A shared sandbox sender, a managed receiving subdomain, and bounce/complaint/suppressed test addresses. This is Resend's signature onboarding.
 - **One-click DNS setup** (Domain Connect or the Cloudflare API). Domain verification is where new users drop off most.
 - **SMTP relay.** Required for Supabase Auth, WordPress, Rails and other no-code tools.
