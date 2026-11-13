@@ -614,11 +614,23 @@ jobs:
 
       - *stage-tip
 
+      # The token verifies at once, but D1's API can refuse a just-minted token for a few seconds (Authentication error
+      # 10000; the Bane job above never sees it because its first call comes ~10 s after minting). Retry only that error:
+      # migrations apply is idempotent and fails before running anything.
       - name: Migrate the support database
         working-directory: support
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
-        run: ./node_modules/.bin/wrangler d1 migrations apply "$SUPPORT_DATABASE" --remote --config "$SUPPORT_CONFIG"
+        run: |
+          set -o pipefail
+          out="$RUNNER_TEMP/support-migrate.log"
+          for attempt in 1 2 3 4 5 6; do
+            if ./node_modules/.bin/wrangler d1 migrations apply "$SUPPORT_DATABASE" --remote --config "$SUPPORT_CONFIG" 2>&1 | tee "$out"; then exit 0; fi
+            grep -q 'code: 10000' "$out" || exit 1
+            echo "::warning::D1 refused the new token (attempt $attempt); retrying in 10 s"
+            sleep 10
+          done
+          echo "::error::D1 kept refusing the token"; exit 1
 
       - name: Deploy the support Worker
         working-directory: support
