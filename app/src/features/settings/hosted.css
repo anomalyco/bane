@@ -46,8 +46,7 @@
 @media (max-width: 1100px) {
   .hosted-settings { grid-template-columns: minmax(0, 1fr); align-content: start; gap: var(--space-20); }
   .settings-rail { position: static; gap: var(--space-12); }
-  .settings-rail__groups { flex-direction: row; gap: var(--space-6); margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); overflow-x: auto; border-bottom: 1px solid var(--color-border); scrollbar-width: none; }
-  .settings-rail__groups::-webkit-scrollbar { display: none; }
+  .settings-rail__groups { flex-direction: row; gap: var(--space-6); margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); overflow-x: auto; border-bottom: 1px solid var(--color-border); }
   .settings-rail__group { display: contents; }
   .settings-rail__group-title { display: none; }
   .settings-rail a { position: relative; flex: none; height: var(--control-height); padding-inline: var(--space-8); border-radius: 0; }
