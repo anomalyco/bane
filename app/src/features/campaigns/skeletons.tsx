@@ -1,8 +1,10 @@
+import { ChevronRight, MoreHorizontal } from 'lucide-react'
 import {
-  Button, ControlSkeleton, Input, LoadingRegion, PageHeader, SearchField, SectionHeader,
+  Button, ControlSkeleton, IconButton, Input, LoadingRegion, PageHeader, SearchField, SectionHeader,
   Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import { CampaignsHeader } from './header'
+import { usePhone } from '../../lib/media'
 import './campaigns.css'
 
 // A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
@@ -57,19 +59,20 @@ export function CampaignEditorSkeleton() {
 }
 
 export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review' | 'templates' | 'template'; isNew?: boolean }) {
+  const phone = usePhone()
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
     return <>
       <CampaignsHeader actions={<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
-      <TableSkeleton columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
+      <TableSkeleton className="campaigns-table" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
     </>
   }
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
-    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>} />
+    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" /></span>{phone ? <><Button variant="primary" disabled>Publish</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>}</>} />
     <LoadingRegion label="Loading template editor" className="campaign-compose-workspace">
       <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
-        <p className="template-compose-intro">A reusable starting point for campaigns. Write example content here; add personalization such as {'{{name}}'} in each campaign.</p>
+        <p className="template-compose-intro">Write example content. Add personalization, such as {'{{name}}'}, in each campaign.</p>
         <div className="campaign-compose-metadata" aria-hidden="true">
           {['Name', 'Purpose', 'Subject', 'Inbox preview', 'From name', 'Reply to'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
         </div>
@@ -78,27 +81,27 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     </LoadingRegion>
   </div>
   if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
+    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions">{phone ? <><Button variant="primary" disabled>Review</Button><IconButton label="More actions" disabled><MoreHorizontal size={16} /></IconButton></> : <>{isNew && <Button variant="ghost" disabled>Use a template</Button>}<Button variant="ghost" disabled>Send test</Button><Button variant="primary" disabled>Continue to review</Button></>}</div></>} />
     <CampaignEditorSkeleton />
   </div>
   return <div className="stack campaign-review">
-    <PageHeader title={<SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<SkeletonText width={65} lineHeight={18} />} />
+    <PageHeader title={<SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<SkeletonText width={65} lineHeight={20} />} />
     <LoadingRegion label="Loading campaign review" className="campaign-review-layout">
-      <section className="campaign-fields">
+      <section className="campaign-fields campaign-recipients">
         <SectionHeader title="Recipients" actions={<Button variant="ghost" disabled>Edit audience</Button>} />
         <CampaignAudienceSkeleton />
       </section>
-      <section className="campaign-fields">
+      <section className="campaign-fields campaign-message">
         <SectionHeader title="Message" actions={<><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></>} />
         <dl className="campaign-message-details"><dt>From</dt><dd><SkeletonText width="70%" /></dd><dt>Subject</dt><dd><SkeletonText width="85%" /></dd><dt>Preview</dt><dd><SkeletonText width="65%" /></dd></dl>
         <Skeleton height={400} />
       </section>
+      <section className="campaign-delivery">
+        <SectionHeader title="Delivery" />
+        <Tabs value="now" onValueChange={() => {}} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
+        <div className="campaign-pacing-options"><div className="campaign-pacing-head"><Button variant="ghost" size="sm" className="campaign-pacing-toggle" disabled><ChevronRight size={14} aria-hidden="true" />Pace sending</Button></div></div>
+        <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to draft</Button><Button variant="primary" disabled>Send campaign now</Button></div>
+      </section>
     </LoadingRegion>
-    <section className="campaign-delivery">
-      <SectionHeader title="Delivery" />
-      <p className="muted campaign-delivery-lead">Review the message and audience, then send.</p>
-      <Tabs value="now" onValueChange={() => {}} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
-      <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to draft</Button><Button variant="primary" disabled>Send campaign now</Button></div>
-    </section>
   </div>
 }
