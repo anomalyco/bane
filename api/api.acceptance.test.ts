@@ -3490,7 +3490,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // The support platform: the SupportPlatform service-binding entrypoint (src/worker.ts) wraps exactly this, with
       // the runtime marked as the binding's caller. No token: the binding is the credential.
       const { supportPlatform, supportPlatformAllows } = await import('./src/support-platform.js');
-      const platform = supportPlatform(req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
+      const platform = supportPlatform(async req => app.fetch(req, { ...runtime, platformCaller: 'bane-support' }), () => runtime.config);
       const service = async (method: string, path: string, body?: Json): Promise<Reply> => { const r = await platform.call<Json>(method, path, body); return { status: r.status, body: r.body, headers: new Headers(r.requestId ? { 'x-request-id': r.requestId } : {}) }; };
       const session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
       const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
