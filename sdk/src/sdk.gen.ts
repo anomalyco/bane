@@ -28,12 +28,12 @@ export const listMcpConnections = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -49,12 +49,12 @@ export const bindMcpConnection = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -76,12 +76,12 @@ export const revokeMcpConnection = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -99,12 +99,12 @@ export const listAgents = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -122,12 +122,12 @@ export const revokeAgent = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -140,12 +140,12 @@ export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -158,12 +158,12 @@ export const listAgentTokens = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -179,12 +179,12 @@ export const createAgentToken = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -201,12 +201,12 @@ export const revokeAgentToken = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -222,12 +222,12 @@ export const listApiKeys = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -243,12 +243,12 @@ export const createApiKey = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -268,12 +268,12 @@ export const revokeApiKey = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -289,12 +289,12 @@ export const listContacts = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -307,12 +307,12 @@ export const createContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -332,12 +332,12 @@ export const deleteContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -350,12 +350,12 @@ export const getContact = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -368,12 +368,12 @@ export const updateContact = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -390,12 +390,12 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -411,12 +411,12 @@ export const updateContactConsent = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -433,12 +433,12 @@ export const listContactLists = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -451,12 +451,12 @@ export const createContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -473,12 +473,12 @@ export const deleteContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -491,12 +491,12 @@ export const getContactList = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -509,12 +509,12 @@ export const updateContactList = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -531,12 +531,12 @@ export const listListMembers = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -549,12 +549,12 @@ export const addListMembers = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -571,12 +571,12 @@ export const removeListMember = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -589,12 +589,12 @@ export const listSegments = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -607,12 +607,12 @@ export const createSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -629,12 +629,12 @@ export const deleteSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -647,12 +647,12 @@ export const getSegment = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -665,12 +665,12 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -690,12 +690,12 @@ export const previewSegment = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -712,12 +712,12 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -733,12 +733,12 @@ export const previewContactImport = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -755,12 +755,12 @@ export const getContactImport = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -776,12 +776,12 @@ export const commitContactImport = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -801,12 +801,12 @@ export const queryAudience = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -826,12 +826,12 @@ export const planAudienceMutation = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -851,12 +851,12 @@ export const applyAudiencePlan = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -873,12 +873,12 @@ export const listCampaignTemplates = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -891,12 +891,12 @@ export const createCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -913,12 +913,12 @@ export const deleteCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -931,12 +931,12 @@ export const getCampaignTemplate = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -949,12 +949,12 @@ export const updateCampaignTemplate = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -971,12 +971,12 @@ export const publishCampaignTemplate = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -993,12 +993,12 @@ export const previewCampaignTemplate = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1014,12 +1014,12 @@ export const renderCampaignTemplatePreviewImage = <ThrowOnError extends boolean 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1032,12 +1032,12 @@ export const setCampaignTemplateArchived = <ThrowOnError extends boolean = false
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1054,12 +1054,12 @@ export const uploadTemplateAsset = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1079,12 +1079,12 @@ export const importTemplateImage = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1101,12 +1101,12 @@ export const deleteTemplateAsset = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1119,12 +1119,12 @@ export const getTemplateAsset = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1137,12 +1137,12 @@ export const getTemplateAssetContent = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1160,12 +1160,12 @@ export const checkEmail = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1182,12 +1182,12 @@ export const sendEmail = <ThrowOnError extends boolean = false>(options: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1204,12 +1204,12 @@ export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1231,12 +1231,12 @@ export const previewEmail = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1253,12 +1253,12 @@ export const listEmails = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1271,12 +1271,12 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1292,12 +1292,12 @@ export const getEmailDetail = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1313,12 +1313,12 @@ export const getEmailContent = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1331,12 +1331,12 @@ export const listEmailEvents = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1349,12 +1349,12 @@ export const uploadAttachment = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1371,12 +1371,12 @@ export const deleteAttachment = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1389,12 +1389,12 @@ export const getAttachment = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1410,12 +1410,12 @@ export const getAttachmentContent = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1431,12 +1431,12 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1452,12 +1452,12 @@ export const createCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1474,12 +1474,12 @@ export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1492,12 +1492,12 @@ export const getCampaign = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1513,12 +1513,12 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1538,12 +1538,12 @@ export const getCampaignStats = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1559,12 +1559,12 @@ export const getCampaignContentGuide = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1580,12 +1580,12 @@ export const previewCampaign = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1601,12 +1601,12 @@ export const previewCampaignAudience = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1622,12 +1622,12 @@ export const renderCampaignPreviewImage = <ThrowOnError extends boolean = false>
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1643,12 +1643,12 @@ export const getCampaignState = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1664,12 +1664,12 @@ export const setCampaignArchived = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1686,12 +1686,12 @@ export const testCampaign = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1711,12 +1711,12 @@ export const sendCampaign = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1736,12 +1736,12 @@ export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1761,12 +1761,12 @@ export const cancelCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1782,12 +1782,12 @@ export const pauseCampaign = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1807,12 +1807,12 @@ export const resumeCampaign = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1832,12 +1832,12 @@ export const setCampaignPacing = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1857,12 +1857,12 @@ export const unscheduleCampaign = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1882,12 +1882,12 @@ export const rescheduleCampaign = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1904,12 +1904,12 @@ export const getWorkspaceSettings = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1922,12 +1922,12 @@ export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1944,12 +1944,12 @@ export const getSesSettings = <ThrowOnError extends boolean = false>(options?: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1965,12 +1965,12 @@ export const listDomains = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -1983,12 +1983,12 @@ export const createDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2008,12 +2008,12 @@ export const configureDomainMailFrom = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2033,12 +2033,12 @@ export const chooseReceivingHost = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2056,11 +2056,11 @@ export const chooseReceivingHost = <ThrowOnError extends boolean = false>(option
 export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(options: Options<SendDomainTestEmailData, ThrowOnError>): RequestResult<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError> => (options.client ?? client).post<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/test-send',
@@ -2073,11 +2073,11 @@ export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(option
 export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options: Options<GetDomainDnsSetupData, ThrowOnError>): RequestResult<GetDomainDnsSetupResponses, GetDomainDnsSetupErrors, ThrowOnError> => (options.client ?? client).get<GetDomainDnsSetupResponses, GetDomainDnsSetupErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup',
@@ -2090,11 +2090,11 @@ export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options:
 export const completeDomainDnsSetup = <ThrowOnError extends boolean = false>(options: Options<CompleteDomainDnsSetupData, ThrowOnError>): RequestResult<unknown, CompleteDomainDnsSetupErrors, ThrowOnError> => (options.client ?? client).get<unknown, CompleteDomainDnsSetupErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/dns-setup/return/{token}',
@@ -2109,12 +2109,12 @@ export const deleteDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2130,12 +2130,12 @@ export const getDomain = <ThrowOnError extends boolean = false>(options: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2151,12 +2151,12 @@ export const verifyDomain = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2169,12 +2169,12 @@ export const listWebhooks = <ThrowOnError extends boolean = false>(options?: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2190,12 +2190,12 @@ export const createWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2212,12 +2212,12 @@ export const deleteWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2230,12 +2230,12 @@ export const getWebhook = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2248,12 +2248,12 @@ export const updateWebhook = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2273,12 +2273,12 @@ export const revealWebhookSecret = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2294,12 +2294,12 @@ export const rotateWebhookSecret = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2312,12 +2312,12 @@ export const testWebhook = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2330,12 +2330,12 @@ export const listWebhookDeliveries = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2348,12 +2348,12 @@ export const getWebhookDelivery = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2366,12 +2366,12 @@ export const retryWebhookDelivery = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2400,12 +2400,12 @@ export const getMetrics = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2421,12 +2421,12 @@ export const getSenderScore = <ThrowOnError extends boolean = false>(options?: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2440,11 +2440,11 @@ export const getSenderScore = <ThrowOnError extends boolean = false>(options?: O
 export const releaseSenderStanding = <ThrowOnError extends boolean = false>(options: Options<ReleaseSenderStandingData, ThrowOnError>): RequestResult<ReleaseSenderStandingResponses, ReleaseSenderStandingErrors, ThrowOnError> => (options.client ?? client).post<ReleaseSenderStandingResponses, ReleaseSenderStandingErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/sender-score/release',
@@ -2465,12 +2465,12 @@ export const getUsage = <ThrowOnError extends boolean = false>(options?: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2486,12 +2486,12 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2507,12 +2507,12 @@ export const configureRegion = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2532,12 +2532,12 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2553,12 +2553,12 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2578,12 +2578,12 @@ export const configureRegionAutoValidation = <ThrowOnError extends boolean = fal
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2605,12 +2605,12 @@ export const getRouting = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2628,12 +2628,12 @@ export const applyRouting = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2653,12 +2653,12 @@ export const listRoutes = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2676,12 +2676,12 @@ export const createRoute = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2703,12 +2703,12 @@ export const deleteRoute = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2724,12 +2724,12 @@ export const getRoute = <ThrowOnError extends boolean = false>(options: Options<
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2747,12 +2747,12 @@ export const updateRoute = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2774,12 +2774,12 @@ export const getRoutingAudit = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2797,12 +2797,12 @@ export const listRoutingVersions = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2820,12 +2820,12 @@ export const getRoutingVersion = <ThrowOnError extends boolean = false>(options?
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2843,12 +2843,12 @@ export const restoreRoutingVersion = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2866,12 +2866,12 @@ export const testRouting = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2891,12 +2891,12 @@ export const listRitualVersions = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2912,12 +2912,12 @@ export const restoreRitualVersion = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2937,12 +2937,12 @@ export const setOmenOptIns = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2962,12 +2962,12 @@ export const listEndpoints = <ThrowOnError extends boolean = false>(options?: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -2985,12 +2985,12 @@ export const createEndpoint = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3010,12 +3010,12 @@ export const deleteEndpoint = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3031,12 +3031,12 @@ export const getEndpoint = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3054,12 +3054,12 @@ export const updateEndpoint = <ThrowOnError extends boolean = false>(options: Op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3081,12 +3081,12 @@ export const sendEndpointVerification = <ThrowOnError extends boolean = false>(o
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3108,12 +3108,12 @@ export const testEndpoint = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3129,12 +3129,12 @@ export const createInboxConnection = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3156,12 +3156,12 @@ export const getRitualVersion = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3179,12 +3179,12 @@ export const checkRitual = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3206,12 +3206,12 @@ export const getRitualTypings = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3229,12 +3229,12 @@ export const listRitualTemplates = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3250,12 +3250,12 @@ export const deleteRitual = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3271,12 +3271,12 @@ export const getRitual = <ThrowOnError extends boolean = false>(options: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3292,12 +3292,12 @@ export const saveRitual = <ThrowOnError extends boolean = false>(options: Option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3317,12 +3317,12 @@ export const attachRituals = <ThrowOnError extends boolean = false>(options: Opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3342,12 +3342,12 @@ export const getRituals = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3363,12 +3363,12 @@ export const applyRituals = <ThrowOnError extends boolean = false>(options: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3388,12 +3388,12 @@ export const testRituals = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3413,12 +3413,12 @@ export const listInboxFolders = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3434,12 +3434,12 @@ export const createInboxFolder = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3459,12 +3459,12 @@ export const deleteInboxFolder = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3480,12 +3480,12 @@ export const updateInboxFolder = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3505,12 +3505,12 @@ export const deleteInboxMessage = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3528,12 +3528,12 @@ export const getInboxMessage = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3549,12 +3549,12 @@ export const updateInboxMessage = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3574,12 +3574,12 @@ export const moveInboxMessage = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3599,12 +3599,12 @@ export const copyInboxMessage = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3624,12 +3624,12 @@ export const expungeInboxFolder = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3649,12 +3649,12 @@ export const getInboxChanges = <ThrowOnError extends boolean = false>(options: O
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3670,12 +3670,12 @@ export const listInboxAppPasswords = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3691,12 +3691,12 @@ export const createInboxAppPassword = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3716,12 +3716,12 @@ export const listAppPasswords = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3737,12 +3737,12 @@ export const revokeInboxAppPassword = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3760,12 +3760,12 @@ export const listInboxes = <ThrowOnError extends boolean = false>(options?: Opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3783,12 +3783,12 @@ export const createInbox = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3810,12 +3810,12 @@ export const deleteInbox = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3833,12 +3833,12 @@ export const getInbox = <ThrowOnError extends boolean = false>(options: Options<
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3856,12 +3856,12 @@ export const updateInbox = <ThrowOnError extends boolean = false>(options: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3883,12 +3883,12 @@ export const simulateInboxMessage = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3910,12 +3910,12 @@ export const listInboxMessages = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3933,12 +3933,12 @@ export const getInboxAttachment = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3954,12 +3954,12 @@ export const releaseRetiredAddress = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3972,12 +3972,12 @@ export const getInboundScanPolicy = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -3993,12 +3993,12 @@ export const updateInboundScanPolicy = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4018,12 +4018,12 @@ export const listInboundDomains = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4036,12 +4036,12 @@ export const getInboundDomain = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4054,12 +4054,12 @@ export const updateInboundDomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4081,12 +4081,12 @@ export const checkInboundDomain = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4104,12 +4104,12 @@ export const enableInboundDomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4131,12 +4131,12 @@ export const disableInboundDomain = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4152,12 +4152,12 @@ export const listInboundSubdomains = <ThrowOnError extends boolean = false>(opti
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4175,12 +4175,12 @@ export const createInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4202,12 +4202,12 @@ export const removeInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4220,12 +4220,12 @@ export const getInboundSubdomain = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4238,12 +4238,12 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4265,12 +4265,12 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4288,12 +4288,12 @@ export const createInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4313,12 +4313,12 @@ export const deleteInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4334,12 +4334,12 @@ export const getInboundAddress = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4355,12 +4355,12 @@ export const updateInboundAddress = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4382,12 +4382,12 @@ export const listInboundThreads = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4403,12 +4403,12 @@ export const createInboundThread = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4430,12 +4430,12 @@ export const getInboundThread = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4451,12 +4451,12 @@ export const updateInboundThread = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4478,12 +4478,12 @@ export const listInboundMessages = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4499,12 +4499,12 @@ export const getInboundMessage = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4520,12 +4520,12 @@ export const getInboundAttachment = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4543,12 +4543,12 @@ export const listLogs = <ThrowOnError extends boolean = false>(options?: Options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4566,12 +4566,12 @@ export const getInboundOverview = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4589,12 +4589,12 @@ export const replyToInboundThread = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4616,12 +4616,12 @@ export const listInboundEvents = <ThrowOnError extends boolean = false>(options?
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4639,12 +4639,12 @@ export const listInboundKeys = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4664,12 +4664,12 @@ export const createInboundKey = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4691,12 +4691,12 @@ export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4714,12 +4714,12 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4737,12 +4737,12 @@ export const createInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4759,12 +4759,12 @@ export const deleteInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4777,12 +4777,12 @@ export const getInboundWebhook = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4798,12 +4798,12 @@ export const updateInboundWebhook = <ThrowOnError extends boolean = false>(optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4825,12 +4825,12 @@ export const testInboundWebhook = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4852,12 +4852,12 @@ export const redeliverInboundMessage = <ThrowOnError extends boolean = false>(op
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4874,12 +4874,12 @@ export const rotateInboundWebhookSecret = <ThrowOnError extends boolean = false>
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4895,12 +4895,12 @@ export const retryInboundWebhookDelivery = <ThrowOnError extends boolean = false
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4913,12 +4913,12 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -4934,11 +4934,11 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspacesData, ThrowOnError>): RequestResult<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspacesResponses, ListWorkspacesErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -4951,11 +4951,11 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: O
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces',
@@ -4969,11 +4969,11 @@ export const createWorkspace = <ThrowOnError extends boolean = false>(options: O
 export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(options: Options<RenameCurrentWorkspaceData, ThrowOnError>): RequestResult<RenameCurrentWorkspaceResponses, RenameCurrentWorkspaceErrors, ThrowOnError> => (options.client ?? client).patch<RenameCurrentWorkspaceResponses, RenameCurrentWorkspaceErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current',
@@ -4987,11 +4987,11 @@ export const renameCurrentWorkspace = <ThrowOnError extends boolean = false>(opt
 export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceMembersData, ThrowOnError>): RequestResult<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceMembersResponses, ListWorkspaceMembersErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -5004,11 +5004,11 @@ export const listWorkspaceMembers = <ThrowOnError extends boolean = false>(optio
 export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<InviteWorkspaceMemberData, ThrowOnError>): RequestResult<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).post<InviteWorkspaceMemberResponses, InviteWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members',
@@ -5022,11 +5022,11 @@ export const inviteWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<RevokeWorkspaceInvitationData, ThrowOnError>): RequestResult<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).delete<RevokeWorkspaceInvitationResponses, RevokeWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -5039,11 +5039,11 @@ export const revokeWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(options?: Options<ListWorkspaceInvitationsData, ThrowOnError>): RequestResult<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError> => (options?.client ?? client).get<ListWorkspaceInvitationsResponses, ListWorkspaceInvitationsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -5056,11 +5056,11 @@ export const listWorkspaceInvitations = <ThrowOnError extends boolean = false>(o
 export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceInvitationData, ThrowOnError>): RequestResult<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceInvitationResponses, CreateWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/invitations',
@@ -5074,11 +5074,11 @@ export const createWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const removeWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<RemoveWorkspaceMemberData, ThrowOnError>): RequestResult<RemoveWorkspaceMemberResponses, RemoveWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveWorkspaceMemberResponses, RemoveWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -5088,11 +5088,11 @@ export const removeWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(options: Options<UpdateWorkspaceMemberData, ThrowOnError>): RequestResult<UpdateWorkspaceMemberResponses, UpdateWorkspaceMemberErrors, ThrowOnError> => (options.client ?? client).patch<UpdateWorkspaceMemberResponses, UpdateWorkspaceMemberErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/current/members/{id}',
@@ -5109,11 +5109,11 @@ export const updateWorkspaceMember = <ThrowOnError extends boolean = false>(opti
 export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<GetWorkspaceInvitationData, ThrowOnError>): RequestResult<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).get<GetWorkspaceInvitationResponses, GetWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/invitations/{id}',
@@ -5123,11 +5123,11 @@ export const getWorkspaceInvitation = <ThrowOnError extends boolean = false>(opt
 export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(options: Options<AcceptWorkspaceInvitationData, ThrowOnError>): RequestResult<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError> => (options.client ?? client).post<AcceptWorkspaceInvitationResponses, AcceptWorkspaceInvitationErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/workspaces/invitations/{id}/accept',
@@ -5140,11 +5140,11 @@ export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 export const deleteConnection = <ThrowOnError extends boolean = false>(options?: Options<DeleteConnectionData, ThrowOnError>): RequestResult<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError> => (options?.client ?? client).delete<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -5157,11 +5157,11 @@ export const deleteConnection = <ThrowOnError extends boolean = false>(options?:
 export const getConnection = <ThrowOnError extends boolean = false>(options?: Options<GetConnectionData, ThrowOnError>): RequestResult<GetConnectionResponses, GetConnectionErrors, ThrowOnError> => (options?.client ?? client).get<GetConnectionResponses, GetConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -5174,11 +5174,11 @@ export const getConnection = <ThrowOnError extends boolean = false>(options?: Op
 export const createConnection = <ThrowOnError extends boolean = false>(options: Options<CreateConnectionData, ThrowOnError>): RequestResult<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection',
@@ -5195,11 +5195,11 @@ export const createConnection = <ThrowOnError extends boolean = false>(options: 
 export const listConnectionRegions = <ThrowOnError extends boolean = false>(options?: Options<ListConnectionRegionsData, ThrowOnError>): RequestResult<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError> => (options?.client ?? client).get<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions',
@@ -5212,11 +5212,11 @@ export const listConnectionRegions = <ThrowOnError extends boolean = false>(opti
 export const refreshConnectionScan = <ThrowOnError extends boolean = false>(options?: Options<RefreshConnectionScanData, ThrowOnError>): RequestResult<RefreshConnectionScanResponses, RefreshConnectionScanErrors, ThrowOnError> => (options?.client ?? client).post<RefreshConnectionScanResponses, RefreshConnectionScanErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/scan',
@@ -5229,11 +5229,11 @@ export const refreshConnectionScan = <ThrowOnError extends boolean = false>(opti
 export const importConnectionDomains = <ThrowOnError extends boolean = false>(options: Options<ImportConnectionDomainsData, ThrowOnError>): RequestResult<ImportConnectionDomainsResponses, ImportConnectionDomainsErrors, ThrowOnError> => (options.client ?? client).post<ImportConnectionDomainsResponses, ImportConnectionDomainsErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/imports',
@@ -5250,11 +5250,11 @@ export const importConnectionDomains = <ThrowOnError extends boolean = false>(op
 export const getConnectionRegionStatus = <ThrowOnError extends boolean = false>(options?: Options<GetConnectionRegionStatusData, ThrowOnError>): RequestResult<GetConnectionRegionStatusResponses, GetConnectionRegionStatusErrors, ThrowOnError> => (options?.client ?? client).get<GetConnectionRegionStatusResponses, GetConnectionRegionStatusErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/regions/status',
@@ -5267,11 +5267,11 @@ export const getConnectionRegionStatus = <ThrowOnError extends boolean = false>(
 export const verifyConnection = <ThrowOnError extends boolean = false>(options: Options<VerifyConnectionData, ThrowOnError>): RequestResult<VerifyConnectionResponses, VerifyConnectionErrors, ThrowOnError> => (options.client ?? client).post<VerifyConnectionResponses, VerifyConnectionErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/connection/verify',
@@ -5297,12 +5297,12 @@ export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5316,11 +5316,11 @@ export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?:
 export const listActivity = <ThrowOnError extends boolean = false>(options?: Options<ListActivityData, ThrowOnError>): RequestResult<ListActivityResponses, ListActivityErrors, ThrowOnError> => (options?.client ?? client).get<ListActivityResponses, ListActivityErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/activity',
@@ -5333,11 +5333,11 @@ export const listActivity = <ThrowOnError extends boolean = false>(options?: Opt
 export const contactSupport = <ThrowOnError extends boolean = false>(options: Options<ContactSupportData, ThrowOnError>): RequestResult<ContactSupportResponses, ContactSupportErrors, ThrowOnError> => (options.client ?? client).post<ContactSupportResponses, ContactSupportErrors, ThrowOnError>({
     security: [{
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         }, {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }],
     url: '/v1/contact-support',
@@ -5547,12 +5547,12 @@ export const getBilling = <ThrowOnError extends boolean = false>(options?: Optio
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5570,12 +5570,12 @@ export const getBillingUsage = <ThrowOnError extends boolean = false>(options?: 
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5593,12 +5593,12 @@ export const listBillingLedger = <ThrowOnError extends boolean = false>(options?
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5616,12 +5616,12 @@ export const listBillingPayments = <ThrowOnError extends boolean = false>(option
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5639,12 +5639,12 @@ export const getBillingPayment = <ThrowOnError extends boolean = false>(options:
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5662,12 +5662,12 @@ export const createBillingTopUp = <ThrowOnError extends boolean = false>(options
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5689,12 +5689,12 @@ export const createBillingTopUpLink = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5716,12 +5716,12 @@ export const updateBillingAutoRecharge = <ThrowOnError extends boolean = false>(
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5743,12 +5743,12 @@ export const deleteBillingPaymentMethod = <ThrowOnError extends boolean = false>
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],
@@ -5766,12 +5766,12 @@ export const createBillingCardSetup = <ThrowOnError extends boolean = false>(opt
         { scheme: 'bearer', type: 'http' },
         {
             in: 'cookie',
-            name: 'bane.session_token',
+            name: 'nightmail.session_token',
             type: 'apiKey'
         },
         {
             in: 'cookie',
-            name: '__Host-bane.session_token',
+            name: '__Host-nightmail.session_token',
             type: 'apiKey'
         }
     ],

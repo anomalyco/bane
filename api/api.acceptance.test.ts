@@ -574,7 +574,7 @@ const AUTH_SECRET = process.env.BANE_ROOT_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BANE_ROOT_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
-const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-bane.session_token' : 'bane.session_token';
+const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-nightmail.session_token' : 'nightmail.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
 // The operator's issuer subject (= its user ID). Self-hosted access is by subject: AUTH_ALLOWED_SUBJECTS lists it.
 const AUTH_SUBJECT = process.env.AUTH_TEST_SUBJECT ?? 'acceptance-operator';
@@ -859,7 +859,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
   assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
-  const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
   // A staff sign-up starts its own workspace, named after the person (#92's naming).
   assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved}'s workspace`);
@@ -869,7 +869,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const oldInvitation=randomUUID();
   await db.query("INSERT INTO workspace_invitations(id,workspace_id,email,role,status,expires_at,inviter_id) VALUES($1,$2,$3,'member','pending',now()+interval '1 hour',$4)",[oldInvitation,me.workspaceId,approved,me.id]);
   email=`changed-${approved}`;useUserInfo=true;
-  const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   assert.equal((await request('/v1/me','GET',session)).status,401);
   runtime.config.accountClient!.requiredAcr=googleAcr;
   const sessionCount = async () => (await db.query('SELECT count(*) FROM bane_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
@@ -878,23 +878,23 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     tokenAcr=wrong;
     const refused=await login();
     assert.equal(refused.headers.get('location'),origin+'/?auth=google_required');
-    assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+    assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   }
   assert.equal((await login('unmet_authentication_requirements')).headers.get('location'),origin+'/?auth=google_required');
   assert.equal((await login('interaction_required')).headers.get('location'),origin+'/?auth=interaction_required');
   assert.equal(await sessionCount(),before);
   tokenAcr=googleAcr;
   const accepted=await login();assert.equal(landed(accepted),origin+'/');
-  assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-bane.session_token=')));
+  assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
   verified=false;const unverified=await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
   // An address change ends older sessions; the new session of the same admitted subject works without a verified address.
   assert.equal((await request('/v1/me','GET',newSession)).status,401);
-  const unverifiedSession=unverified.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const unverifiedSession=unverified.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   assert.equal((await request('/v1/me','GET',unverifiedSession)).status,200);
   verified=true;subject=randomUUID();subjects.push(subject);email=approved;
-  const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const reassigned=await login();const reassignedSession=reassigned.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',reassignedSession,{})).status,200);
   assert.equal((await request('/api/auth/sign-out','POST',reassignedSession)).status,200);
   assert.equal((await request('/v1/me','GET',reassignedSession)).status,401);
@@ -911,7 +911,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
   await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
   const seated=await login();assert.equal(landed(seated),origin+'/');
-  const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-bane.session_token='))!.split(';')[0]!;
+  const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const seatMe=await (await request('/v1/me','GET',seatSession)).json() as {id:string;workspaceId:string;role:string;email:string};
   assert.deepEqual([seatMe.id,seatMe.workspaceId,seatMe.role,seatMe.email],[seatId,me.workspaceId,'admin',email]);
   subject=randomUUID();subjects.push(subject);
@@ -984,9 +984,9 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
     // Add account asks the account service for its chooser; every sign-in, adds included, requires Google again.
     assert.equal(pushed!.get('prompt'), add ? 'select_account' : null);
     assert.deepEqual(JSON.parse(pushed!.get('claims')!).id_token.acr,{essential:true,values:[googleAcr]});
-    const flowNonce = pushed!.get('nonce')!, state = pushed!.get('state')!, binding = jar.get('__Host-bane.login')!;
+    const flowNonce = pushed!.get('nonce')!, state = pushed!.get('state')!, binding = jar.get('__Host-nightmail.login')!;
     return async () => {
-      person = p; nonce = flowNonce; jar.set('__Host-bane.login',binding);
+      person = p; nonce = flowNonce; jar.set('__Host-nightmail.login',binding);
       const before = proved.size, done = store(await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code:'fixture',state,iss:issuer}),{headers:{cookie:cookie(),'sec-fetch-site':'cross-site'}}),runtime));
       if (done.headers.get('location')?.includes('account=')) assert.equal(proved.size,before+1,'The exchange proved a DPoP key');
       return done;
@@ -1004,14 +1004,20 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
     return p;
   }
   const personal = await connect(someone('personal'), false);
-  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token']);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-nightmail.account','__Host-nightmail.session_token']);
   const work = await connect(someone('work'), true);
-  assert.deepEqual([...jar.keys()].sort(),['__Host-bane.account','__Host-bane.session_token','__Host-bane.session_token.1']);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-nightmail.account','__Host-nightmail.session_token','__Host-nightmail.session_token.1']);
   assert.notEqual(personal.workspace, work.workspace);
   // Without a tab's account the browser default (the one added last) answers; with one, exactly that account.
   const who = async (headers: Record<string,string> = {}) => ((await store(await request('/v1/me','GET',undefined,headers)).json()) as {id:string}).id;
   assert.equal(await who(), work.id);
   assert.equal(await who(as(personal)), personal.id);
+  assert.equal(await who(as(work)), work.id);
+  // A browser from before the rename holds bane.* cookies: they still sign it in, and its next dashboard request moves
+  // them to nightmail.* without signing anyone out (remove after rename cleanup).
+  for (const [name, value] of [...jar]) { jar.delete(name); jar.set(name.replace('__Host-nightmail.', '__Host-bane.'), value); }
+  assert.equal(await who(as(personal)), personal.id);
+  assert.deepEqual([...jar.keys()].sort(),['__Host-nightmail.account','__Host-nightmail.session_token','__Host-nightmail.session_token.1']);
   assert.equal(await who(as(work)), work.id);
   // Another account's workspace is refused, not served as the tab's account.
   const crossed = await request('/v1/me','GET',undefined,as(personal,{'x-bane-workspace':work.workspace!}));
@@ -1064,7 +1070,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   // Signing out of one account keeps the other.
   const out = store(await request('/api/auth/sign-out','POST',{account:work.id},as(personal)));
   assert.deepEqual(await out.json(),{success:true,accounts:[personal.id],active:personal.id});
-  assert.ok(!jar.has('__Host-bane.session_token.1'));
+  assert.ok(!jar.has('__Host-nightmail.session_token.1'));
   const gone = await request('/v1/me','GET',undefined,as(work));
   assert.equal(gone.status,401); assert.equal(await code(gone),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(personal)), personal.id);
@@ -1072,17 +1078,17 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
 
   // A session revoked on the server, or expired, drops only that account; the list clears just its cookie.
   await connect(work, true);
-  assert.equal(jar.get('__Host-bane.account'), work.id);
+  assert.equal(jar.get('__Host-nightmail.account'), work.id);
   await db.query('DELETE FROM bane_sessions WHERE user_id=$1',[work.id]);
   assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(personal)), personal.id);
-  assert.equal(jar.get('__Host-bane.account'), work.id, 'A tab naming its account leaves the default alone');
+  assert.equal(jar.get('__Host-nightmail.account'), work.id, 'A tab naming its account leaves the default alone');
   // Without a tab's account the stale default falls to a live account once, and the default then names that account.
   assert.equal(await who(), personal.id);
-  assert.equal(jar.get('__Host-bane.account'), personal.id, 'The stale default is replaced, not left to fall through again');
+  assert.equal(jar.get('__Host-nightmail.account'), personal.id, 'The stale default is replaced, not left to fall through again');
   const pruned = store(await request('/api/auth/accounts','GET',undefined,as(personal)));
   assert.deepEqual(((await pruned.json()) as {accounts:{id:string}[]}).accounts.map(a=>a.id),[personal.id]);
-  assert.deepEqual([...jar.keys()].filter(k=>k.includes('session_token')),['__Host-bane.session_token']);
+  assert.deepEqual([...jar.keys()].filter(k=>k.includes('session_token')),['__Host-nightmail.session_token']);
   await connect(work, true);
   await db.query("UPDATE bane_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[personal.id]);
   assert.equal(await code(await request('/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
@@ -1106,10 +1112,10 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   tokenAcr = googleAcr;
 
   // Signing in again as a connected account replaces its own session, in its own slot.
-  const previous = jar.get('__Host-bane.session_token'), size = jar.size;
+  const previous = jar.get('__Host-nightmail.session_token'), size = jar.size;
   const again = await signIn(personal);
   assert.equal(new URL(again.headers.get('location')!).searchParams.get('account'), personal.id);
-  assert.notEqual(jar.get('__Host-bane.session_token'), previous, 'Signing in again replaces the account’s own session, in its own slot');
+  assert.notEqual(jar.get('__Host-nightmail.session_token'), previous, 'Signing in again replaces the account’s own session, in its own slot');
   assert.equal(jar.size, size);
   assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1 AND expires_at>now()',[personal.id])).rows[0].n,1);
   // At most five accounts. A sign-in started at four that finishes after a fifth was added is refused at the callback,
@@ -1172,7 +1178,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[workspace]);
       await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),user,workspace]);
       await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
-      jar.push(`__Host-bane.session_token${slot?'.'+slot:''}=${session}`);
+      jar.push(`__Host-nightmail.session_token${slot?'.'+slot:''}=${session}`);
       accounts.push({user,subject:user,workspace});
     }
     const [personal, work] = accounts as [typeof accounts[number], typeof accounts[number]];
@@ -1288,7 +1294,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
     const {createApp}=await import('./src/app.js');const app=createApp();
     const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
-    const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^bane\./,'__Host-bane.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
+    const call=(path:string,method='GET',body?:object,cookie=manager!.cookie,env=dashboard)=>app.fetch(new Request('https://bane.example.org'+path,{method,body:body&&JSON.stringify(body),headers:{cookie:cookie.replace(/^nightmail\./,'__Host-nightmail.'),origin:'https://bane.example.org',...(body?{'content-type':'application/json'}:{})}}),env);
     const list=await (await call('/v1/mcp-connections')).json() as {data:{id:string;status:string}[]};
     assert.ok(list.data.some(g=>g.id===grants.rows[0].id && g.status==='active'));
     assert.equal((await call(`/v1/mcp-connections/${grants.rows[0].id}/revoke`,'POST')).status,200);
@@ -1948,7 +1954,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
         const org={id:'ws_'+randomUUID().replaceAll('-',''),name:'Fixture organization',slug:unique('slug')};
         if(own){await pool.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[f.userId]);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
-        return {org,cookie:f.cookie.replace(/^bane\./,'__Host-bane.')};
+        return {org,cookie:f.cookie.replace(/^nightmail\./,'__Host-nightmail.')};
       }
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
       const a=await workspaceFixture(ownerEmail,true), b=await workspaceFixture(otherEmail,true), guest=(await workspaceFixture(guestEmail,false)).cookie;
@@ -10157,7 +10163,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const tracked=()=>db.query(`SELECT to_jsonb(j) AS job FROM jobs j WHERE type='domain.verify' ORDER BY id`);
     const before=(await tracked()).rows;error(await api('POST',`/v1/domains/${dom[0]}/verify`),503,'AWS_ACCOUNT_MISMATCH');assert.deepEqual((await tracked()).rows,before);
     const dashboard=await seedSession(db);await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('owner',$1,$2,'owner')`,[w[0],dashboard.userId]);
-    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Host-)?bane/,'__Host-bane'),'x-bane-workspace':w[0]!}}),runtime);
+    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),'x-bane-workspace':w[0]!}}),runtime);
     assert.equal(detail.status,200);assert.equal((await detail.json() as Json).id,dom[0]);assert.deepEqual((await tracked()).rows,before);
     const {workspaceCredentials}=await import('./src/provider-credentials.js');await assert.rejects(workspaceCredentials(runtime,r,{kind:'shared',id:'fixture',aws_account_id:dest,role_arn:'',external_id:''}),mismatch);
     const {tenantJob}=await import('./src/provider-connections.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),cid='conn_'+w[0];
@@ -10212,7 +10218,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     // POST /connection takes its account only from a ready sending pool.
     await db.query(`UPDATE provider_pool_regions SET sending_state='pending'`);
     const owner=await seedSession(db),host='cold-rehome.example.org';await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('personal-owner',$1,$2,'owner')`,[personal,owner.userId]);
-    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Host-)?bane/,'__Host-bane'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');

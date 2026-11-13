@@ -38,14 +38,14 @@
       "dashboardSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "bane.session_token",
-        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
+        "name": "nightmail.session_token",
+        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (nightmail.session_token, then nightmail.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
-        "name": "__Host-bane.session_token",
-        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
+        "name": "__Host-nightmail.session_token",
+        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-nightmail.session_token, then __Host-nightmail.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
       }
     },
     "schemas": {

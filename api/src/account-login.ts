@@ -2,7 +2,7 @@ import * as oidc from 'oauth4webapi';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { getCookie, setCookie } from 'hono/cookie';
+import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { isStaffSignIn, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
 import { productName, requestHeader } from './brand.js';
@@ -35,9 +35,9 @@ async function provider(runtime: Runtime) {
   return { metadata, client, authentication, callback, options };
 }
 
-// A browser keeps one session per account it connected, in its own cookie (a slot): `session_token` (slot 0, the
-// name every earlier build used) and `session_token.1` to `.4`. Each request acts as exactly one of them, the account
-// named by X-Nightmail-Account (one per tab) or, without the header, the browser's default (`bane.account`). Separate
+// A browser keeps one session per account it connected, in its own cookie (a slot): `nightmail.session_token` (slot 0, the
+// name single-account builds used) and `session_token.1` to `.4`. Each request acts as exactly one of them, the account
+// named by X-Nightmail-Account (one per tab) or, without the header, the browser's default (`nightmail.account`). Separate
 // cookies, rather than one cookie listing every session, mean signing in, signing out or a session expiring only ever
 // writes that account's own cookie: two tabs changing different accounts at once can't lose or bring back each other's
 // session, and each cookie carries its own expiry.
@@ -49,15 +49,15 @@ const cookieValue = (headers: Headers, name: string) => {
   const found = headers.get('cookie')?.split(';').map(c => c.trim()).filter(c => c.startsWith(`${name}=`)) ?? [];
   return found.length === 1 ? found[0]!.slice(name.length + 1) : null;
 };
-const slotCookie = (runtime: Runtime, slot: number) => cookieName(runtime, slot ? `session_token.${slot}` : 'session_token');
+const slotName = (slot: number) => slot ? `session_token.${slot}` : 'session_token';
 async function sessionJar(runtime: Runtime, headers: Headers): Promise<Jar> {
   const slots: Jar['slots'] = [];
   for (let slot = 0; slot < MAX_ACCOUNTS; slot++) {
-    const token = cookieValue(headers, slotCookie(runtime, slot));
+    const token = readCookie(runtime, headers, slotName(slot));
     if (token && /^[A-Za-z0-9_-]{43}$/.test(token)) slots.push({ slot, hash: await digest(token) });
   }
   // An unknown or malformed account name matches no session: the request is refused rather than acting as another account.
-  const header = requestHeader(headers, 'account'), preferred = cookieValue(headers, cookieName(runtime, 'account'));
+  const header = requestHeader(headers, 'account'), preferred = readCookie(runtime, headers, 'account');
   return { slots, selected: header === null ? null : accountId.test(header) ? header : '', preferred: preferred && accountId.test(preferred) ? preferred : null };
 }
 const hashes = (jar: Jar) => sql.param(jar.slots.map(s => s.hash));
@@ -224,9 +224,30 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   return {session, slot, userId, returnUrl:returnUrl.href};
 }
 
-const cookieName = (runtime: Runtime, name: string) => `${runtime.config.publicUrl.startsWith('https:') ? '__Host-' : ''}bane.${name}`;
+// Cookies are named nightmail.* (__Host- on HTTPS). A browser that still holds the bane.* cookies from before the rename
+// is read through them, and its next dashboard request moves them over (migrateLegacyCookies): nobody is signed out.
+// bane.*: remove after rename cleanup.
+const cookieHost = (runtime: Runtime) => runtime.config.publicUrl.startsWith('https:') ? '__Host-' : '';
+const cookieName = (runtime: Runtime, name: string) => `${cookieHost(runtime)}nightmail.${name}`;
+const legacyCookieName = (runtime: Runtime, name: string) => `${cookieHost(runtime)}bane.${name}`;
+const readCookie = (runtime: Runtime, headers: Headers, name: string) => cookieValue(headers, cookieName(runtime, name)) ?? cookieValue(headers, legacyCookieName(runtime, name));
 const cookieOptions = (runtime: Runtime, maxAge: number) => ({ httpOnly:true, secure:runtime.config.publicUrl.startsWith('https:'), sameSite:'Lax' as const, path:'/', maxAge });
+/** Clears a cookie under its current name and, when the browser still has it, its pre-rename one. */
+const clearCookie = (c: Ctx, name: string) => {
+  setCookie(c, cookieName(c.env, name), '', cookieOptions(c.env, 0));
+  if (cookieValue(c.req.raw.headers, legacyCookieName(c.env, name)) !== null) setCookie(c, legacyCookieName(c.env, name), '', cookieOptions(c.env, 0));
+};
 const SESSION_SECONDS = 604800;
+
+/** Moves a browser's pre-rename bane.* session and default-account cookies to nightmail.*, once, without signing it out. */
+export function migrateLegacyCookies(c: Ctx) {
+  for (const name of [...Array.from({ length: MAX_ACCOUNTS }, (_, slot) => slotName(slot)), 'account']) {
+    const legacy = cookieValue(c.req.raw.headers, legacyCookieName(c.env, name));
+    if (legacy === null) continue;
+    if (cookieValue(c.req.raw.headers, cookieName(c.env, name)) === null) setCookie(c, cookieName(c.env, name), legacy, cookieOptions(c.env, SESSION_SECONDS));
+    setCookie(c, legacyCookieName(c.env, name), '', cookieOptions(c.env, 0));
+  }
+}
 
 /** The session this request acts as, or null. A tab naming an account this browser has no live session for gets null. */
 async function currentSession(runtime: Runtime, headers: Headers) {
@@ -281,14 +302,14 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
 export function settleDefaultAccount(c: Ctx, userId: string) {
   if (requestHeader(c.req.raw.headers, 'account') !== null) return;
   const name = cookieName(c.env, 'account');
-  if (cookieValue(c.req.raw.headers, name) !== userId) setCookie(c, name, userId, cookieOptions(c.env, SESSION_SECONDS));
+  if (readCookie(c.env, c.req.raw.headers, 'account') !== userId) setCookie(c, name, userId, cookieOptions(c.env, SESSION_SECONDS));
 }
 
 /** This browser's connected accounts, each with its own workspaces, read with that account's own session. */
 async function accountList(runtime: Runtime, c: Ctx, jar: Jar, connection?: string) {
   const { accounts, dead } = await connectedAccounts(runtime, jar);
   // A session that expired or was revoked removes only its own account: clear just that cookie.
-  for (const slot of dead) setCookie(c, slotCookie(runtime, slot), '', cookieOptions(runtime, 0));
+  for (const slot of dead) clearCookie(c, slotName(slot));
   const unique = accounts.filter((account, i) => accounts.findIndex(other => other.id === account.id) === i);
   const ids = sql.param(unique.map(account => account.id));
   const { rows: memberships } = unique.length ? await runtime.db.execute<{ user_id: string; id: string; name: string; slug: string; role: 'owner' | 'admin' | 'member' }>(sql`
@@ -333,12 +354,12 @@ export async function accountBrowserRoute(c: Ctx) {
     return c.json({url:start.url});
   }
   if (path === '/api/auth/callback/account' && c.req.method === 'GET') {
-    const binding = getCookie(c,cookieName(runtime,'login')) ?? '';
-    setCookie(c,cookieName(runtime,'login'),'',cookieOptions(runtime,0));
+    const binding = readCookie(runtime,c.req.raw.headers,'login') ?? '';
+    clearCookie(c,'login');
     let started: string | undefined;
     try {
       const { session,slot,userId,returnUrl } = await finishAccountLogin(runtime,new URL(c.req.url),binding,await jar(),url => { started = url; });
-      setCookie(c,slotCookie(runtime,slot),session,cookieOptions(runtime,SESSION_SECONDS));
+      setCookie(c,cookieName(runtime,slotName(slot)),session,cookieOptions(runtime,SESSION_SECONDS));
       // The account just signed in becomes this browser's default, and the page it returns to opens as it.
       setCookie(c,cookieName(runtime,'account'),userId,cookieOptions(runtime,SESSION_SECONDS));
       const target = new URL(returnUrl);
@@ -378,11 +399,11 @@ export async function accountBrowserRoute(c: Ctx) {
     const target = input.all ? null : input.account ?? (await currentSession(runtime, c.req.raw.headers))?.user_id;
     const leaving = input.all ? browser.slots : browser.slots.filter(s => accounts.some(account => account.hash === s.hash && account.id === target));
     if (leaving.length) await runtime.db.execute(sql`DELETE FROM bane_sessions WHERE token_hash=ANY(${sql.param(leaving.map(s => s.hash))}::text[])`);
-    for (const s of leaving) setCookie(c,slotCookie(runtime,s.slot),'',cookieOptions(runtime,0));
+    for (const s of leaving) clearCookie(c,slotName(s.slot));
     const remaining = accounts.filter(account => !leaving.some(s => s.slot === account.slot));
     const next = remaining.find(account => account.id === browser.preferred) ?? remaining[0];
     if (next) setCookie(c,cookieName(runtime,'account'),next.id,cookieOptions(runtime,SESSION_SECONDS));
-    else setCookie(c,cookieName(runtime,'account'),'',cookieOptions(runtime,0));
+    else clearCookie(c,'account');
     return c.json({success:true, accounts:[...new Set(remaining.map(account => account.id))], active:next?.id ?? null});
   }
   if (path === '/api/auth/get-session' && c.req.method === 'GET') return c.json(await accountSessionUser(runtime,c.req.raw.headers));
