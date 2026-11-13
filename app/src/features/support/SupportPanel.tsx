@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
-import { ArrowUp, Check, Square, UserRound, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
+import { ArrowUp, Check, CircleAlert, Image as ImageIcon, ImagePlus, Square, UserRound, X } from 'lucide-react'
 import { Button, DropdownMenu, IconButton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
@@ -7,8 +7,8 @@ import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
 import { createSocketTransport, supportOrigin } from './socket'
-import { supportStore, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
-import { MAX_MESSAGE } from './protocol'
+import { plural, supportStore, ticketTitle, type Attachment, type ChatMessage, type ChatState, type Part, type SupportStore } from './store'
+import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
 import './support.css'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
@@ -42,6 +42,17 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   const close = () => { panel.current?.style.removeProperty('transform'); onClose() }
   const drag = useSheetDrag(close, phone)
   const busy = state.busy || state.messages.some(message => message.streaming)
+  // A screenshot dragged over the panel: a drop target over the conversation (the page beside it isn't one).
+  const canAttach = store.transport.uploads && state.connection === 'open' && !state.closed
+  const [dragging, setDragging] = useState(false)
+  const depth = useRef(0)
+  const files = (event: DragEvent) => [...event.dataTransfer.types].includes('Files')
+  const drop = {
+    onDragEnter: (event: DragEvent) => { if (!canAttach || !files(event)) return; event.preventDefault(); depth.current++; setDragging(true) },
+    onDragOver: (event: DragEvent) => { if (!canAttach || !files(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy' },
+    onDragLeave: () => { if (depth.current && --depth.current === 0) setDragging(false) },
+    onDrop: (event: DragEvent) => { if (!canAttach || !files(event)) return; event.preventDefault(); depth.current = 0; setDragging(false); void store.attach([...event.dataTransfer.files]) },
+  }
   function onKeyDown(event: KeyboardEvent<HTMLElement>) {
     // Escape inside the panel closes it. A menu opened from it lives in a portal and handles its own Escape.
     if (event.key === 'Escape' && !event.defaultPrevented && panel.current?.contains(event.target as Node)) { event.preventDefault(); close() }
@@ -50,11 +61,12 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
     {phone && <div className="support-overlay" data-open={open || undefined} aria-hidden="true" onClick={close} />}
     {phone && open && <SheetOpenEffects />}
     <section ref={panel} id="support-panel" className={cx('support-panel', phone && 'support-panel--sheet')} role="dialog" aria-modal="false" aria-labelledby="support-title"
-      data-open={open || undefined} data-busy={busy || undefined} tabIndex={-1} onKeyDown={onKeyDown} {...drag}>
+      data-open={open || undefined} data-busy={busy || undefined} tabIndex={-1} onKeyDown={onKeyDown} {...drag} {...drop}>
       {phone && <div className="ui-sheet__grab" aria-hidden="true"><span /></div>}
       <Header state={state} store={store} onClose={close} />
       <Conversation state={state} store={store} open={open} />
-      <Composer state={state} store={store} input={input} busy={busy} />
+      <Composer state={state} store={store} input={input} busy={busy} canAttach={canAttach} />
+      <div className="support-drop" data-active={dragging || undefined} aria-hidden="true"><ImagePlus size={20} /><span>Drop a screenshot to attach</span><span className="support-drop__hint">PNG, JPEG or WebP, up to 5 MB</span></div>
       <div className="sr-only" role="status" aria-live="polite">{state.announcement}</div>
     </section>
   </>
@@ -122,7 +134,8 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
 function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () => void }) {
   const text = message.parts.map(part => part.kind === 'text' ? part.text : '').join('')
   return <div className="support-message support-message--user" data-restored={message.restored || undefined}>
-    <p className="support-user">{text}</p>
+    {message.images?.length ? <div className="support-user-images">{message.images.map((image, i) => <img key={i} src={image.url} alt={`Screenshot: ${image.name}`} width={120} height={84} />)}</div> : null}
+    {text && <p className="support-user">{text}</p>}
     {message.failed && <p className="support-failed"><span>{message.failed}</span><Button variant="ghost" size="sm" onClick={onRetry}>Try again</Button></p>}
   </div>
 }
@@ -142,7 +155,7 @@ function AgentMessage({ message, store }: { message: ChatMessage; store: Support
       ? <ul key={group.key} className="support-tools">{group.tools.map(tool => <ToolLine key={tool.id} label={tool.label} state={tool.state} />)}</ul>
       : group.part.kind === 'text' ? <StreamText key={group.key} text={group.part.text} live={message.streaming} last={group.index === message.parts.length - 1} restored={message.restored} />
       : group.part.kind === 'consent' ? <ConsentCard key={group.key} part={group.part} onDecide={decision => { if (group.part.kind === 'consent') decide(store, group.part.request.requestId, decision) }} />
-      : <TicketCard key={group.key} ticket={group.part.ticket} />)}
+      : <TicketCard key={group.key} part={group.part} />)}
     {waiting && <p className="support-typing"><Caret /></p>}
   </article>
 }
@@ -228,12 +241,16 @@ function ConsentCard({ part, onDecide }: { part: Extract<Part, { kind: 'consent'
   </div>
 }
 
-function TicketCard({ ticket }: { ticket: Extract<Part, { kind: 'ticket' }>['ticket'] }) {
-  return <div className="support-card support-ticket" role="group" aria-label="Ticket filed">
+// What the ticket is ("Bug report filed", "Billing question passed to …"), its ID, who replies where, and the
+// screenshots that went with it.
+function TicketCard({ part }: { part: Extract<Part, { kind: 'ticket' }> }) {
+  const { ticket, screenshots } = part
+  return <div className="support-card support-ticket" role="group" aria-label="Ticket">
     <span className="support-ticket__mark" aria-hidden="true"><Check size={12} strokeWidth={2.75} /></span>
     <div className="support-ticket__text">
-      <p className="support-ticket__title"><span>Passed to the Bane team</span><code>{ticket.ticketId}</code></p>
+      <p className="support-ticket__title"><span>{ticketTitle(ticket)}</span><code>{ticket.ticketId}</code></p>
       <p className="support-card__body">Someone will reply by email to <MaskedAddress value={ticket.replyTo} />, {ticket.expect}.</p>
+      {screenshots > 0 && <p className="support-ticket__meta"><ImageIcon size={13} aria-hidden="true" />{plural(screenshots, 'screenshot')} attached</p>}
     </div>
   </div>
 }
@@ -252,10 +269,13 @@ function InlineStatus({ state, store }: { state: ChatState; store: SupportStore 
   return null
 }
 
-function Composer({ state, store, input, busy }: { state: ChatState; store: SupportStore; input: RefObject<HTMLTextAreaElement | null>; busy: boolean }) {
+function Composer({ state, store, input, busy, canAttach }: { state: ChatState; store: SupportStore; input: RefObject<HTMLTextAreaElement | null>; busy: boolean; canAttach: boolean }) {
   const [now, setNow] = useState(() => Date.now())
+  const picker = useRef<HTMLInputElement>(null)
   const until = state.limit?.until ?? null
   useEffect(() => { if (until && until > Date.now()) { const timer = setTimeout(() => setNow(Date.now()), until - Date.now() + 50); return () => clearTimeout(timer) } }, [until])
+  // A refused screenshot's reason stays a few seconds, then the tray returns to what is attached.
+  useEffect(() => { if (state.attachError) { const timer = setTimeout(() => store.clearAttachError(), 6000); return () => clearTimeout(timer) } }, [state.attachError])
   const limited = Boolean(state.limit && (state.limit.until === null || state.limit.until > now))
   // The box grows with what is typed, up to six lines, then scrolls.
   useLayoutEffect(() => { const el = input.current; if (!el) return; el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 132)}px` }, [state.draft])
@@ -264,23 +284,66 @@ function Composer({ state, store, input, busy }: { state: ChatState; store: Supp
     <Button size="sm" onClick={() => store.restart()}>Start a new conversation</Button>
   </div>
   const online = state.connection === 'open' && Boolean(state.hello)
-  const empty = !state.draft.trim()
-  const stop = busy && empty && online
+  const sendable = store.sendable()
+  const stop = busy && !state.draft.trim() && !state.attachments.length && online
   function submit(event?: FormEvent) {
     event?.preventDefault()
     if (stop) { store.cancel(); return }
     if (online && !limited) store.send()
   }
   return <form className="support-composer" onSubmit={submit}>
+    <AttachmentTray state={state} store={store} />
     <div className="support-composer__box" data-disabled={!online || limited || undefined}>
+      {store.transport.uploads && <>
+        <IconButton size="sm" className="support-composer__attach" label="Attach a screenshot" disabled={!canAttach || limited} onClick={() => picker.current?.click()}><ImagePlus size={16} /></IconButton>
+        {/* On a phone this opens the photo picker: images only, no camera capture. */}
+        <input ref={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden tabIndex={-1} onChange={event => { void store.attach([...event.target.files ?? []]); event.target.value = '' }} />
+      </>}
       <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label="Message Bane support"
         placeholder={!online ? state.connection === 'offline' ? 'Waiting for the connection…' : 'Connecting…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
         onChange={event => store.setDraft(event.target.value)}
+        onPaste={event => { const pasted = [...event.clipboardData.files]; if (pasted.length && canAttach) { event.preventDefault(); void store.attach(pasted) } }}
         onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} />
-      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : empty || !online || limited}>
+      <IconButton type="submit" variant={stop ? 'secondary' : 'primary'} size="sm" className="support-composer__send" label={stop ? 'Stop answering' : 'Send'} data-stop={stop || undefined} disabled={stop ? false : !sendable || !online || limited}>
         <span className="support-composer__icons" aria-hidden="true"><ArrowUp size={14} strokeWidth={2.25} /><Square size={9} strokeWidth={0} fill="currentColor" /></span>
       </IconButton>
     </div>
   </form>
 }
 
+// Screenshots waiting in the message box: thumbnails to remove before sending, and one quiet line for how the upload is
+// going (or why a file was refused). Two fixed layers over the bottom of the conversation, which makes room for them: the
+// line just above the message box and the thumbnails above it. Each only appears or goes, so nothing on screen moves.
+const TRAY_LINE = 24, TRAY_THUMBS = 60
+function AttachmentTray({ state, store }: { state: ChatState; store: SupportStore }) {
+  const { attachments, attachError } = state
+  const tray = useRef<HTMLDivElement>(null)
+  const shown = attachments.length > 0 || Boolean(attachError)
+  const height = shown ? TRAY_LINE + (attachments.length ? TRAY_THUMBS : 0) : 0
+  useLayoutEffect(() => {
+    const panel = tray.current?.closest<HTMLElement>('.support-panel')
+    panel?.style.setProperty('--tray', `${height}px`)
+    return () => { panel?.style.removeProperty('--tray') }
+  }, [height])
+  const failed = attachments.find(item => item.state === 'failed')
+  const uploading = attachments.some(item => item.state === 'uploading')
+  const progress = Math.round(attachments.reduce((sum, item) => sum + (item.state === 'ready' ? 1 : item.progress), 0) / Math.max(1, attachments.length) * 100)
+  const [tone, line] = attachError ? ['danger', attachError]
+    : failed ? ['danger', `Couldn’t upload ${failed.name}. Remove it to send.`]
+    : uploading ? ['progress', <>Uploading {plural(attachments.length, 'screenshot')}… <span className="support-tray__percent">{progress}%</span></>]
+    : attachments.length ? ['done', `${plural(attachments.length, 'screenshot')} ready to send`] : ['', '']
+  return <div ref={tray} className="support-tray" hidden={!shown}>
+    {attachments.length > 0 && <ul className="support-tray__thumbs">{attachments.map(item => <Thumb key={item.key} item={item} onRemove={() => store.detach(item.key)} />)}</ul>}
+    {line && <p className="support-tray__line" data-tone={tone} role={tone === 'danger' ? 'alert' : 'status'}>
+      <span className="support-tray__mark" aria-hidden="true">{tone === 'danger' ? <CircleAlert size={12} /> : tone === 'done' ? <Check size={12} strokeWidth={2.5} /> : <span className="support-tool__dot" />}</span>
+      <span>{line}</span>
+    </p>}
+  </div>
+}
+function Thumb({ item, onRemove }: { item: Attachment; onRemove: () => void }) {
+  return <li className="support-thumb" data-state={item.state}>
+    <img src={item.url} alt={item.name} width={48} height={48} />
+    {item.state === 'uploading' && <span className="support-thumb__bar" aria-hidden="true" style={{ transform: `scaleX(${Math.max(.04, item.progress)})` }} />}
+    <button type="button" className="support-thumb__remove" aria-label={`Remove ${item.name}`} onClick={onRemove}><X size={10} strokeWidth={2.5} /></button>
+  </li>
+}

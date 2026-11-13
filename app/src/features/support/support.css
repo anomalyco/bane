@@ -35,7 +35,8 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 /* The conversation grows down from the top; while the reader is at the bottom it follows the newest line. */
 .support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
 .support-log:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
-.support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) var(--space-24); }
+/* --tray: the screenshot tray's height while it covers the bottom of the conversation (AttachmentTray). */
+.support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) calc(var(--space-24) + var(--tray, 0px)); }
 .support-message { min-width: 0; animation: support-enter 240ms var(--ease-out-strong) both; }
 .support-message[data-restored] { animation: none; }
 .support-message--agent { display: flex; flex-direction: column; gap: var(--space-12); }
@@ -54,6 +55,8 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-message--notice .support-text { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* The person's own messages: on the right, in a quiet block. No tails, no avatar. */
 .support-message--user { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-4); padding-left: 12%; }
+.support-user-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-6); max-width: 100%; }
+.support-user-images img { display: block; width: 120px; height: 84px; object-fit: cover; object-position: top left; border-radius: var(--radius-sm); outline: 1px solid var(--color-border); outline-offset: -1px; background: var(--color-layer-2); }
 .support-user { max-width: 100%; padding: 6px 11px; border-radius: var(--radius-sm); background: var(--color-layer-2); white-space: pre-wrap; }
 .support-failed { display: flex; align-items: center; gap: var(--space-4); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .support-failed .ui-button { margin-right: -9px; }
@@ -102,6 +105,8 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-message[data-restored] .support-ticket__mark { animation: none; }
 .support-ticket__text { flex: 1; min-width: 0; }
 .support-ticket__title { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
+.support-ticket__meta { display: flex; align-items: center; gap: var(--space-6); margin-top: var(--space-6); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.support-ticket__meta svg { flex: none; }
 .support-ticket .support-ticket__title code { padding: 0; background: none; color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
 /* A masked address, as everywhere in the dashboard: its first characters, then a blurred run drawn from filler. */
 .support-masked { display: inline-flex; max-width: 100%; vertical-align: bottom; white-space: nowrap; cursor: default; }
@@ -118,7 +123,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 
 /* The message box: grows with what is typed up to six lines; Enter sends, Shift+Enter starts a line. While the agent
    writes and the box is empty, Send turns into Stop. */
-.support-composer { flex: none; padding: var(--space-4) var(--space-12) var(--space-12); }
+.support-composer { position: relative; flex: none; padding: var(--space-4) var(--space-12) var(--space-12); }
 .support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 12px; border-radius: var(--radius-sm); outline: 1px solid transparent; background: var(--color-surface); box-shadow: var(--shadow-button); transition: outline-color var(--motion-duration), box-shadow var(--motion-duration); }
 .support-composer__box:focus-within { outline-color: var(--color-focus); box-shadow: none; }
 .support-composer__box[data-disabled] { background: var(--color-layer-1); }
@@ -126,6 +131,40 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-composer__input::placeholder { color: var(--color-muted); opacity: 1; }
 .support-composer__input:disabled { cursor: not-allowed; }
 .ui-button.support-composer__send { width: 28px; height: 28px; border-radius: 4px; }
+.support-composer__box:has(.support-composer__attach) { padding-left: 4px; }
+.ui-button.support-composer__attach { width: 28px; height: 28px; color: var(--color-muted); }
+@media (hover: hover) and (pointer: fine) { .ui-button.support-composer__attach:hover:not(:disabled) { color: var(--color-text); transition-duration: 0ms; } }
+
+/* Screenshots waiting to be sent, over the bottom of the conversation in two fixed layers (SupportPanel.tsx, TRAY_LINE and
+   TRAY_THUMBS): the status line just above the message box, the thumbnails above it, a short fade above the top one. */
+.support-tray { display: contents; }
+.support-tray[hidden] { display: none; }
+.support-tray__thumbs, .support-tray__line { position: absolute; left: 0; right: 0; z-index: 1; background: var(--color-surface); }
+.support-tray__line { bottom: 100%; height: 24px; padding: 4px var(--space-12); }
+.support-tray__thumbs { bottom: calc(100% + 24px); height: 60px; display: flex; gap: var(--space-8); margin: 0; padding: var(--space-8) var(--space-12) var(--space-4); list-style: none; }
+.support-tray__thumbs::before, .support-tray__line:only-child::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 12px; background: linear-gradient(to bottom, transparent, var(--color-surface)); pointer-events: none; }
+.support-thumb { position: relative; flex: none; width: 48px; height: 48px; animation: support-card-in 240ms var(--ease-out-strong) both; }
+.support-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top left; border-radius: var(--radius-sm); outline: 1px solid var(--color-border); outline-offset: -1px; background: var(--color-layer-2); transition: opacity 200ms ease-out; }
+.support-thumb[data-state='uploading'] img { opacity: .55; }
+.support-thumb[data-state='failed'] img { opacity: .55; outline-color: var(--color-danger-border); }
+.support-thumb__bar { position: absolute; left: 5px; right: 5px; bottom: 5px; height: 2px; border-radius: 1px; background: var(--color-accent); transform-origin: left; transition: transform 220ms var(--ease-out-strong); }
+.support-thumb__remove { position: absolute; top: -6px; right: -6px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: var(--color-contrast); color: var(--color-on-contrast); box-shadow: 0 0 0 2px var(--color-surface); transition: transform 160ms var(--ease-out-strong); }
+.support-thumb__remove::after { content: ''; position: absolute; inset: -9px; }
+.support-thumb__remove:active { transform: scale(.9); }
+.support-thumb__remove svg { width: 10px; height: 10px; }
+.support-tray__line { display: flex; align-items: center; gap: var(--space-6); margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; white-space: nowrap; }
+.support-tray__line > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.support-tray__line[data-tone='danger'] { color: var(--color-danger); }
+.support-tray__line[data-tone='done'] .support-tray__mark { color: var(--color-success-marker); }
+.support-tray__line[data-tone='progress'] .support-tool__dot { animation: support-breathe 1.2s ease-in-out infinite; }
+.support-tray__mark { display: inline-grid; flex: none; place-items: center; width: 12px; height: 12px; }
+.support-tray__mark svg { width: 12px; height: 12px; }
+.support-tray__percent { font-variant-numeric: tabular-nums; }
+/* Dragging a file over the panel: the whole panel is the drop target. */
+.support-drop { position: absolute; inset: var(--space-8); z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-6); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-surface) 94%, transparent); color: var(--color-text); font-size: var(--text-sm); pointer-events: none; opacity: 0; visibility: hidden; transition: opacity 120ms ease-out, visibility 0s 120ms; }
+.support-drop[data-active] { opacity: 1; visibility: visible; transition: opacity 120ms ease-out, visibility 0s; }
+.support-drop svg { margin-bottom: var(--space-4); color: var(--color-muted); }
+.support-drop__hint { color: var(--color-muted); font-size: var(--text-xs); }
 .support-composer__icons { display: inline-grid; place-items: center; }
 .support-composer__icons > svg { grid-area: 1 / 1; transition: opacity 140ms ease-out, transform 220ms var(--ease-out-strong); }
 .support-composer__icons > svg:last-child, .support-composer__send[data-stop] .support-composer__icons > svg:first-child { opacity: 0; transform: scale(.5); }
@@ -133,7 +172,8 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
 .support-composer--closed { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 56px; padding: var(--space-12) var(--space-16); border-top: 1px solid var(--color-border-muted); color: var(--color-muted); }
 @media (pointer: coarse), (max-width: 899px) {
   .support-composer__input { height: 36px; padding-block: 7px; font-size: 16px; line-height: 22px; }
-  .ui-button.support-composer__send { width: 36px; height: 36px; }
+  .ui-button.support-composer__send, .ui-button.support-composer__attach { width: 36px; height: 36px; }
+  .support-thumb__remove::after { inset: -13px; }
 }
 .support-panel--sheet .support-composer { padding-bottom: var(--space-8); }
 
@@ -151,7 +191,9 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
   @starting-style { .support-panel[data-open] { opacity: 0; transform: none; } }
   .support-overlay { transition: opacity 150ms ease-out, visibility 0s 150ms !important; }
   .support-overlay[data-open] { transition: opacity 150ms ease-out, visibility 0s !important; }
-  .support-message, .support-tool, .support-card, .support-inline, .support-ticket__mark, .support-panel__subtitle-text { animation: support-fade 150ms ease-out both !important; }
+  .support-message, .support-tool, .support-card, .support-inline, .support-ticket__mark, .support-panel__subtitle-text, .support-thumb { animation: support-fade 150ms ease-out both !important; }
+  .support-thumb__bar, .support-thumb__remove { transition: none !important; }
+  .support-tray__line .support-tool__dot { animation: none !important; }
   .support-message[data-restored], .support-message[data-restored] :is(.support-tool, .support-card, .support-ticket__mark) { animation: none !important; }
   .support-tool__text[data-leaving] { display: none; }
   .support-caret, .support-tool__dot { animation: none !important; }

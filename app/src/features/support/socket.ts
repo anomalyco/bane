@@ -8,9 +8,17 @@ import { parseServerMessage, type ClientMessage, type Connection, type SupportTr
 type Started = { conversationId: string; chatToken: string; socketUrl: string; expiresAt: string }
 class StartError extends Error { constructor(readonly status: number, readonly code: string, readonly retryAfter?: number) { super(code) } }
 
+// What a reload needs to rejoin the conversation (PROTOCOL.md §1): its ID, and the socket URL until it expires.
+type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
 const storageKey = (workspaceId: string) => `bane.support.conversation.${workspaceId}`
-const read = (key: string) => { try { return sessionStorage.getItem(key) } catch { return null } }
-const write = (key: string, value: string | null) => { try { if (value) sessionStorage.setItem(key, value); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
+function load(key: string): Saved | null {
+  let raw: string | null = null
+  try { raw = sessionStorage.getItem(key) } catch { return null }
+  if (!raw) return null
+  try { const saved = JSON.parse(raw) as Saved; return typeof saved?.conversationId === 'string' ? saved : null } catch { return null }
+}
+const save = (key: string, value: Saved | null) => { try { if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
+const fresh = (expiresAt?: string) => Boolean(expiresAt && Date.parse(expiresAt) - Date.now() > 60_000)
 
 async function post(origin: string, path: string, body: unknown): Promise<Started> {
   let response: Response
@@ -31,24 +39,27 @@ const handoff = async (shareContent: boolean) => {
 
 export function createSocketTransport({ origin, workspaceId, resume }: { origin: string; workspaceId: string; resume?: string | null }): SupportTransport {
   const key = storageKey(workspaceId)
-  if (resume) write(key, resume)
+  if (resume) save(key, { conversationId: resume })
   const listeners = new Set<(event: TransportEvent) => void>()
   const emit = (event: TransportEvent) => { for (const listener of listeners) listener(event) }
-  let socket: WebSocket | null = null, started: Started | null = null, state: Connection = 'idle'
+  // After a reload, the saved socket URL reconnects directly while it is still valid.
+  const saved = load(key)
+  let socket: WebSocket | null = null, state: Connection = 'idle'
+  let started: Started | null = saved?.socketUrl && fresh(saved.expiresAt) ? { conversationId: saved.conversationId, chatToken: '', socketUrl: saved.socketUrl, expiresAt: saved.expiresAt! } : null
   let attempt = 0, retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
   let disposed = false, generation = 0
   const setState = (next: Connection, extra: Omit<Extract<TransportEvent, { type: 'connection' }>, 'type' | 'state'> = {}) => { state = next; emit({ type: 'connection', state: next, ...extra }) }
 
   // /chat/resume for a known conversation (a fresh handoff each time), else /chat/start. One retry on a rejected handoff.
   async function open(): Promise<Started> {
-    const conversationId = read(key)
+    const conversationId = load(key)?.conversationId
     for (let tries = 0; ; tries++) {
       try {
         const token = await handoff(false)
         return conversationId ? await post(origin, '/chat/resume', { conversationId, handoff: token }) : await post(origin, '/chat/start', { handoff: token })
       } catch (error) {
         if (!(error instanceof StartError)) throw error
-        if (conversationId && error.status === 404) { write(key, null); return open() }
+        if (conversationId && error.status === 404) { save(key, null); return open() }
         if (tries === 0 && (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED')) continue
         throw error
       }
@@ -73,7 +84,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
     teardown()
     try {
       // A chat token that hasn't expired reconnects directly; otherwise renew it through /chat/resume.
-      if (!started || Date.parse(started.expiresAt) - Date.now() < 60_000) started = await open()
+      if (!started || !fresh(started.expiresAt)) started = await open()
     } catch (error) {
       if (current !== generation) return
       if (error instanceof StartError && error.code === 'RATE_LIMITED') { setState('unavailable', { reason: 'RATE_LIMITED', retryAt: Date.now() + (error.retryAfter ?? 60) * 1000 }); return }
@@ -82,7 +93,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       return
     }
     if (current !== generation || disposed) return
-    write(key, started.conversationId)
+    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt })
     let opened = false
     const ws = socket = new WebSocket(started.socketUrl)
     ws.onopen = () => {
@@ -101,6 +112,8 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
     ws.onclose = event => {
       if (socket !== ws) return
       teardown()
+      // 1000: the conversation ended (a closed message came first); nothing to reconnect to.
+      if (opened && event.code === 1000) { setState('idle'); return }
       // Refused before opening (an expired or revoked token), or closed for an expired token: renew, then reconnect. An
       // expired token renews at once, without showing the conversation as offline.
       if (!opened || event.code === 4401 || event.code === 1008) started = null
@@ -124,7 +137,9 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       try { if (send({ type: 'consent.respond', requestId, decision: 'allow', handoff: await handoff(true) })) return } catch { /* Not allowed: answer no. */ }
       send({ type: 'consent.respond', requestId, decision: 'deny' })
     },
-    restart() { write(key, null); started = null; generation++; teardown(); state = 'idle'; attempt = 0; void connect() },
+    uploads: false,
+    upload: () => Promise.reject(new Error('Screenshots aren’t available in support chat yet.')),
+    restart() { save(key, null); started = null; generation++; teardown(); state = 'idle'; attempt = 0; void connect() },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

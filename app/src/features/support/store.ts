@@ -1,5 +1,5 @@
 import type { ConsentRequest, Connection, ConversationStatus, MessageKind, ServerMessage, SupportTransport, TicketFiled, TransportEvent } from './protocol'
-import { MAX_MESSAGE } from './protocol'
+import { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MESSAGE } from './protocol'
 
 // One conversation's state, built from the transport's events. It lives outside React (one per workspace, see
 // supportStore), so the conversation, the draft and the unread mark survive navigation, a resize that swaps the shell, and
@@ -9,8 +9,11 @@ export type Part =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; id: string; label: string; state: ToolState }
   | { kind: 'consent'; request: ConsentRequest; state: 'open' | 'allowing' | 'allow' | 'deny' }
-  | { kind: 'ticket'; ticket: TicketFiled }
-export interface ChatMessage { id: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; failed?: string }
+  | { kind: 'ticket'; ticket: TicketFiled; screenshots: number }
+export interface ChatImage { url: string; name: string }
+export interface ChatMessage { id: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; failed?: string; images?: ChatImage[] }
+/** A screenshot in the message box: uploading as soon as it is added, sent with the next message. */
+export interface Attachment { key: string; name: string; url: string; state: 'uploading' | 'ready' | 'failed'; progress: number; imageId?: string; error?: string }
 type Hello = Extract<ServerMessage, { type: 'hello' }>
 export interface ChatState {
   connection: Connection
@@ -25,21 +28,45 @@ export interface ChatState {
   limit: { code: string; message: string; until: number | null } | null
   humanRequested: boolean
   draft: string
+  attachments: Attachment[]
+  /** Why the last screenshot was refused (type, size or count), until the next one is added or a message is sent. */
+  attachError: string | null
+  /** Screenshots already sent in this conversation (the limit counts them). */
+  imagesSent: number
   unread: boolean
   /** The latest finished message or card, for screen readers (the visible log doesn't announce streaming text). */
   announcement: string
 }
 
-const initial = (): ChatState => ({ connection: 'idle', retryAt: null, reason: null, hello: null, status: 'open', messages: [], busy: false, closed: null, limit: null, humanRequested: false, draft: '', unread: false, announcement: '' })
+const initial = (): ChatState => ({ connection: 'idle', retryAt: null, reason: null, hello: null, status: 'open', messages: [], busy: false, closed: null, limit: null, humanRequested: false, draft: '', attachments: [], attachError: null, imagesSent: 0, unread: false, announcement: '' })
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 const textOf = (message: ChatMessage) => message.parts.flatMap(part => part.kind === 'text' ? [part.text] : []).join('\n\n')
 const id = () => `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+/** What a ticket is, in a few words: a report the team works on, or a request passed to someone. */
+export function ticketTitle(ticket: TicketFiled) {
+  const to = ticket.assignee?.name ?? 'the Bane team'
+  const passed: Record<string, string> = { refund: 'Refund request', billing_dispute: 'Billing question', account_closure: 'Account closure request', limit_increase: 'Limit increase request', enforcement_review: 'Account review request', legal: 'Legal question' }
+  const filed: Record<string, string> = { bug: 'Bug report', security: 'Security report', abuse_report: 'Abuse report' }
+  if (filed[ticket.category]) return `${filed[ticket.category]} filed`
+  if (passed[ticket.category]) return `${passed[ticket.category]} passed to ${to}`
+  return ticket.category === 'human_requested' && !ticket.assignee ? 'Passed to a person on the Bane team' : `Passed to ${to}`
+}
+// The type by its first bytes, as the Worker decides it: a renamed file or a wrong header doesn't pass.
+async function sniff(file: Blob): Promise<(typeof IMAGE_TYPES)[number] | null> {
+  const b = new Uint8Array(await file.slice(0, 12).arrayBuffer())
+  if ([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, i) => b[i] === byte)) return 'image/png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
+  const ascii = (at: number) => String.fromCharCode(...b.subarray(at, at + 4))
+  return b.length >= 12 && ascii(0) === 'RIFF' && ascii(8) === 'WEBP' ? 'image/webp' : null
+}
 
 export class SupportStore {
   private state: ChatState = initial()
   private listeners = new Set<() => void>()
   private visible = false
-  private lastUserMessage: { clientMessageId: string; text: string } | null = null
+  private lastUserMessage: { clientMessageId: string; text: string; images?: string[] } | null = null
+  private uploads = new Map<string, AbortController>()
   private readonly unsubscribe: () => void
 
   constructor(readonly transport: SupportTransport) {
@@ -66,17 +93,54 @@ export class SupportStore {
   start() { if (this.state.connection === 'idle' && !this.state.hello) this.transport.connect() }
   reconnect() { this.transport.connect() }
   setDraft(draft: string) { this.set({ draft: draft.slice(0, MAX_MESSAGE) }) }
+  /** Whether the message box can be sent: something to send, and every screenshot uploaded. */
+  sendable() { const { draft, attachments } = this.state; return (draft.trim() !== '' || attachments.length > 0) && attachments.every(item => item.state === 'ready') }
   send() {
-    const text = this.state.draft.trim()
-    if (!text) return false
-    const clientMessageId = id()
+    if (!this.sendable()) return false
+    const text = this.state.draft.trim(), attached = this.state.attachments
+    const images = attached.map(item => item.imageId!), clientMessageId = id()
     // In the log before it goes out: an answer can start the moment the server has it.
     const before = this.state
-    this.set(state => ({ draft: '', messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: [{ kind: 'text', text }], streaming: false, restored: false }] }))
-    if (!this.transport.send({ type: 'user.message', clientMessageId, text })) { this.set({ draft: before.draft, messages: before.messages }); return false }
-    this.lastUserMessage = { clientMessageId, text }
+    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + images.length,
+      messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false }] }))
+    if (!this.transport.send({ type: 'user.message', clientMessageId, text, ...images.length ? { images } : {} })) { this.set({ draft: before.draft, attachments: before.attachments, imagesSent: before.imagesSent, messages: before.messages }); return false }
+    this.lastUserMessage = { clientMessageId, text, ...images.length ? { images } : {} }
     return true
   }
+  /** Screenshots pasted, dropped or picked: checked by type (from the bytes), size and the per-conversation limit, then
+   *  uploaded at once while the person writes. */
+  async attach(files: File[]) {
+    if (!this.transport.uploads || !files.length) return
+    let error: string | null = null
+    const accepted: File[] = []
+    for (const file of files) {
+      const name = file.name || 'That file'
+      if (this.state.imagesSent + this.state.attachments.length + accepted.length >= MAX_IMAGES) { error = `Up to ${MAX_IMAGES} screenshots per conversation.`; break }
+      if (!await sniff(file)) { error = `${name} isn’t a PNG, JPEG or WebP image.`; continue }
+      if (file.size > MAX_IMAGE_BYTES) { error = `${name} is over 5 MB. Screenshots can be up to 5 MB.`; continue }
+      accepted.push(file)
+    }
+    const added: Attachment[] = accepted.map(file => ({ key: id(), name: file.name || 'Screenshot', url: URL.createObjectURL(file), state: 'uploading', progress: 0 }))
+    this.set(state => ({ attachError: error, attachments: [...state.attachments, ...added] }))
+    added.forEach((item, i) => this.upload(item.key, accepted[i]))
+  }
+  private upload(key: string, file: File) {
+    const controller = new AbortController()
+    this.uploads.set(key, controller)
+    const patch = (change: Partial<Attachment>) => this.set(state => ({ attachments: state.attachments.map(item => item.key === key ? { ...item, ...change } : item) }))
+    this.transport.upload(file, progress => patch({ progress }), controller.signal)
+      .then(({ imageId }) => patch({ state: 'ready', progress: 1, imageId }))
+      .catch(error => { if (!controller.signal.aborted) patch({ state: 'failed', error: error instanceof Error ? error.message : 'The upload failed.' }) })
+      .finally(() => this.uploads.delete(key))
+  }
+  /** Removes a screenshot before sending (cancelling its upload). */
+  detach(key: string) {
+    this.uploads.get(key)?.abort()
+    const item = this.state.attachments.find(entry => entry.key === key)
+    if (item) URL.revokeObjectURL(item.url)
+    this.set(state => ({ attachments: state.attachments.filter(entry => entry.key !== key) }))
+  }
+  clearAttachError() { if (this.state.attachError) this.set({ attachError: null }) }
   /** TURN_FAILED: resend the same message (the server ignores a clientMessageId it already accepted). */
   retry() {
     const last = this.lastUserMessage
@@ -96,7 +160,7 @@ export class SupportStore {
   requestHuman() { if (this.transport.send({ type: 'human.request' })) this.set({ humanRequested: true }) }
   end() { this.transport.send({ type: 'end' }) }
   restart() { this.lastUserMessage = null; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart() }
-  dispose() { this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
+  dispose() { for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
 
   private handle(event: TransportEvent) {
     if (event.type === 'connection') { this.set({ connection: event.state, retryAt: event.retryAt ?? null, reason: event.reason ?? null }); return }
@@ -111,7 +175,7 @@ export class SupportStore {
           parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
         this.set({ messages })
         if (message.pending.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
-        if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket })
+        if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: message.pending.ticket.attachments ?? 0 })
         break
       }
       case 'status': this.set({ busy: message.busy }); break
@@ -149,8 +213,8 @@ export class SupportStore {
         break
       case 'consent.resolved': this.setConsent(message.requestId, message.decision); break
       case 'ticket.filed':
-        this.append({ kind: 'ticket', ticket: { ticketId: message.ticketId, category: message.category, replyTo: message.replyTo, expect: message.expect } })
-        this.set({ status: 'ticketed', humanRequested: true, announcement: `Passed to the Bane team as ${message.ticketId}. Someone will reply by email, ${message.expect}.` })
+        this.append({ kind: 'ticket', ticket: { ticketId: message.ticketId, category: message.category, replyTo: message.replyTo, expect: message.expect, assignee: message.assignee ?? null }, screenshots: message.attachments ?? this.state.imagesSent })
+        this.set({ status: 'ticketed', humanRequested: true, announcement: `${ticketTitle(message)}: ${message.ticketId}. Someone will reply by email, ${message.expect}.` })
         break
       case 'error':
         if (message.code === 'TURN_FAILED') {
