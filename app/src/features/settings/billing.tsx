@@ -110,7 +110,7 @@ function CardControl({ summary: b }: { summary: BillingSummary | undefined }) {
     <span>{cardLabel(card)}</span><span className="muted">{String(card.expMonth).padStart(2, '0')}/{String(card.expYear).slice(-2)}</span>
     <DropdownMenu label="Card actions" title={cardLabel(card)} items={[{ label: 'Replace card', onSelect: () => void setup() }, { label: 'Remove card', destructive: true, onSelect: () => setRemoving(true) }]} />
     <ConfirmDialog open={removing} onOpenChange={setRemoving} danger title="Remove this card?" description={`${cardLabel(card)} is removed from Stripe. Auto-recharge turns off; add credit with Stripe Checkout until you save another card.`} confirmLabel="Remove card"
-      onConfirm={async () => { await billingApi.removeCard(); refresh(); toast('Card removed. Auto-recharge is off.', 'success') }} />
+      onConfirm={async () => { try { await billingApi.removeCard() } catch (cause) { throw new Error(errorText(cause)) } refresh(); toast('Card removed. Auto-recharge is off.', 'success') }} />
   </span>
 }
 
@@ -126,7 +126,7 @@ function AutoRecharge({ summary: b, Row }: { summary: BillingSummary | undefined
   return <section className="billing-section" aria-busy="true">
     <SectionHeader title="Auto-recharge" actions={<ControlSkeleton width={36} />} />
     <p className="muted usage-note">{RECHARGE_NOTE}</p>
-    <div className="settings-rows billing-rows">{RECHARGE_ROWS.map(([key, title, hint]) => <Row key={key} title={title} hint={hint || 'Added this month'}><ControlSkeleton width={112} /></Row>)}</div>
+    <div className="settings-rows billing-rows">{RECHARGE_ROWS.map(([key, title, hint]) => <Row key={key} title={title} hint={hint || 'Added this month'}><span className="billing-dollars"><ControlSkeleton width={112} /></span></Row>)}</div>
   </section>
 }
 function RechargeForm({ settings, hasCard, capped, Row }: { settings: NonNullable<BillingSummary['autoRecharge']>; hasCard: boolean; capped: boolean; Row: (props: RowProps) => ReactNode }) {
@@ -148,6 +148,7 @@ function RechargeForm({ settings, hasCard, capped, Row }: { settings: NonNullabl
   function submit(event: FormEvent) { event.preventDefault(); if (valid && changed) void save() }
   return <form className="billing-section" onSubmit={submit} aria-label="Auto-recharge">
     <SectionHeader title="Auto-recharge" actions={<>
+      {!hasCard && <span className="muted billing-needs">Add a card to turn this on</span>}
       <Button type="submit" size="sm" variant="primary" loading={pending && changed} disabled={!changed || !valid || !hasCard} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} className="billing-save">Save</Button>
       <span title={hasCard ? undefined : 'Save a card first'}><Switch label={<span className="sr-only">Auto-recharge</span>} checked={form.enabled} disabled={pending || !hasCard || !valid} onCheckedChange={enabled => { const next = { ...form, enabled }; setForm(next); void save(next) }} /></span>
     </>} />
@@ -159,12 +160,13 @@ function RechargeForm({ settings, hasCard, capped, Row }: { settings: NonNullabl
 }
 
 // History: the balance's ledger and the card payments, a page at a time. Both are cursor lists with card slots on phones.
+const ledgerText = (e: LedgerEntry) => `${e.description}${e.kind === 'topup' && e.expiresAt ? ` · Expires ${fullDay(e.expiresAt)}` : ''}`
+const ledgerDescription = (e: LedgerEntry) => <span className="billing-desc" title={ledgerText(e)}>{e.description}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>
 const ledgerColumns: Column<LedgerEntry>[] = [
-  { key: 'description', label: 'Description', render: e => <span className="billing-desc" title={e.description}>{e.description}{e.kind === 'topup' && e.expiresAt && <span className="muted"> · Expires {fullDay(e.expiresAt)}</span>}</span>, card: 'title' },
-  { key: 'at', label: 'Date', width: 132, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
-  { key: 'amount', label: 'Amount', width: 112, align: 'right', render: e => <span className="billing-amount" data-sign={BigInt(e.amount) < 0n ? 'out' : 'in'}>{usd(e.amount, { sign: true })}</span>, card: 'aside' },
-  { key: 'after', label: 'Balance after', width: 128, align: 'right', render: e => usd(e.balanceAfter), cardRender: e => <>{usd(e.balanceAfter)}{e.invoiceUrl && <> · <InvoiceLink href={e.invoiceUrl} label="Invoice" /></>}</>, card: 'field' },
-  { key: 'invoice', label: '', width: 88, align: 'right', render: e => e.invoiceUrl ? <InvoiceLink href={e.invoiceUrl} label="Invoice" /> : null, card: 'hide' },
+  { key: 'description', label: 'Description', render: e => <span className="billing-cell">{ledgerDescription(e)}{e.invoiceUrl && <InvoiceLink href={e.invoiceUrl} label="Invoice" />}</span>, cardRender: ledgerDescription, card: 'title' },
+  { key: 'at', label: 'Date', width: 124, render: e => date(e.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
+  { key: 'amount', label: 'Amount', width: 104, align: 'right', render: e => <span className="billing-amount" data-sign={BigInt(e.amount) < 0n ? 'out' : 'in'}>{usd(e.amount, { sign: true })}</span>, card: 'aside' },
+  { key: 'after', label: 'Balance after', width: 124, align: 'right', render: e => usd(e.balanceAfter), cardRender: e => <>{usd(e.balanceAfter)}{e.invoiceUrl && <> · <InvoiceLink href={e.invoiceUrl} label="Invoice" /></>}</>, card: 'field' },
 ]
 function InvoiceLink({ href, label }: { href: string; label: string }) {
   return <a className="billing-link" href={href} target="_blank" rel="noreferrer">{label}<ArrowUpRight size={12} aria-hidden="true" /></a>
@@ -173,12 +175,12 @@ const PaymentLinks = ({ payment: p }: { payment: Payment }) => <>{p.invoiceUrl &
 const PaymentStatusBadge = ({ payment: p }: { payment: Payment }) => <StatusBadge status={p.status === 'succeeded' ? 'Paid' : p.status === 'requires_action' ? 'Needs action' : p.status}
   tone={p.status === 'succeeded' ? 'success' : p.status === 'failed' ? 'danger' : ['canceled', 'expired'].includes(p.status) ? 'neutral' : 'warning'} />
 const KIND: Record<Payment['kind'], string> = { checkout: 'Top-up · Checkout', saved_card: 'Top-up · saved card', recharge: 'Auto-recharge', setup: 'Card saved' }
+const paymentNote = (p: Payment) => p.status === 'failed' && p.failure ? declineText(p.failure.code) : p.card ? cardLabel(p.card) : null
 const paymentColumns: Column<Payment>[] = [
-  { key: 'kind', label: 'Payment', render: p => KIND[p.kind], card: 'title' },
-  { key: 'at', label: 'Date', width: 132, render: p => date(p.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
-  { key: 'amount', label: 'Amount', width: 112, align: 'right', render: p => p.kind === 'setup' ? '—' : centsUsd(p.totalCents ?? p.amountCents), card: 'aside' },
-  { key: 'status', label: 'Status', width: 120, render: p => <PaymentStatusBadge payment={p} />, cardRender: p => <span className="cluster billing-links"><PaymentStatusBadge payment={p} /><PaymentLinks payment={p} /></span>, card: 'line' },
-  { key: 'links', label: '', width: 136, align: 'right', render: p => <span className="cluster billing-links"><PaymentLinks payment={p} /></span>, card: 'hide' },
+  { key: 'kind', label: 'Payment', render: p => <span className="billing-stack"><span>{KIND[p.kind]}</span>{paymentNote(p) && <span className="muted billing-stack__note">{paymentNote(p)}</span>}</span>, cardRender: p => KIND[p.kind], card: 'title' },
+  { key: 'at', label: 'Date', width: 124, render: p => date(p.at, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }), card: 'line' },
+  { key: 'amount', label: 'Amount', width: 104, align: 'right', render: p => p.kind === 'setup' ? '—' : centsUsd(p.totalCents ?? p.amountCents), card: 'aside' },
+  { key: 'status', label: 'Status', width: 248, render: p => <span className="cluster billing-links"><PaymentStatusBadge payment={p} /><PaymentLinks payment={p} /></span>, card: 'line' },
 ]
 function History() {
   const [view, setView] = useState<'ledger' | 'payments'>('ledger')

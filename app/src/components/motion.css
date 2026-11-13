@@ -37,3 +37,11 @@
 .live-status--plain { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
 .live-status--plain[data-state='verified'] { color: var(--color-success); }
 .live-status--plain[data-state='failed'] { color: var(--color-danger); }
+
+/* Crossfade: the layers share one grid cell (or overlap in SVG); the outgoing one fades out under the incoming one. */
+div.crossfade { display: grid; min-width: 0; }
+div.crossfade > .crossfade__layer { grid-area: 1 / 1; min-width: 0; }
+.crossfade__layer--in { animation: crossfade-in 200ms var(--ease-swap) both; }
+.crossfade__layer--out { animation: crossfade-out 200ms var(--ease-swap) both; pointer-events: none; }
+@keyframes crossfade-in { from { opacity: 0; } }
+@keyframes crossfade-out { to { opacity: 0; } }

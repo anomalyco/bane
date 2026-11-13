@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Download } from 'lucide-react'
 import { Field, SectionHeader, Select } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
+import { PrivateAddress } from '../../components/PrivateAddress'
+import { isMailbox } from '../../lib/private-address'
 import type { Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
 import { mcpClientNames, type McpClient } from '../../../../api/src/mcp-clients'
@@ -48,6 +50,22 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
   return lines.join('\n')
 }
 
+const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g
+/** Code or prose that holds mailbox addresses: each one goes through PrivateAddress, so it is blurred until hovered or
+ * focused (and shown when privacy mode is off). Copy buttons keep copying the plain text, in full. */
+export function MaskedText({ text }: { text: string }) {
+  const parts: ReactNode[] = []
+  let from = 0
+  for (const match of text.matchAll(ADDRESS)) {
+    if (!isMailbox(match[0])) continue
+    if (match.index > from) parts.push(text.slice(from, match.index))
+    parts.push(<PrivateAddress key={match.index} value={match[0]} />)
+    from = match.index + match[0].length
+  }
+  parts.push(text.slice(from))
+  return <>{parts}</>
+}
+
 // A data URL needs no object URL to revoke, so the download can't race the cleanup.
 function downloadText(name: string, text: string) {
   Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
@@ -61,7 +79,7 @@ export function AgentPrompt({ prompt }: { prompt: string | null }) {
       <CopyAction value={prompt ?? ''} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>
-    <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code>{prompt ?? ''}</code></pre>
+    <pre className="developer-code developer-code--prompt" tabIndex={0} aria-label="Agent prompt"><code><MaskedText text={prompt ?? ''} /></code></pre>
   </section>
 }
 

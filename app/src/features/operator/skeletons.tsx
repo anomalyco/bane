@@ -7,7 +7,7 @@ import './operator.css'
 
 // The operator console's column definitions (card slots included), shared by the route skeleton and the loaded tables.
 export const queueColumnDefs: SkeletonColumn[] = [
-  { key: 'name', label: 'Workspace', width: '22%' },
+  { key: 'name', label: 'Workspace', width: '25%' },
   { key: 'step', label: 'Step', width: 112, card: 'aside' },
   { key: 'reason', label: 'Why', card: 'line' },
   { key: 'score', label: 'Score', width: 72, align: 'right', card: 'line' },
@@ -34,10 +34,10 @@ export const domainColumnDefs: SkeletonColumn[] = [
   { key: 'region', label: 'Region', width: 112, card: 'line' },
   { key: 'dkim', label: 'DKIM', width: 80, card: 'inline' },
   { key: 'mailFrom', label: 'MAIL FROM', width: 104, card: 'inline' },
-  { key: 'dmarc', label: 'DMARC', width: 112, card: 'inline' },
+  { key: 'dmarc', label: 'DMARC', width: 112, card: 'line' },
 ]
 export const memberColumnDefs: SkeletonColumn[] = [
-  { key: 'email', label: 'Email', width: '40%' },
+  { key: 'email', label: 'Email', width: '46%' },
   { key: 'role', label: 'Role', width: 120, card: 'aside' },
   { key: 'user', label: 'User', card: 'line' },
   { key: 'billing', label: 'Billing', width: 180, card: 'line' },

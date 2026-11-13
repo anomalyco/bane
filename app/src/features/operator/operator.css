@@ -8,6 +8,15 @@
 .op-muted-id { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 .op-cell { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-flags { color: var(--color-muted); font-size: var(--text-xs); }
+/* A card whose title is a button (a row that opens a dialog) ellipsizes like a link does: the button is a block that fits the title. */
+.op-table .ui-card__link, .op-notes .ui-card__link { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A workspace: when the cell is tight the ID gives way first (three times as fast as the name); the title has both. */
+.op-ws { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; }
+.op-ws .op-muted-id { flex: 0 3 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A member's address stays on one line inside its cell, so revealing it never changes the row's height; a cut one has its full text in the title. */
+.op-email { display: block; min-width: 0; }
+.op-email .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.op-email .private-address[data-revealed] > .private-address__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Facts: a hairline, a label and the value. 56px tall in every state. */
 .op-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
@@ -23,7 +32,7 @@
 /* Billing rows hold one line each (values arrive after the page), so nothing below them moves. */
 .op-rows--single dd { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .op-rows--single > div { align-items: center; }
-.op-free { display: flex; align-items: center; gap: var(--space-12); }
+.op-rows--single dd.op-free { display: flex; align-items: center; gap: var(--space-12); overflow: visible; }
 .op-reasons { display: flex; flex-direction: column; gap: var(--space-8); margin: 0 0 var(--space-12); padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .op-reasons li { display: flex; flex-direction: column; gap: 2px; }
 .op-reasons .muted { font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -58,7 +67,10 @@
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }
 @media (max-width: 640px) {
-  .op-note-grid, .op-key-form { grid-template-columns: minmax(0, 1fr); }
+  .op-key-form { grid-template-columns: minmax(0, 1fr); }
+  .op-note-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* Cards have no selection column, so there is nothing for the bulk menu to act on. */
+  .data-toolbar > .ui-button.op-bulk { display: none; }
   .op-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
   .op-rows > div { grid-template-columns: 112px minmax(0, 1fr); }
 }

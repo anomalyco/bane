@@ -12,7 +12,7 @@ import { receivedTo } from '../../lib/private-address'
 // On a phone each row is a card: the subject (the link) and the time, then direction, status and the other party.
 export const logColumnDefs: SkeletonColumn[] = [
   { key: 'time', label: 'Time · UTC', width: 140, card: 'aside' }, { key: 'direction', label: <span className="sr-only">Direction</span>, width: 48, card: 'line' },
-  { key: 'status', label: 'Status', width: 104, card: 'inline' }, { key: 'from', label: 'From', width: '14%', card: 'inline' }, { key: 'to', label: 'To', width: '14%', card: 'hide' },
+  { key: 'status', label: 'Status', width: 124, card: 'inline' }, { key: 'from', label: 'From', width: '14%', card: 'inline' }, { key: 'to', label: 'To', width: '14%', card: 'hide' },
   { key: 'subject', label: 'Subject', card: 'title' }, { key: 'stream', label: 'Stream', width: 116, card: 'hide' }, { key: 'open', label: '', width: 28, card: 'hide' },
 ]
 
@@ -49,6 +49,11 @@ export const logColumns: Column<LogEntry>[] = [
   { ...logColumnDefs[6]!, render: row => <span className="muted">{row.stream ? label(row.stream) : '—'}</span> },
   { ...logColumnDefs[7]!, render: () => <ChevronRight size={14} aria-hidden /> },
 ]
+
+// The Logs page gives Status the room its longest label needs ("Acceptance unknown"); Overview keeps the compact column.
+const wide = <T extends { key: string; width?: number | string }>(columns: T[]): T[] => columns.map(column => column.key === 'status' ? { ...column, width: 172 } : column)
+export const logsPageColumns = wide(logColumns)
+export const logsPageColumnDefs = wide(logColumnDefs)
 
 // CSV is an explicit export: addresses in full, like the detail pages.
 export function logCsvRows(rows: LogEntry[], regions: boolean): string[][] {

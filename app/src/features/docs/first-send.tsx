@@ -9,6 +9,7 @@ import { request } from '../../data/live'
 import type { Domain } from '../../data/types'
 import './developer.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { MaskedText } from './agent-setup'
 
 const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simulator.amazonses.com`)
 
@@ -61,7 +62,7 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
       <Tabs label="Example language" value={language} onValueChange={setLanguage} items={languages} />
       <CopyAction key={language} value={snippets[language as 'curl' | 'sdk']} label={`Copy ${language === 'curl' ? 'cURL' : 'TypeScript'} example`} variant="ghost" size="sm" compact className="developer-copy-icon" />
     </div>
-    <div className="developer-client-panels" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code>{snippets[item.value as 'curl' | 'sdk']}</code></pre>)}</div>
+    <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
     <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>
     {testButton && !demo && domain && <TestSend domain={domain} />}
   </section>

@@ -25,7 +25,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
   const close = () => { if (!contact.isPending) onClose() }
   if (done) return <Dialog open onOpenChange={next => { if (!next) close() }} title={done.url ? 'Support is open in a new tab' : 'Support reference'}
     description={done.url ? 'If the tab didn’t open, use the link below. Mention this reference if you write to support later.' : 'Include this reference when you email Bane support.'}
-    footer={<Button variant="primary" onClick={close}>Done</Button>}>
+    footer={<Button key="done" variant="primary" autoFocus onClick={close}>Done</Button>}>
     <div className="stack">
       <div className="contact-support__reference"><code>{done.id}</code><CopyButton value={done.id} label="Copy support reference" /></div>
       {done.url && <a className="contact-support__link" href={done.url} target="_blank" rel="noopener noreferrer">Open support<ArrowUpRight size={14} aria-hidden="true" /></a>}
@@ -34,7 +34,6 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
   return <Dialog open onOpenChange={next => { if (!next) close() }} title="Contact support" description="Bane support gets your message, the page you’re on and any recent errors."
     footer={<><Button disabled={contact.isPending} onClick={close}>Cancel</Button><Button variant="primary" type="submit" form="contact-support" loading={contact.isPending}>Contact support</Button></>}>
     <form id="contact-support" className="stack" onSubmit={submit}>
-      <MutationError error={contact.error} />
       <Field label="Message" htmlFor="contact-support-message" hint={`Optional. ${message.length.toLocaleString('en-US')} / ${MAX.toLocaleString('en-US')}`}>
         <Textarea id="contact-support-message" value={message} maxLength={MAX} onChange={event => setMessage(event.target.value)} disabled={contact.isPending} placeholder="What were you trying to do?" autoFocus />
       </Field>
@@ -42,6 +41,7 @@ export function ContactSupportDialog({ onClose }: { onClose: () => void }) {
         <Checkbox label="Share message content with support for this request" checked={shareContent} onCheckedChange={setShareContent} disabled={contact.isPending} aria-describedby="contact-support-share-hint" />
         <div id="contact-support-share-hint" className="ui-field__hint">Lets support read email bodies in this workspace, for this request only.</div>
       </div>
+      <MutationError error={contact.error} />
     </form>
   </Dialog>
 }

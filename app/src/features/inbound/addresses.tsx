@@ -115,16 +115,18 @@ function AddressPath({ address, overview, onAddAlias, onAddPattern }: { address:
       {!entry ? <SkeletonText width="50%" /> : attached.length ? <ul>{attached.map((k, i) => <li key={k}><RitualIcon /><Link to={`/receiving/rituals?key=${encodeURIComponent(k)}`}><code>{k}</code></Link>{i < attached.length - 1 && <span className="addr-then">then</span>}<span className="addr-grow" />
         <IconButton size="sm" label={`Detach ${k}`} disabled={busy} onClick={() => void attach(list => list.filter(b => !(b.ritual === k && b.target === address.id)), `${k} detached.`)}><X size={14} aria-hidden="true" /></IconButton></li>)}</ul>
         : <p className="addr-step__empty">{steps.rituals.empty}. A ritual can label, filter or send this address’s mail on.</p>}
-      <div className="addr-step__actions">
-        {available.length > 0 && <Select aria-label="Ritual to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a ritual…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />}
-        {available.length > 0 && <Button size="sm" disabled={!ritual || busy || attached.length >= 3} onClick={() => void attach(list => [...list, { ritual, target: address.id, continue: false }], `${ritual} attached.`)}>Attach</Button>}
-        <Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rituals?new=1">Write a ritual</Link>
+      <div className="addr-step__foot">
+        {available.length > 0 && <div className="addr-step__actions">
+          <Select aria-label="Ritual to attach" value={ritual} onValueChange={setRitual} options={[{ value: '', label: 'Attach a ritual…' }, ...available.map(r => ({ value: r.key, label: r.key }))]} />
+          <Button size="sm" disabled={!ritual || busy || attached.length >= 3} onClick={() => void attach(list => [...list, { ritual, target: address.id, continue: false }], `${ritual} attached.`)}>Attach</Button>
+        </div>}
+        <div className="addr-step__actions"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rituals?new=1">Write a ritual</Link></div>
       </div>
     </section>
     <span className="addr-arrow" aria-hidden="true">→</span>
     <section className="addr-step" id="goes-to">
       <h2>{steps.goesTo.title}</h2><p>{steps.goesTo.line}</p>
-      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span><span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span></li>)}</ul>}
+      {!entry ? <SkeletonText width="50%" /> : <ul>{entry.to.map(t => <li key={`${t.type}:${t.id}`}><TargetIcon type={t.type} /><span>{targetName(t, address.id)}</span>{(t.via || t.status === 'paused' || t.type !== 'inbox' || t.id !== address.id) && <span className="muted">{t.via ? `via ${t.via}` : t.status === 'paused' ? 'Paused' : typeLabel[t.type]}</span>}</li>)}</ul>}
       {entry && !elsewhere.length && <p className="addr-step__empty">{steps.goesTo.empty}. Add a route to also send it to a webhook.</p>}
       {entry?.toTruncated && <p className="addr-step__empty">{number(entry.toTotal - entry.to.length)} more {entry.toTotal - entry.to.length === 1 ? 'webhook gets' : 'webhooks get'} this address’s mail. <Link to={`/receiving/webhooks?address=${encodeURIComponent(address.id)}`}>See every webhook</Link></p>}
       {entry?.route && <p className="addr-step__empty">A route sends this address’s mail{entry.route.to === 'drop' ? ' nowhere: it’s dropped' : entry.route.to.includes(address.id) ? '' : ' elsewhere instead of its inbox'}.</p>}
@@ -158,7 +160,7 @@ function RecentMail({ address, threads }: { address: InboundAddress; threads: Re
   if (threads.error) return <ErrorState error={threads.error} onRetry={() => void threads.refetch()} />
   if (!threads.data) return <div aria-hidden="true"><SkeletonText width="60%" /></div>
   if (!threads.data.length) return <p className="muted">No mail yet. Mail sent to <PrivateAddress value={address.address} /> shows up here and in the Inbox within seconds.</p>
-  return <ul className="addr-recent">{threads.data.slice(0, 5).map(t => <li key={t.id}><Link to={`/receiving/inbox?address=${address.id}&thread=${t.id}`}><span>{t.subject || '(no subject)'}</span><span className="muted">{t.snippet}</span><time>{when(t.lastMessageAt)}</time></Link></li>)}</ul>
+  return <ul className="addr-recent">{threads.data.slice(0, 5).map(t => <li key={t.id}><Link to={`/receiving/inbox?address=${address.id}&thread=${t.id}`}><span className="addr-recent__subject" title={t.subject || undefined}>{t.subject || '(no subject)'}</span><span className="addr-recent__snippet muted" title={t.snippet || undefined}>{t.snippet}</span><time>{when(t.lastMessageAt)}</time></Link></li>)}</ul>
 }
 
 const useAddressThreads = (id: string) => useApiDef(queries.inboundThreads(id, 'inbox', '', undefined))
@@ -206,7 +208,7 @@ export function InboundAddressDetailPage() {
     {!ready ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion> : current && <div className="stack inbound-stack addr-page">
       <dl className="settings-facts">
         <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
-        <div><dt>Sends as</dt><dd className="settings-break"><PrivateAddress value={current.publicAddress ?? current.address} /></dd></div>
+        {current.publicAddress && current.publicAddress !== current.address && <div><dt>Sends as</dt><dd className="settings-break"><PrivateAddress value={current.publicAddress} /></dd></div>}
         <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'By the catch-all, ' : ''}{date(current.createdAt)}</dd></div>
         <div><dt>Threads</dt><dd>{number(current.stats.threads)}{current.stats.unreadThreads > 0 && <span className="muted"> · {number(current.stats.unreadThreads)} unread</span>}</dd></div>
         <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>
@@ -215,7 +217,7 @@ export function InboundAddressDetailPage() {
       {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address expired. It no longer receives or sends; its history stays readable until you delete it.</Alert>}
       {canAdminister && <AddressPath address={current} overview={overview} onAddAlias={() => focus(() => document.getElementById('inbound-address-aliases'))} onAddPattern={() => focus(() => patternInput.current)} />}
       <section className="section stack" aria-labelledby="address-recent">
-        <SectionHeader title={<span id="address-recent">Recent mail</span>} actions={<Link className="ui-button ui-button--ghost ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in Inbox</Link>} />
+        <SectionHeader title={<span id="address-recent">Recent mail</span>} />
         <RecentMail address={current} threads={threads} />
       </section>
       {canAdminister && <section className="section section--bordered stack">
@@ -229,6 +231,6 @@ export function InboundAddressDetailPage() {
         <PatternsField key={current.updatedAt} address={current} inputRef={patternInput} />
       </section>}
     </div>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="Stored messages stay. The address and its aliases are released with their read, star and archive state; new mail to them follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Stored messages stay. The address and its aliases are released with their read, star and archive state; new mail to them follows the domain’s catch-all, and routes stop delivering here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }

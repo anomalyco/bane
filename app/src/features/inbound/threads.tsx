@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
-import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
+import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { useApi, useApiDef, useApiMutation, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -10,11 +10,11 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, cleanName, full, idempotencyFor, nameOf, Sender, when } from './shared'
+import { AddressSelect, addressName, cleanName, idempotencyFor, nameOf, Sender, when } from './shared'
 import { nameParts } from '../../lib/private-address'
 import '../settings/settings.css'
 import './inbound.css'
-import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
+import { AddressList, NamedAddress, PrivateAddress } from '../../components/PrivateAddress'
 
 const views: { value: InboundThreadView; label: string }[] = [{ value: 'inbox', label: 'Inbox' }, { value: 'starred', label: 'Starred' }, { value: 'archive', label: 'Archive' }, { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'all', label: 'All' }]
 const statusTone = (status: string) => status === 'delivered' ? 'success' as const : ['bounced', 'complained', 'rejected', 'suppressed', 'rendering_failed', 'canceled'].includes(status) ? 'danger' as const : status === 'delayed' ? 'warning' as const : 'neutral' as const
@@ -35,8 +35,8 @@ function ThreadRow({ thread, addresses, own, showAddresses, selected, onSelect }
       {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
       <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt} title={`${date(thread.lastMessageAt)} ${time(thread.lastMessageAt)} UTC`}>{when(thread.lastMessageAt)}</time>
     </span>
-    <span className="inbound-thread-row__subject">{thread.subject || '(no subject)'}</span>
-    <span className="mailbox-thread-row__snippet">{thread.snippet}</span>
+    <span className="inbound-thread-row__subject" title={thread.subject || undefined}>{thread.subject || '(no subject)'}</span>
+    <span className="mailbox-thread-row__snippet" title={thread.snippet || undefined}>{thread.snippet}</span>
     {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
   </button></li>
 }
@@ -184,7 +184,7 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
 function RecipientList({ label: title, values, people }: { label: string; values: string[]; people: Map<string, MailAddress> }) {
   return <p className="mailbox-composer__to inbound-recipients"><span className="inbound-recipients__label">{title}</span><span className="inbound-recipients__list">{values.map(value => {
     const name = cleanName(people.get(value)?.name)
-    return <span key={value} className="inbound-recipient">{name && <bdi className="muted">{name}</bdi>}<bdi className="inbound-recipient__address">{value}</bdi></span>
+    return <span key={value} className="inbound-recipient">{name && <bdi className="muted">{name}</bdi>}<bdi className="inbound-recipient__address"><PrivateAddress value={value} /></bdi></span>
   })}</span></p>
 }
 
@@ -225,7 +225,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
       {explicit && <IconButton variant="ghost" size="sm" label="Reply to the newest message instead" onClick={onClearTarget}><X size={14} /></IconButton>}
     </div>
     {!fixed && <Field label="Send as" htmlFor="inbound-reply-sender" hint="It reached several of your addresses. Choose which one replies." error={fieldError(send.error, 'addressId')}>
-      <Select id="inbound-reply-sender" value={sender ?? ''} onValueChange={setChosen} disabled={send.isPending} placeholder="Choose an address" options={candidates.map(id => ({ value: id, label: addressName(addresses, id) }))} />
+      <AddressSelect id="inbound-reply-sender" value={sender ?? ''} onValueChange={setChosen} disabled={send.isPending} placeholder="Choose an address" options={candidates.map(id => ({ value: id, address: addressName(addresses, id) }))} />
     </Field>}
     <div className="inbound-recipients-review" aria-label="Reply recipients">
       {lookup.error && <ErrorState error={lookup.error} onRetry={() => void lookup.refetch()} />}
@@ -234,7 +234,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           <RecipientList label="From" values={[senderOf(senderAddress).address.toLowerCase()]} people={new Map([[senderOf(senderAddress).address.toLowerCase(), senderOf(senderAddress)]])} />
           {resolved.to.length ? <RecipientList label="To" values={resolved.to} people={people} /> : <p className="mailbox-composer__to">This reply has no recipients outside your own addresses.</p>}
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
-          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi>{target.from.address}</bdi>).</p>}
+          {redirected && <p className="mailbox-composer__to inbound-recipients__warning">The sender asked for replies to a different address than the one it came from (<bdi><PrivateAddress value={target.from.address} /></bdi>).</p>}
         </>}
     </div>
     <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="Write a reply" disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
@@ -278,8 +278,8 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   return <Dialog open={open} onOpenChange={next => { if (!send.isPending) onOpenChange(next) }} title="New message" footer={<><Button disabled={send.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-new-thread" loading={send.isPending}>Send</Button></>}>
     <form id="inbound-new-thread" className="stack" onSubmit={submit} noValidate>
       <MutationError error={send.error} />
-      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')} hint={selected && sender && sender.address !== selected.address ? `Sends as ${full(sender)}.` : undefined}>
-        <Select id="inbound-new-from" value={from} onValueChange={setFrom} disabled={send.isPending} placeholder="Choose an address" options={addresses.map(address => ({ value: address.id, label: address.displayName ? `${address.displayName} <${address.address}>` : address.address }))} />
+      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')} hint={selected && sender && sender.address !== selected.address ? <>Sends as <NamedAddress name={sender.name} address={sender.address} />.</> : undefined}>
+        <AddressSelect id="inbound-new-from" value={from} onValueChange={setFrom} disabled={send.isPending} placeholder="Choose an address" options={addresses.map(address => ({ value: address.id, address: address.address, name: address.displayName ?? undefined }))} />
       </Field>
       <Field label="To" htmlFor="inbound-new-to" error={errors.to || fieldError(send.error, 'to')} hint="Separate several recipients with commas."><Input id="inbound-new-to" value={to} onChange={event => setTo(event.target.value)} disabled={send.isPending} placeholder="name@example.com" autoComplete="off" /></Field>
       <Field label="Subject" htmlFor="inbound-new-subject" error={errors.subject || fieldError(send.error, 'subject')}><Input id="inbound-new-subject" value={subject} onChange={event => setSubject(event.target.value)} disabled={send.isPending} /></Field>
@@ -314,8 +314,8 @@ export function InboundPage() {
     <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
-        <div className="inbound-filter"><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
-          options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => ({ value: address.id, label: address.address }))]} /></div>
+        <div className="inbound-filter"><AddressSelect aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
+          options={[{ value: '', label: 'All addresses' }, ...[...addresses.values()].map(address => ({ value: address.id, address: address.address }))]} /></div>
         <Tabs label="Conversation views" value={view} onValueChange={value => { pagination.reset(); change({ view: value, thread: null, message: null }) }} items={views} />
         <div className="search-box mailbox-search"><Search size={16} /><Input type="search" aria-label="Search conversations" placeholder="Search mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
         {addressList.error && <Alert tone="warning">Addresses could not be loaded, so they show as IDs.</Alert>}
@@ -323,7 +323,7 @@ export function InboundPage() {
           : threads.data.length ? <>
             <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} own={own} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/receiving">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />

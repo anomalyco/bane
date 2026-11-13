@@ -17,13 +17,13 @@
   .keys-table [data-col='type'] { width: 15% !important; }
 }
 .keys-cell { min-width: 0; }
-.keys-cell > span { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+.keys-cell > span { max-width: 100%; overflow: clip; overflow-clip-margin: 4px; text-overflow: ellipsis; white-space: nowrap; }
 /* An agent's short-lived tokens sit under it, indented. */
 .keys-cell--nested, .keys-nested { padding-left: var(--space-16); }
 
 /* Create key, first step: the three types as rows that go straight to their form. */
-.keys-types { display: flex; flex-direction: column; gap: var(--space-4); margin: 0 calc(-1 * var(--space-12)); padding: 0; list-style: none; }
-.keys-type { display: flex; align-items: center; gap: var(--space-12); width: 100%; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 100ms ease-out; }
+.keys-types { display: flex; flex-direction: column; gap: var(--space-4); margin: 0 calc(-1 * var(--focus-reach)); padding: 0; list-style: none; }
+.keys-type { display: flex; align-items: center; gap: var(--space-12); width: 100%; padding: var(--space-12) var(--focus-reach); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 100ms ease-out; }
 .keys-type > svg { flex: none; margin-left: auto; color: var(--color-faint); }
 .keys-type__label { font-weight: var(--font-weight-bold); }
 .keys-type:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
@@ -37,6 +37,12 @@
 .keys-choice input { appearance: none; flex-shrink: 0; width: var(--space-16); height: var(--space-16); margin: 2px 0 0; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); cursor: inherit; transition: box-shadow var(--motion-duration), background var(--motion-duration); }
 .keys-choice input:checked { background: var(--color-on-accent); box-shadow: inset 0 0 0 5px var(--color-accent); }
 .keys-purpose:disabled .keys-choice { color: var(--color-muted); cursor: not-allowed; }
+/* Touch: radios grow with the checkboxes beside them (20 px), and a one-line choice is a 44 px target. */
+@media (pointer: coarse), (max-width: 899px) {
+  .keys-choice input { width: 20px; height: 20px; margin-top: 0; }
+  .keys-choice input:checked { box-shadow: inset 0 0 0 6px var(--color-accent); }
+  .settings-key-domain-options .keys-choice { min-height: 44px; align-items: center; }
+}
 /* Forced colors drop box-shadow, which draws both the ring and the dot; draw them with system colors instead. */
 @media (forced-colors: active) {
   .keys-choice input { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
@@ -65,4 +71,15 @@
 .keys-guide dd { margin: 2px 0 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 @media (max-width: 900px) { .keys-guide__panel dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .keys-guide__panel dl { grid-template-columns: minmax(0, 1fr); } }
+.keys-guide .guide-link { position: relative; }
+.keys-guide .guide-link::before { content: ''; position: absolute; inset: -12px -8px; }
 .keys-guide__where { color: var(--color-faint); white-space: nowrap; }
+
+/* A row in full (click a row, or tap a card): label and value, values wrap instead of clipping. */
+.keys-details { display: flex; flex-direction: column; gap: var(--space-12); margin: 0; }
+.keys-details > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); }
+.keys-details dt { color: var(--color-muted); }
+.keys-details dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* A card's title is a button once the card opens the details; keep its clipped name ending in an ellipsis. */
+.keys-table .ui-card__title > .ui-card__link { display: block; width: 100%; min-width: 0; }
+.keys-table .ui-card__link > span { display: block; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }

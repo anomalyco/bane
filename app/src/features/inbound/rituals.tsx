@@ -7,7 +7,7 @@ import { autocompletion } from '@codemirror/autocomplete'
 import { forceLinting, linter, lintGutter, type Diagnostic as LintDiagnostic } from '@codemirror/lint'
 import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, SectionHeader, Select, Textarea, useToast, type Column } from '../../components/ui'
 import { request } from '../../data/live'
@@ -27,6 +27,7 @@ import './receiving.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { RitualAgentCard } from './ritual-agent'
+import { AddressSelect } from './shared'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -95,6 +96,7 @@ function Editor({ value, change, completions, check, flash, relint }: { value: s
         basicSetup, javascript(), highlight, EditorView.lineWrapping, lintGutter(), changedField,
         EditorView.contentAttributes.of({ 'aria-label': 'Ritual source' }),
         autocompletion({ override: [ctx => {
+          if (!ctx.explicit && /Comment/.test(syntaxTree(ctx.state).resolveInner(ctx.pos, -1).name)) return null
           const word = ctx.matchBefore(/[\w.[\]"-]+/)
           if (!word || (word.from === word.to && !ctx.explicit)) return null
           return { from: word.from, options: latest.current.completions.map(c => ({ label: c.label, type: c.type, detail: c.detail, info: c.info, ...(c.apply ? { apply: c.apply } : {}) })) }
@@ -508,7 +510,7 @@ export function RitualsPage() {
         <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
           empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
         <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
+          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><AddressSelect value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => ({ value: t.value, address: t.label }))]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
           <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key} to ${targetName(target)}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
@@ -516,8 +518,8 @@ export function RitualsPage() {
       </section>
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
-        <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
-          <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
+        <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: <PrivateAddress value="ceo@example.com" />, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
+          <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
         <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />

@@ -4,11 +4,12 @@
 // when Docker is running, else a temporary initdb cluster. The database and role are created here and removed on stop().
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { Agent, createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const freePort = () => new Promise((resolve, reject) => { const s = createServer(); s.on('error', reject); s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
 
@@ -21,7 +22,7 @@ function pgBin(name) {
   throw new Error(`CLS gate: set CLS_PG_URL to a Postgres admin URL, or install Postgres so ${name} is on PATH.`);
 }
 
-export async function start(repo, { log = () => {}, servers = 1 } = {}) {
+export async function start(repo, { log = () => {}, servers = 1, delay = null, fontDelay = 0 } = {}) {
   const api = join(repo, 'api');
   const require = createRequire(join(api, 'package.json'));
   const pg = require('pg');
@@ -39,7 +40,7 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     if (!adminUrl && hasDocker()) {
       // The same image as the CI service.
       const port = await freePort(), password = randomBytes(12).toString('hex');
-      const id = execFileSync('docker', ['run', '-d', '--rm', '-e', `POSTGRES_PASSWORD=${password}`, '-p', `127.0.0.1:${port}:5432`, PG_IMAGE, ...fast], { encoding: 'utf8' }).trim();
+      const id = execFileSync('docker', ['run', '-d', '--rm', '--tmpfs', '/var/lib/postgresql/data:rw', '-e', `POSTGRES_PASSWORD=${password}`, '-p', `127.0.0.1:${port}:5432`, PG_IMAGE, ...fast], { encoding: 'utf8' }).trim();
       cleanups.push(() => execFileSync('docker', ['rm', '-f', id], { stdio: 'ignore' }));
       adminUrl = `postgresql://postgres:${password}@127.0.0.1:${port}/postgres`;
       // The image's init server listens on a socket only: the first TCP connection is the real server.
@@ -66,9 +67,9 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     const url = new URL(adminUrl); url.username = name; url.password = password; url.pathname = '/' + name;
 
     const secret = randomBytes(36).toString('hex');
-    const envFor = port => ({
-      PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: `http://127.0.0.1:${port}`, API_BASE_URL: `http://127.0.0.1:${port}`, HOST: '127.0.0.1', PORT: String(port),
-      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
+    const envFor = (port, publicOrigin = `http://127.0.0.1:${port}`) => ({
+      PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: publicOrigin, API_BASE_URL: publicOrigin, HOST: '127.0.0.1', PORT: String(port),
+      MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', API_RATE_LIMIT_PER_MINUTE: '100000',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
       UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
@@ -88,25 +89,88 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
     symlinkSync(join(repo, 'app/dist'), pub, 'dir');
     cleanups.push(() => rmSync(pub, { force: true }));
 
-    // Several API processes on the one database: each keeps its own per-peer admission budget (6000 requests a
-    // minute), which parallel cold page loads from 127.0.0.1 would otherwise exhaust.
+    // Shaper servers in front of the API: they apply the gate's per-route API delay, serve web fonts from memory
+    // (or after fontDelay for CLS_FONTS=late) and cache immutable /assets/* responses across runs, so the browser needs
+    // no CDP Fetch interception (context.route) and one or two API processes stay well inside the 6000/min peer budget.
+    const fontDir = join(repo, 'app/dist/fonts');
+    const fonts = new Map(readdirSync(fontDir).filter(f => f.endsWith('.woff2')).map(f => [f, readFileSync(join(fontDir, f))]));
+    const assetCache = new Map();
+    const agent = new Agent({ keepAlive: true, maxSockets: 128 });
+    cleanups.push(() => agent.destroy());
     let serverLog = '';
     const serve = async () => {
-      const port = await freePort(), origin = `http://127.0.0.1:${port}`;
-      const server = spawn('node', ['--import', 'tsx', 'src/server.ts'], { cwd: api, env: envFor(port), stdio: ['ignore', 'ignore', 'pipe'] });
+      const apiPort = await freePort(), proxyPort = await freePort();
+      const apiOrigin = `http://127.0.0.1:${apiPort}`, origin = `http://127.0.0.1:${proxyPort}`;
+      const server = spawn('node', ['--import', 'tsx', 'src/server.ts'], { cwd: api, env: envFor(apiPort, origin), stdio: ['ignore', 'ignore', 'pipe'] });
       server.stderr.on('data', chunk => { serverLog = (serverLog + chunk).slice(-20_000); });
       const exited = new Promise(resolve => server.once('exit', code => resolve(code)));
       cleanups.push(async () => { server.kill(); await exited; });
       // Ready once the lazily imported auth router rejects an anonymous /v1/me.
       for (let ready = false; !ready;) {
         if (server.exitCode !== null) throw new Error(`CLS gate: the API exited (${server.exitCode}).\n${serverLog}`);
-        ready = await fetch(origin + '/v1/me').then(r => r.status === 401, () => false);
+        ready = await fetch(apiOrigin + '/v1/me').then(r => r.status === 401, () => false);
         if (!ready) await Promise.race([exited, new Promise(r => setTimeout(r, 100))]);
       }
-      return origin;
+      const proxy = createHttpServer(async (req, res) => {
+        const rawUrl = req.url || '/', q = rawUrl.indexOf('?'), pathname = q === -1 ? rawUrl : rawUrl.slice(0, q);
+        const sleep = ms => new Promise(done => { const t = setTimeout(done, ms); res.once('close', () => { clearTimeout(t); done(); }); });
+        if (pathname.startsWith('/fonts/')) {
+          if (fontDelay > 0) { await sleep(fontDelay); if (res.destroyed || res.writableEnded) return; }
+          else {
+            const buf = fonts.get(basename(pathname));
+            if (buf) {
+              res.writeHead(200, { 'content-type': 'font/woff2', 'cache-control': 'public, max-age=31536000, immutable', 'content-length': String(buf.length) });
+              res.end(req.method === 'HEAD' ? undefined : buf);
+              return;
+            }
+          }
+        }
+        if ((req.method === 'GET' || req.method === 'HEAD') && pathname.startsWith('/assets/')) {
+          const accept = String(req.headers['accept-encoding'] ?? '');
+          const enc = /\bbr\b/.test(accept) ? 'br' : /\bgzip\b/.test(accept) ? 'gzip' : 'raw';
+          const key = `${enc}:${pathname}`;
+          let entry = assetCache.get(key);
+          if (!entry) {
+            entry = new Promise(resolve => {
+              const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: 'GET', path: rawUrl, headers: enc === 'raw' ? {} : { 'accept-encoding': enc }, agent }, upRes => {
+                const chunks = [];
+                upRes.on('data', chunk => chunks.push(chunk));
+                upRes.on('end', () => {
+                  const body = Buffer.concat(chunks);
+                  const ok = upRes.statusCode === 200 && String(upRes.headers['cache-control'] ?? '').includes('immutable');
+                  if (!ok) { assetCache.delete(key); resolve(null); return; }
+                  const headers = { ...upRes.headers, 'content-length': String(body.length) };
+                  delete headers.connection; delete headers['keep-alive']; delete headers['transfer-encoding'];
+                  resolve({ status: 200, headers, body });
+                });
+                upRes.on('error', () => { assetCache.delete(key); resolve(null); });
+              });
+              up.on('error', () => { assetCache.delete(key); resolve(null); });
+              up.end();
+            });
+            assetCache.set(key, entry);
+          }
+          const cached = await entry;
+          if (res.destroyed || res.writableEnded) return;
+          if (cached) { res.writeHead(cached.status, cached.headers); res.end(req.method === 'HEAD' ? undefined : cached.body); return; }
+        }
+        if (pathname.startsWith('/v1/') && delay) { await sleep(delay(rawUrl)); if (res.destroyed || res.writableEnded) return; }
+        const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent }, upRes => {
+          res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+          if (req.method === 'HEAD') { upRes.resume(); res.end(); return; }
+          upRes.pipe(res);
+        });
+        up.on('error', () => { if (!res.headersSent) res.writeHead(502); res.destroy(); });
+        res.on('close', () => { if (!res.writableEnded) up.destroy(); });
+        req.on('error', () => up.destroy());
+        req.pipe(up);
+      });
+      await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(proxyPort, '127.0.0.1', resolve); });
+      cleanups.push(async () => { proxy.closeAllConnections(); await new Promise(r => proxy.close(r)); });
+      return { origin, apiOrigin };
     };
-    const origins = await Promise.all(Array.from({ length: Math.max(1, servers) }, serve));
-    const origin = origins[0];
+    const started = await Promise.all(Array.from({ length: Math.max(1, servers) }, serve));
+    const origins = started.map(s => s.origin), origin = origins[0], apiOrigin = started[0].apiOrigin;
     log(`api: ${origins.join(' ')}`);
 
     const db = new pg.Client({ connectionString: url.href }); await db.connect();
@@ -122,14 +186,14 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
       await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,'https://account.anoma.ly',$2,now()+interval '2 hours')",[createHash('sha256').update(token).digest('hex'),userId]);
       const cookie = token;
       const call = async (method, path, body, status) => {
-        const r = await fetch(origin + path, { method, headers: { origin, cookie: `bane.session_token=${encodeURIComponent(cookie)}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+        const r = await fetch(apiOrigin + path, { method, headers: { origin, cookie: `bane.session_token=${encodeURIComponent(cookie)}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
         const text = await r.text();
         if (status ? r.status !== status : !r.ok) throw new Error(`CLS seed: ${method} ${path} → ${r.status} ${text.slice(0, 400)}`);
         return text ? JSON.parse(text) : null;
       };
       return (sessions[key] = { cookie, api: call });
     }
-    return { origin, origins, db, signIn, sessions, stop, serverLog: () => serverLog };
+    return { origin, origins, apiOrigin, db, signIn, sessions, stop, serverLog: () => serverLog };
   } catch (error) { await stop(); throw error; }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useApiMutation, useApiQuery } from '../../data/context'
 import { Button, Checkbox, Dialog, Field, Input, LoadingRegion, SkeletonText, Alert, useToast } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -15,11 +15,13 @@ export function BulkSubscribeDialog({ listId, listName, searchIgnored = false, o
   const plan = useApiMutation((api, value: string) => api.audienceQuery.plan(value), undefined, false, false)
   const apply = useApiMutation((api, input: { planId: string; evidence: string; confirmResubscribe: boolean }) => api.audienceQuery.apply(input))
   const [evidence, setEvidence] = useState(''), [attested, setAttested] = useState(false), [resubscribe, setResubscribe] = useState(false), [checked, setChecked] = useState(false)
-  const { mutate: count } = plan
-  useEffect(() => { count(statement) }, [count, statement])
+  // `mutate` is a new function each render, so the effect waits on the statement alone: depending on it re-counted forever.
+  const count = useRef(plan.mutate)
+  count.current = plan.mutate
+  useEffect(() => { count.current(statement) }, [statement])
   const ready = plan.data && plan.data.matched > 0
   const missingEvidence = checked && !evidence.trim(), missingAttestation = checked && !attested, missingResubscribe = checked && Boolean(plan.data?.requiresResubscribeConfirmation) && !resubscribe
-  function recount() { apply.reset(); setChecked(false); count(statement) }
+  function recount() { apply.reset(); setChecked(false); count.current(statement) }
   async function submit() {
     setChecked(true)
     if (!plan.data || !evidence.trim() || !attested || (plan.data.requiresResubscribeConfirmation && !resubscribe)) return
@@ -30,7 +32,7 @@ export function BulkSubscribeDialog({ listId, listName, searchIgnored = false, o
   }
   const matched = plan.data?.matched ?? 0, people = `${number(matched)} ${matched === 1 ? 'person' : 'people'}`
   const busy = plan.isPending || apply.isPending
-  return <Dialog open onOpenChange={open => { if (!open && !apply.isPending) onClose() }} title="Mark as subscribed" description="Records that they agreed to marketing email, so campaigns can send to them." footer={<><Button disabled={apply.isPending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="bulk-subscribe" loading={apply.isPending} disabled={!ready || plan.isPending}>{ready ? `Mark ${people} as subscribed` : 'Mark as subscribed'}</Button></>}>
+  return <Dialog open onOpenChange={open => { if (!open && !apply.isPending) onClose() }} title="Mark as subscribed" description="Records that they agreed to marketing email, so campaigns can send to them." footer={<><Button disabled={apply.isPending} onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="bulk-subscribe" loading={apply.isPending} disabled={!ready || plan.isPending}>Mark as subscribed</Button></>}>
     <form id="bulk-subscribe" className="stack" onSubmit={event => { event.preventDefault(); void submit() }}>
       <p className="audience-dialog-copy">Changes every contact with Unknown consent {listId ? <>on <strong>{name ?? 'this list'}</strong></> : 'in your audience'}. People who opted out and suppressed addresses stay as they are.{searchIgnored && ' Your search doesn’t apply here; the count below is what changes.'}</p>
       <div className="audience-plan" aria-live="polite">

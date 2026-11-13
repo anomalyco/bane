@@ -1,7 +1,7 @@
-import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
-import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, LogOut, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, SecretCode, SectionHeader, Tabs, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
@@ -32,10 +32,18 @@ async function retrying<T>(run: () => Promise<T>) {
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
 const message = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 
+// The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
+// limit, standing, domain counts) that Overview reads.
+function useRefreshIdentity() {
+  const client = useQueryClient()
+  return () => { void client.invalidateQueries({ queryKey: ['identity'], exact: true }).catch(() => {}) }
+}
+
 // A ready connection opens the add-domain step, then lifts the gate.
 function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnection | null>) {
   const client = useQueryClient()
   const sync = useConnectionCache()
+  const refreshIdentity = useRefreshIdentity()
   const workspaceId = useSession()?.identity?.workspaceId
   return useGuardedMutation({
     gcTime: 0,
@@ -44,6 +52,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
       if (connection?.state === 'ready' && workspaceId) setDomainStep(workspaceId, '')
       sync(connection)
       if (connection?.state !== 'ready') return
+      refreshIdentity()
       // Regions, discovery and limits now come from the new connection.
       void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] !== 'connection' }).catch(() => {})
     },
@@ -61,7 +70,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
       <div className="onboarding-header-actions">
         <div className="onboarding-workspace"><AccountSwitcher /></div>
         <ThemeToggle />
-        <Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button>
+        <Button variant="ghost" className="onboarding-signout" title="Sign out" onClick={() => void session?.logout()}><LogOut size={16} aria-hidden /><span className="onboarding-signout-label">Sign out</span></Button>
       </div>
     </header>
     <main id="main-content" className="page-surface onboarding-surface" tabIndex={-1}>
@@ -72,7 +81,6 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 }
 
 type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'admin' | 'error'
-const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, connect: 2, domain: 3, imported: 3, records: 4, agent: 5 }
 const hostedSteps = ['Choose', 'Add domain', 'First email']
 const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'First email']
 // The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
@@ -101,6 +109,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const sending = stage.step === 'sending'
   const choosingDomain = stage.step === 'domain' && !stage.domainId
   const sync = useConnectionCache()
+  const refreshIdentity = useRefreshIdentity()
   // The chosen option shows its next step at once, while the connection request finishes.
   const [picked, setPicked] = useState<ConnectionKind | null>(null)
   // A connection being deleted (Back, or Hosted instead) is ignored until the delete lands.
@@ -130,6 +139,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     if (!sending || current?.state !== 'ready' || (picked === 'shared' && current.kind === 'byo')) return
     setDomainStep(workspaceId, '')
     sync(current)
+    refreshIdentity()
   }, [current?.state, current?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   function choose(kind: ConnectionKind) {
     shared.reset(); byo.reset()
@@ -165,12 +175,14 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   }, [awsPhase])
   const connectionState: ConnectionState | 'creating' = awsPhase === 'connected' ? 'ready' : current?.kind === 'byo' ? current.state : 'creating'
   const imported = importedCount(connection.data)
+  // Overview opens next: bring the identity's daily limit and counts up to date first.
+  const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
     ready={stage.step === 'domain'}
-    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, finishedStep)} />
+    onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
-  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, finishedStep)} /> }
+  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={finish} /> }
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
@@ -184,11 +196,11 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     content = <ImportedDomains count={imported} onContinue={id => setDomainStep(workspaceId, agentStep(id))} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
   }
   else { view = 'domain'; content = domainForm() }
-  // Steps slide in the direction of travel; the first paint and the loader stay still.
+  // A step fades in; the first paint and the loader stay still.
   const [frame, setFrame] = useState<{ view: View; previous: View | null }>({ view, previous: null })
   if (frame.view !== view) setFrame({ view, previous: frame.view })
   const previous = frame.view === view ? frame.previous : frame.view
-  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || view === 'error' || view === 'admin' ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
+  const motion = previous === null || view === 'loading' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   const aws = flow === 'byo'
   const step = stepOf(view, aws, choosingDomain)
@@ -255,8 +267,15 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
-    {error ? <Alert tone="danger">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert> : null}
+    {error ? <ChooseError error={error} /> : null}
   </div>
+}
+
+// Below the cards, so on a phone it is scrolled into view when a choice fails.
+function ChooseError({ error }: { error: unknown }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => { ref.current?.scrollIntoView({ block: 'nearest' }) }, [error])
+  return <div ref={ref}><Alert tone="danger">{connectionError(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert></div>
 }
 
 // The AWS mark: the wordmark follows the text colour, the smile stays AWS orange in both themes.

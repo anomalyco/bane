@@ -79,3 +79,39 @@
   .settings-facts.domain-facts { display: grid; gap: 0; }
   .domain-receiving-facts dd { justify-content: flex-end; }
 }
+
+/* Domains list: the name and the sending note get the width, so neither ends in an ellipsis on a normal screen. */
+.ui-table-scroll.domains-table th[data-col='name'] { width: 38% !important; }
+.ui-table-scroll.domains-table th[data-col='sending'] { width: 29% !important; }
+.ui-table-scroll.domains-table th[data-col='receiving'] { width: 23% !important; }
+.ui-table-scroll.domains-table th[data-col='addresses'] { width: 10% !important; }
+.domain-fact-note { margin-left: var(--space-8); }
+/* On a phone a long domain wraps in its card instead of ending in an ellipsis. */
+.ui-cards.domains-table .ui-card { height: auto; min-height: var(--table-row-height); }
+.ui-cards.domains-table .ui-card__head { height: auto; min-height: 20px; align-items: flex-start; }
+.ui-cards.domains-table .ui-card__title { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.ui-cards.domains-table .domain-name { white-space: normal; }
+@media (max-width: 560px) { .domain-fact-note { display: block; margin: var(--space-4) 0 0; } }
+
+/* DNS records are for copying: values wrap instead of ending in an ellipsis, and Copy sits right after its text. */
+.ui-table-scroll.domain-records .settings-copy-cell { justify-content: flex-start; gap: var(--space-4); }
+.ui-table-scroll.domain-records .settings-copy-cell code { flex: 0 1 auto; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.ui-table-scroll.domain-records .settings-copy-cell > .ui-button { flex: none; }
+@media (pointer: coarse) {
+  .ui-table-scroll.domain-records .settings-copy-cell > .ui-button { position: relative; }
+  .ui-table-scroll.domain-records .settings-copy-cell > .ui-button::before { content: ''; position: absolute; inset: -8px; }
+}
+/* On a phone a record's name and value wrap under their labels at full length. */
+.ui-cards.domain-records .ui-card { height: auto; min-height: var(--table-row-height); }
+.ui-cards.domain-records .ui-card__line { height: auto; overflow: visible; white-space: normal; }
+.ui-cards.domain-records .ui-card__segment { display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: var(--space-6); overflow: visible; overflow-wrap: anywhere; }
+.ui-cards.domain-records .ui-card__label { margin-right: 0; }
+
+/* Touch: every copy button and DNS guide link has a 44 px target, and neighbours never overlap (rows are at least 44 px apart). */
+@media (pointer: coarse) {
+  .ui-button.copy-action.dns-copy::before { inset: -12px; }
+  .dns-row { padding-block: var(--space-12); }
+  .dns-guides { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-4); }
+  .dns-guides-dot { display: none; }
+  .dns-wait a { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding-inline: var(--space-8); }
+}

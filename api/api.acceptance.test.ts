@@ -86,6 +86,16 @@ test('email preview engine: forced colors and opt-in media use the selected them
   assert.doesNotMatch(gmail('gmail-ios', html), /background:#ffffff|#787123/);
   assert.match(gmail('gmail-ios', '<meta name="color-scheme" content="light only">' + html), /background:#ffffff/);
 });
+test('email preview engine: Gmail web auto-links visible text without creating navigation', async () => {
+  const { emulate } = await import('./src/email-preview/index.js');
+  const source = '<p>Visit example.org. <a href="https://example.org">example.org</a> &lt;hi&gt;</p>';
+  const render = (client: 'gmail-web'|'gmail-ios'|'outlook-web'|'outlook-new-windows') => emulate(source, {client,theme:'light'}).html;
+  const gmail = render('gmail-web');
+  assert.match(gmail, /Visit <a role="link">example\.org<\/a>\. <a role="link">example\.org<\/a> &lt;hi&gt;/);
+  assert.doesNotMatch(gmail, /href=/);
+  assert.match(render('gmail-ios'), /Visit example\.org\./);
+  assert.equal(render('outlook-web'), render('outlook-new-windows'));
+});
 test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
   const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
   const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
@@ -7984,11 +7994,22 @@ describe('Billing: Stripe', () => {
   test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
     const { runtime, db, deliver, send } = await stripeFixture(t);
     const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
-    for (const [options, code] of [[{ secret: 'whsec_other' }, 'STRIPE_SIGNATURE_INVALID'], [{ t: Math.floor(Date.now() / 1000) - 301 }, 'STRIPE_SIGNATURE_INVALID'],
-      [{ t: Math.floor(Date.now() / 1000) + 301 }, 'STRIPE_SIGNATURE_INVALID'], [{ livemode: true }, 'STRIPE_LIVEMODE_MISMATCH']] as const) {
-      const reply = await deliver('checkout.session.completed', object, options);
+    // Stale and future timestamps sit a minute past the 300 s tolerance and are taken when sent, so a slow request can't
+    // carry them back inside it; the exact edge is pinned below against a fixed clock.
+    const now = () => Math.floor(Date.now() / 1000);
+    for (const [options, code] of [[() => ({ secret: 'whsec_other' }), 'STRIPE_SIGNATURE_INVALID'], [() => ({ t: now() - 360 }), 'STRIPE_SIGNATURE_INVALID'],
+      [() => ({ t: now() + 360 }), 'STRIPE_SIGNATURE_INVALID'], [() => ({ livemode: true }), 'STRIPE_LIVEMODE_MISMATCH']] as const) {
+      const reply = await deliver('checkout.session.completed', object, options());
       assert.deepEqual([reply.status, reply.body.error?.code], [400, code], JSON.stringify(options));
       assert.equal((await db.query('SELECT count(*)::int AS n FROM billing_gateway_events WHERE stripe_event_id = $1', [reply.id])).rows[0].n, 0, 'A refused delivery records nothing.');
+    }
+    // The rule: a timestamp more than 300 s from the server clock, either way, is refused; the clock isn't rounded.
+    const { verifyStripeSignature } = await import('./src/billing/stripe-webhook.js');
+    const clock = 1_800_000_000;
+    for (const [offset, at, accepted] of [[-301, clock, false], [-300, clock, true], [-300, clock + 0.001, false], [0, clock, true],
+      [300, clock, true], [300, clock - 0.001, false], [301, clock, false]] as const) {
+      const edge = await signedStripeEvent('checkout.session.completed', object, { t: clock + offset });
+      assert.equal(await verifyStripeSignature(STRIPE_TEST_WEBHOOK_SECRET, edge.body, edge.signature, at), accepted, `t = ${offset} s at ${at - clock} s`);
     }
     const signed = await signedStripeEvent('checkout.session.completed', object);
     assert.equal((await send(signed.body.replace('"paid"', '"unpaid"'), signed.signature)).status, 400, 'The signature covers the exact body.');

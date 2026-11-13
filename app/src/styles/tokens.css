@@ -192,6 +192,8 @@
   /* Micro-interactions: strong ease-out for enters and feedback (120–250 ms), ease-in-out for on-screen moves. */
   --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
   --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
+  /* Data swaps (a new range on Overview, the selected tab's marker): 200 ms. */
+  --ease-swap: cubic-bezier(.2, .8, .2, 1);
   /* Sheets: the iOS drawer curve. */
   --ease-drawer: cubic-bezier(.32, .72, 0, 1);
   --shadow-raised: 0 2px 4px rgb(0 0 0 / 4%), 0 1px 2px -1px rgb(0 0 0 / 8%), 0 0 0 .5px rgb(0 0 0 / 12%);

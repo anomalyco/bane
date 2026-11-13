@@ -18,6 +18,11 @@
 .hosted-settings__content .section { margin-block: 0; }
 .hosted-settings__content .ui-table-scroll { --table-row-height: 53px; }
 
+/* An address in a setting, a table cell or a fact keeps to its own box: masked it is cut at the edge, so it never runs
+   into the next column or past the row; revealed it wraps (two lines fit a 53px row). */
+:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; word-break: break-all; }
+
 /* Rows: 53px each, label left and control right, split by hairlines. */
 .settings-rows { display: flex; flex-direction: column; border-top: 1px solid var(--color-border-muted); }
 .settings-row { display: grid; grid-template-columns: minmax(140px, 240px) minmax(0, 1fr); align-items: center; gap: var(--space-24); height: 53px; border-bottom: 1px solid var(--color-border-muted); }
@@ -27,7 +32,7 @@
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
 .settings-name { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); width: 100%; }
-.settings-name-input.ui-input { width: min(320px, 100%); }
+.settings-name-input.ui-input { width: min(440px, 100%); }
 .settings-name .ui-button[data-hidden] { visibility: hidden; }
 .settings-mcp { position: relative; display: flex; align-items: center; gap: var(--space-8); }
 .settings-mcp .ui-button[data-hidden] { visibility: hidden; }
@@ -41,14 +46,15 @@
 @media (hover: hover) and (pointer: fine) { .settings-score:hover svg { transform: translate(2px, -2px); } }
 .settings-danger { margin-top: var(--space-24); }
 .settings-danger .settings-row__label > span:first-child { color: var(--color-danger); }
-.settings-team-skeleton { min-height: 240px; }
 
 /* Tablet and phone: the rail becomes a row of tabs under the title (scrolling sideways if it must), so each section
    gets the full width. Phone: each row puts its label above a full-width control when the control is a field. */
 @media (max-width: 1100px) {
   .hosted-settings { grid-template-columns: minmax(0, 1fr); align-content: start; gap: var(--space-20); }
   .settings-rail { position: static; gap: var(--space-12); }
-  .settings-rail__groups { flex-direction: row; gap: var(--space-6); margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); overflow-x: auto; border-bottom: 1px solid var(--color-border); }
+  .settings-rail__groups { flex-direction: row; gap: var(--space-6); margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); overflow-x: auto; }
+  /* The strip scrolls, so it clips: padding keeps room around the tabs' focus rings, with negative margins so nothing moves, and the hairline under the tabs is a background where the border was. */
+  .settings-rail__groups { padding-block: var(--focus-reach); margin-block: calc(-1 * var(--focus-reach)) calc(1px - var(--focus-reach)); background: linear-gradient(var(--color-border), var(--color-border)) left bottom calc(var(--focus-reach) - 1px) / 100% 1px no-repeat; }
   .settings-rail__group { display: contents; }
   .settings-rail__group-title { display: none; }
   .settings-rail a { position: relative; flex: none; height: var(--control-height); padding-inline: var(--space-8); border-radius: 0; }
@@ -59,8 +65,13 @@
 }
 @media (max-width: 640px) {
   .settings-row { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-12); height: auto; min-height: 53px; padding-block: var(--space-8); }
-  .settings-row:has(.settings-name, .settings-inline > code) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
-  .settings-row:has(.settings-name, .settings-inline > code) .settings-row__control { justify-content: flex-start; text-align: left; }
+  .settings-rows:not(.usage-rows) .settings-row__label > span { overflow: visible; white-space: normal; }
+  .settings-row__label a { position: relative; }
+  .settings-row__label a::after { content: ''; position: absolute; inset-block: -14px; inset-inline: 0; }
+  .settings-score { position: relative; }
+  .settings-score::after { content: ''; position: absolute; inset-block: -12px; inset-inline: 0; }
+  .settings-row:has(.settings-name, .settings-inline > code, .private-address) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); padding-block: var(--space-12); }
+  .settings-row:has(.settings-name, .settings-inline > code, .private-address) .settings-row__control { justify-content: flex-start; text-align: left; }
   .settings-inline:has(> code) { flex-wrap: nowrap; min-width: 0; max-width: 100%; }
   .settings-inline > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .settings-name { justify-content: flex-start; }
@@ -70,7 +81,8 @@
 @media (max-width: 900px) {
   .settings-row:has(.settings-mcp) { grid-template-columns: minmax(0, 1fr); gap: var(--space-8); height: auto; min-height: 53px; padding-block: var(--space-12); }
   .settings-row:has(.settings-mcp) .settings-row__control { justify-content: flex-start; }
-  .settings-mcp { flex-wrap: wrap; }
+  .settings-mcp { flex: 1; flex-wrap: wrap; min-width: 0; }
+  .settings-mcp .ui-button--danger { margin-inline-start: auto; }
 }
 @media (max-width: 640px) {
   .settings-mcp__workspace { flex: 1 0 100%; width: auto; }

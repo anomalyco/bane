@@ -19,7 +19,10 @@
 /* Facts (Console-style): a hairline, a label row, then the value beside its own series. 60px tall. */
 .ov-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
 .ov-facts > div { min-width: 0; height: 60px; padding-top: var(--space-12); border-top: 1px solid var(--color-border); }
-.ov-facts dt { display: flex; justify-content: space-between; gap: var(--space-8); height: 16px; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+.ov-facts dt { position: relative; height: 16px; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+/* The count or delta is laid out from the right edge and pulled back by its own width, so as it tweens through wider
+   and narrower numbers its box never moves (a transform, not a layout shift). */
+.ov-facts dt > .muted { position: absolute; top: 0; left: 100%; transform: translateX(-100%); font-variant-numeric: tabular-nums; }
 .ov-facts dd { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-12); height: 28px; margin: var(--space-4) 0 0; min-width: 0; }
 .ov-facts__value { display: flex; align-items: center; height: 28px; font-size: 24px; line-height: 28px; font-weight: 500; letter-spacing: -.035em; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ov-spark { flex: none; width: 76px; height: 24px; }
@@ -81,3 +84,9 @@
   .ov-chart__head { height: auto; flex-wrap: wrap; row-gap: var(--space-4); }
   .ov-chart__head .chart-legend { gap: var(--space-12); }
 }
+
+/* A new range or stream: the old figures stay up and dim once the new ones take over 100 ms, then brighten as they
+   arrive. Opacity only, so nothing moves. */
+.ov-facts, .ov-chart { transition: opacity 200ms var(--ease-swap); }
+.ov-facts[data-stale], .ov-chart[data-stale] { opacity: .6; transition: opacity 200ms var(--ease-swap) 100ms; }
+.ov-spark-stack { flex: none; }
