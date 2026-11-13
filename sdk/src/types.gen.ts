@@ -4295,6 +4295,58 @@ export type SupportWebhookDelivery = {
     updatedAt: string;
 };
 
+export type SupportStandingDetail = SupportStanding & {
+    /**
+     * The last 60 days.
+     */
+    history: {
+        /**
+         * The published daily score, quality, limit and step, with the day’s real mail (accepted, hard-bounced, complained, screen-rejected), oldest first. The only source for days older than the 30 days mail is kept.
+         */
+        days: Array<{
+            day: string;
+            score: number | null;
+            quality: number | null;
+            limit: number | null;
+            step: string | null;
+            accepted: number;
+            bounced: number;
+            complained: number;
+            rejected: number;
+        }>;
+        /**
+         * Changes of standing (ladder steps, limit bands, quarantines, releases), newest first, at most 50.
+         */
+        changes: Array<{
+            at: string;
+            /**
+             * step, limit, quarantine, release, tenant or operator.
+             */
+            kind: string;
+            from: string | null;
+            to: string | null;
+            reasons: Array<string>;
+            limitFrom: number | null;
+            limitTo: number | null;
+        }>;
+    };
+    /**
+     * "Request a higher limit" is approved automatically with a score of 90 or more on each of the last 14 days, no warn, restrict or pause in 30 days, and a request of at most 25,000 a day. Anything else goes to a person.
+     */
+    limitRequest: {
+        eligibleForAutoApproval: boolean;
+        /**
+         * Why not, when not.
+         */
+        reasons: Array<{
+            code: string;
+            message: string;
+        }>;
+        maxAuto: number;
+        requested: number | null;
+    };
+};
+
 export type SupportBilling = {
     /**
      * False until billing is enabled on this installation.
@@ -4314,12 +4366,87 @@ export type SupportBilling = {
     }>;
 };
 
+export type SupportRequestLog = {
+    /**
+     * False when this installation does not read Workers Logs (reason not_configured) or they did not answer (unavailable).
+     */
+    available: boolean;
+    reason?: 'not_configured' | 'unavailable';
+    window: {
+        since: string;
+        until: string;
+    };
+    /**
+     * How long Workers Logs keep request lines.
+     */
+    retention: '3 days';
+    /**
+     * At most 50, most frequent first.
+     */
+    groups: Array<SupportRequestGroup>;
+    totals: {
+        /**
+         * Matching request lines in the window.
+         */
+        errors: number;
+        /**
+         * More than 1,000 lines matched, so the counts are of a sample spread over the window: narrow it.
+         */
+        truncated: boolean;
+    };
+    computedAt: string;
+};
+
+export type SupportRequestGroup = {
+    /**
+     * The route template (/v1/emails/:id), never a path.
+     */
+    route: string;
+    method: string;
+    status: number;
+    /**
+     * The error code Bane answered with.
+     */
+    code: string | null;
+    /**
+     * How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.
+     */
+    principal: string;
+    count: number;
+    firstSeen: string;
+    lastSeen: string;
+    /**
+     * Up to 5 of the latest, to look up with /v1/support/requests/{requestId}.
+     */
+    sampleRequestIds: Array<string>;
+};
+
 export type SupportRequestTrace = {
     requestId: string;
     /**
-     * Whether Bane stored anything about this request for this customer.
+     * Whether Bane logged or stored anything about this request for this customer.
      */
     found: boolean;
+    /**
+     * Its request lines from Workers Logs (the last 3 days), in the grant’s workspaces. Successful requests are sampled, so one may be missing.
+     */
+    logs: Array<{
+        at: string;
+        route: string;
+        method: string;
+        status: number;
+        code: string | null;
+        durationMs: number | null;
+        /**
+         * How the caller authenticated: dashboard, apiKey, mcp, agentToken, inboxKey…; never which key or user.
+         */
+        principal: string;
+        workspaceId: string;
+    }>;
+    /**
+     * False when this installation does not read Workers Logs or they did not answer; logs is then empty.
+     */
+    logsAvailable: boolean;
     /**
      * Changes the request made.
      */
@@ -4344,6 +4471,771 @@ export type SupportRequestTrace = {
         at: string;
     }>;
     note: string;
+};
+
+export type SupportDeliveryMetrics = {
+    workspaceId: string;
+    computedAt: string;
+    window: {
+        since: string;
+        until: string;
+        granularity: 'day' | 'hour';
+    };
+    groupBy: 'none' | 'campaign' | 'from_domain' | 'provider' | 'stream';
+    stream: 'all' | 'transactional' | 'marketing';
+    filters: {
+        campaignId: string | null;
+        fromDomain: string | null;
+    };
+    totals: {
+        /**
+         * Real emails created (simulated mail is counted apart).
+         */
+        emails: number;
+        /**
+         * Accepted by the provider (SES).
+         */
+        accepted: number;
+        delivered: number;
+        hardBounced: number;
+        /**
+         * Delayed or soft-bounced at least once.
+         */
+        softBounced: number;
+        complained: number;
+        /**
+         * Opened at least once, bots and privacy proxies included.
+         */
+        opened: number;
+        /**
+         * Opened with an open SES did not flag as a bot.
+         */
+        openedHuman: number;
+        clicked: number;
+        /**
+         * Refused by the content screen.
+         */
+        screenRejected: number;
+        suppressed: number;
+        simulated: number;
+        /**
+         * Recipient unsubscribes (footer, one-click, SES) in the window, for the whole workspace: stream, campaignId and fromDomain do not narrow them.
+         */
+        unsubscribed: number;
+        rates: SupportRates;
+    };
+    /**
+     * Every bucket with mail, oldest first: the volume per day or hour.
+     */
+    buckets: Array<{
+        /**
+         * UTC day (YYYY-MM-DD) or hour (ISO).
+         */
+        at: string;
+        /**
+         * Real emails created (simulated mail is counted apart).
+         */
+        emails: number;
+        /**
+         * Accepted by the provider (SES).
+         */
+        accepted: number;
+        delivered: number;
+        hardBounced: number;
+        /**
+         * Delayed or soft-bounced at least once.
+         */
+        softBounced: number;
+        complained: number;
+        /**
+         * Opened at least once, bots and privacy proxies included.
+         */
+        opened: number;
+        /**
+         * Opened with an open SES did not flag as a bot.
+         */
+        openedHuman: number;
+        clicked: number;
+        /**
+         * Refused by the content screen.
+         */
+        screenRejected: number;
+        suppressed: number;
+        simulated: number;
+        unsubscribed: number;
+    }>;
+    /**
+     * Null when groupBy=none.
+     */
+    groups: Array<{
+        /**
+         * Campaign ID ("" for mail outside campaigns), From domain, provider or recipient domain, or stream.
+         */
+        key: string;
+        /**
+         * The groups beyond the largest 20, summed.
+         */
+        other: boolean;
+        provider: 'gmail' | 'microsoft' | 'yahoo' | 'apple' | 'proton' | 'gmx' | 'other' | null;
+        /**
+         * Real emails created (simulated mail is counted apart).
+         */
+        emails: number;
+        /**
+         * Accepted by the provider (SES).
+         */
+        accepted: number;
+        delivered: number;
+        hardBounced: number;
+        /**
+         * Delayed or soft-bounced at least once.
+         */
+        softBounced: number;
+        complained: number;
+        /**
+         * Opened at least once, bots and privacy proxies included.
+         */
+        opened: number;
+        /**
+         * Opened with an open SES did not flag as a bot.
+         */
+        openedHuman: number;
+        clicked: number;
+        /**
+         * Refused by the content screen.
+         */
+        screenRejected: number;
+        suppressed: number;
+        simulated: number;
+        rates: SupportRates;
+        buckets: Array<{
+            /**
+             * UTC day (YYYY-MM-DD) or hour (ISO).
+             */
+            at: string;
+            /**
+             * Real emails created (simulated mail is counted apart).
+             */
+            emails: number;
+            /**
+             * Accepted by the provider (SES).
+             */
+            accepted: number;
+            delivered: number;
+            hardBounced: number;
+            /**
+             * Delayed or soft-bounced at least once.
+             */
+            softBounced: number;
+            complained: number;
+            /**
+             * Opened at least once, bots and privacy proxies included.
+             */
+            opened: number;
+            /**
+             * Opened with an open SES did not flag as a bot.
+             */
+            openedHuman: number;
+            clicked: number;
+            /**
+             * Refused by the content screen.
+             */
+            screenRejected: number;
+            suppressed: number;
+            simulated: number;
+        }>;
+    }> | null;
+    /**
+     * What the Hosted content screen judged in the window, for the whole workspace (not narrowed by the filters).
+     */
+    screen: {
+        screened: number;
+        rejected: number;
+    };
+    /**
+     * Heuristics computed from this read, most severe first (support-agent-design §5.3). Weigh them; they are not verdicts.
+     */
+    findings: Array<SupportFinding>;
+};
+
+export type SupportRates = {
+    delivery: SupportRate;
+    bounce: SupportRate & unknown;
+    complaint: SupportRate & unknown;
+    open: SupportRate & unknown;
+    openHuman: SupportRate & unknown;
+    click: SupportRate & unknown;
+};
+
+/**
+ * delivered / accepted
+ */
+export type SupportRate = {
+    numerator: number;
+    denominator: number;
+    /**
+     * A fraction; null when the denominator is zero.
+     */
+    value: number | null;
+};
+
+export type SupportFinding = {
+    severity: 'info' | 'notice' | 'serious' | 'critical';
+    code: string;
+    /**
+     * Plain words with the numbers; the usual cause and fix.
+     */
+    message: string;
+    /**
+     * The provider, domain, campaign or list it is about, or null for the whole read.
+     */
+    scope: string | null;
+    /**
+     * The numbers behind it: counts, rates as fractions, thresholds.
+     */
+    evidence: {
+        [key: string]: number;
+    };
+};
+
+export type SupportBounceReasons = {
+    workspaceId: string;
+    computedAt: string;
+    window: {
+        since: string;
+        until: string;
+    };
+    /**
+     * At most 50 groups, largest first.
+     */
+    groups: Array<{
+        provider: 'gmail' | 'microsoft' | 'yahoo' | 'apple' | 'proton' | 'gmx' | 'other';
+        /**
+         * The recipient domain when the provider is other.
+         */
+        domain: string | null;
+        class: 'bounce' | 'soft_bounce' | 'deferral' | 'complaint';
+        /**
+         * Bounce type/subtype (Permanent/General, Transient/MailboxFull…), delay type, or complaint feedback type.
+         */
+        subtype: string;
+        /**
+         * Enhanced status code (5.1.1, 5.7.26, 4.7.0…) when the event recorded one.
+         */
+        status: string | null;
+        /**
+         * The redacted diagnostic (addresses are <address>, IPs <ip>), 160 characters.
+         */
+        diagnostic: string | null;
+        count: number;
+        firstSeen: string;
+        lastSeen: string;
+        /**
+         * Up to 3 campaigns with most of these.
+         */
+        campaigns: Array<string>;
+    }>;
+    /**
+     * What the 50 groups leave out.
+     */
+    other: {
+        groups: number;
+        count: number;
+    } | null;
+    complaints: Array<{
+        feedbackType: string;
+        count: number;
+    }>;
+    /**
+     * Hard bounces of first sends: a bad import stands out here.
+     */
+    firstSend: SupportRate & {
+        basis: string;
+    };
+    /**
+     * Heuristics computed from this read, most severe first (support-agent-design §5.3). Weigh them; they are not verdicts.
+     */
+    findings: Array<SupportFinding>;
+};
+
+export type SupportDomainHealth = {
+    workspaceId: string;
+    computedAt: string;
+    domain: {
+        id: string;
+        name: string;
+        region: string | null;
+        createdAt: string | null;
+    };
+    /**
+     * What Bane stored at the last verification.
+     */
+    claim: {
+        sending: string | null;
+        dkim: string | null;
+        dkimSigning: boolean;
+        mailFrom: {
+            domain: string | null;
+            status: string | null;
+        };
+        dmarc: {
+            status: string | null;
+            record: string | null;
+            source: string | null;
+            checkedAt: string | null;
+        };
+        receiving: string | null;
+        lostSince: string | null;
+        /**
+         * shared (Bane Hosted pool) or byo.
+         */
+        connection: {
+            kind: string;
+            region: string;
+        } | null;
+    };
+    /**
+     * One live read of public DNS (5 labels, 3 seconds, cached 5 minutes).
+     */
+    dns: {
+        checkedAt: string;
+        /**
+         * False when a lookup did not answer within the 3-second budget.
+         */
+        complete: boolean;
+        spf: {
+            record: string | null;
+            /**
+             * More than one SPF record is a permerror.
+             */
+            records: number;
+            includesAmazonSes: boolean;
+            /**
+             * DNS-querying terms in the record itself (receivers allow 10 in all).
+             */
+            lookups: number;
+            /**
+             * -all, ~all, ?all…
+             */
+            all: string | null;
+        };
+        dmarc: {
+            record: string | null;
+            /**
+             * stored: the exact label had none; this is the last verification’s record (it may be the organizational domain’s).
+             */
+            source: 'live' | 'stored' | null;
+            at: string | null;
+            p: string | null;
+            sp: string | null;
+            pct: number | null;
+            adkim: string;
+            aspf: string;
+            rua: boolean;
+            ruf: boolean;
+            valid: boolean;
+        };
+        bimi: {
+            record: string | null;
+            /**
+             * l= present
+             */
+            logo: boolean;
+            /**
+             * a= present (VMC or CMC)
+             */
+            authority: boolean;
+        };
+        mailFrom: {
+            domain: string;
+            mx: Array<string>;
+            mxExpected: string;
+            spf: {
+                record: string | null;
+                /**
+                 * More than one SPF record is a permerror.
+                 */
+                records: number;
+                includesAmazonSes: boolean;
+                /**
+                 * DNS-querying terms in the record itself (receivers allow 10 in all).
+                 */
+                lookups: number;
+                /**
+                 * -all, ~all, ?all…
+                 */
+                all: string | null;
+            };
+        } | null;
+    };
+    alignment: {
+        /**
+         * DKIM d= is the From domain (SES Easy DKIM verified and signing).
+         */
+        dkim: boolean;
+        /**
+         * The Return-Path (verified MAIL FROM) shares the From domain’s organizational domain.
+         */
+        spf: boolean;
+        dmarcPasses: boolean;
+        verdict: 'aligned' | 'dkim_only' | 'spf_only' | 'unaligned';
+        returnPath: string;
+    };
+    volume: {
+        /**
+         * Days with mail in the last 30, oldest first.
+         */
+        days: Array<{
+            at: string;
+            emails: number;
+            accepted: number;
+            campaign: number;
+        }>;
+        /**
+         * The first send kept (30 days): the warm-up age, unless olderThanRetention.
+         */
+        firstSendAt: string | null;
+        olderThanRetention: boolean;
+        warmupAgeDays: number | null;
+        peakDaily: number;
+        medianDaily: number;
+        peakToMedian: number | null;
+    };
+    streams: {
+        emails: number;
+        campaign: number;
+        /**
+         * kind=marketing sends through the API.
+         */
+        marketingApi: number;
+        marketingShare: SupportRate;
+        /**
+         * How marketing from this domain gets List-Unsubscribe.
+         */
+        listUnsubscribe: string;
+        /**
+         * One subject to more than 500 recipients a day outside campaigns.
+         */
+        bulkLikeTransactional: Array<{
+            day: string;
+            subject: string;
+            emails: number;
+        }>;
+    };
+    /**
+     * Heuristics computed from this read, most severe first (support-agent-design §5.3). Weigh them; they are not verdicts.
+     */
+    findings: Array<SupportFinding>;
+};
+
+export type SupportScreen = {
+    workspaceId: string;
+    computedAt: string;
+    since: string;
+    /**
+     * Hours the Hosted content screen judged mail in.
+     */
+    hours: Array<{
+        at: string;
+        screened: number;
+        rejected: number;
+    }>;
+    totals: {
+        screened: number;
+        rejected: number;
+        rate: SupportRate;
+    };
+    /**
+     * Among the rejections listed.
+     */
+    byCode: {
+        [key: string]: number;
+    };
+    /**
+     * The last 50, newest first.
+     */
+    rejections: Array<{
+        emailId: string;
+        campaignId: string | null;
+        at: string;
+        /**
+         * 120 characters.
+         */
+        subject: string;
+        /**
+         * CONTENT_REJECTED_SPAM, CONTENT_IMAGE_ONLY, CONTENT_TOO_LARGE_TO_SCREEN, ATTACHMENT_TYPE_UNSCREENABLE, ATTACHMENT_CONTENT_MISMATCH.
+         */
+        errorCode: string;
+        /**
+         * The classifier’s spam probability, for CONTENT_REJECTED_SPAM.
+         */
+        spamScore: number | null;
+        model: string | null;
+    }>;
+};
+
+export type SupportCampaign = {
+    id: string;
+    name: string;
+    state: string;
+    createdAt: string;
+    launchedAt: string | null;
+    scheduledAt: string | null;
+    stream: 'marketing';
+    audience: {
+        listId: string | null;
+        listName: string | null;
+        segmentId: string | null;
+        segmentName: string | null;
+        /**
+         * Recipients frozen at launch, or the list’s current members for a draft.
+         */
+        size: number | null;
+    };
+    tracking: boolean;
+    from: string | null;
+    fromName: string | null;
+    replyTo: Array<string>;
+    /**
+     * 120 characters.
+     */
+    subject: string | null;
+    previewTextLength: number;
+    pauseReason: {
+        code: string;
+        message: string;
+    } | null;
+    waiting: {
+        reason: string;
+        until: string;
+    } | null;
+    quarantines: number;
+    /**
+     * Lifetime statistics, as GET /v1/campaigns/{id}/stats computes them.
+     */
+    stats: {
+        counts: {
+            total: number;
+            byStatus: {
+                [key: string]: number;
+            };
+        };
+        totals: {
+            [key: string]: number;
+        };
+        rates: {
+            delivery: SupportRate;
+            bounce: SupportRate;
+            complaint: SupportRate;
+            open: SupportRate;
+            click: SupportRate;
+        };
+    };
+};
+
+export type SupportCampaignDetail = SupportCampaign & {
+    workspaceId: string;
+    computedAt: string;
+    /**
+     * Emails materialized per hour, the last 72 hours with any.
+     */
+    pacing: Array<{
+        at: string;
+        emails: number;
+    }>;
+    /**
+     * The draft’s block HTML, only when the customer shared message content in this workspace (grant.contentWorkspaceId); otherwise null.
+     */
+    content: {
+        html: string | null;
+        previewText: string | null;
+        sourceTemplateId: string | null;
+    } | null;
+};
+
+export type SupportLint = {
+    id: string;
+    workspaceId: string;
+    computedAt: string;
+    kind: 'email' | 'campaign';
+    contentShared: boolean;
+    /**
+     * Always: what the message is made of, never its words.
+     */
+    metadata: {
+        sizeBytes: number;
+        parts: {
+            html: boolean;
+            text: boolean;
+            raw: boolean;
+        };
+        attachments: {
+            count: number;
+            types: Array<string>;
+        };
+        listUnsubscribe: boolean;
+        listUnsubscribePost: boolean;
+        tracking: boolean;
+        alignment: {
+            fromDomain: string;
+            dkimDomain: string | null;
+            returnPath: string;
+            dkimAligned: boolean;
+            spfAligned: boolean;
+        };
+        subject: {
+            length: number;
+            capitalsShare: number | null;
+            exclamationRuns: number;
+            emoji: number;
+            replyPrefix: boolean;
+            replyWithoutThread: boolean;
+        };
+    };
+    /**
+     * Only when the customer shared message content in this workspace; otherwise null.
+     */
+    content: {
+        readable: boolean;
+        unreadableReason: string | null;
+        visibleWords: number;
+        images: {
+            count: number;
+            declaredArea: number;
+            /**
+             * Words the screen’s image rule asks for: 25 per 600×300 beyond a 200×200 logo.
+             */
+            wordsRequired: number;
+            rulePasses: boolean;
+            missingAlt: number;
+        };
+        hiddenWords: number;
+        sameColorWords: number;
+        links: {
+            count: number;
+            domains: Array<{
+                domain: string;
+                count: number;
+            }>;
+            shorteners: Array<string>;
+            /**
+             * "text domain → link domain"
+             */
+            mismatchedText: Array<string>;
+            plainHttp: number;
+            localOrStaging: Array<string>;
+            unsubscribe: boolean;
+            unsubscribeAddedByBane: boolean;
+        };
+        unresolvedTokens: Array<string>;
+        spamPhrases: Array<string>;
+    } | null;
+    /**
+     * Heuristics computed from this read, most severe first (support-agent-design §5.3). Weigh them; they are not verdicts.
+     */
+    findings: Array<SupportFinding>;
+};
+
+export type SupportAudienceHealth = {
+    workspaceId: string;
+    computedAt: string;
+    /**
+     * The 20 largest lists, or the one asked for.
+     */
+    lists: Array<{
+        contacts: number;
+        subscribed: number;
+        unknown: number;
+        unsubscribed: number;
+        suppressed: number;
+        suppressedBy: {
+            [key: string]: number;
+        };
+        clicked30: number;
+        clicked90: number;
+        clicked180: number;
+        /**
+         * Observed for more than 180 days with no open or click.
+         */
+        stale: number;
+        neverObserved: number;
+        /**
+         * info@, sales@ and other role addresses.
+         */
+        role: number;
+        freeMail: number;
+        /**
+         * gmial.com, hotmial.com, gmail.co…
+         */
+        typoDomains: number;
+        providers: {
+            [key: string]: number;
+        };
+        shares: {
+            stale: SupportRate & unknown;
+            role: SupportRate;
+            freeMail: SupportRate;
+        };
+        id: string;
+        name: string;
+    }>;
+    /**
+     * Every contact; null when listId narrows the read.
+     */
+    all: {
+        contacts: number;
+        subscribed: number;
+        unknown: number;
+        unsubscribed: number;
+        suppressed: number;
+        suppressedBy: {
+            [key: string]: number;
+        };
+        clicked30: number;
+        clicked90: number;
+        clicked180: number;
+        /**
+         * Observed for more than 180 days with no open or click.
+         */
+        stale: number;
+        neverObserved: number;
+        /**
+         * info@, sales@ and other role addresses.
+         */
+        role: number;
+        freeMail: number;
+        /**
+         * gmial.com, hotmial.com, gmail.co…
+         */
+        typoDomains: number;
+        providers: {
+            [key: string]: number;
+        };
+        shares: {
+            stale: SupportRate & unknown;
+            role: SupportRate;
+            freeMail: SupportRate;
+        };
+    } | null;
+    /**
+     * Committed imports of the last 90 days, newest first (10).
+     */
+    imports: Array<{
+        id: string;
+        listId: string | null;
+        listName: string | null;
+        at: string;
+        imported: number;
+        errors: number;
+        contacts: number;
+        hardBounce: SupportRate & unknown;
+        complaint: SupportRate;
+        unsubscribed: number;
+    }>;
+    /**
+     * Heuristics computed from this read, most severe first (support-agent-design §5.3). Weigh them; they are not verdicts.
+     */
+    findings: Array<SupportFinding>;
 };
 
 export type ListMcpConnectionsData = {
@@ -21375,6 +22267,10 @@ export type GetSupportStandingData = {
          * Only this workspace; it must be one of the grant’s. Omit for all of them.
          */
         workspaceId?: string;
+        /**
+         * The daily limit the customer asks for, to check it against the automatic maximum.
+         */
+        requestedLimit?: number;
     };
     url: '/v1/support/standing';
 };
@@ -21429,7 +22325,7 @@ export type GetSupportStandingResponses = {
      * Success
      */
     200: {
-        data: Array<SupportStanding>;
+        data: Array<SupportStandingDetail>;
     };
 };
 
@@ -21590,6 +22486,92 @@ export type ListSupportAuditResponses = {
 
 export type ListSupportAuditResponse = ListSupportAuditResponses[keyof ListSupportAuditResponses];
 
+export type ListSupportRequestsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * error: every status of 400 or more (default); 5xx or 4xx only.
+         */
+        status?: 'error' | '5xx' | '4xx';
+        /**
+         * Window start (default: 24 hours before until). At most 3 days back.
+         */
+        since?: string;
+        /**
+         * Window end (default: now).
+         */
+        until?: string;
+        /**
+         * Only this route template, as a group names it.
+         */
+        route?: string;
+        /**
+         * Only this error code.
+         */
+        code?: string;
+    };
+    url: '/v1/support/requests';
+};
+
+export type ListSupportRequestsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportRequestsError = ListSupportRequestsErrors[keyof ListSupportRequestsErrors];
+
+export type ListSupportRequestsResponses = {
+    /**
+     * Success
+     */
+    200: SupportRequestLog;
+};
+
+export type ListSupportRequestsResponse = ListSupportRequestsResponses[keyof ListSupportRequestsResponses];
+
 export type GetSupportRequestData = {
     body?: never;
     path: {
@@ -21657,3 +22639,651 @@ export type GetSupportRequestResponses = {
 };
 
 export type GetSupportRequestResponse = GetSupportRequestResponses[keyof GetSupportRequestResponses];
+
+export type GetSupportDeliveryMetricsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * Window start (default: 14 days before until). At most 30 days back.
+         */
+        since?: string;
+        /**
+         * Window end (default: now).
+         */
+        until?: string;
+        /**
+         * hour: at most 72 hours.
+         */
+        granularity?: 'day' | 'hour';
+        groupBy?: 'none' | 'campaign' | 'from_domain' | 'provider' | 'stream';
+        stream?: 'all' | 'transactional' | 'marketing';
+        campaignId?: string;
+        fromDomain?: string;
+    };
+    url: '/v1/support/deliverability/metrics';
+};
+
+export type GetSupportDeliveryMetricsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportDeliveryMetricsError = GetSupportDeliveryMetricsErrors[keyof GetSupportDeliveryMetricsErrors];
+
+export type GetSupportDeliveryMetricsResponses = {
+    /**
+     * Success
+     */
+    200: SupportDeliveryMetrics;
+};
+
+export type GetSupportDeliveryMetricsResponse = GetSupportDeliveryMetricsResponses[keyof GetSupportDeliveryMetricsResponses];
+
+export type GetSupportBounceReasonsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * Window start (default: 14 days before until). At most 30 days back.
+         */
+        since?: string;
+        /**
+         * Window end (default: now).
+         */
+        until?: string;
+        provider?: 'gmail' | 'microsoft' | 'yahoo' | 'apple' | 'proton' | 'gmx' | 'other';
+        campaignId?: string;
+        fromDomain?: string;
+        /**
+         * Default: all three.
+         */
+        type?: 'bounce' | 'deferral' | 'complaint';
+    };
+    url: '/v1/support/deliverability/bounces';
+};
+
+export type GetSupportBounceReasonsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportBounceReasonsError = GetSupportBounceReasonsErrors[keyof GetSupportBounceReasonsErrors];
+
+export type GetSupportBounceReasonsResponses = {
+    /**
+     * Success
+     */
+    200: SupportBounceReasons;
+};
+
+export type GetSupportBounceReasonsResponse = GetSupportBounceReasonsResponses[keyof GetSupportBounceReasonsResponses];
+
+export type GetSupportDomainHealthData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/domains/{id}/health';
+};
+
+export type GetSupportDomainHealthErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportDomainHealthError = GetSupportDomainHealthErrors[keyof GetSupportDomainHealthErrors];
+
+export type GetSupportDomainHealthResponses = {
+    /**
+     * Success
+     */
+    200: SupportDomainHealth;
+};
+
+export type GetSupportDomainHealthResponse = GetSupportDomainHealthResponses[keyof GetSupportDomainHealthResponses];
+
+export type GetSupportScreenData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * Default and limit: 7 days ago.
+         */
+        since?: string;
+    };
+    url: '/v1/support/screen';
+};
+
+export type GetSupportScreenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportScreenError = GetSupportScreenErrors[keyof GetSupportScreenErrors];
+
+export type GetSupportScreenResponses = {
+    /**
+     * Success
+     */
+    200: SupportScreen;
+};
+
+export type GetSupportScreenResponse = GetSupportScreenResponses[keyof GetSupportScreenResponses];
+
+export type ListSupportCampaignsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        /**
+         * Created at or after (default: 30 days ago).
+         */
+        since?: string;
+        state?: string;
+        limit?: number;
+    };
+    url: '/v1/support/campaigns';
+};
+
+export type ListSupportCampaignsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListSupportCampaignsError = ListSupportCampaignsErrors[keyof ListSupportCampaignsErrors];
+
+export type ListSupportCampaignsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        workspaceId: string;
+        computedAt: string;
+        data: Array<SupportCampaign>;
+    };
+};
+
+export type ListSupportCampaignsResponse = ListSupportCampaignsResponses[keyof ListSupportCampaignsResponses];
+
+export type GetSupportCampaignData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/campaigns/{id}';
+};
+
+export type GetSupportCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportCampaignError = GetSupportCampaignErrors[keyof GetSupportCampaignErrors];
+
+export type GetSupportCampaignResponses = {
+    /**
+     * Success
+     */
+    200: SupportCampaignDetail;
+};
+
+export type GetSupportCampaignResponse = GetSupportCampaignResponses[keyof GetSupportCampaignResponses];
+
+export type GetSupportEmailLintData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/emails/{id}/lint';
+};
+
+export type GetSupportEmailLintErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportEmailLintError = GetSupportEmailLintErrors[keyof GetSupportEmailLintErrors];
+
+export type GetSupportEmailLintResponses = {
+    /**
+     * Success
+     */
+    200: SupportLint;
+};
+
+export type GetSupportEmailLintResponse = GetSupportEmailLintResponses[keyof GetSupportEmailLintResponses];
+
+export type GetSupportCampaignLintData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+    };
+    url: '/v1/support/campaigns/{id}/lint';
+};
+
+export type GetSupportCampaignLintErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportCampaignLintError = GetSupportCampaignLintErrors[keyof GetSupportCampaignLintErrors];
+
+export type GetSupportCampaignLintResponses = {
+    /**
+     * Success
+     */
+    200: SupportLint;
+};
+
+export type GetSupportCampaignLintResponse = GetSupportCampaignLintResponses[keyof GetSupportCampaignLintResponses];
+
+export type GetSupportAudienceHealthData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Only this workspace; it must be one of the grant’s. Omit for all of them.
+         */
+        workspaceId?: string;
+        listId?: string;
+    };
+    url: '/v1/support/audience/health';
+};
+
+export type GetSupportAudienceHealthErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetSupportAudienceHealthError = GetSupportAudienceHealthErrors[keyof GetSupportAudienceHealthErrors];
+
+export type GetSupportAudienceHealthResponses = {
+    /**
+     * Success
+     */
+    200: SupportAudienceHealth;
+};
+
+export type GetSupportAudienceHealthResponse = GetSupportAudienceHealthResponses[keyof GetSupportAudienceHealthResponses];

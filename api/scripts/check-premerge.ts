@@ -64,8 +64,8 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   }
   const [dev, prod] = [configs['wrangler.dev.jsonc'], configs['wrangler.prod.jsonc']];
   if (dev && prod && !isDeepStrictEqual(dev.assets, prod.assets)) fail('Worker routes', 'The assets block differs between api/wrangler.dev.jsonc and api/wrangler.prod.jsonc. dev is the only place production routing is tested before release: keep them identical.', 'api/wrangler.prod.jsonc');
-  // The Worker module imports cloudflare:workers for its Durable Object; give Node an empty stand-in.
-  register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s,c,n){return s==='cloudflare:workers'?{url:'data:text/javascript,export class DurableObject{}',shortCircuit:true}:n(s,c)}`));
+  // The Worker module imports cloudflare:workers for its Durable Object and the SupportPlatform entrypoint; give Node empty stand-ins.
+  register('data:text/javascript,' + encodeURIComponent(`export async function resolve(s,c,n){return s==='cloudflare:workers'?{url:'data:text/javascript,export class DurableObject{};export class WorkerEntrypoint{}',shortCircuit:true}:n(s,c)}`));
   const worker = (await import('../src/worker.js')).default as { fetch(request: Request, env: unknown, ctx: unknown): Promise<Response> };
   const env = { ASSETS: { fetch: async () => new Response('static asset', { headers: { 'x-premerge-asset': '1' } }) }, ADMISSION: { limit: async () => ({ success: false }) } };
   // An API path ends at admission (refused here, so nothing else loads); only the outcome matters, not its log line.

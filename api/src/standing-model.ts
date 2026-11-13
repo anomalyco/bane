@@ -211,6 +211,29 @@ export function belowClearLine(input: LadderInput) {
     && under(input.rejected, input.screened, LADDER.screen.warn[0]);
 }
 
+// ---------- asking for more (reputation-and-ops-design §3.5) ----------
+/** Auto-approval of "Request a higher limit": score ≥ 90 for 14 days, no ladder step in 30 days, at most 25,000 a day. */
+export const LIMIT_REQUEST = { minScore: 90, scoreDays: 14, quietDays: 30, maxAuto: 25_000 } as const;
+export type LimitRequest = { eligibleForAutoApproval: boolean; reasons: { code: string; message: string }[]; maxAuto: number };
+/**
+ * Whether a limit request qualifies for auto-approval now. `days` are the published daily scores (sender_score_daily),
+ * `steps` the ladder steps (warn, restrict, pause) entered in the last 30 days, `requested` the limit asked for, if known.
+ * Notice is not a ladder step: it is a note on the score card.
+ */
+export function limitRequestEligibility(o: { phase: ScoreState['phase'] | null; step: Step | null; days: { day: string; score: number | null }[]; steps: number; today: string; requested?: number }): LimitRequest {
+  const reasons: LimitRequest['reasons'] = [], { minScore, scoreDays, quietDays, maxAuto } = LIMIT_REQUEST;
+  if (o.phase === null) reasons.push({ code: 'NO_STANDING', message: 'This workspace has no sender standing (Bane Hosted sending only), so a limit request goes to a person.' });
+  else if (o.phase !== 'graded') reasons.push({ code: 'CALIBRATING', message: 'The score is still calibrating; it needs 100 real recipients and 24 hours first.' });
+  // The 14 UTC days up to today, or up to yesterday before the job has written today's score.
+  const byDay = new Map(o.days.map(d => [d.day, d.score])), end = Date.parse(o.today + 'T00:00:00Z') - (byDay.has(o.today) ? 0 : DAY_MS);
+  const wanted = Array.from({ length: scoreDays }, (_, i) => new Date(end - i * DAY_MS).toISOString().slice(0, 10));
+  const short = wanted.filter(day => { const s = byDay.get(day); return s === undefined || s === null || s < minScore; });
+  if (o.phase === 'graded' && short.length) reasons.push({ code: 'SCORE_BELOW_90', message: `The score must be ${minScore} or more on each of the last ${scoreDays} days; it was not on ${short.length} of them (latest ${short[0]}).` });
+  if (o.steps > 0 || (o.step !== null && stepRank(o.step) >= stepRank('warn'))) reasons.push({ code: 'RECENT_LADDER_STEP', message: `The workspace reached a warn, restrict or pause step in the last ${quietDays} days${o.step !== null && stepRank(o.step) >= stepRank('warn') ? ` (now: ${o.step})` : ''}.` });
+  if (o.requested !== undefined && o.requested > maxAuto) reasons.push({ code: 'OVER_AUTO_MAXIMUM', message: `Requests above ${maxAuto.toLocaleString('en-US')} a day always go to a person.` });
+  return { eligibleForAutoApproval: !reasons.length, reasons, maxAuto };
+}
+
 /** The limit admission enforces from the standing (before an operator override or a resume's restore). */
 export function dailyLimit(o: { phase: ScoreState['phase']; score: number | null; band: number; step: Step; currentLimit: number; strikeCapped: boolean }) {
   if (o.phase !== 'graded' || o.score === null) return { band: CALIBRATION.limit, limit: CALIBRATION.limit };
