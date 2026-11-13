@@ -7335,7 +7335,7 @@ describe('Billing: Stripe', () => {
   });
 
   test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
-    const { db, deliver, send } = await stripeFixture(t);
+    const { runtime, db, deliver, send } = await stripeFixture(t);
     const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
     for (const [options, code] of [[{ secret: 'whsec_other' }, 'STRIPE_SIGNATURE_INVALID'], [{ t: Math.floor(Date.now() / 1000) - 301 }, 'STRIPE_SIGNATURE_INVALID'],
       [{ t: Math.floor(Date.now() / 1000) + 301 }, 'STRIPE_SIGNATURE_INVALID'], [{ livemode: true }, 'STRIPE_LIVEMODE_MISMATCH']] as const) {
@@ -7346,6 +7346,14 @@ describe('Billing: Stripe', () => {
     const signed = await signedStripeEvent('checkout.session.completed', object);
     assert.equal((await send(signed.body.replace('"paid"', '"unpaid"'), signed.signature)).status, 400, 'The signature covers the exact body.');
     assert.equal((await send(signed.body)).status, 400, 'The signature header is required.');
+    // Without the Stripe keys an unsigned request is still refused at authentication; a signed one gets 503 so Stripe retries.
+    const keys = runtime.config.billing;
+    runtime.config.billing = {};
+    try {
+      assert.equal((await send(signed.body)).status, 400);
+      const waiting = await send(signed.body, signed.signature);
+      assert.deepEqual([waiting.status, ((await waiting.json()) as Json).error.code], [503, 'BILLING_NOT_CONFIGURED']);
+    } finally { runtime.config.billing = keys; }
     assert.equal((await send(signed.body, `${signed.signature.replace(/v1=.*/, 'v1=' + '0'.repeat(64))},${signed.signature.split(',')[1]}`)).status, 200, 'Any v1 may match (secret rotation).');
     for (const [type, foreign] of [['checkout.session.completed', object], ['customer.created', { id: 'cus_other', object: 'customer' }], ['charge.dispute.created', { id: 'dp_other', payment_intent: 'pi_console', amount: 100 }]] as const) {
       const reply = await deliver(type, foreign);
