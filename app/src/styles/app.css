@@ -233,8 +233,9 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .tab-bar__item:active .tab-bar__icon { transform: scale(.92); }
 .tab-bar__item:focus-visible { outline-offset: -4px; }
 /* More: the rest of the pages, then the sidebar's footer (sender score, SES quota). */
-.more-sheet__links { display: flex; flex-direction: column; margin: 0 calc(-1 * var(--space-8)); }
-.more-sheet__link { display: flex; align-items: center; gap: var(--space-12); min-height: 52px; padding-inline: var(--space-8); border-radius: var(--radius-sm); color: var(--color-text); font-size: 15px; text-decoration: none; transition: background-color 120ms ease; }
+.more-sheet__links { display: flex; flex-direction: column; margin: 0 calc(-1 * var(--focus-reach)); }
+.more-sheet__link:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+.more-sheet__link { display: flex; align-items: center; gap: var(--space-12); min-height: 52px; padding-inline: calc(var(--space-8) - var(--focus-reach)); border-radius: var(--radius-sm); color: var(--color-text); font-size: 15px; text-decoration: none; transition: background-color 120ms ease; }
 .more-sheet__lock { margin-left: auto; color: var(--color-faint); }
 .more-sheet__link:active { background: var(--color-pressed); transition-duration: 0ms; }
 .more-sheet__link.active { background: var(--color-layer-2); font-weight: var(--font-weight-bold); }
@@ -265,6 +266,8 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar__context > :is(.ui-select-trigger, select) { box-shadow: none; background-color: transparent; font-weight: var(--font-weight-bold); field-sizing: content; }
 .mobile-bar__context > :is(.ui-select-trigger, select):focus-visible { box-shadow: none; outline: 2px solid var(--color-focus); }
 /* A form's own Save and Cancel stay in reach above the tab bar while its fields scroll. */
+/* A phone scrolls the document: Tab brings a control clear of the tab bar (56px, --tab-bar-height) and its ring. */
+html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area-inset-bottom) + var(--focus-reach)); }
 .app-shell--compact .form-actions { position: sticky; bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); z-index: 2; flex-wrap: nowrap; margin-inline: calc(-1 * var(--bleed)); padding: var(--space-12) var(--bleed); background: color-mix(in srgb, var(--color-surface) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border-muted); backdrop-filter: blur(12px); }
 @media (max-width: 640px) { .app-shell--compact .form-actions > .ui-button { flex: 1 1 0; } }
 /* Contact support (components/ContactSupport.tsx): the share choice with its note under it, and the reference to copy. */
