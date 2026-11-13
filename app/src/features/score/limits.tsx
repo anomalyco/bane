@@ -26,7 +26,7 @@ export function SendingLimitsGuide({ headings = 'h3' }: { headings?: 'h2' | 'h3'
       <p>Hosted workspaces have a daily limit in recipients over a rolling 24 hours, set by the sender score.</p>
       <div className="limits-table-scroll"><table className="limits-table">
         <thead><tr><th scope="col">Score</th><th scope="col">Grade</th><th scope="col">Daily limit</th><th scope="col">Per minute</th></tr></thead>
-        <tbody>{bands.map(([score, grade, limit]) => <tr key={score}><td>{score}</td><td>{grade}</td><td>{typeof limit === 'number' ? number(limit) : limit}</td><td>{typeof limit === 'number' ? number(perMinute(limit)) : number(500)}</td></tr>)}</tbody>
+        <tbody>{bands.map(([score, grade, limit]) => <tr key={score}><td>{score}</td><td>{grade}</td><td>{typeof limit === 'number' ? number(limit) : limit.split(' · ').map((part, i, all) => <span key={part} className="limits-table__part">{part}{i < all.length - 1 && ' ·'} </span>)}</td><td>{typeof limit === 'number' ? number(perMinute(limit)) : number(500)}</td></tr>)}</tbody>
       </table></div>
       <ul className="limits-notes">
         <li>Per minute: the daily limit ÷ 20, at least 50 and at most 500.</li>
