@@ -6,7 +6,7 @@ import { Alert, Button, Checkbox, ConfirmDialog, CopyButton, SecretCode, DataTab
 import { useSession } from '../../data/context'
 import { noteKinds, noteSeverities, noteStatuses, resolved, statusLabel, uiNotesApi, uiNotesKey, type NoteKind, type NoteSeverity, type NoteStatus, type UiNote } from '../../data/ui-notes'
 import { relativeTime, shortDateTime } from '../../lib/format'
-import { setUiNotesMode } from '../../lib/ui-notes-mode'
+import { notesModifierLabel, setUiNotesMode } from '../../lib/ui-notes-mode'
 import { NotesToolbar, noteColumnDefs, useOperatorTabs } from './skeletons'
 
 // Every UI note across the dashboard (staff's ⌘-click notes, features/ui-notes): filter by status, type and text, open
@@ -59,7 +59,7 @@ export function OperatorNotesPage() {
     { ...def('select'), label: canAct && rows.length ? <Checkbox checked={allChecked} onCheckedChange={on => setSelected(on ? new Set(rows.map(row => row.id)) : new Set())} label={<span className="sr-only">Select all</span>} /> : '',
       render: note => canAct ? <Checkbox checked={selected.has(note.id)} onCheckedChange={on => toggle(note.id, on)} label={<span className="sr-only">Select note</span>} /> : null },
     { ...def('shot'), render: note => <Thumb note={note} /> },
-    { ...def('note'), render: note => <span className="op-cell" title={note.body}>{note.severity === 'high' && <span className="op-flags">High · </span>}{note.body}</span> },
+    { ...def('note'), render: note => <span className="op-cell" title={note.body}>{note.severity === 'high' && <span className="op-flags">High · </span>}{note.body}</span>, cardRender: note => `${note.severity === 'high' ? 'High · ' : ''}${note.body}` },
     { ...def('status'), render: note => <Status status={note.status} /> },
     { ...def('page'), render: note => <span className="op-cell op-muted-id" title={note.page.path}>{note.page.route}</span> },
     { ...def('kind'), render: note => kindLabel(note.kind) },
@@ -81,7 +81,7 @@ export function OperatorNotesPage() {
         actions={selected.size ? <DropdownMenu label="Selected notes" title={`${selected.size} selected`} trigger={bulkTrigger} items={bulkItems} /> : bulkTrigger} />
       {notes.isError && !notes.data ? <ErrorState error={notes.error} onRetry={() => void notes.refetch()} /> : <>
         <DataTable className="op-notes" loading={notes.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} onRowClick={row => setOpen(row.id)} columns={columns}
-          empty={<EmptyState title={filtered ? 'No notes match' : 'No open notes'} description={filtered ? 'Try another status, type or search.' : 'Turn on UI notes in the account menu (⇧N), then ⌘-click anything in the dashboard to leave one.'} />} />
+          empty={<EmptyState title={filtered ? 'No notes match' : 'No open notes'} description={filtered ? 'Try another status, type or search.' : `Turn on UI notes (⇧N), then ${notesModifierLabel}-click anything to leave one.`} />} />
         {notes.hasNextPage && <Button className="op-more" loading={notes.isFetchingNextPage} onClick={() => void notes.fetchNextPage()}>Load more</Button>}
       </>}
     </div>

@@ -47,7 +47,7 @@ export function OperatorPage() {
 
 const flags = (row: OperatorQueueItem) => [row.paused && 'paused', row.quarantined > 0 && `${row.quarantined} quarantined`, row.watch && 'watched', row.strikes > 0 && `${row.strikes} ${row.strikes === 1 ? 'strike' : 'strikes'}`].filter(Boolean).join(' · ')
 const queueColumns: Column<OperatorQueueItem>[] = [
-  { ...def(queueColumnDefs, 'name'), render: row => <span className="op-cell">{row.name}<span className="op-muted-id"> · {row.workspaceId}</span></span>, cardRender: row => row.name },
+  { ...def(queueColumnDefs, 'name'), render: row => <span className="op-ws" title={`${row.name} · ${row.workspaceId}`}><span className="op-cell">{row.name}</span><span className="op-muted-id">{row.workspaceId}</span></span>, cardRender: row => row.name },
   { ...def(queueColumnDefs, 'step'), render: row => <StepBadge step={row.step} /> },
   { ...def(queueColumnDefs, 'reason'), render: row => <span className="op-cell" title={row.reasons.map(reason => reason.message).join('\n')}>{flags(row) && <span className="op-flags">{flags(row)} · </span>}{row.reasons[0]?.message ?? '—'}</span> },
   { ...def(queueColumnDefs, 'score'), render: row => row.score === null ? '—' : row.score.toFixed(1), cardRender: row => row.score === null ? 'Calibrating' : `Score ${row.score.toFixed(1)}` },
@@ -67,17 +67,31 @@ function Queue() {
   </>
 }
 
+const actionLabel = (row: OperatorAction) => label(row.action.replace(/^operator-/, '').replaceAll('-', '_'))
 const actionColumns: Column<OperatorAction>[] = [
-  { ...def(actionColumnDefs, 'action'), render: row => label(row.action.replace(/^operator-/, '').replaceAll('-', '_')) },
+  { ...def(actionColumnDefs, 'action'), render: actionLabel },
   { ...def(actionColumnDefs, 'at'), render: row => <At value={row.at} /> },
   { ...def(actionColumnDefs, 'workspace'), render: row => <Link to={`/operator/workspaces/${encodeURIComponent(row.workspaceId)}`} className="op-muted-id">{row.workspaceId}</Link> },
   { ...def(actionColumnDefs, 'reason'), render: row => <span className="op-cell" title={row.reason ?? undefined}>{row.reason ?? '—'}</span> },
   { ...def(actionColumnDefs, 'ticket'), render: row => <span className="op-cell">{row.ticketRef ?? '—'}</span>, cardRender: row => row.ticketRef ? `Ticket ${row.ticketRef}` : row.via ?? '' },
 ]
+// A table row's whole story, for what a cell cuts short (a phone has no hover to show it).
+function DetailDialog({ title, rows, onClose }: { title: string; rows: [string, ReactNode][]; onClose: () => void }) {
+  return <Dialog open onOpenChange={next => { if (!next) onClose() }} title={title} footer={<Button onClick={onClose}>Close</Button>}>
+    <Rows rows={rows.filter(([, value]) => value !== null && value !== '')} />
+  </Dialog>
+}
 function Actions() {
   const actions = useQuery({ queryKey: ['operator', 'actions'], queryFn: ({ signal }) => operatorApi.actions({}, signal) })
-  return actions.isError && !actions.data ? <ErrorState error={actions.error} onRetry={() => void actions.refetch()} />
-    : <DataTable className="op-table" loading={actions.isPending} skeletonRows={6} rows={actions.data ?? []} rowKey={row => `${row.at}:${row.workspaceId}:${row.action}:${row.requestId ?? ''}`} empty={<EmptyState title="No operator actions yet" />} columns={actionColumns} />
+  const [shown, setShown] = useState<OperatorAction | null>(null)
+  return <>
+    {actions.isError && !actions.data ? <ErrorState error={actions.error} onRetry={() => void actions.refetch()} />
+      : <DataTable className="op-table" loading={actions.isPending} skeletonRows={6} rows={actions.data ?? []} rowKey={row => `${row.at}:${row.workspaceId}:${row.action}:${row.requestId ?? ''}`} onRowClick={setShown} empty={<EmptyState title="No operator actions yet" />} columns={actionColumns} />}
+    {shown && <DetailDialog title={actionLabel(shown)} onClose={() => setShown(null)} rows={[
+      ['When', when(shown.at)], ['Workspace', <Link to={`/operator/workspaces/${encodeURIComponent(shown.workspaceId)}`}>{shown.workspaceId}</Link>],
+      ['Reason', shown.reason], ['Ticket', shown.ticketRef], ['Via', shown.via], ['Request', shown.requestId ? <span className="op-muted-id">{shown.requestId}</span> : null],
+    ]} />}
+  </>
 }
 
 // ---------------------------------------------------------------- one workspace
@@ -128,12 +142,12 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
   const factorColumns: Column<SenderScoreFactor>[] = [
     { ...def(factorColumnDefs, 'factor'), render: f => <span title={f.basis}>{f.label}</span> },
     { ...def(factorColumnDefs, 'score'), render: f => f.score === null ? 'Neutral' : f.score.toFixed(1), cardRender: f => f.score === null ? 'Neutral' : `Score ${f.score.toFixed(1)}` },
-    { ...def(factorColumnDefs, 'value'), render: f => f.value === null ? '—' : factorFormats[f.key](f.value) },
+    { ...def(factorColumnDefs, 'value'), render: f => f.value === null ? '—' : factorFormats[f.key](f.value), cardRender: f => f.value === null ? 'No data' : factorFormats[f.key](f.value) },
     { ...def(factorColumnDefs, 'weight'), render: f => number(f.weight), cardRender: f => `weight ${f.weight}` },
-    { ...def(factorColumnDefs, 'points'), render: f => f.points === null ? '—' : f.points.toFixed(2), cardRender: f => f.points === null ? '' : `${f.points.toFixed(2)} pts` },
+    { ...def(factorColumnDefs, 'points'), render: f => f.points === null ? '—' : f.points.toFixed(2), cardRender: f => f.points === null ? 'no points' : `${f.points.toFixed(2)} pts` },
   ]
   const domainColumns: Column<OperatorDomain>[] = [
-    { ...def(domainColumnDefs, 'name'), render: d => d.name },
+    { ...def(domainColumnDefs, 'name'), render: d => <span className="op-cell" title={d.name}>{d.name}</span>, cardRender: d => d.name },
     { ...def(domainColumnDefs, 'pool'), render: d => label(d.pool) },
     { ...def(domainColumnDefs, 'region'), render: d => d.region ?? '—' },
     { ...def(domainColumnDefs, 'dkim'), render: d => yes(d.dkim), cardRender: d => `DKIM ${d.dkim ? 'on' : 'off'}` },
@@ -144,7 +158,7 @@ function WorkspaceBody({ data, canAct, onReleaseCampaign }: { data: OperatorWork
   const [freeAction, setFreeAction] = useState<FreeAction | null>(null)
   const personFree = (userId: string) => billing.data?.free.people.find(p => p.userId === userId)?.free ?? null
   const memberColumns: Column<OperatorMember>[] = [
-    { ...def(memberColumnDefs, 'email'), render: m => <PrivateAddress value={m.email} /> },
+    { ...def(memberColumnDefs, 'email'), render: m => <span className="op-email" title={m.email}><PrivateAddress value={m.email} /></span> },
     { ...def(memberColumnDefs, 'role'), render: m => label(m.role) },
     { ...def(memberColumnDefs, 'user'), render: m => <span className="op-muted-id">{m.userId}</span> },
     { ...def(memberColumnDefs, 'billing'), render: m => !billing.data ? <SkeletonText width={96} /> : personFree(m.userId)?.live ? <span className="op-cell" title={personFree(m.userId)!.reason}>Free account{personFree(m.userId)!.until ? ` · until ${when(personFree(m.userId)!.until)}` : ''}</span> : <span className="muted">Billed</span> },
@@ -237,9 +251,11 @@ function Timeline({ workspaceId }: { workspaceId: string }) {
     queryFn: ({ pageParam, signal }) => operatorApi.timeline(workspaceId, pageParam, signal), getNextPageParam: page => page.nextCursor ?? undefined,
   })
   const rows = (timeline.data?.pages ?? []).flatMap((page, p) => page.items.map((item, i) => ({ ...item, key: `${p}:${i}:${item.at}:${item.kind}` })))
+  const [shown, setShown] = useState<OperatorTimelineItem | null>(null)
   return <section className="op-section"><SectionHeader title="Evidence timeline" />
     {timeline.isError && !timeline.data ? <ErrorState error={timeline.error} onRetry={() => void timeline.refetch()} /> : <>
-      <DataTable className="op-table" loading={timeline.isPending} skeletonRows={5} rows={rows} rowKey={row => row.key} columns={timelineColumns} empty={<EmptyState title="No events yet" />} />
+      <DataTable className="op-table" loading={timeline.isPending} skeletonRows={5} rows={rows} rowKey={row => row.key} onRowClick={setShown} columns={timelineColumns} empty={<EmptyState title="No events yet" />} />
+      {shown && <DetailDialog title="Event" onClose={() => setShown(null)} rows={[['Event', shown.title], ['Kind', <StatusBadge status={label(shown.kind)} tone={kindTone[shown.kind] ?? 'neutral'} />], ['When', when(shown.at)], ['Detail', detailText(shown)]]} />}
       {timeline.hasNextPage && <Button className="op-more" loading={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()}>Load more</Button>}
       {timeline.isError && timeline.data && <Alert tone="danger">{timeline.error instanceof Error ? timeline.error.message : 'Couldn’t load more events.'}</Alert>}
     </>}
