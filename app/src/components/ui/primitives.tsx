@@ -282,7 +282,7 @@ export function ErrorText({ error, fallback = 'Something went wrong. Please try 
 const permissionError = (error: unknown) => error instanceof Error && 'code' in error && permissionCodes.has(String(error.code));
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
   if (permissionError(error)) return <div className="ui-error-state"><Alert tone="neutral" title="Owners and admins only"><span>{error instanceof Error && 'text' in error ? String(error.text) : 'Only workspace owners and admins can open this.'}</span></Alert></div>;
-  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} /></Alert>{onRetry && <Button onClick={onRetry}>Try again</Button>}</div>;
+  return <div className="ui-error-state"><Alert tone="danger" title="Couldn’t load this content"><ErrorText error={error} />{onRetry && <div className="ui-error-state__retry"><Button onClick={onRetry}>Try again</Button></div>}</Alert></div>;
 }
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;

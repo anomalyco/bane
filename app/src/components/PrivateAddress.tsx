@@ -45,10 +45,15 @@ export function useMasked(text: string) {
     reserve()
     return onRulerChange(reserve)
   }, [text])
-  // A revealed address that its cell cuts short says the whole of it on hover.
+  // A revealed address that its cell cuts short (privacy mode on or off) says the whole of it on hover, and follows the cell as it resizes.
   useLayoutEffect(() => {
     const element = box.current
-    setClipped(revealed && !!element && element.scrollWidth > element.clientWidth + 1)
+    if (!revealed || !element) { setClipped(false); return }
+    const check = () => setClipped(element.scrollWidth > element.clientWidth + 1)
+    check()
+    const observer = new ResizeObserver(check)
+    observer.observe(element)
+    return () => observer.disconnect()
   }, [revealed, text])
   useEffect(() => {
     if (!hovered) return
