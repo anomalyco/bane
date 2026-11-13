@@ -30,10 +30,8 @@
    "findings": []
   },
   "Campaign editor · desktop": {
-   "score": 75,
-   "findings": [
-    "dup-value|###|sendability|size"
-   ]
+   "score": 67,
+   "findings": []
   },
   "Campaign review · desktop": {
    "score": 20,
@@ -227,10 +225,9 @@
    ]
   },
   "Overview · setup · desktop": {
-   "score": 55,
+   "score": 47,
    "findings": [
-    "dup-value|###|after emails|daily limit",
-    "dup-value|###|of real emails|daily limit"
+    "dup-value|###|after emails|daily limit"
    ]
   },
   "Received email · desktop": {
@@ -347,28 +344,20 @@
    "findings": []
   },
   "Sent email · desktop": {
-   "score": 58,
-   "findings": [
-    "dup-value|###|sendability|content"
-   ]
+   "score": 50,
+   "findings": []
   },
   "Sent email · junk-like · desktop": {
-   "score": 98,
-   "findings": [
-    "dup-value|###|sendability|size"
-   ]
+   "score": 90,
+   "findings": []
   },
   "Sent email · junk-like · phone": {
-   "score": 91,
-   "findings": [
-    "dup-value|###|sendability|size"
-   ]
+   "score": 83,
+   "findings": []
   },
   "Sent email · phone": {
-   "score": 51,
-   "findings": [
-    "dup-value|###|sendability|content"
-   ]
+   "score": 43,
+   "findings": []
   },
   "Settings · MCP connection · desktop": {
    "score": 19,

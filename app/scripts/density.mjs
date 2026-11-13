@@ -105,11 +105,11 @@ const probe = ({ LONG_BLOCK, INERT_WORDS, NEAR_PX }) => {
   const values = list.filter(b => !b.table && b.words <= 8 && !b.el.closest('svg, [aria-hidden=true], [class*=chart], [class*=axis], time, [role=img], [role=tablist], [role=radiogroup], [role=combobox], select')).flatMap(b => {
     const text = b.text.replace(/\d{1,2}:\d{2}(:\d{2})?/g, ' ').replace(new RegExp(`${MONTH}\\s+\\d{1,2}|\\d{1,2}\\s+${MONTH}|\\d{4}-\\d{2}-\\d{2}`, 'g'), ' ');
     // Not part of an identifier (INV-2209, order 4821's “#4821”) or a unit word glued on (30d, 24h).
-    // Thresholds (“≥ 2% and ≥ 25”) are rules, not readings. The word after a figure is its unit: “1,000 emails” and
-    // “1,000 recipients” are different things.
+    // Thresholds (“≥ 2% and ≥ 25”) are rules, not readings, and “/ 100” is a scale. The word after a figure is its
+    // unit: “1,000 emails” and “1,000 recipients” are different things.
     if (/[≥≤<>]/.test(text)) return [];
-    return [...text.matchAll(/(?<![\w#-])[$€£]?\d[\d,]*(\.\d+)?%?(?![\w-])/g)].map(m => ({ ...b, shown: m[0], value: m[0].replace(/[$€£,%]/g, '').replace(/\.0+$/, ''), unit: /^\s*([A-Za-z]+)/.exec(text.slice(m.index + m[0].length))?.[1]?.toLowerCase().replace(/s$/, '') ?? '' }))
-      .filter(v => v.value.replace(/^[0.]+/, '').replace(/\D/g, '').length >= 2 && !/^(19|20)\d\d$/.test(v.value));
+    return [...text.matchAll(/(?<![\w#-])[$€£]?\d[\d,]*(\.\d+)?%?(?![\w-])/g)].map(m => ({ ...b, at: m.index, shown: m[0], value: m[0].replace(/[$€£,%]/g, '').replace(/\.0+$/, ''), unit: /^\s*([A-Za-z]+)/.exec(text.slice(m.index + m[0].length))?.[1]?.toLowerCase().replace(/s$/, '') ?? '' }))
+      .filter(v => v.value.replace(/^[0.]+/, '').replace(/\D/g, '').length >= 2 && !/^(19|20)\d\d$/.test(v.value) && !(v.value === '100' && /(\/|of|–)\s*$/.test(text.slice(0, v.at))));
   });
   // A value's label: the nearest short text before it in its card (or its own words, “Limit 5,000/day”).
   const context = b => {
