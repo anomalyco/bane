@@ -86,6 +86,16 @@ test('email preview engine: forced colors and opt-in media use the selected them
   assert.doesNotMatch(gmail('gmail-ios', html), /background:#ffffff|#787123/);
   assert.match(gmail('gmail-ios', '<meta name="color-scheme" content="light only">' + html), /background:#ffffff/);
 });
+test('email preview engine: Gmail web auto-links visible text without creating navigation', async () => {
+  const { emulate } = await import('./src/email-preview/index.js');
+  const source = '<p>Visit example.org. <a href="https://example.org">example.org</a> &lt;hi&gt;</p>';
+  const render = (client: 'gmail-web'|'gmail-ios'|'outlook-web'|'outlook-new-windows') => emulate(source, {client,theme:'light'}).html;
+  const gmail = render('gmail-web');
+  assert.match(gmail, /Visit <a role="link">example\.org<\/a>\. <a role="link">example\.org<\/a> &lt;hi&gt;/);
+  assert.doesNotMatch(gmail, /href=/);
+  assert.match(render('gmail-ios'), /Visit example\.org\./);
+  assert.equal(render('outlook-web'), render('outlook-new-windows'));
+});
 test('SDK release: extraction accepts one bounded regular package at a fixed path',async t=>{
   const {mkdtempSync,mkdirSync,readFileSync,existsSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path'),{execFileSync,spawnSync}=await import('node:child_process');
   const workflow=await readFile(new URL('../.github/workflows/release.yml',import.meta.url),'utf8');
