@@ -72,10 +72,12 @@ export default {
     if (url.pathname === '/__calls') return Response.json(calls);
     const body = request.method === 'POST' ? await request.json() : null;
     calls.push(['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')]);
-    if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/') && url.pathname.endsWith('/parts/part_png')) {
-      // Bane redirects to signed storage; the fake answers with the bytes directly.
-      return new Response(Uint8Array.from(atob('${EMAIL_PNG}'), c => c.charCodeAt(0)), { headers: { 'content-type': 'image/png' } });
-    }
+    // Like Bane: inbox keys get an attachment as a short-lived signed link (on Bane's origin for R2-stored mail), and
+    // never the admin-only parts route.
+    if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
+    if (request.method === 'GET' && url.pathname === '/v1/objects/fixture-png.sig') return new Response(Uint8Array.from(atob('${EMAIL_PNG}'), c => c.charCodeAt(0)), { headers: { 'content-type': 'image/png' } });
+    if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/parts\\//.test(url.pathname)) return Response.json({ error: { code: 'ADMIN_REQUIRED' } }, { status: 403 });
+    if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/') && url.searchParams.get('includeDelivery') === 'true') return Response.json({ error: { code: 'ADMIN_REQUIRED' } }, { status: 403 });
     if (request.method === 'GET' && url.pathname.startsWith('/v1/inbound/messages/')) {
       const id = url.pathname.split('/').pop();
       // id → [thread, from, dmarc, to, subject, text]; unknown ids are Ada's Gmail question.
@@ -97,8 +99,8 @@ export default {
       const [threadId = 'thr_other', from = 'ada@acme.test', dmarc = 'PASS', to = 'support@dev.bane.mx', subject = 'Bounces from Gmail?', body = 'Why are Gmail bounces up this week?'] = table.map(v => v ?? undefined);
       const auto = id.includes('auto');
       const attachments = id === 'msg_image_1' || id === 'msg_abuse_1' ? [{ id: 'part_png', filename: 'bounce screenshot.png', contentType: 'image/png', size: 300, disposition: 'attachment' }, { id: 'part_pdf', filename: 'invoice.pdf', contentType: 'application/pdf', size: 900, disposition: 'attachment' }] : [];
-      return Response.json({ id, threadId, direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>',
-        headers: auto ? [{ name: 'Auto-Submitted', value: 'auto-replied' }] : [{ name: 'Subject', value: subject }], verdicts: { dmarc, spf: 'PASS' }, attachments });
+      const authentication = url.searchParams.get('includeAuthentication') === 'true' ? { authentication: { spf: 'PASS', dkim: null, dmarc }, automated: auto } : {};
+      return Response.json({ id, threadId, direction: 'inbound', subject, from: { name: null, address: from }, to: [to], text: body, replyText: body, messageId: '<' + id + '@mail.test>', ...authentication, attachments });
     }
     if (request.method === 'POST' && url.pathname === '/v1/inbound/threads') return Response.json({ id: 'msg_new', threadId: 'thr_new_' + calls.length }, { status: 202 });
     if (request.method === 'POST' && /^\\/v1\\/inbound\\/threads\\/[^/]+\\/reply$/.test(url.pathname)) return Response.json({ id: 'msg_reply', threadId: url.pathname.split('/')[4] }, { status: 202 });

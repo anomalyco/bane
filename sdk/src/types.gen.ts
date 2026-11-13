@@ -3092,6 +3092,11 @@ export type InboundMessageDetail = InboundMessage & {
     verdicts?: {
         [key: string]: string | boolean;
     };
+    authentication?: InboundMessageAuthentication;
+    /**
+     * With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically.
+     */
+    automated?: boolean;
     html: string | null;
     /**
      * With includeHtml=true: the HTML has more elements or deeper nesting than Bane parses (20,000 nodes, 256 levels deep). It is returned as stored; prefer text to rendering it.
@@ -3106,6 +3111,18 @@ export type InboundMessageDetail = InboundMessage & {
         contentId: string | null;
         url?: string | null;
     }>;
+};
+
+/**
+ * With includeAuthentication=true.
+ */
+export type InboundMessageAuthentication = {
+    spf: string | null;
+    dkim: string | null;
+    /**
+     * PASS when the From domain is aligned with a passing SPF or DKIM result.
+     */
+    dmarc: string | null;
 };
 
 export type InboundAttachmentDownload = {
@@ -19065,6 +19082,10 @@ export type GetInboundMessageData = {
          * Include delivery details for workspace logs (dashboard or unrestricted live manage access only).
          */
         includeDelivery?: 'true' | 'false';
+        /**
+         * Include the sender authentication results (SPF, DKIM, DMARC) and whether the message is automated (auto-replies, bounces, bulk and list mail). Available to any reader of the message.
+         */
+        includeAuthentication?: 'true' | 'false';
         includeHtml?: 'true' | 'false';
     };
     url: '/v1/inbound/messages/{messageId}';

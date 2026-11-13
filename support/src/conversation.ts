@@ -489,12 +489,11 @@ export class SupportConversation extends DurableObject<Env> {
     let message: InboundMessage;
     try { message = await api.message(next.message_id); }
     catch (error) { if (next.attempts >= 5) set('failed'); throw error; }
-    const sender = senderOf(message), headers = new Map((message.headers ?? []).map(h => [h.name.toLowerCase(), h.value]));
-    // Never answer automatic mail or ourselves (loops).
-    const automatic = !sender || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || sender === this.env.SUPPORT_ADDRESS.toLowerCase()
-      || (headers.get('auto-submitted') ?? 'no').toLowerCase() !== 'no' || /^(?:bulk|list|junk|auto_reply)$/i.test(headers.get('precedence') ?? '') || headers.has('x-autoreply') || headers.has('x-autorespond');
+    const sender = senderOf(message);
+    // Never answer automatic mail or ourselves (loops). Bane flags auto-replies, bounces, reports, bulk and list mail.
+    const automatic = !sender || message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || sender === this.env.SUPPORT_ADDRESS.toLowerCase();
     if (automatic) { set('dropped'); return true; }
-    const dmarc = String(message.verdicts?.dmarc ?? message.verdicts?.dmarcVerdict ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
+    const dmarc = String(message.authentication?.dmarc ?? 'NONE').toUpperCase(), dmarcPass = dmarc === 'PASS';
     const confirmed = next.state === 'confirmed';
     // Daily caps on inbound mail, per DMARC identity (or the unauthenticated bucket) and in total (review M5, R1). Over a
     // cap the message is kept for the team's digest, never dropped. Rerouted copies were counted where they arrived.

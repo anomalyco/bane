@@ -10872,6 +10872,13 @@
                   ]
                 }
               },
+              "authentication": {
+                "$ref": "#/components/schemas/InboundMessageAuthentication"
+              },
+              "automated": {
+                "type": "boolean",
+                "description": "With includeAuthentication=true: an auto-reply, bounce, delivery report, or bulk or list mail. Never answer it automatically."
+              },
               "html": {
                 "type": [
                   "string",
@@ -10935,6 +10942,36 @@
             ]
           }
         ]
+      },
+      "InboundMessageAuthentication": {
+        "type": "object",
+        "properties": {
+          "spf": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dkim": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dmarc": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PASS when the From domain is aligned with a passing SPF or DKIM result."
+          }
+        },
+        "required": [
+          "spf",
+          "dkim",
+          "dmarc"
+        ],
+        "description": "With includeAuthentication=true."
       },
       "InboundAttachmentDownload": {
         "type": "object",
@@ -54369,6 +54406,21 @@
             "required": false,
             "description": "Include delivery details for workspace logs (dashboard or unrestricted live manage access only).",
             "name": "includeDelivery",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false",
+              "description": "Include the sender authentication results (SPF, DKIM, DMARC) and whether the message is automated (auto-replies, bounces, bulk and list mail). Available to any reader of the message."
+            },
+            "required": false,
+            "description": "Include the sender authentication results (SPF, DKIM, DMARC) and whether the message is automated (auto-replies, bounces, bulk and list mail). Available to any reader of the message.",
+            "name": "includeAuthentication",
             "in": "query"
           },
           {

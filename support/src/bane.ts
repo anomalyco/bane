@@ -56,16 +56,18 @@ export function baneApi(env: Env, which: 'support' | 'intake' = 'support') {
     return parsed as T;
   }
   return {
-    /** A received message with its headers and verdicts (SPF, DKIM, DMARC), for sender checks. */
-    message: (messageId: string) => call<InboundMessage>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}?includeDelivery=true`),
-    /** One attachment's bytes (≤ limit, else null). Bane answers 307 to a signed storage URL, which is fetched directly. */
+    /**
+     * A received message with the sender's authentication results (SPF, DKIM, DMARC) and Bane's automated-mail flag, for
+     * sender checks. Inbox keys can't read the delivery projection (envelopes, headers), and don't need it.
+     */
+    message: (messageId: string) => call<InboundMessage>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}?includeAuthentication=true`),
+    /** One attachment's bytes (≤ limit, else null), through the short-lived signed link Bane returns for it. */
     async part(messageId: string, partId: string, limit: number): Promise<Uint8Array | null> {
-      if (!key) throw new MissingSecret(secret);
-      const path = `/v1/inbound/messages/${encodeURIComponent(messageId)}/parts/${encodeURIComponent(partId)}`;
-      let response = await env.BANE_API.fetch(`${env.BANE_ORIGIN}${path}`, { headers: { authorization: `Bearer ${key}`, 'user-agent': 'bane-support' }, redirect: 'manual' });
-      const location = response.headers.get('location');
-      if (response.status >= 300 && response.status < 400 && location) response = await fetch(location, { redirect: 'error' });
-      if (!response.ok) throw new BaneError(response.status, 'ATTACHMENT_UNAVAILABLE', `Bane answered ${response.status} for an attachment`);
+      const { url } = await call<{ url: string }>('GET', `/v1/inbound/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(partId)}`);
+      // Mail stored in R2 is served by Bane itself: stay on the binding for Bane's origin, and fetch other storage directly.
+      // Workers have no redirect: 'error'; a redirect is not followed, and fails the ok check below.
+      const response = new URL(url).origin === new URL(env.BANE_ORIGIN).origin ? await env.BANE_API.fetch(url, { redirect: 'manual' }) : await fetch(url, { redirect: 'manual' });
+      if (!response.ok) throw new BaneError(response.status, 'ATTACHMENT_UNAVAILABLE', `Storage answered ${response.status} for an attachment`);
       if (Number(response.headers.get('content-length') ?? 0) > limit) { await response.body?.cancel(); return null; }
       return readCapped(response.body, limit);
     },
@@ -89,7 +91,10 @@ export type InboundMessage = {
   to?: unknown; cc?: unknown; replyTo?: unknown; text?: string | null;
   replyText?: string | null; messageId?: string | null; inReplyTo?: string | null; references?: unknown;
   attachments?: { id: string; filename: string | null; contentType: string; size: number; disposition?: string }[];
-  headers?: { name: string; value: string }[]; verdicts?: Record<string, string | boolean>;
+  /** With includeAuthentication=true. dmarc is PASS when the From domain aligns with a passing SPF or DKIM result. */
+  authentication?: { spf: string | null; dkim: string | null; dmarc: string | null };
+  /** Bane's flag for auto-replies, bounces, delivery reports, and bulk or list mail. */
+  automated?: boolean;
 };
 
 /** The sender address of a received message, whichever shape the API returns. */
