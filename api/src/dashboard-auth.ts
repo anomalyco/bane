@@ -1,7 +1,7 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
 import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
-import {accountBrowserRoute,accountSessionActor,accountSessionUser} from './account-login.js';
+import {accountBrowserRoute,accountSessionActor,accountSessionUser,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
 
@@ -26,6 +26,7 @@ export async function invitationRecipient(runtime:Runtime,headers:Headers) {
   return verifiedDashboardUser(runtime,headers,true);
 }
 export const getDashboardActor = accountSessionActor;
+export { settleDefaultAccount };
 export function registerDashboardAuth(app: App) {
   app.on(['GET','POST','OPTIONS'],'/api/auth/*',accountBrowserRoute);
   app.openapi(createRoute({method:'get',path:'/v1/me',operationId:'getCurrentIdentity',tags:['Auth'],security,

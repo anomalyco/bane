@@ -36,6 +36,7 @@ export const queries = {
   keys: (cursor: string | undefined, showRevoked: boolean) => def(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked)),
   agentTokens: (showRevoked: boolean) => def(['agent-tokens', showRevoked], (api, signal) => api.credentials.agentTokens(showRevoked, signal)),
   mcpConnections: () => def(['mcp-connections'], (api, signal) => api.credentials.mcpConnections(signal)),
+  mcpConnection: (id: string) => def(['mcp-connections', id], (api, signal) => api.credentials.mcpConnection(id, signal)),
   mailboxKeys: (showRevoked: boolean) => def(['mailbox-keys', showRevoked], (api, signal) => api.mailboxes.keys(showRevoked, signal)),
   webhooks: (cursor?: string) => def(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor)),
   connection: () => def(['connection'], (_api, signal) => connectionApi.get(signal)),

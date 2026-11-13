@@ -12,6 +12,7 @@ import { settingsColumns } from './skeletons'
 import { receivingIssueTitle } from './receiving-issue-title'
 import './settings.css'
 import './domain-records.css'
+import { expectAccount } from '../../data/accounts'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
 export function useDomain(id: string, recheckUntil = 0) {
@@ -62,7 +63,7 @@ export function useDnsSetup(domain: Domain | undefined) {
 // Navigates this tab: providers refuse to be framed, and they return to /domains/<id> when done.
 function DnsConnect({ setup, open }: { setup: DnsSetup; open: boolean }) {
   return <div className="dns-connect" data-hidden={!open || undefined} inert={!open}>
-    <a className="ui-button ui-button--primary ui-button--md" href={setup.applyUrl!} rel="noopener">Configure DNS with {setup.provider!.name}<ArrowRight size={16} aria-hidden /></a>
+    <a className="ui-button ui-button--primary ui-button--md" href={setup.applyUrl!} rel="noopener" onClick={expectAccount}>Configure DNS with {setup.provider!.name}<ArrowRight size={16} aria-hidden /></a>
     <p className="muted">Or add the records below yourself.</p>
   </div>
 }
