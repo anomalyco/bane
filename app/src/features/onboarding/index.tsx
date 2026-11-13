@@ -32,10 +32,18 @@ async function retrying<T>(run: () => Promise<T>) {
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
 const message = (error: unknown) => error instanceof ApiError ? error.text : error instanceof Error ? error.message : 'Something went wrong. Try again.'
 
+// The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
+// limit, standing, domain counts) that Overview reads.
+function useRefreshIdentity() {
+  const client = useQueryClient()
+  return () => { void client.invalidateQueries({ queryKey: ['identity'], exact: true }).catch(() => {}) }
+}
+
 // A ready connection opens the add-domain step, then lifts the gate.
 function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnection | null>) {
   const client = useQueryClient()
   const sync = useConnectionCache()
+  const refreshIdentity = useRefreshIdentity()
   const workspaceId = useSession()?.identity?.workspaceId
   return useGuardedMutation({
     gcTime: 0,
@@ -44,6 +52,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
       if (connection?.state === 'ready' && workspaceId) setDomainStep(workspaceId, '')
       sync(connection)
       if (connection?.state !== 'ready') return
+      refreshIdentity()
       // Regions, discovery and limits now come from the new connection.
       void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'bane' && query.queryKey[2] !== 'connection' }).catch(() => {})
     },
@@ -101,6 +110,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const sending = stage.step === 'sending'
   const choosingDomain = stage.step === 'domain' && !stage.domainId
   const sync = useConnectionCache()
+  const refreshIdentity = useRefreshIdentity()
   // The chosen option shows its next step at once, while the connection request finishes.
   const [picked, setPicked] = useState<ConnectionKind | null>(null)
   // A connection being deleted (Back, or Hosted instead) is ignored until the delete lands.
@@ -130,6 +140,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     if (!sending || current?.state !== 'ready' || (picked === 'shared' && current.kind === 'byo')) return
     setDomainStep(workspaceId, '')
     sync(current)
+    refreshIdentity()
   }, [current?.state, current?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   function choose(kind: ConnectionKind) {
     shared.reset(); byo.reset()
@@ -165,12 +176,14 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   }, [awsPhase])
   const connectionState: ConnectionState | 'creating' = awsPhase === 'connected' ? 'ready' : current?.kind === 'byo' ? current.state : 'creating'
   const imported = importedCount(connection.data)
+  // Overview opens next: bring the identity's daily limit and counts up to date first.
+  const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
     ready={stage.step === 'domain'}
-    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, finishedStep)} />
+    onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
-  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, finishedStep)} /> }
+  else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={finish} /> }
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'

@@ -17,8 +17,9 @@ export function useSendingLimit() {
   const identity = useSession()?.identity
   const hosted = identity?.multiTenant === true && identity.connection?.kind === 'shared'
   // Seeded with the session's own /v1/me, so opening Overview doesn't ask again; it refreshes each minute.
+  // An identity without the limit (the connection cache keeps only a summary) is not a seed: the limit is read.
   const live = useQuery({ queryKey: ['bane', api.mode, 'sending-limit', identity?.workspaceId], enabled: hosted && api.mode === 'live', refetchInterval: 60_000, refetchIntervalInBackground: false,
-    initialData: identity ?? undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
+    initialData: identity?.connection?.sendingLimit !== undefined ? identity ?? undefined : undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
   return hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null
 }
 
