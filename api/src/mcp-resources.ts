@@ -113,7 +113,7 @@ export function resourceActions(name: string): Readonly<Record<string, string>> 
 }
 
 // Optional pagination is uniform across resources; list it once at the tool level.
-const commonArgs = new Set(['search', 'from', 'subjectContains', 'idempotencyKey', 'ifMatch']);
+const commonArgs = new Set(['search', 'from', 'subjectContains', 'ifMatch']);
 const commonBodyFields = new Set(['name', 'type', 'from', 'to', 'subject', 'text', 'html', 'email', 'ttlSeconds']);
 type Schema = Record<string, any>;
 
@@ -165,8 +165,9 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
       const fields = Object.entries(properties).filter(([k]) => required.includes(k) || commonArgs.has(k));
       return { properties: { action: { const: action }, ...Object.fromEntries(fields.map(([k, v]) => [k, fieldSummary(v as Schema, $defs as Schema)])) }, ...(required.length ? { required } : {}) };
     });
-    const pagination=Object.fromEntries(['cursor','limit'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,{}]]:[]}));
-    return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...pagination }, required: ['action'], oneOf },
+    // The optional retry key, like pagination, is uniform. List it once per resource instead of on every write.
+    const shared=Object.fromEntries(['cursor','limit','idempotencyKey'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='idempotencyKey'?{type:'string'}:{}]]:[]}));
+    return [{ name, description, inputSchema: { type: 'object' as const, properties: { action: { enum: visible.map(x => x.action) },...shared }, required: ['action'], oneOf },
       annotations: { readOnlyHint: visible.every(x => x.op.tool.annotations?.readOnlyHint), destructiveHint: visible.some(x => x.op.tool.annotations?.destructiveHint), openWorldHint: true } }];
   }).concat([describeTool]);
 }
