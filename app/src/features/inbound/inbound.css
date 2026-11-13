@@ -12,7 +12,7 @@
 .mailbox-search .ui-input { width: 100%; }
 .mailbox-list__summary { margin: 0 0 var(--space-4); font-size: var(--text-xs); }
 /* Rows bleed into the gutter so their text lines up with the search box; the unread dot sits in that gutter. */
-.mailbox-threads { display: grid; align-content: start; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)) 0 calc(-1 * var(--space-16)); padding: 0 var(--space-4) var(--space-16) 0; list-style: none; }
+.mailbox-threads { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; margin: 0 calc(-1 * var(--space-4)) 0 calc(-1 * var(--space-16)); padding: 0 var(--space-4) var(--space-16) 0; list-style: none; }
 .mailbox-thread-row { position: relative; display: grid; gap: 3px; width: 100%; padding: var(--space-12) var(--space-12) var(--space-12) var(--space-16); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text); text-align: left; font: inherit; cursor: pointer; transition: background var(--motion-duration, 120ms); }
 .mailbox-thread-row:hover { background: var(--color-hover); }
 .mailbox-thread-row[data-selected] { background: var(--color-active-bg, var(--color-hover)); }
@@ -85,8 +85,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .inbound-recipients { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: var(--space-8); margin: 0; color: var(--color-text); }
 .inbound-recipients__label { color: var(--color-muted); }
 .inbound-recipients__list { display: flex; flex-wrap: wrap; gap: 0 var(--space-12); min-width: 0; }
-.inbound-recipient { display: inline-flex; gap: var(--space-6); min-width: 0; overflow-wrap: anywhere; }
-.inbound-recipient__address { font-weight: 500; }
+.inbound-recipient { display: inline-flex; flex-wrap: wrap; gap: 0 var(--space-6); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.inbound-recipient__address { display: inline-block; min-width: 0; max-width: 100%; font-weight: 500; }
 .inbound-recipients-review > p.inbound-recipients__warning { color: var(--color-warning); }
 .inbound-recipients-review > p.mailbox-composer__to:not(.inbound-recipients) { margin: 0; }
 .mailbox-composer .ui-field { gap: var(--space-4); }
@@ -102,7 +102,13 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
   .mailbox-conversation__header { flex-wrap: wrap; }
   .mailbox-conversation__title { order: 1; flex-basis: 100%; }
   .mailbox-conversation__actions { margin-left: auto; }
+  .mailbox-page[data-thread-open] .ui-page-header .cluster > a.ui-icon-button { display: none; }
+  .mailbox-message__from { flex-wrap: wrap; gap: 0 var(--space-8); overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+  .mailbox-message__from .muted { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: visible; }
 }
+/* An address never runs past its line: masked, the blurred run is cut there; revealed, a longer one wraps inside it. */
+.mailbox-message__from .private-address__value, .inbound-recipient__address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.mailbox-message__from .private-address[data-revealed] > .private-address__value, .inbound-recipient__address .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 
 /* Inbound webhooks and keys: two-line checkbox labels align the box with the first line. */
 .mailbox-webhook-events { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
@@ -279,4 +285,8 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
   .app-shell--compact .mailbox-reader { overflow: visible; }
   .app-shell--compact .mailbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
   .app-shell--compact .mailbox-list .ui-tabs { margin-inline: calc(-1 * var(--bleed, 0px)); padding-inline: var(--bleed, 0px); }
+}
+/* Phone: the idle reply box is just the field; the recipients, the reply target and Send show once it has focus or text. */
+@media (max-width: 640px) {
+  .app-shell--compact .mailbox-composer:not(:focus-within):not([data-filled]) :is(.inbound-composer__target, .inbound-recipients-review, .mailbox-composer__actions) { display: none; }
 }
