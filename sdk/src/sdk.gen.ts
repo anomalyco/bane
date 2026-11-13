@@ -2926,7 +2926,9 @@ export const getEndpoint = <ThrowOnError extends boolean = false>(options: Optio
 });
 
 /**
- * Change an endpoint’s rate, retry policy, pause state or URL
+ * Edit an endpoint: its name, type, URL, pause state, rate or retry policy
+ *
+ * Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.
  */
 export const updateEndpoint = <ThrowOnError extends boolean = false>(options: Options<UpdateEndpointData, ThrowOnError>): RequestResult<UpdateEndpointResponses, UpdateEndpointErrors, ThrowOnError> => (options.client ?? client).patch<UpdateEndpointResponses, UpdateEndpointErrors, ThrowOnError>({
     security: [

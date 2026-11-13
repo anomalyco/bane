@@ -48,8 +48,13 @@ const CreateEndpoint = z.discriminatedUnion('type', [
   }).strict(),
 ]).openapi('CreateEndpoint');
 const UpdateEndpoint = Policy.partial().extend({
+  name: Name.optional().describe('Rename it. Refused while an attached ritual calls it by the current name.'),
+  type: z.enum(types).optional().describe('Switch a Slack endpoint to Discord or back, with the new url. Webhook and forward endpoints keep their type.'),
   paused: z.boolean().optional().describe('Hold deliveries. Queued calls resume when unpaused.'),
-  url: Url.optional().describe('Replace a Slack, Discord or webhook URL.'),
+  url: Url.optional().describe('Replace a Slack, Discord or webhook URL. Write-only: omit it to keep the current URL. Replacing a webhook URL drops its custom headers unless headers are sent with it.'),
+  headers: WebhookHeaders.optional().describe('Replace a webhook endpoint’s custom headers. Write-only.'),
+  timeoutSeconds: z.number().int().min(1).max(30).optional().describe('Webhook endpoints only.'),
+  retryAttempts: z.number().int().min(0).max(10).optional().describe('Webhook endpoints only.'),
 }).strict().openapi('UpdateEndpoint');
 const NameParam = z.object({ name: Name });
 
@@ -114,6 +119,10 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
   return { name: r.name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
 }
 const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
+/** The attached rituals that call endpoints.<name>. Their programs (stored once a ritual is attached) resolved the name and checked its type when saved. */
+async function ritualsCalling(tx: DbExecutor, w: string, name: string) {
+  return (await tx.execute<{ key: string }>(sql`SELECT r.key FROM mail_ritual_configs c, jsonb_each(c.programs->'rituals') r WHERE c.workspace_id=${w} AND r.value->'refs' ? ${'endpoint:' + name} ORDER BY r.key`)).rows.map(r => r.key);
+}
 async function findEndpoint(db: DbExecutor, w: string, name: string) {
   const row = (await endpointRows(db, w, { name, limit: 1 }))[0];
   if (!row) throw missingEndpoint(name);
@@ -223,8 +232,11 @@ export function registerEndpoints(app: App) {
     if (created.status === 'pending') c.get('actor').wakeJobs = 1;
     return c.json({ ...created, ...(secret ? { secret } : {}) }, 201);
   });
-  app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Change an endpoint’s rate, retry policy, pause state or URL', request: { params: NameParam, body: json(UpdateEndpoint) }, responses: { 200: response(Endpoint), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Edit an endpoint: its name, type, URL, pause state, rate or retry policy',
+    description: 'Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.',
+    request: { params: NameParam, body: json(UpdateEndpoint) }, responses: { 200: response(Endpoint), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name, q = c.req.valid('json');
+    let current = name;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
       const found = await findEndpoint(tx, w, name);
@@ -237,11 +249,33 @@ export function registerEndpoints(app: App) {
       const row = { ...found, ...held };
       if (q.idempotent && row.type !== 'webhook') throw new ApiError(422, 'UNSUPPORTED_IDEMPOTENCY', 'Only webhook endpoints can declare that they deduplicate by Idempotency-Key.', 'idempotent');
       if (q.paused === false && q.url === undefined && needsUrl(row)) throw resumeNeedsUrl();
-      if (q.url !== undefined) {
-        if (row.type === 'forward') throw new ApiError(422, 'FORWARD_ADDRESS_FIXED', 'A forward address cannot change. Create a new forward endpoint so its recipient can confirm.', 'url');
-        if (row.type === 'webhook') await tx.update(mailboxWebhooks).set({ url: webhookUrl(c.env, q.url), encryptedHeaders: await encryptWebhookHeaders(c.env, [], webhookSecretBinding(w, row.hook_id)), updatedAt: new Date().toISOString() }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
-        else await tx.execute(sql`UPDATE mail_endpoints SET encrypted_value=${await encrypt(c.env, pinnedUrl(row.type, q.url), w + ':endpoint:' + row.hook_id)} WHERE workspace_id=${w} AND hook_id=${row.hook_id}`);
+      const rename = q.name !== undefined && q.name !== name ? q.name : undefined, retype = q.type !== undefined && q.type !== row.type ? q.type : undefined, type = retype ?? row.type;
+      const chat = (t: EndpointType) => t === 'slack' || t === 'discord';
+      if (retype && !(chat(row.type) && chat(retype))) throw new ApiError(422, 'ENDPOINT_TYPE_FIXED', `Only Slack and Discord endpoints switch type. Create a new ${retype} endpoint instead.`, 'type');
+      if (retype && q.url === undefined) throw new ApiError(422, 'ENDPOINT_URL_REQUIRED', `Switching ${name} to ${retype === 'slack' ? 'Slack' : 'Discord'} needs its ${retype === 'slack' ? 'Slack incoming webhook' : 'Discord webhook'} URL.`, 'url');
+      const webhookOnly = (['headers', 'timeoutSeconds', 'retryAttempts'] as const).find(k => q[k] !== undefined);
+      if (webhookOnly && row.type !== 'webhook') throw new ApiError(422, 'WEBHOOK_SETTING_ONLY', `${webhookOnly} applies to webhook endpoints only.`, webhookOnly);
+      if (rename || retype) {
+        // Renaming or retyping it would leave an attached ritual calling a name that no longer exists, or with the wrong payload.
+        const callers = await ritualsCalling(tx, w, name);
+        if (callers.length) throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${callers.length === 1 ? 'ritual' : 'rituals'} ${callers.join(', ')} ${callers.length === 1 ? 'calls' : 'call'} endpoints.${name}. To ${rename ? 'rename' : 'switch'} it, create a new endpoint, point the ${callers.length === 1 ? 'ritual' : 'rituals'} at it, then delete this one.`, rename ? 'name' : 'type');
       }
+      if (rename) await assertEndpointName(tx, w, rename, row.hook_id);
+      if (q.url !== undefined && row.type === 'forward') throw new ApiError(422, 'FORWARD_ADDRESS_FIXED', 'A forward address cannot change. Create a new forward endpoint so its recipient can confirm.', 'url');
+      if (row.type === 'webhook') {
+        // A new URL drops the custom headers meant for the old one, unless new headers come with it.
+        const headers = q.headers ?? (q.url !== undefined ? [] : undefined);
+        if (rename || q.url !== undefined || headers !== undefined || q.timeoutSeconds !== undefined || q.retryAttempts !== undefined)
+          await tx.update(mailboxWebhooks).set({ ...(rename ? { key: rename, name: rename } : {}), ...(q.url !== undefined ? { url: webhookUrl(c.env, q.url) } : {}), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, webhookSecretBinding(w, row.hook_id)), timeoutSeconds: q.timeoutSeconds, retryAttempts: q.retryAttempts, updatedAt: new Date().toISOString() }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
+      } else {
+        if (q.url !== undefined) await tx.execute(sql`UPDATE mail_endpoints SET encrypted_value=${await encrypt(c.env, pinnedUrl(type, q.url), w + ':endpoint:' + row.hook_id)} WHERE workspace_id=${w} AND hook_id=${row.hook_id}`);
+        if (rename || retype) {
+          const ref = `${type}:${rename ?? name}`;
+          await tx.execute(sql`UPDATE mail_endpoints SET ref=${ref} WHERE workspace_id=${w} AND hook_id=${row.hook_id}`);
+          await tx.update(mailboxWebhooks).set({ name: ref, updatedAt: new Date().toISOString() }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
+        }
+      }
+      current = rename ?? name;
       if (q.paused !== undefined || q.url !== undefined) {
         // A forward has no URL to send again (its address is shown and fixed), so a mark on it means nothing: resuming clears it.
         await tx.update(mailboxWebhooks).set({ paused: q.paused, ...(q.url !== undefined || row.type === 'forward' ? { reconfirm: false } : {}) }).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
@@ -252,21 +286,21 @@ export function registerEndpoints(app: App) {
         await tx.execute(sql`INSERT INTO mail_action_policies(workspace_id,hook_id,per_minute,retry_on_timeout,idempotent) VALUES(${w},${row.hook_id},${next.perMinute},${next.retryOnTimeout},${next.idempotent})
           ON CONFLICT(workspace_id,hook_id) DO UPDATE SET per_minute=excluded.per_minute,retry_on_timeout=excluded.retry_on_timeout,idempotent=excluded.idempotent`);
       }
+      // URLs and header values are credentials: only that they changed is recorded (in fields), never their values.
       await recordAudit(tx, c, { action: 'endpoint.update', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, details: { fields: Object.keys(q) },
-        after: { name, type: row.type, paused: q.paused, perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent } });
+        ...(rename || retype ? { before: { name, type: row.type } } : {}),
+        after: { name: current, type, paused: q.paused, perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent, timeoutSeconds: q.timeoutSeconds, retryAttempts: q.retryAttempts, headerNames: q.headers?.map(h => h.name) } });
     });
-    return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, name)), 200);
+    return c.json(await endpointView(c.env, w, await findEndpoint(c.env.db, w, current)), 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint no ritual or route uses', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = ritualAdmin(c, true).workspaceId, name = c.req.valid('param').name;
     await c.env.db.transaction(async tx => {
       await lockMailboxLane(tx, w, 'address');
       const row = await findEndpoint(tx, w, name);
-      const used = (await tx.execute<{ ritual: boolean; route: boolean }>(sql`SELECT
-        EXISTS(SELECT FROM mail_ritual_configs WHERE workspace_id=${w} AND programs->'refs' ? ${'endpoint:' + name}) AS ritual,
-        EXISTS(SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${row.hook_id}) AS route`)).rows[0]!;
-      if (used.ritual) throw new ApiError(409, 'ENDPOINT_IN_USE', `An attached ritual calls endpoints.${name}. Remove the call or detach the ritual, then delete.`);
-      if (used.route) throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${name}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
+      const callers = await ritualsCalling(tx, w, name);
+      if (callers.length) throw new ApiError(409, 'ENDPOINT_IN_USE', `Attached ${callers.length === 1 ? 'ritual' : 'rituals'} ${callers.join(', ')} ${callers.length === 1 ? 'calls' : 'call'} endpoints.${name}. Remove the call or detach the ${callers.length === 1 ? 'ritual' : 'rituals'}, then delete.`);
+      if ((await tx.execute(sql`SELECT FROM mail_routes WHERE workspace_id=${w} AND destinations ? ${row.hook_id} LIMIT 1`)).rowCount) throw new ApiError(409, 'ENDPOINT_IN_USE', `A route delivers to ${name}. Remove it from routes first (deleteInboundWebhook with detach=true does both).`);
       await tx.delete(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, w), eq(mailboxWebhooks.id, row.hook_id)));
       await recordAudit(tx, c, { action: 'endpoint.delete', workspaceId: w, target: { type: 'endpoint', id: row.hook_id }, before: { name, type: row.type } });
     });

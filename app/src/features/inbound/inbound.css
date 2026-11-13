@@ -188,6 +188,7 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .ritual-attach .ui-check-field { min-height: var(--control-height); }
 .ritual-row-actions { display: inline-flex; gap: var(--space-4); }
 .ritual-error { color: var(--color-danger); }
+.endpoint-recipient { margin: 0; font-size: var(--text-sm); }
 .ritual-attach__note { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); }
 /* The save bar: in the page flow at the end (its space is reserved), stuck to the bottom of the view while scrolling. */
 /* Left-aligned, so toasts (bottom right) never cover Save. */

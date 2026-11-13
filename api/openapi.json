@@ -8274,6 +8274,21 @@
             "type": "boolean",
             "description": "The receiver deduplicates by the Idempotency-Key header, so unknown outcomes are replayed. Webhooks only."
           },
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+            "description": "Rename it. Refused while an attached ritual calls it by the current name."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "slack",
+              "discord",
+              "webhook",
+              "forward"
+            ],
+            "description": "Switch a Slack endpoint to Discord or back, with the new url. Webhook and forward endpoints keep their type."
+          },
           "paused": {
             "type": "boolean",
             "description": "Hold deliveries. Queued calls resume when unpaused."
@@ -8281,7 +8296,45 @@
           "url": {
             "type": "string",
             "maxLength": 2048,
-            "description": "Replace a Slack, Discord or webhook URL."
+            "description": "Replace a Slack, Discord or webhook URL. Write-only: omit it to keep the current URL. Replacing a webhook URL drops its custom headers unless headers are sent with it."
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "Replace a webhook endpoint’s custom headers. Write-only."
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30,
+            "description": "Webhook endpoints only."
+          },
+          "retryAttempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10,
+            "description": "Webhook endpoints only."
           }
         },
         "additionalProperties": false
@@ -42120,7 +42173,8 @@
           "Endpoints"
         ],
         "operationId": "updateEndpoint",
-        "summary": "Change an endpoint’s rate, retry policy, pause state or URL",
+        "summary": "Edit an endpoint: its name, type, URL, pause state, rate or retry policy",
+        "description": "Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.",
         "parameters": [
           {
             "schema": {

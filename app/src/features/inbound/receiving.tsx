@@ -15,7 +15,7 @@ import { NewInboxDialog } from './inboxes'
 import { ConnectAgentButton } from '../docs/connect-agent'
 import { ago, expiresIn, receivingDomains, useOverview, type Overview, type OverviewEndpoint, type RouteEntry } from './overview'
 import { Chain, ConceptLine, Match, RitualIcon, RouteIcon, TargetIcon, Targets } from './parts'
-import { CreatedEndpointDialog, endpointStatusLabel, endpointStatusTone, NewEndpointDialog, type Endpoint } from './ritual-connections'
+import { CreatedEndpointDialog, EndpointDialog, endpointStatusLabel, endpointStatusTone, type EditableEndpoint, type Endpoint } from './ritual-connections'
 import { RouteEditor } from './routing'
 import { actorText, useLiveVersion } from './live'
 import '../settings/settings.css'
@@ -130,6 +130,8 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
   const toast = useToast()
   const [creating, setCreating] = useState(false)
   const [created, setCreated] = useState<(Endpoint & { secret?: string }) | null>(null)
+  // Kept after closing, so the dialog's title and fields don't change while it animates out.
+  const [editing, setEditing] = useState<EditableEndpoint | null>(null), [editOpen, setEditOpen] = useState(false)
   async function act(e: OverviewEndpoint, path: string, method: string, body: unknown, done: string) {
     try {
       const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
@@ -151,6 +153,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
         { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
         { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
         { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <span /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
+          { label: 'Edit', onSelect: () => { setEditing(e); setEditOpen(true) } },
           ...(e.type !== 'forward' ? [{ label: 'Send a test message', onSelect: () => void act(e, '/test', 'POST', undefined, `Test posted to ${e.call}.`) }] : []),
           ...(e.type === 'forward' && e.status !== 'ready' ? [{ label: 'Resend confirmation', onSelect: () => void act(e, '/verification', 'POST', {}, 'Confirmation email queued.') }] : []),
           { label: e.status === 'paused' ? 'Resume' : 'Pause', onSelect: () => void act(e, '', 'PATCH', { paused: e.status !== 'paused' }, e.status === 'paused' ? 'Resumed.' : 'Paused. Calls wait until you resume.') },
@@ -158,7 +161,8 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
         ]} /> },
       ]} />
     {overview.endpointsTruncated && <p className="muted rcv-truncated">Showing the first 100 endpoints and 100 inbound webhooks. <Link to="/receiving/webhooks">Event webhooks</Link> lists every inbound webhook.</p>}
-    <NewEndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
+    <EndpointDialog open={creating} onOpenChange={setCreating} onCreated={e => { setCreating(false); setCreated(e); refresh() }} />
+    <EndpointDialog open={editOpen} editing={editing} onOpenChange={setEditOpen} onSaved={e => { setEditOpen(false); toast(`Saved ${e.name}.`, 'success'); refresh() }} />
     <CreatedEndpointDialog created={created} onClose={() => setCreated(null)} />
   </div>
 }
