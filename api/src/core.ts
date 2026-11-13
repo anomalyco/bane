@@ -6,6 +6,7 @@ import type { SESv2Client } from '@aws-sdk/client-sesv2';
 import { sql } from 'drizzle-orm';
 import { errorCodeOf, errorTypeOf, log, logFallback, stackFrames } from './log.js';
 import type { ReadyConnection } from './provider-credentials.js';
+import { SECURITY_HEADERS } from './security-headers.js';
 
 export type Database = NodePgDatabase;
 export const SuppressionReason = z.string().describe('Reason recorded when this send was suppressed. For a multi-recipient send blocked locally, this is the first blocked recipient in To, Cc, Bcc order.');
@@ -372,14 +373,7 @@ export function logError(error: unknown, fields: Record<string, unknown> & { cod
   } catch { return logFallback(); }
   log(level, entry);
 }
-export const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://support.bane.mx wss://support.bane.mx https://support.dev.bane.mx wss://support.dev.bane.mx; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
-  'X-Frame-Options': 'DENY',
-  'X-Content-Type-Options': 'nosniff',
-  'Referrer-Policy': 'no-referrer',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
-  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-} as const;
+export { SECURITY_HEADERS };
 export function applySecurityHeaders(headers: Headers): Headers {
   // Route-specific policies (notably OAuth form redirects) take precedence.
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!headers.has(name)) headers.set(name, value);

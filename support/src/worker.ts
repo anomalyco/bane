@@ -6,6 +6,7 @@ import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
 import { log, logError } from './log.js';
+import { addresses } from '../../api/src/brand.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 import { INTAKE, type Mailbox } from './intake.js';
@@ -56,7 +57,7 @@ async function startChat(request: Request, env: Env): Promise<Response> {
   if (env.CHAT_START && !(await env.CHAT_START.limit({ key: `user:${handoff.userId}` })).success) return fail(429, 'RATE_LIMITED', 'Too many conversations started. Try again in a minute.', { ...headers, 'retry-after': '60' }, { retryAfter: 60 });
   const now = Date.now(), dayAgo = now - 86_400_000;
   const today = await env.DB.prepare('SELECT count(*) AS n FROM conversations WHERE user_id = ? AND created_at > ?').bind(handoff.userId, dayAgo).first<{ n: number }>();
-  if ((today?.n ?? 0) >= CONVERSATIONS_PER_DAY) return fail(429, 'RATE_LIMITED', `You can start ${CONVERSATIONS_PER_DAY} support conversations a day. Continue an earlier one, or email support@bane.mx.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 });
+  if ((today?.n ?? 0) >= CONVERSATIONS_PER_DAY) return fail(429, 'RATE_LIMITED', `You can start ${CONVERSATIONS_PER_DAY} support conversations a day. Continue an earlier one, or email ${addresses.support}.`, { ...headers, 'retry-after': '3600' }, { retryAfter: 3600 });
   const conversationId = newId('conv');
   // The handoff's jti opens one conversation; the unique key makes a concurrent replay lose.
   const claimed = await env.DB.batch([

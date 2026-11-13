@@ -10,6 +10,7 @@ import { SendingLimitsGuide } from '../score/limits'
 import { DocsArticleSkeleton, useDocsAudience } from './frame'
 import { openApiQuery } from './openapi'
 import './docs.css'
+import { publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
 type Schema = Record<string, any>
 type Operation = { id: string; method: string; path: string; tag: string; summary: string; description: string; parameters: Schema[]; requestBody?: Schema; responses: Record<string, Schema>; samples: {lang: string; label: string; source: string}[] }
@@ -18,8 +19,8 @@ type Document = { info: {title: string; version: string; description?: string; '
 const methods = ['get', 'post', 'put', 'patch', 'delete']
 // Tag names are API identifiers (ApiKeys); people read them with spaces (API keys).
 const tagTitle = (tag: string) => tag === 'ApiKeys' ? 'API keys' : tag === 'Auth' ? 'Agent tokens' : tag
-// Examples are written for bane.mx; this instance's own origin goes in their place, so a copied command works here.
-const here = (code: string, origin: string) => code.replaceAll('https://bane.mx', origin)
+// Examples are written for the hosted origin; this instance's own goes in their place, so a copied command works here.
+const here = (code: string, origin: string) => code.replaceAll(publicOrigin, origin)
 function operationTitle(value: string) {
   return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => /^mcp$/i.test(word) ? 'MCP' : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' ')
 }
@@ -180,7 +181,7 @@ function useAgentPrompt() {
 function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
   const prompt = useAgentPrompt()
   const groups = [...new Set(all.map(operation => operation.tag))]
-  const install = 'npm install @banemx/sdk'
+  const install = `npm install ${sdkPackage}`
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>Bane API</h1><p>{document.info.description}</p></header>
     {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
@@ -188,7 +189,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
       {guides.map(guide => <Link key={guide.id} to={`/docs/${guide.id}`}><strong>{guide.title}</strong><span>{guide.summary}</span></Link>)}
     </div></section>
     <AgentPrompt prompt={prompt} />
-    <section id="sdk" className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/@banemx/sdk">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
+    <section id="sdk" className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href={`https://www.npmjs.com/package/${sdkPackage}`}>published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section id="formats" className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>API index for agents and text tools, with a complete reference per tag.</span></a>
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>

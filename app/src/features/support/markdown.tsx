@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode } from 'react'
 import { Link } from 'react-router'
+import { hostedHosts, supportHost } from '../../../../api/src/brand'
 
 // The agent's restricted Markdown (support/PROTOCOL.md §4.2): paragraphs, **bold**, `code`, fenced code, numbered and
 // bulleted lists, and links. Built as React elements, never HTML. Links render only to Bane's own sites and repository;
@@ -42,7 +43,7 @@ function blocks(source: string): Block[] {
   return out
 }
 
-const SITES = new Set(['bane.mx', 'dev.bane.mx', 'support.bane.mx', 'support.dev.bane.mx'])
+const SITES = new Set(hostedHosts.flatMap(host => [host, supportHost(host)]))
 export function allowedLink(href: string): URL | null {
   let url: URL
   try { url = new URL(href) } catch { return null }

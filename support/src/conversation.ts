@@ -11,6 +11,7 @@ import { customerBlock, firstName, greetingBundle, type Customer } from './agent
 import type { Harness, HarnessEvent, TurnResult } from './agent/harness.js';
 import { createHarness, MODEL, promptFragments } from './agent/opencode.js';
 import { ToolFailure, type TicketInput, type ToolHost } from './agent/tools.js';
+import { addresses } from '../../api/src/brand.js';
 
 // One support conversation (chat or email) per Durable Object (design §1). It holds:
 // - the support grant, in a private SQLite table: never in a message, a tool argument or result, a log or the socket;
@@ -301,13 +302,13 @@ export class SupportConversation extends DurableObject<Env> {
     // Daily caps (review M5): this person's turns and everyone's, before any model call.
     const allowed = await this.turnAllowed(meta);
     if (!allowed.ok) {
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? 'Bane support is answering a lot of questions today. Email support@bane.mx and the team will reply.' : 'You’ve reached today’s limit for support answers. Email support@bane.mx and the team will reply.', retryable: false });
+      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `Bane support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
       return;
     }
     // Fail closed before any model call: without the gateway key there is no agent, and the panel says so.
     if (!this.env.CONSOLE_GATEWAY_KEY) {
       log('error', { event: 'chat', code: 'SECRET_MISSING', secret: 'CONSOLE_GATEWAY_KEY' });
-      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: 'Support isn’t fully set up yet. Please email support@bane.mx.', retryable: false });
+      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: `Support isn’t fully set up yet. Please email ${addresses.support}.`, retryable: false });
       return;
     }
     let text: string;
@@ -334,7 +335,7 @@ export class SupportConversation extends DurableObject<Env> {
       const missing = error instanceof MissingSecret ? error.secret : null;
       logError(error, { event: 'chat', code: missing ? 'SECRET_MISSING' : 'TURN_FAILED' });
       this.broadcast({ type: 'message.end', messageId, text: '', redacted: false });
-      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: missing ? 'Support isn’t fully set up yet. Please email support@bane.mx.' : 'Something went wrong on my side. Try again in a moment.', retryable: !missing });
+      this.broadcast({ type: 'error', code: 'TURN_FAILED', message: missing ? `Support isn’t fully set up yet. Please email ${addresses.support}.` : 'Something went wrong on my side. Try again in a moment.', retryable: !missing });
       this.broadcast({ type: 'status', busy: false });
       return;
     }
@@ -418,7 +419,7 @@ export class SupportConversation extends DurableObject<Env> {
       fileTicket: async (input: TicketInput) => {
         const meta = this.meta()!, filed = await this.harnessTicket(meta, input, this.currentDmarc);
         if (filed.refused === 'person') throw new ToolFailure('This customer already filed today’s maximum of tickets, so this couldn’t be filed. Tell them the Bane team already has their earlier tickets today and can be reached by replying to one of those emails; answer what you can yourself.');
-        if (filed.refused) throw new ToolFailure('Bane support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email support@bane.mx; answer what you can yourself.');
+        if (filed.refused) throw new ToolFailure(`Bane support has reached its ticket limit for today (for everyone, not this customer), so this couldn’t be filed. Tell them the team has been alerted and they can email ${addresses.support}; answer what you can yourself.`);
         return filed.created
           ? `Filed ${filed.id}. Tell the customer: you've passed it to the Bane team as ${filed.id}; someone will reply by email to ${filed.replyTo ?? 'their account address'}, usually within one business day; you can't promise an outcome, but you've included what you found.`
           : `Added to the existing ticket ${filed.id}. Tell the customer you've added this to ${filed.id}.`;

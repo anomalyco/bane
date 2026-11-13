@@ -302,7 +302,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
+          role-to-assume: arn:aws:iam::604439173067:role/github/nightmail-${{ env.STAGE }}
           aws-region: us-east-1
 
       - name: Mint a short-lived Cloudflare token
@@ -366,7 +366,7 @@ jobs:
           if pulumi stack select "$STAGE" >/dev/null 2>&1; then
             echo "stack $STAGE already exists"
           else
-            pulumi stack init "$STAGE" --secrets-provider "awskms://alias/pulumi/bane-${STAGE}?region=us-east-1"
+            pulumi stack init "$STAGE" --secrets-provider "awskms://alias/pulumi/nightmail-${STAGE}?region=us-east-1"
           fi
 
       - name: Setup Bun
@@ -391,6 +391,18 @@ jobs:
 
       - *stage-tip
 
+      - name: Preview and check the gateway secret migration
+        if: steps.guard.outputs.skip != 'true' && !inputs.preview
+        working-directory: infra/pulumi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+          PULUMI_BACKEND_URL: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+        run: |
+          set -euo pipefail
+          umask 077
+          pulumi preview --stack "$STAGE" --save-plan "$RUNNER_TEMP/deploy.plan" --suppress-outputs --non-interactive
+          python3 ../../.github/scripts/check-gateway-plan.py "$STAGE" "$RUNNER_TEMP/deploy.plan"
+
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
         uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
@@ -398,6 +410,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
         with:
           command: ${{ inputs.preview && 'preview' || 'up' }}
+          plan: ${{ !inputs.preview && format('{0}/deploy.plan', runner.temp) || '' }}
           stack-name: ${{ env.STAGE }}
           work-dir: infra/pulumi
           cloud-url: s3://bane-${{ env.STAGE }}-pulumi?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
@@ -449,7 +462,7 @@ jobs:
           VITE_PUBLIC_URL: ${{ needs.authorize.outputs.stage == 'dev' && 'https://dev.bane.mx' || 'https://bane.mx' }}
 
       # The environment picks the stage. No variable or secret name carries a
-      # stage prefix: each stage reads the same keys from its own bane/<stage>/
+      # stage prefix: each stage reads the same keys from its own nightmail/<stage>/
       # folder below. Sign-in policy is committed in wrangler.<stage>.jsonc.
       - name: Configure the stage
         run: |
@@ -463,26 +476,26 @@ jobs:
             echo "WRANGLER_CONFIG=$wrangler_config"
           } >> "$GITHUB_ENV"
 
-      # The deploy secrets live in AWS Secrets Manager as bane/<stage>/* and are
-      # read by the environment's own role (github/bane-<stage>). That role also
+      # The deploy secrets live in AWS Secrets Manager as nightmail/<stage>/* and are
+      # read by the environment's own role (github/nightmail-<stage>). That role also
       # mints the short-lived Cloudflare token; no Cloudflare credential is stored.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
-          role-session-name: bane-${{ env.STAGE }}-secrets-${{ github.run_id }}
+          role-to-assume: arn:aws:iam::604439173067:role/github/nightmail-${{ env.STAGE }}
+          role-session-name: nightmail-${{ env.STAGE }}-secrets-${{ github.run_id }}
           aws-region: us-east-1
 
       - name: Fetch the stage secrets
         uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
         with:
           secret-ids: |
-            DATABASE_URL,bane/${{ env.STAGE }}/DATABASE_URL
-            BANE_ROOT_SECRET,bane/${{ env.STAGE }}/BETTER_AUTH_SECRET
-            ACCOUNT_CLIENT_PRIVATE_KEY,bane/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
-            TYPESAFE_API_KEY,bane/${{ env.STAGE }}/TYPESAFE_API_KEY
-            STRIPE_SECRET_KEY,bane/${{ env.STAGE }}/STRIPE_SECRET_KEY
-            STRIPE_WEBHOOK_SECRET,bane/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
+            DATABASE_URL,nightmail/${{ env.STAGE }}/DATABASE_URL
+            BANE_ROOT_SECRET,nightmail/${{ env.STAGE }}/BETTER_AUTH_SECRET
+            ACCOUNT_CLIENT_PRIVATE_KEY,nightmail/${{ env.STAGE }}/ACCOUNT_CLIENT_PRIVATE_KEY
+            TYPESAFE_API_KEY,nightmail/${{ env.STAGE }}/TYPESAFE_API_KEY
+            STRIPE_SECRET_KEY,nightmail/${{ env.STAGE }}/STRIPE_SECRET_KEY
+            STRIPE_WEBHOOK_SECRET,nightmail/${{ env.STAGE }}/STRIPE_WEBHOOK_SECRET
           parse-json-secrets: false
 
       # Only dev runs a live E2E, so only dev has an E2E key to read.
@@ -491,7 +504,7 @@ jobs:
         uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
         with:
           secret-ids: |
-            E2E_API_KEY,bane/dev/E2E_API_KEY
+            E2E_API_KEY,nightmail/dev/E2E_API_KEY
           parse-json-secrets: false
 
       - *stage-tip
@@ -519,7 +532,7 @@ jobs:
       - *stage-tip
 
       # Also syncs the mail gateway's key with the committed bane:mailGatewayEnabled in
-      # infra/pulumi/Pulumi.<stage>.yaml: enabled reads bane/<stage>/MAILGW_API_TOKEN with
+      # infra/pulumi/Pulumi.<stage>.yaml: enabled reads nightmail/<stage>/MAILGW_API_TOKEN with
       # this job's role inside this step only (never $GITHUB_ENV), and disabled removes it.
       # Only mint when the Worker is ready to deploy. Superseded builds and failed migrations consume no issuer slot.
       - name: Mint a short-lived Cloudflare token
@@ -680,8 +693,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/bane-${{ env.STAGE }}
-          role-session-name: bane-${{ env.STAGE }}-support-${{ github.run_id }}
+          role-to-assume: arn:aws:iam::604439173067:role/github/nightmail-${{ env.STAGE }}
+          role-session-name: nightmail-${{ env.STAGE }}-support-${{ github.run_id }}
           aws-region: us-east-1
 
       - *stage-tip

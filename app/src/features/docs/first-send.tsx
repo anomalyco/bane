@@ -10,6 +10,7 @@ import type { Domain } from '../../data/types'
 import './developer.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { MaskedText } from './agent-setup'
+import { apiKeyEnv, sdkPackage } from '../../../../api/src/brand'
 
 const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simulator.amazonses.com`)
 
@@ -17,11 +18,11 @@ const simulator = ['success', 'bounce', 'complaint'].map(local => `${local}@simu
 // the environment variable. Region is left out on purpose: the sender domain decides it.
 export function sendSnippets({ origin, apiKey, from, to }: { origin: string; apiKey: string | null; from: string; to: string }) {
   const body = { from, to, subject: 'Hello from Bane', text: 'It works.' }
-  const header = apiKey ? `"Authorization: Bearer ${apiKey}"` : '"Authorization: Bearer $BANE_API_KEY"'
+  const header = apiKey ? `"Authorization: Bearer ${apiKey}"` : `"Authorization: Bearer $${apiKeyEnv}"`
   return {
     // A new Idempotency-Key per run: reusing one returns the first email's ID and sends nothing new.
     curl: `curl --request POST \\\n  --url '${origin}/v1/emails/send' \\\n  --header ${header} \\\n  --header 'Content-Type: application/json' \\\n  --header "Idempotency-Key: $(uuidgen)" \\\n  --data '${JSON.stringify(body)}'`,
-    sdk: `import { createClient } from '@banemx/sdk/client'\nimport { sendEmail } from '@banemx/sdk'\n\nconst client = createClient({ baseUrl: '${origin}', auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined })\n// One Idempotency-Key per email: a retry with the same key never sends it twice.\nconst { data } = await sendEmail({ client, headers: { 'Idempotency-Key': crypto.randomUUID() }, throwOnError: true,\n  body: { from: '${from}', to: '${to}', subject: 'Hello from Bane', text: 'It works.' } })\nconsole.log(data.id) // 202: queued, not delivered yet`,
+    sdk: `import { createClient } from '${sdkPackage}/client'\nimport { sendEmail } from '${sdkPackage}'\n\nconst client = createClient({ baseUrl: '${origin}', auth: scheme => scheme.scheme === 'bearer' ? process.env.${apiKeyEnv} : undefined })\n// One Idempotency-Key per email: a retry with the same key never sends it twice.\nconst { data } = await sendEmail({ client, headers: { 'Idempotency-Key': crypto.randomUUID() }, throwOnError: true,\n  body: { from: '${from}', to: '${to}', subject: 'Hello from Bane', text: 'It works.' } })\nconsole.log(data.id) // 202: queued, not delivered yet`,
   }
 }
 

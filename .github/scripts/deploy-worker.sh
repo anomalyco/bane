@@ -24,7 +24,7 @@ app_secrets='$ENV | {BANE_ROOT_SECRET, ACCOUNT_CLIENT_PRIVATE_KEY, TYPESAFE_API_
 
 # The IMAP/SMTP gateway's shared key (gateway/PHASE2.md). The stage's committed
 # bane:mailGatewayEnabled is the only switch, so neither state can fail open:
-# enabled requires bane/<stage>/MAILGW_API_TOKEN, and disabled removes the Worker's
+# enabled requires nightmail/<stage>/MAILGW_API_TOKEN, and disabled removes the Worker's
 # binding, which a deploy would otherwise inherit. The key is fetched here, the
 # only step that needs it, and leaves this process only through the secrets file.
 unset MAILGW_API_TOKEN
@@ -49,11 +49,11 @@ bound() { # Whether the deployed Worker has the binding. Any failure stops the d
 }
 if [[ $gateway == true ]]; then
   # Missing, pending deletion, unreadable and malformed all stop here.
-  token=$(aws secretsmanager get-secret-value --secret-id "bane/$STAGE/MAILGW_API_TOKEN" --query SecretString --output text) ||
-    { echo "::error::bane:mailGatewayEnabled is true, but bane/$STAGE/MAILGW_API_TOKEN could not be read"; exit 1; }
+  token=$(aws secretsmanager get-secret-value --secret-id "nightmail/$STAGE/MAILGW_API_TOKEN" --query SecretString --output text) ||
+    { echo "::error::bane:mailGatewayEnabled is true, but nightmail/$STAGE/MAILGW_API_TOKEN could not be read"; exit 1; }
   # Check before masking: a workflow command masks one line and unescapes %XX.
   if [[ ! $token =~ ^[A-Za-z0-9._~+/=-]{32,}$ ]]; then
-    echo "::error::bane/$STAGE/MAILGW_API_TOKEN must be at least 32 characters from [A-Za-z0-9._~+/=-]"; exit 1
+    echo "::error::nightmail/$STAGE/MAILGW_API_TOKEN must be at least 32 characters from [A-Za-z0-9._~+/=-]"; exit 1
   fi
   echo "::add-mask::$token"
   MAILGW_API_TOKEN=$token jq -n "$app_secrets + {MAILGW_API_TOKEN}" > "$secrets_file"
@@ -67,13 +67,13 @@ else
     if bound; then echo "::error::MAILGW_API_TOKEN is still bound to the Worker"; exit 1; fi
   fi
 fi
-# Hosted billing's Stripe keys (api/README.md, Stripe setup), from bane/<stage>/STRIPE_*. The Worker takes payments
+# Hosted billing's Stripe keys (api/README.md, Stripe setup), from nightmail/<stage>/STRIPE_*. The Worker takes payments
 # only with both. A key for the other Stripe mode always stops here: dev takes test keys, production live ones.
 # Without usable keys the deploy continues while the stage's billing is off or in shadow (payments answer
 # 503 BILLING_NOT_CONFIGURED), and stops when billing_config.mode is enforce. Values never reach argv or the log.
 stripe_mode='test'; [[ $STAGE == production ]] && stripe_mode='live'
 if [[ ${STRIPE_SECRET_KEY:-} =~ ^(sk|rk)_(test|live)_ && ${BASH_REMATCH[2]} != "$stripe_mode" ]]; then
-  echo "::error::bane/$STAGE/STRIPE_SECRET_KEY is a ${BASH_REMATCH[2]}-mode key, but $STAGE takes $stripe_mode-mode keys"; exit 1
+  echo "::error::nightmail/$STAGE/STRIPE_SECRET_KEY is a ${BASH_REMATCH[2]}-mode key, but $STAGE takes $stripe_mode-mode keys"; exit 1
 fi
 if [[ ${STRIPE_SECRET_KEY:-} =~ ^(sk|rk)_${stripe_mode}_[A-Za-z0-9_]+$ && ${STRIPE_WEBHOOK_SECRET:-} =~ ^whsec_[A-Za-z0-9_]+$ ]]; then
   # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
@@ -85,7 +85,7 @@ else
   billing=$(node --import tsx -e "const {Client}=require('pg');import('./src/adapters/node.ts').then(async ({postgresConnection})=>{const c=new Client(postgresConnection(process.env.DATABASE_URL));await c.connect();try{const r=await c.query(\"SELECT CASE WHEN to_regclass('billing_config') IS NULL THEN 'off' ELSE (SELECT mode FROM billing_config WHERE singleton) END AS mode\");process.stdout.write(r.rows[0]?.mode??'off')}finally{await c.end()}})") ||
     { echo "::error::Could not read billing_config.mode for $STAGE"; exit 1; }
   if [[ $billing == enforce ]]; then
-    echo "::error::Billing is enforced on $STAGE, but bane/$STAGE/STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are not both $stripe_mode-mode Stripe values. Set them, or switch billing back to shadow (scripts/set-billing-enforcement.ts) first."; exit 1
+    echo "::error::Billing is enforced on $STAGE, but nightmail/$STAGE/STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are not both $stripe_mode-mode Stripe values. Set them, or switch billing back to shadow (scripts/set-billing-enforcement.ts) first."; exit 1
   fi
   echo "::warning::Billing is ${billing:-off} on $STAGE and its Stripe keys are not set: payments answer 503 BILLING_NOT_CONFIGURED."
 fi

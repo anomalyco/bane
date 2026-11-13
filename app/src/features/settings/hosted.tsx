@@ -23,6 +23,7 @@ import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { agentAccess, connectionTitle } from './key-labels'
+import { hostedHosts } from '../../../../api/src/brand'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -134,7 +135,7 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
   </div>
 }
 // The account service's connected apps page, on the installations that sign in with Anomaly account.
-const accountApps = ({ 'bane.mx': 'https://account.anoma.ly/apps', 'dev.bane.mx': 'https://account.dev.anoma.ly/apps' } as Record<string, string>)[window.location.hostname] ?? null
+const accountApps = !hostedHosts.includes(window.location.hostname) ? null : window.location.hostname.startsWith('dev.') ? 'https://account.dev.anoma.ly/apps' : 'https://account.anoma.ly/apps'
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()

@@ -1,3 +1,4 @@
+import { publicOrigin } from './brand.js'
 export interface UploadAttachmentBytesOptions {
   apiUrl: string
   token: string
@@ -26,7 +27,7 @@ export { BaneUploadError as OpenSendUploadError }
 // to another origin: Node's fetch would otherwise resend the body there.
 function apiOrigin(apiUrl: string) {
   let base: URL
-  try { base = new URL(apiUrl) } catch { throw new BaneUploadError('apiUrl must be an absolute URL such as https://bane.mx.', 'INVALID_API_URL', 0) }
+  try { base = new URL(apiUrl) } catch { throw new BaneUploadError(`apiUrl must be an absolute URL such as ${publicOrigin}.`, 'INVALID_API_URL', 0) }
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)
   if (base.username || base.password || (base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback))) {
     throw new BaneUploadError('apiUrl must be an HTTPS origin without credentials. HTTP is allowed only on loopback.', 'INVALID_API_URL', 0)
