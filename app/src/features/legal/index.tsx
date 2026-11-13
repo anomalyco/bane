@@ -9,7 +9,7 @@ import privacy from './content/privacy.md'
 import subprocessors from './content/subprocessors.md'
 import './legal.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { addresses } from '../../../../api/src/brand'
+import { addresses, productName } from '../../../../api/src/brand'
 
 // Public pages, no sign-in: /legal and one page per document. The documents are Markdown in ./content, rendered to HTML
 // when the dashboard builds (app/legal-markdown.ts).
@@ -26,7 +26,7 @@ export function LegalPage() {
   const location = useLocation(), navigate = useNavigate()
   const current = isSlug(doc) ? documents[doc] : null
   const title = doc === undefined ? 'Legal' : current?.title ?? 'Page not found'
-  useEffect(() => { document.title = `${title} · bane` }, [title])
+  useEffect(() => { document.title = `${title} · ${productName.toLowerCase()}` }, [title])
   // A new document opens at its top, or at the section its link names.
   useLayoutEffect(() => {
     const target = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null
@@ -43,7 +43,7 @@ export function LegalPage() {
   }
   return <div className="legal-page">
     <header className="legal-header">
-      <Link className="wordmark" to="/" aria-label="bane home"><BaneWordmark /></Link>
+      <Link className="wordmark" to="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></Link>
       <nav className="legal-switcher" aria-label="Legal documents">
         <NavLink to="/legal" end>Overview</NavLink>
         {legalLinks.map(([slug, label]) => <NavLink key={slug} to={`/legal/${slug}`}>{label}</NavLink>)}
@@ -62,7 +62,7 @@ function LegalIndex() {
   return <main className="legal-main legal-index">
     <div className="legal-intro">
       <h1>Legal</h1>
-      <p>Bane is provided by {ENTITY}. These are the terms and policies that apply to it.</p>
+      <p>{productName} is provided by {ENTITY}. These are the terms and policies that apply to it.</p>
     </div>
     <ul className="legal-documents">
       {legalLinks.map(([slug]) => { const item = documents[slug]; return <li key={slug}>

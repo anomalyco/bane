@@ -1,4 +1,4 @@
-// Test doubles for the support Worker's integration tests: a fake Bane (the SupportPlatform entrypoint over RPC and the
+// Test doubles for the support Worker's integration tests: a fake Nightmail (the SupportPlatform entrypoint over RPC and the
 // public API it calls with the inbox key) and a scripted Anthropic Messages API standing in for Console's gateway.
 // No network, no real model: the model's moves are decided from the request body, so retries and replays stay stable.
 
@@ -7,7 +7,7 @@ import { pngWithMetadata } from './images.js';
 export const GRANT_TOKEN = `bane_support_${'5'.repeat(64)}`;
 const EMAIL_PNG = Buffer.from(pngWithMetadata(80, 40)).toString('base64');
 
-/** The fake Bane, as a Worker module (it must export a real WorkerEntrypoint for RPC). */
+/** The fake Nightmail, as a Worker module (it must export a real WorkerEntrypoint for RPC). */
 export const FAKE_BANE = `
 import { WorkerEntrypoint } from 'cloudflare:workers';
 const calls = [];
@@ -38,7 +38,7 @@ export class SupportPlatform extends WorkerEntrypoint {
   async verifyHandoff(token) { calls.push(['verifyHandoff', token]); const h = handoff(token); if (h?.shareContent) shared.add(h.id); return h ? { ok: true, handoff: h } : { ok: false, code: 'HANDOFF_INVALID' }; }
   async verifyEmail(body) {
     calls.push(['verifyEmail', body]);
-    // Every @acme.test address is a Bane user (Ada, plus the review PoCs' victim@ and vera@).
+    // Every @acme.test address is a Nightmail user (Ada, plus the review PoCs' victim@ and vera@).
     const local = body.email.endsWith('@acme.test') ? body.email.split('@')[0] : null;
     return local ? ok({ verified: true, user: { id: local === 'ada' ? 'usr_ada' : 'usr_' + local, name: local === 'ada' ? 'Ada Lovelace' : local[0].toUpperCase() + local.slice(1) }, workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner' }] }) : ok({ verified: false, user: null, workspaces: [] });
   }
@@ -72,7 +72,7 @@ export default {
     if (url.pathname === '/__calls') return Response.json(calls);
     const body = request.method === 'POST' ? await request.json() : null;
     calls.push(['api', request.method, url.pathname, body, request.headers.get('authorization'), request.headers.get('idempotency-key')]);
-    // Like Bane: inbox keys get an attachment as a short-lived signed link (on Bane's origin for R2-stored mail), and
+    // Like Nightmail: inbox keys get an attachment as a short-lived signed link (on Nightmail's origin for R2-stored mail), and
     // never the admin-only parts route.
     if (request.method === 'GET' && /^\\/v1\\/inbound\\/messages\\/[^/]+\\/attachments\\/part_png$/.test(url.pathname)) return Response.json({ url: url.origin + '/v1/objects/fixture-png.sig', expiresAt: new Date(Date.now() + 300_000).toISOString() });
     if (request.method === 'GET' && url.pathname === '/v1/objects/fixture-png.sig') return new Response(Uint8Array.from(atob('${EMAIL_PNG}'), c => c.charCodeAt(0)), { headers: { 'content-type': 'image/png' } });
@@ -147,8 +147,8 @@ export async function fakeGateway(request: Request): Promise<Response> {
   const said = lastUserText(body), answered = blocks(body?.messages?.at(-1)).some(b => b.type === 'tool_result');
   const lastUser = [...(body?.messages ?? [])].reverse().find((m: any) => m.role === 'user' && blocks(m).some(b => b.type === 'text'));
   const sawImage = blocks(lastUser).some(b => b.type === 'image');
-  if (said.includes('A support email arrived') && said.includes('reset link')) return text(['Hi Ada,\n\nReset it here: https://bane-mx-security.example/reset\n\nBane support (AI)']);
-  if (said.includes('A support email arrived') && sawImage) return text(['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nBane support (AI)']);
+  if (said.includes('A support email arrived') && said.includes('reset link')) return text(['Hi Ada,\n\nReset it here: https://bane-mx-security.example/reset\n\nNightmail support (AI)']);
+  if (said.includes('A support email arrived') && sawImage) return text(['Hi Ada,\n\nI can see your screenshot: it shows a Gmail bounce.\n\nNightmail support (AI)']);
   if (said.includes('screenshot')) return text([sawImage ? 'I can see your screenshot.' : 'I can’t see a screenshot.']);
   if (said.includes('webhook test fails')) {
     // api_errors, then a bug ticket without its reproduction (refused), then the full one, then the answer.
@@ -161,12 +161,12 @@ export async function fakeGateway(request: Request): Promise<Response> {
       tried: ['api_errors: 14 × 500 INTERNAL_ERROR on POST /v1/webhooks/:id/test'], recommendation: 'Check the webhook test handler against req_' + 'a'.repeat(32) + '.',
       reproSteps: ['Open Webhooks', 'Press Send test on any endpoint'], affected: 'POST /v1/webhooks/{id}/test', requestIds: ['req_' + 'a'.repeat(32), 'req_' + 'b'.repeat(32)], errorCodes: ['500 INTERNAL_ERROR'],
       expected: 'A test delivery', actual: 'HTTP 500' });
-    return text(['That’s a Bane bug: I’ve passed it to the Bane team.']);
+    return text(['That’s a Nightmail bug: I’ve passed it to the Nightmail team.']);
   }
   if (said.includes('just opened the support chat')) return text(['Hi Ada, I see you sent ', '"Early access" yesterday', ' with 42% opens. What are we working on today?']);
-  if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nBane support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
+  if (said.includes('A support email arrived')) return answered ? text(['Hi Ada,\n\nGmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse('toolu_e', 'bounce_reasons', { provider: 'gmail' });
   if (said.includes('Gmail bounces')) return answered ? text(['Gmail hard-bounced 61 of 1,000 sends (6.1%). Here’s what I’d do:\n\n1. Remove the import from Oct 25.']) : toolUse('toolu_b', 'bounce_reasons', { provider: 'gmail', days: 7 });
-  if (said.includes('refund')) return answered ? text(['I’ve passed this to the Bane team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
+  if (said.includes('refund')) return answered ? text(['I’ve passed this to the Nightmail team. Someone will reply by email.']) : toolUse('toolu_t', 'file_ticket', {
     type: 'billing', topic: 'refund', title: 'Duplicate $25 top-up', severity: 'P3', summary: 'Ada asks for a refund of a duplicate top-up. The ledger shows two identical top-ups. She wants one refunded.', ask: 'Please refund my duplicate top-up',
     tried: ['get_billing: two $25 top-ups 40 s apart'], recommendation: 'Refund the second $25 top-up (billing error).', evidence: ['req_1'] });
   if (said.includes('look at the content')) return answered ? text(['I’ve asked for access to read that email.']) : toolUse('toolu_c', 'request_content_access', { why: 'To check why the screen rejected your promo, I need to read its HTML.' });

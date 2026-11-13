@@ -8759,8 +8759,8 @@ describe('Billing: API, MCP and notices', () => {
       await run(low!); await run(low!);
       assert.equal(await status(low!), 'sent');
       const [email] = await sent();
-      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Bane: Northwind Inc balance is low ($4.80)']);
-      for (const part of ['What happened', 'about 27,000 more emails', 'What Bane did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
+      assert.deepEqual([email.to_addresses, email.subject], [[AUTH_EMAIL], 'Nightmail: Northwind Inc balance is low ($4.80)']);
+      for (const part of ['What happened', 'about 27,000 more emails', 'What Nightmail did', 'What to do', 'auto-recharge', `${PUBLIC_ORIGIN}/settings#billing`]) assert.ok(email.text.includes(part), part);
       assert.equal((await sent()).length, 1);
 
       // A send that crashed mid-lease is retried once the lease runs out, under the same idempotency key.
@@ -8771,7 +8771,7 @@ describe('Billing: API, MCP and notices', () => {
       await db.query(`UPDATE billing_notices SET lease_until=now()-interval '1 second' WHERE id=$1`, [failed]);
       await run(failed!);
       assert.equal(await status(failed!), 'sent');
-      const declined = (await sent()).find(r => r.subject === 'Bane couldn\'t add credit to Northwind Inc');
+      const declined = (await sent()).find(r => r.subject === 'Nightmail couldn\'t add credit to Northwind Inc');
       assert.match(declined.text, /card ending 4242 and the charge failed: the card has insufficient funds\./);
 
       // Exempt accounts are never emailed, even when a job is already queued.
@@ -14076,7 +14076,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const outcome = Object.fromEntries((await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`, [platform])).rows.map(r => [r.id === 'email_forged_notice' ? 'forged' : 'notice', [r.status, r.error_code]]));
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
-      for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Bane did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
+      for (const part of ['What happened', '2 of 1,000 accepted emails were marked as spam', 'What Nightmail did', 'will not rise', 'How to fix it', '/docs#sending-limits']) assert.ok(sent[0].text.includes(part), part);
       // No second email for the same step within a day.
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'ok', reasons: [] }));
       await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));

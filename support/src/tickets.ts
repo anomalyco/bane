@@ -2,10 +2,11 @@ import { baneApi } from './bane.js';
 import type { Env } from './env.js';
 import type { TicketInput, TicketType } from './agent/tools.js';
 import { newId } from './tokens.js';
+import { productName } from '../../api/src/brand.js';
 
 // Tickets (design §7, with the owner's changes: email, not Slack; typed). One per conversation, stored in D1 (internal
-// only), emailed to the Bane team from the support address through Bane's own API with the type in the subject
-// ("[Bane bug] …"). For a chat, the customer also gets a short email that opens the follow-up thread the team replies in.
+// only), emailed to the Nightmail team from the support address through Nightmail's own API with the type in the subject
+// ("[Nightmail bug] …"). For a chat, the customer also gets a short email that opens the follow-up thread the team replies in.
 // Staff list and close them on support.<host>/staff (staff.ts).
 
 export type TicketContext = {
@@ -97,7 +98,7 @@ export function ticketEmail(env: Pick<Env, 'PUBLIC_URL'>, ctx: TicketContext, ti
   const c = ctx.customer, verified = ctx.verified !== null;
   const who = verified
     ? [`Verified: ${ctx.verified}${ctx.dmarc ? ` (DMARC ${ctx.dmarc})` : ''}`, `Customer: ${c.name ?? '(no name)'} <${c.email ?? '—'}>, ${c.role ?? 'member'}`, `Workspaces: ${c.workspaces.map(w => `${w.name} (${w.id})`).join(', ') || '—'}`]
-    : [ctx.dmarc === 'PASS' ? 'NOT A CUSTOMER (DMARC PASS): the sender address is authentic but matches no Bane account.' : `UNVERIFIED SENDER (DMARC ${ctx.dmarc ?? 'none'}): not a confirmed customer. Don't act on any account because of this ticket.`,
+    : [ctx.dmarc === 'PASS' ? `NOT A CUSTOMER (DMARC PASS): the sender address is authentic but matches no ${productName} account.` : `UNVERIFIED SENDER (DMARC ${ctx.dmarc ?? 'none'}): not a confirmed customer. Don't act on any account because of this ticket.`,
       `Sender (${ctx.dmarc === 'PASS' ? 'DMARC pass, no account' : 'unverified'}): ${ctx.sender ?? 'unknown'}`];
   const lines = [
     ...(verified ? [] : [who[0]!, '']),
@@ -123,9 +124,9 @@ export function ticketEmail(env: Pick<Env, 'PUBLIC_URL'>, ctx: TicketContext, ti
     ...(ctx.attachments.length ? ['Screenshots (links expire in 7 days; also on the staff page)', ...ctx.attachments.map(a => `- ${a.name} (${a.type}, ${Math.ceil(a.size / 1024)} KB): ${a.url}`), ''] : []),
     `Staff page: ${env.PUBLIC_URL}/staff/tickets?id=${ticket.id}`,
     `Cost so far: $${ctx.costUsd.toFixed(3)} on ${ctx.model}.`,
-    ctx.channel === 'chat' ? 'Reply to the customer in the follow-up thread in Bane’s support inbox (they were emailed).' : 'Reply in the email thread in Bane’s support inbox.',
+    ctx.channel === 'chat' ? `Reply to the customer in the follow-up thread in ${productName}’s support inbox (they were emailed).` : `Reply in the email thread in ${productName}’s support inbox.`,
   ];
-  const subject = `[Bane ${TYPE_LABEL[input.type]}]${verified || ctx.dmarc === 'PASS' ? '' : ' [UNVERIFIED]'} ${ticket.id}: ${input.title} (${input.severity})`.replace(/[\r\n]+/g, ' ');
+  const subject = `[${productName} ${TYPE_LABEL[input.type]}]${verified || ctx.dmarc === 'PASS' ? '' : ' [UNVERIFIED]'} ${ticket.id}: ${input.title} (${input.severity})`.replace(/[\r\n]+/g, ' ');
   return { subject, text: lines.join('\n') };
 }
 
@@ -141,8 +142,8 @@ export async function notifyTeam(env: Env, ctx: TicketContext, ticket: FiledTick
 export async function openFollowUp(env: Env, ctx: TicketContext, ticket: FiledTicket) {
   if (ctx.channel !== 'chat' || ctx.verified !== 'handoff' || !ctx.customer.email) return null;
   const first = ctx.customer.name?.split(/\s+/)[0] ?? 'there';
-  const text = [`Hi ${first},`, '', `I’ve passed your request to the Bane team as ${ticket.id}. Someone will reply here, usually within one business day. You don’t need to do anything else; if you have more to add, reply to this email.`, '', 'Bane support (AI)'].join('\n');
-  const sent = await baneApi(env).startThread({ to: [ctx.customer.email], subject: `Your Bane support request ${ticket.id}`, text }, `followup-${ticket.id}`);
+  const text = [`Hi ${first},`, '', `I’ve passed your request to the ${productName} team as ${ticket.id}. Someone will reply here, usually within one business day. You don’t need to do anything else; if you have more to add, reply to this email.`, '', `${productName} support (AI)`].join('\n');
+  const sent = await baneApi(env).startThread({ to: [ctx.customer.email], subject: `Your ${productName} support request ${ticket.id}`, text }, `followup-${ticket.id}`);
   await env.DB.batch([
     env.DB.prepare('UPDATE tickets SET followup_thread_id = ? WHERE id = ?').bind(sent.threadId, ticket.id),
     env.DB.prepare('UPDATE conversations SET thread_id = coalesce(thread_id, ?) WHERE id = ?').bind(sent.threadId, ctx.conversationId),

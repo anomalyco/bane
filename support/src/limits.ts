@@ -2,6 +2,7 @@ import { baneApi } from './bane.js';
 import type { Env } from './env.js';
 import { addressHash } from './tokens.js';
 import { log, logError } from './log.js';
+import { productName } from '../../api/src/brand.js';
 
 // Daily caps (review M5, R1): model turns, tickets and inbound mail, per person or sender and per budget, per UTC day in
 // D1. Budgets don't share: verified customers have their own ticket reserve, each intake address its own, so unverified
@@ -14,7 +15,7 @@ export const DEFAULT_LIMITS = {
   /** Model turns, all conversations together (the Console key's own budget is the backstop), and per person. */
   turnsPerDay: 1500,
   turnsPerPerson: 100,
-  /** Tickets for verified customers (chat, verified email, a DMARC-passing Bane user at an intake address). */
+  /** Tickets for verified customers (chat, verified email, a DMARC-passing Nightmail user at an intake address). */
   ticketsVerifiedPerDay: 60,
   /** Tickets from everyone else, per intake address. */
   ticketsIntakePerMailbox: 40,
@@ -96,7 +97,7 @@ export async function alertOnce(env: Env, kind: 'turns' | 'tickets' | 'mail', li
   if (!first.ok) return;
   const what = { turns: 'model-turn budget', tickets: 'verified-customer ticket reserve', mail: 'inbound mail cap' }[kind];
   try {
-    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[Bane support] Daily ${what} reached (${limit})`,
+    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[${productName} support] Daily ${what} reached (${limit})`,
       text: [`The support agent reached its daily ${what} of ${limit} on ${today()} (UTC).`, '', kind === 'turns'
         ? 'Until midnight UTC, chats show "support is busy" and support emails get a fixed reply saying the team will answer.'
         : 'Until midnight UTC, mail over the cap is kept and listed in tomorrow’s over-cap digest; nothing is dropped.', '',
@@ -110,10 +111,10 @@ export async function daily(env: Env, now = Date.now()) {
   const rows = (await env.DB.prepare('SELECT channel, reason, sender, dmarc, subject, message_id, thread_id FROM overflow WHERE day = ? ORDER BY id LIMIT 200').bind(day).all<{ channel: string; reason: string; sender: string | null; dmarc: string | null; subject: string | null; message_id: string; thread_id: string | null }>()).results;
   const total = (await env.DB.prepare('SELECT count(*) AS n FROM overflow WHERE day = ?').bind(day).first<{ n: number }>())?.n ?? 0;
   if (total) {
-    const lines = [`${total} message${total === 1 ? ' was' : 's were'} over a daily cap on ${day} (UTC) and kept here instead of being answered or ticketed. Everything is also in Bane's inbox.`, '',
+    const lines = [`${total} message${total === 1 ? ' was' : 's were'} over a daily cap on ${day} (UTC) and kept here instead of being answered or ticketed. Everything is also in ${productName}'s inbox.`, '',
       ...rows.map(r => `- ${r.channel}@ · ${r.reason} · ${r.sender ?? 'unknown'} (DMARC ${r.dmarc ?? 'none'}) · "${(r.subject ?? '').replace(/[\r\n]+/g, ' ').slice(0, 120)}" · ${r.message_id}${r.thread_id ? ` · thread ${r.thread_id}` : ''}`),
       ...(total > rows.length ? [`…and ${total - rows.length} more (D1 overflow, day ${day}).`] : []), '', 'Subjects and senders are untrusted.'];
-    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[Bane support] ${total} message${total === 1 ? '' : 's'} over cap on ${day}`, text: lines.join('\n') }, `overflow-${day}`);
+    await baneApi(env).startThread({ to: [env.TICKET_TO], subject: `[${productName} support] ${total} message${total === 1 ? '' : 's'} over cap on ${day}`, text: lines.join('\n') }, `overflow-${day}`);
   }
   // Retention: counters a week, single-use records a month, overflow 30 days, closed conversations and resolved tickets a year.
   const ago = (days: number) => now - days * 86_400_000;
