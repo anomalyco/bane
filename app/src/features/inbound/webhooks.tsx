@@ -10,6 +10,7 @@ import { fieldError, MutationError, SecretDialog } from '../settings/shared'
 import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
+import './receiving.css'
 import { AddressList } from '../../components/PrivateAddress'
 
 const eventInfo: Partial<Record<MailboxEventType, string>> = {
@@ -98,7 +99,7 @@ function WebhooksList() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note">Signed POSTs (Standard Webhooks) for mail at your addresses: received messages and your replies. No public URL? Long-poll <code>GET /v1/inbound/events</code>. For email sent with the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
+    <p className="muted inbound-note rcv-note">Signed POSTs (Standard Webhooks) for received mail and your replies. No public URL? Long-poll <code>GET /v1/inbound/events</code>. Events for sent email are in <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
     {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
