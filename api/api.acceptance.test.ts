@@ -3834,6 +3834,75 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('an endpoint edits in place: name, type, URL and pause; a blank URL keeps it, none is returned, and other workspaces are refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const w = runtime.config.workspaceId, { decrypt } = await import('./src/operations.js');
+      const slack = 'https://hooks.slack.com/services/T0EDIT/B0EDIT/editfixtureslack0001', discord = 'https://discord.com/api/webhooks/4242/editfixturediscord0002';
+      const first = 'https://example.com/hooks/edit-first-0003', second = 'https://example.com/hooks/edit-second-0004';
+      const seen: Json[] = [], keep = (body: Json) => { seen.push(body); return body; };
+      const hookOf = async (name: string) => (await db.query("SELECT hook_id,ref,encrypted_value FROM mail_endpoints WHERE workspace_id=$1 AND split_part(ref,':',2)=$2", [w, name])).rows[0];
+      const chatUrl = async (name: string) => { const r = await hookOf(name); return decrypt(runtime, r.encrypted_value, `${w}:endpoint:${r.hook_id}`); };
+      const webhook = async (name: string) => (await db.query('SELECT url,timeout_seconds,retry_attempts FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [w, name])).rows[0];
+      keep(ok(await local('POST', '/v1/endpoints', { type: 'slack', name: 'alerts', url: slack }), 201));
+      keep(ok(await local('POST', '/v1/endpoints', { type: 'webhook', name: 'crm', url: first }), 201));
+
+      // Rename and pause with no URL: the stored URL is the same one.
+      const renamed = keep(ok(await local('PATCH', '/v1/endpoints/alerts', { name: 'pager', paused: true })));
+      assert.deepEqual([renamed.name, renamed.type, renamed.status, renamed.call], ['pager', 'slack', 'paused', 'endpoints.pager']);
+      error(await local('GET', '/v1/endpoints/alerts'), 404, 'NOT_FOUND');
+      assert.equal(await chatUrl('pager'), slack);
+      assert.equal(keep(ok(await local('PATCH', '/v1/endpoints/pager', { paused: false }))).status, 'ready');
+      assert.equal(await chatUrl('pager'), slack);
+
+      // Slack switches to Discord only with the Discord URL; webhooks and forwards keep their type.
+      assert.equal(error(await local('PATCH', '/v1/endpoints/pager', { type: 'discord' }), 422, 'ENDPOINT_URL_REQUIRED').field, 'url');
+      error(await local('PATCH', '/v1/endpoints/pager', { type: 'discord', url: slack }), 422, 'INVALID_CONNECTOR');
+      const switched = keep(ok(await local('PATCH', '/v1/endpoints/pager', { type: 'discord', url: discord })));
+      assert.deepEqual([switched.type, switched.status], ['discord', 'ready']);
+      assert.deepEqual([(await hookOf('pager')).ref, await chatUrl('pager')], ['discord:pager', discord]);
+      assert.equal(error(await local('PATCH', '/v1/endpoints/crm', { type: 'slack', url: slack }), 422, 'ENDPOINT_TYPE_FIXED').field, 'type');
+      assert.equal(error(await local('PATCH', '/v1/endpoints/pager', { timeoutSeconds: 10 }), 422, 'WEBHOOK_SETTING_ONLY').field, 'timeoutSeconds');
+
+      // A webhook: renamed with its delivery settings and the URL left blank, then a new URL.
+      const intake = keep(ok(await local('PATCH', '/v1/endpoints/crm', { name: 'intake', timeoutSeconds: 10, retryAttempts: 3 })));
+      assert.deepEqual([intake.name, intake.type, intake.status], ['intake', 'webhook', 'ready']);
+      assert.deepEqual(await webhook('intake'), { url: first, timeout_seconds: 10, retry_attempts: 3 });
+      keep(ok(await local('PATCH', '/v1/endpoints/intake', { url: second })));
+      assert.equal((await webhook('intake')).url, second);
+      assert.equal(error(await local('PATCH', '/v1/endpoints/intake', { name: 'pager' }), 409, 'ENDPOINT_NAME_TAKEN').field, 'name');
+
+      // An attached ritual calls it by name: renaming or retyping it is refused and names the ritual.
+      const domain = unique('mdom');
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,'edit.example',$3,'active')", [domain, w, REGION]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture','fixture-topic')", [w, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'support@edit.example' }), 201);
+      ok(await local('PUT', '/v1/rituals', { rituals: [{ key: 'notify', source: 'export default function route(email,ctx){endpoints.pager({content:"x"})}' }], attachments: [{ ritual: 'notify', target: box.id }] }));
+      assert.match(error(await local('PATCH', '/v1/endpoints/pager', { name: 'pages' }), 409, 'ENDPOINT_IN_USE').message, /Attached ritual notify calls endpoints\.pager/);
+      error(await local('PATCH', '/v1/endpoints/pager', { type: 'slack', url: slack }), 409, 'ENDPOINT_IN_USE');
+      assert.equal(keep(ok(await local('PATCH', '/v1/endpoints/pager', { paused: true }))).status, 'paused', 'Other edits still work.');
+      ok(await local('PUT', '/v1/rituals', {}));
+
+      // Another workspace's manage key can't read, edit or list them.
+      const other = unique('edit-other'), outsider = `bane_${(randomUUID() + randomUUID()).replaceAll('-', '')}`;
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Other',$3,$4,'["read","send","manage"]','[]')`, [unique('key'), other, createHash('sha256').update(outsider).digest('hex'), outsider.slice(0, 14)]);
+      error(await request('PATCH', '/v1/endpoints/pager', outsider, { name: 'taken', url: 'https://discord.com/api/webhooks/1/theirs', paused: false }), 404, 'NOT_FOUND');
+      error(await request('PATCH', '/v1/endpoints/intake', outsider, { url: 'https://example.com/hooks/theirs' }), 404, 'NOT_FOUND');
+      error(await request('GET', '/v1/endpoints/pager', outsider), 404, 'NOT_FOUND');
+      assert.deepEqual(ok(await request('GET', '/v1/endpoints', outsider)).data, []);
+      assert.deepEqual([(await hookOf('pager')).ref, await chatUrl('pager'), (await webhook('intake')).url], ['discord:pager', discord, second]);
+
+      // No URL in any answer or in the audit trail: only that one changed.
+      keep(ok(await local('GET', '/v1/endpoints')));
+      keep(ok(await local('GET', '/v1/endpoints/intake')));
+      const audit = (await db.query("SELECT summary FROM audit_events WHERE workspace_id=$1 AND action='endpoint.update' ORDER BY at", [w])).rows.map(r => r.summary);
+      assert.ok(audit.some(s => s.before?.name === 'alerts' && s.after?.name === 'pager'));
+      assert.ok(audit.some(s => s.fields?.includes('url')));
+      const text = JSON.stringify([seen, audit]);
+      for (const url of [slack, discord, first, second]) for (const part of [url, url.slice(8, -4)]) assert.ok(!text.includes(part), `An answer or audit row repeats ${part}`);
+    });
+  });
+
   test('a removal waits for a receiving write under way, then holds what the write changed', async t => {
     // Two connections: the write pauses inside its transaction after it has recorded its approval and before it locks
     // the webhook, and the owner removes the approval meanwhile. The removal waits for the write, then holds the webhook.

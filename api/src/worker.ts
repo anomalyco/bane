@@ -186,7 +186,9 @@ export default {
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
     if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
-      return fastSecure(await assets.fetch(request));
+      // Existing files are served asset-first. Only dashboard routes get the shell on a miss.
+      if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+      return fastSecure(await assets.fetch(new Request(new URL('/', url), request)));
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
     try {

@@ -1,6 +1,6 @@
 /**
  * How to check that a webhook delivery came from Bane, in words and as code. Shared by the dashboard's Docs guide
- * (#guide-webhook-signatures) and the API's /docs.md and /llms.txt, so it has no runtime imports and ships to browsers.
+ * (/docs/webhook-signatures) and the API's /docs.md and /llms.txt, so it has no runtime imports and ships to browsers.
  */
 export const webhookSignatureGuide = {
   id: 'webhook-signatures',

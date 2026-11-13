@@ -74,7 +74,8 @@
 .webhook-header-row > .ui-icon-button { grid-area: remove; }
 .webhook-header-row__error { grid-area: error; }
 .webhook-headers__actions:empty { display: none; }
-.webhook-headers__actions > .ui-button--ghost:first-child { margin-inline-start: -9px; }
+.webhook-headers__actions > .ui-button--ghost:first-child { margin-inline-start: calc(-1 * var(--focus-reach)); padding-inline-start: calc(var(--button-pad-x, 11px) - 9px + var(--focus-reach)); }
+.webhook-headers__actions > .ui-button--ghost:first-child:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .webhook-header-names { display: flex; gap: var(--space-6); min-width: 0; white-space: nowrap; }
 .webhook-header-names > :first-child { overflow: hidden; text-overflow: ellipsis; }
 @container webhook-headers (max-width: 420px) {
@@ -127,7 +128,7 @@
 .settings-key-domains > legend { padding: 0; margin-bottom: var(--space-12); }
 .settings-key-domains p { margin: 0; }
 .settings-key-all-domains { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-8); }
-.settings-key-domain-options { display: flex; flex-direction: column; gap: var(--space-12); max-height: 180px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: var(--space-12) 2px 2px; }
+.settings-key-domain-options { display: flex; flex-direction: column; gap: var(--space-12); max-height: calc(180px - 2px + var(--focus-reach)); overflow-y: auto; border-top: 1px solid var(--color-border); padding: var(--space-12) var(--focus-reach) var(--focus-reach); margin: 0 calc(2px - var(--focus-reach)) calc(2px - var(--focus-reach)); }
 .settings-key-domain-options .ui-check-field { flex-shrink: 0; }
 .settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }
 .ui-select-trigger.settings-default-region { width: 320px; max-width: 100%; }

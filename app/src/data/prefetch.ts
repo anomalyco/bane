@@ -5,6 +5,7 @@ import { useApi, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
 import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { BaneApi } from './types'
+import { openApiQuery } from '../features/docs/openapi'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
@@ -53,7 +54,9 @@ export function usePrefetchRoute() {
   return useCallback(async (path: string) => {
     const chunk = routeChunks[path]?.().catch(() => {})
     const data = api.mode === 'live' ? prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister })) : undefined
-    await Promise.all([chunk, data])
+    // The docs read the public API definition, not the workspace's API.
+    const docs = path === '/docs' ? cache.prefetchQuery(openApiQuery) : undefined
+    await Promise.all([chunk, data, docs])
   }, [cache, api, regionId, multiTenant, canAdminister])
 }
 

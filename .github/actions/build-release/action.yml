@@ -14,3 +14,4 @@ runs:
         for pkg in api app sdk; do (cd "$pkg" && bun install --frozen-lockfile); done
         (cd sdk && bun run build)
         (cd app && bun run build)
+        node .github/scripts/retain-assets.mjs "$VITE_PUBLIC_URL"

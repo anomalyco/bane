@@ -30,7 +30,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   const graded = report?.state === 'graded'
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"
     description="A 0–100 grade of how healthy your sending is, weighted to recent email. A high score helps your mail reach the inbox, and on Hosted it sets your daily limit."
-    footer={<><Link className="ui-button ui-button--ghost ui-button--md" to="/docs#getSenderScore" onClick={closeScoreAbout}>API reference</Link><Button variant="primary" onClick={closeScoreAbout}>Done</Button></>}>
+    footer={<><Link className="ui-button ui-button--ghost ui-button--md" to="/docs/api/getSenderScore" onClick={closeScoreAbout}>API reference</Link><Button variant="primary" onClick={closeScoreAbout}>Done</Button></>}>
     {!report ? error ? <ErrorState error={error} onRetry={onRetry} /> : <div className="score-about__status"><SkeletonText width="60%" /></div> : <>
       <div className="score-about__status" data-grade={graded && report.grade ? gradeKey(report.grade) : undefined}>
         <b>{graded ? Math.round(report.score!) : '—'}</b>

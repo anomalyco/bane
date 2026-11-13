@@ -55,7 +55,7 @@ export const guides: Guide[] = [
           ['Ritual', concepts.rituals.line, concepts.rituals.example],
           ['Endpoint', concepts.endpoints.line, <code key="e">{concepts.endpoints.example}</code>],
           ['Catch-all', 'What happens to mail for an address that doesn’t exist on the domain: store it, or create an address for it.', <code key="e">*@acme.com</code>],
-          ['Agent inbox', 'An expiring address that an agent or a test creates and reads.', <a key="e" href="#guide-inboxes">Agent inboxes</a>],
+          ['Agent inbox', 'An expiring address that an agent or a test creates and reads.', <Link key="e" to="/docs/inboxes">Agent inboxes</Link>],
         ]} />
       </Section>
       <Section title="Where your domain receives: reply.yourdomain or the domain itself">
@@ -67,11 +67,11 @@ export const guides: Guide[] = [
           <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. Bane turns receiving on once it resolves.</li>
           <li>In <Link to="/receiving">Receiving</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
           <li>Send it a test email. It shows up in Receiving → Inbox within seconds.</li>
-          <li>Optional: add an <a href="#guide-endpoints">endpoint</a> (Slack, a webhook…) and a <a href="#guide-rituals">ritual</a> that decides which mail goes there.</li>
+          <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rituals">ritual</Link> that decides which mail goes there.</li>
         </ol>
       </Section>
       <Section title="Over the API">
-        <p>Create an address with <a href="#createInboundAddress">createInboundAddress</a>, list conversations with <a href="#listInboundThreads">listInboundThreads</a> and reply with <a href="#replyToInboundThread">replyToInboundThread</a>. To get each message as it arrives, subscribe a URL to <code>message.received</code> with <a href="#createInboundWebhook">createInboundWebhook</a>.</p>
+        <p>Create an address with <Link to="/docs/api/createInboundAddress">createInboundAddress</Link>, list conversations with <Link to="/docs/api/listInboundThreads">listInboundThreads</Link> and reply with <Link to="/docs/api/replyToInboundThread">replyToInboundThread</Link>. To get each message as it arrives, subscribe a URL to <code>message.received</code> with <Link to="/docs/api/createInboundWebhook">createInboundWebhook</Link>.</p>
       </Section>
     </>,
   },
@@ -137,9 +137,9 @@ export const guides: Guide[] = [
         <p>Past its limit (200 messages or 25 MiB by default) new mail is held the same way. Bane pulls one-time codes and links out of each message. An inbox can reply only to people who wrote to it, if replies were allowed when it was created.</p>
       </Section>
       <Section title="Create one">
-        <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <a href="#createInbox">createInbox</a>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
+        <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
         <Code label="create inbox example">{`curl --request POST "$BANE/v1/inboxes" \\\n  --header "Authorization: Bearer $BANE_API_KEY" \\\n  --header 'Content-Type: application/json' \\\n  --data '{"name":"Sign-up test","ttlSeconds":3600,"credential":{"name":"Sign-up test key","permissions":["read"]}}'`}</Code>
-        <p>Then wait for mail with <a href="#listInboxMessages">listInboxMessages</a> (or the MCP tool <code>waitForMessage</code>), and delete the inbox with <a href="#deleteInbox">deleteInbox</a> when you’re done.</p>
+        <p>Then wait for mail with <Link to="/docs/api/listInboxMessages">listInboxMessages</Link> (or the MCP tool <code>waitForMessage</code>), and delete the inbox with <Link to="/docs/api/deleteInbox">deleteInbox</Link> when you’re done.</p>
       </Section>
     </>,
   },

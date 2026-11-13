@@ -2427,13 +2427,36 @@ export type UpdateEndpoint = {
      */
     idempotent?: boolean;
     /**
+     * Rename it. Refused while an attached ritual calls it by the current name.
+     */
+    name?: string;
+    /**
+     * Switch a Slack endpoint to Discord or back, with the new url. Webhook and forward endpoints keep their type.
+     */
+    type?: 'slack' | 'discord' | 'webhook' | 'forward';
+    /**
      * Hold deliveries. Queued calls resume when unpaused.
      */
     paused?: boolean;
     /**
-     * Replace a Slack, Discord or webhook URL.
+     * Replace a Slack, Discord or webhook URL. Write-only: omit it to keep the current URL. Replacing a webhook URL drops its custom headers unless headers are sent with it.
      */
     url?: string;
+    /**
+     * Replace a webhook endpoint’s custom headers. Write-only.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Webhook endpoints only.
+     */
+    timeoutSeconds?: number;
+    /**
+     * Webhook endpoints only.
+     */
+    retryAttempts?: number;
 };
 
 export type DeletedEndpoint = {

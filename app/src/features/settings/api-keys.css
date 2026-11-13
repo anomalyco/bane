@@ -17,7 +17,7 @@
   .keys-table [data-col='type'] { width: 15% !important; }
 }
 .keys-cell { min-width: 0; }
-.keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.keys-cell > span { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 /* An agent's short-lived tokens sit under it, indented. */
 .keys-cell--nested, .keys-nested { padding-left: var(--space-16); }
 

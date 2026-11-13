@@ -31,7 +31,8 @@
 //
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
-// cold desktop load, hovering the first few reveals them without anything moving.
+// cold desktop load, hovering the first few reveals them without anything moving, and so does turning privacy mode off
+// with ⇧P (then on again, which masks them as before).
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -116,8 +117,14 @@ const pages = ids => [
   ['Operator · without UI notes', '/operator', { user: 'rae', from: '/', notes: true }],
   ['Overview · restricted', '/', { user: 'rae', from: '/logs' }],
   ['Campaigns · restricted', '/campaigns', { user: 'rae', from: '/' }],
-  ['Docs · guide', '/docs#guide-rituals', { from: '/' }],
-  ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
+  // The docs: inside the dashboard signed in (a guide from the contents, an operation, a deep-linked overview section),
+  // in their own layout signed out.
+  ['Docs · guide', '/docs/rituals', { from: '/docs', click: 'Rituals and omens' }],
+  ['Docs · MCP guide', '/docs/mcp', { from: '/' }],
+  ['Docs · operation', '/docs/api/sendEmail', { from: '/docs/receiving' }],
+  ['Docs · section', '/docs#sending-limits', { from: '/api-keys' }],
+  ['Docs · signed out', '/docs', { user: null }],
+  ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
   ['Two accounts · switch', '/', { user: ['dana', 'nia'], from: '/', switchTo: 'Lumen Labs' }],
@@ -134,7 +141,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Support chat', 'Overview · sending limits dialog']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Support chat', 'Overview · sending limits dialog']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -265,6 +272,24 @@ async function masking(page, hover) {
     else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
     if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
   }
+  // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
+  const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
+  if (!count) return problems;
+  const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
+  // ⇧P is ignored while typing (the support chat's box, a ritual's editor), so leave whatever field has focus first.
+  await page.evaluate(() => document.activeElement?.blur());
+  const before = await states();
+  await page.keyboard.press('Shift+P'); await frame();
+  const off = await states(), root = await page.evaluate(() => ({ privacy: document.documentElement.dataset.privacy, pressed: document.querySelector('.privacy-toggle')?.getAttribute('aria-pressed') }));
+  if (root.privacy !== 'off' || root.pressed !== 'false') problems.push(`⇧P did not turn privacy mode off: ${JSON.stringify(root)}`);
+  off.forEach((state, i) => {
+    if (!state.revealed || [...state.text].length <= 2) problems.push(`privacy mode off left ${before[i].text}… masked`);
+    else if (state.own !== before[i].own || state.around !== before[i].around) problems.push(`privacy mode off moved ${before[i].text}…: ${before[i].own} → ${state.own}`);
+  });
+  await page.keyboard.press('Shift+P'); await frame();
+  const on = await states();
+  on.forEach((state, i) => { if (state.revealed !== before[i].revealed || state.text !== before[i].text || state.own !== before[i].own) problems.push(`privacy mode on again did not mask ${before[i].text}… as before`); });
+  problems.push(...await page.evaluate(maskedLeaks));
   return problems;
 }
 
