@@ -42,6 +42,8 @@ export interface ChatState {
 const initial = (): ChatState => ({ connection: 'idle', retryAt: null, reason: null, hello: null, status: 'open', messages: [], busy: false, closed: null, limit: null, humanRequested: false, draft: '', attachments: [], attachError: null, imagesSent: 0, unread: false, announcement: '' })
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 const textOf = (message: ChatMessage) => message.parts.flatMap(part => part.kind === 'text' ? [part.text] : []).join('\n\n')
+// What a screen reader should say: the answer without its Markdown markers.
+const spoken = (text: string) => text.replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1').replace(/\*\*([^*\n]+?)\*\*/g, '$1').replace(/`([^`\n]+)`/g, '$1').replace(/^\s*```.*$/gm, '').replace(/^\s{0,3}[-*•]\s+/gm, '')
 const id = () => `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 /** What a ticket is, in a few words, from its type and topic: a report the team works on ("Bug report filed"), or a
@@ -201,7 +203,7 @@ export class SupportStore {
         const parts: Part[] = !replace ? item.parts : [...item.parts.filter(part => part.kind !== 'text')]
         if (replace && message.text) parts.splice(first < 0 ? parts.length : Math.min(first, parts.length), 0, { kind: 'text', text: message.text })
         this.update(item.id, entry => ({ ...entry, parts, streaming: false }))
-        this.set({ announcement: `${this.state.hello?.agent.name ?? 'Bane support'}: ${message.text}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${this.state.hello?.agent.name ?? 'Bane support'}: ${spoken(message.text)}`, unread: this.state.unread || !this.visible })
         break
       }
       case 'tool.start': this.append({ kind: 'tool', id: message.toolCallId, label: message.label, state: 'running' }, message.messageId); break
