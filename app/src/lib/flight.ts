@@ -1,7 +1,7 @@
 // The dashboard's writes in flight (lib/single-flight.ts uses this), one registry per QueryClient, outside React: a
 // re-render, a remount or another component making the same write all see the same entries. A key is the workspace the
 // write is sent for, its operation, its target and its input, serialized. The workspace is the one selected when the
-// write is made, which its request carries (X-Bane-Workspace): the same rename in two workspaces is two writes, and back
+// write is made, which its request carries (X-Nightmail-Workspace): the same rename in two workspaces is two writes, and back
 // in the first while its write still runs, a repeat there is still a duplicate. An entry leaves when its write settles,
 // whether it succeeded or failed. No imports, so the API acceptance suite can test it.
 

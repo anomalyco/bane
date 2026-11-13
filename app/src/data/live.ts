@@ -5,7 +5,7 @@ import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntr
 import { productName } from '../../../api/src/brand'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
-// The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Bane-Account. It is per tab
+// The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
 // (sessionStorage), so two tabs can show two accounts; unknown in a new tab until /v1/me answers as the browser default.
 const accountStorageKey = 'bane.account'
 let accountSelection: string | null = (() => { try { return sessionStorage.getItem(accountStorageKey) } catch { return null } })()
@@ -60,7 +60,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   try {
     const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
     response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { 'X-Bane-Account': account } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.ifMatch===undefined?{}:{'If-Match':String(options.ifMatch)}), ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(account ? { 'X-Nightmail-Account': account } : {}), ...(workspaceSelection ? { 'X-Bane-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error

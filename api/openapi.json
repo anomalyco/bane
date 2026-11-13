@@ -39,13 +39,13 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "bane.session_token",
-        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Bane-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
+        "description": "OIDC-authenticated HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (bane.session_token, then bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
       },
       "secureDashboardSession": {
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-bane.session_token",
-        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Bane-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
+        "description": "OIDC-authenticated Secure HttpOnly host-only session in production. Unsafe requests require the canonical dashboard Origin. A browser holds one session per connected account (__Host-bane.session_token, then __Host-bane.session_token.1 to .4); X-Nightmail-Account (the account ID from getCurrentIdentity) chooses the one a request acts as, otherwise the browser default. A named account without a live session gets 401 ACCOUNT_SIGNED_OUT, never another account."
       }
     },
     "schemas": {
@@ -19923,7 +19923,7 @@
                       "items": {
                         "$ref": "#/components/schemas/Workspace"
                       },
-                      "description": "A hosted dashboard session's workspaces and roles (select one with X-Bane-Workspace); null for keys, MCP, agent tokens and self-hosted."
+                      "description": "A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted."
                     },
                     "operator": {
                       "type": [
@@ -59645,7 +59645,7 @@
           }
         ],
         "deprecated": true,
-        "description": "Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.",
+        "description": "Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Nightmail-Workspace; without it, the most recent selection is used.",
         "responses": {
           "200": {
             "description": "Success",
@@ -59795,7 +59795,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.",
+        "description": "Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.",
         "requestBody": {
           "required": true,
           "content": {

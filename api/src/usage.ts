@@ -83,7 +83,7 @@ export function registerUsage(app: App) {
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     // The scope keeps the two views apart: a member's read is never served an owner's received count.
     const body = await dashboardRead(c, ['usage', a.workspaceId, receiving ? 'all' : 'sent', Math.floor(Date.now() / 60_000)].join('|'), compute);
-    c.header('x-bane-usage-cache', body.cache);
+    c.header('x-nightmail-usage-cache', body.cache);
     return c.json(body.value, 200);
   });
 }

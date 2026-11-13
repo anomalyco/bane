@@ -8,6 +8,7 @@ import { closest, type EndpointType } from './ritual-schema.js';
 import { matchRouting, plusBase, type RoutingInput } from './routing-match.js';
 import type { mailMessages, mailAttachments } from './db/mailbox.js';
 import { JobDeferred } from './jobs.js';
+import { loopHeaderNames } from './brand.js';
 
 const key = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/),
   bounded = z.string().min(1).max(254);
@@ -156,7 +157,7 @@ export function projectEmail(
       autoReply: !!headers['auto-submitted'],
       bulk: !!headers['list-id'],
       listId: headers['list-id']?.[0] ?? null,
-      baneHops: headers['x-bane-loop']?.length ?? 0,
+      baneHops: loopHeaderNames.reduce((hops, name) => hops + (headers[name]?.length ?? 0), 0),
     },
     thread: {
       id: m.threadId ?? null,

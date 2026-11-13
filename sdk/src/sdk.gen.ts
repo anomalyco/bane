@@ -4927,7 +4927,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Bane-Workspace; without it, the most recent selection is used.
+ * Deprecated: use getCurrentIdentity (GET /v1/me), which returns the same list. Select a membership with X-Nightmail-Workspace; without it, the most recent selection is used.
  *
  * @deprecated
  */
@@ -4946,7 +4946,7 @@ export const listWorkspaces = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Bane-Workspace.
+ * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{
