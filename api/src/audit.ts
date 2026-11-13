@@ -51,7 +51,7 @@ export const RETENTION = { standard: '1 year', billing: '7 years', access: '90 d
 //   { action: 'billing.topup' | 'billing.refund' | 'billing.dispute' | …, workspaceId, retention: 'billing', … }); members' and operators'
 //   billing changes pass `c` or operatorContext(c, operator) instead.
 // - Sign-in (#89): recordAudit(tx, { actor: { type: 'member', id: userId, userId, via: 'dashboard' }, requestId, ipNetwork, userAgent },
-//   { action: 'auth.sign_in', workspaceId: null, userId, … }); then port userEmail() below to bane_users.
+//   { action: 'auth.sign_in', workspaceId: null, userId, … }); then port userEmail() below to nightmail_users.
 // - Reputation (#111/#115): operator actions arrive through the hosted_operator_audit trigger (migration 262); nothing to call.
 
 const SECRET_KEY = /secret|password|passwd|token|api[_-]?key|private|credential|authorization|cookie|signature|hash|^dkim|^headers?$/i;
@@ -198,7 +198,7 @@ export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContex
 // ---------- reading the trail ----------
 
 /** The person behind a user ID, for display (identity is the issuer subject; the address is display only). */
-export const userEmail = (userId: SQL) => sql`(SELECT email FROM bane_users WHERE id = ${userId})`;
+export const userEmail = (userId: SQL) => sql`(SELECT email FROM nightmail_users WHERE id = ${userId})`;
 
 export const AuditEntry = z.object({
   id: z.string().describe('Stable ID of the entry; audit entries are prefixed aud_, ledger lines bill_, enforcement events enf_.'),
@@ -330,7 +330,7 @@ export function registerAudit(app: App) {
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/users/{id}/audit', operationId: 'operatorUserAudit',
     request: { params: z.object({ id: z.string().min(1).max(200) }), query: AuditFilters }, responses: { 200: response(z.object({ data: z.array(OperatorEntry), nextCursor: z.string().nullable() })), ...errors } }), async c => {
     const operator = await requireOperator(c, 'operator:read'), id = c.req.valid('param').id;
-    if (!(await c.env.db.execute(sql`SELECT FROM bane_users WHERE id = ${id}`)).rowCount) notFound('User');
+    if (!(await c.env.db.execute(sql`SELECT FROM nightmail_users WHERE id = ${id}`)).rowCount) notFound('User');
     return c.json(await operatorTrail(c, operator, { userId: id }, c.req.valid('query'), []), 200);
   });
 }

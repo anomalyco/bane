@@ -155,7 +155,7 @@ const admin = new pg.Pool({ connectionString: url, max: 4 });
 async function assertDisposable() {
   const { rows: [r] } = await admin.query(`SELECT shobj_description(d.oid, 'pg_database') AS marker, current_database() AS name,
     (SELECT count(*)::int FROM workspaces WHERE id <> 'default' AND id NOT LIKE 'tear\\_%') AS workspaces,
-    (SELECT count(*)::int FROM bane_users WHERE id NOT LIKE 'tear-user-%') AS users
+    (SELECT count(*)::int FROM nightmail_users WHERE id NOT LIKE 'tear-user-%') AS users
     FROM pg_database d WHERE d.datname = current_database()`);
   if (r?.marker !== DISPOSABLE) throw new Error(`tear host: refusing database ${r?.name ?? '(unknown)'}: it is not marked disposable. Create a dedicated, migrated database and mark it with COMMENT ON DATABASE ... IS '${DISPOSABLE}' (see tear/README.md).`);
   if (r.workspaces || r.users) throw new Error(`tear host: refusing database ${r.name}: it holds ${r.workspaces} workspaces and ${r.users} users that tear did not create.`);
@@ -203,9 +203,9 @@ let fx: Fixture | null = null;
 async function seedUser(w: string, role: 'owner' | 'member'): Promise<User> {
   const id = `tear-user-${randomUUID()}`, token = randomBytes(32).toString('base64url'), memberId = randomUUID();
   const email = `${id}@example.com`;
-  await admin.query(`INSERT INTO bane_users (id,name,email,email_verified) VALUES ($1,'tear',$2,true)`, [id, email]);
-  await admin.query(`INSERT INTO bane_oidc_identities VALUES ($1,$2,$2)`, [fixtureIssuer,id]);
-  await admin.query(`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES ($1,$2,$3,$2,$4)`, [createHash('sha256').update(token).digest('hex'),id,fixtureIssuer,at(RealDate.now()+86_400_000)]);
+  await admin.query(`INSERT INTO nightmail_users (id,name,email,email_verified) VALUES ($1,'tear',$2,true)`, [id, email]);
+  await admin.query(`INSERT INTO nightmail_oidc_identities VALUES ($1,$2,$2)`, [fixtureIssuer,id]);
+  await admin.query(`INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES ($1,$2,$3,$2,$4)`, [createHash('sha256').update(token).digest('hex'),id,fixtureIssuer,at(RealDate.now()+86_400_000)]);
   await admin.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,$4)`, [memberId, w, id, role]);
   return { id, memberId, cookie: `bane.session_token=${token}` };
 }
@@ -221,7 +221,7 @@ async function open() {
 async function close() {
   if (!fx) return;
   for (const slot of Object.values(fx.slots)) crash(slot);
-  await admin.query('DELETE FROM bane_users WHERE id = ANY($1)', [[fx.owner.id, fx.member.id]]);
+  await admin.query('DELETE FROM nightmail_users WHERE id = ANY($1)', [[fx.owner.id, fx.member.id]]);
   fx = null;
 }
 
@@ -278,7 +278,7 @@ async function refreshGrant(name: string) {
   const g = fx!.grants.get(name)!;
   const claims=JSON.parse(Buffer.from(g.access.split('.')[1]!,'base64url').toString());
   const user=[fx!.member,fx!.owner].find(u=>u.id===claims.sub);
-  if(!user || !(await admin.query('SELECT FROM bane_resource_grants WHERE id=$1 AND NOT revoked',[g.keyId])).rowCount)return {status:'denied'};
+  if(!user || !(await admin.query('SELECT FROM nightmail_resource_grants WHERE id=$1 AND NOT revoked',[g.keyId])).rowCount)return {status:'denied'};
   return mintGrant(name,user,claims.scope);
 }
 // A v3 agent token, as signed by a release before the HKDF key (v4): still verified during overlap.
@@ -435,7 +435,7 @@ async function act(action: string): Promise<Obs> {
       case 'ikey': case 'gikey': return { status: (await send(null, 'POST', `/v1/inbound/keys/${f.creds.get(a1)!.id}/revoke`, owner())).status };
     } break;
     case 'delete': return { status: (await send(null, 'DELETE', `/v1/inboxes/${f.box}`, owner())).status };
-    case 'receiving': await admin.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1', [f.grants.get(a1 ?? 'grant')!.consentId]); return {};
+    case 'receiving': await admin.query('UPDATE nightmail_resource_grants SET receiving=true WHERE grant_key=$1', [f.grants.get(a1 ?? 'grant')!.consentId]); return {};
     case 'refresh': return refreshGrant(a1!);
     case 'remove': return { status: (await send(null, 'DELETE', `/v1/workspaces/current/members/${f.member.memberId}`, owner())).status };
     case 'promote': return { status: (await send(null, 'PATCH', `/v1/workspaces/current/members/${f.member.memberId}`, owner(), { role: 'admin' })).status };

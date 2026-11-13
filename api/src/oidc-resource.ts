@@ -58,9 +58,9 @@ const rolePermissions = (role: string): Permission[] => role === 'owner' || role
  */
 export async function externalMcpGrant(runtime: Runtime, keyId: string, workspaceId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
   const { rows: [grant] } = await db.execute<{role: string; permissions: Permission[]}>(sql`
-    SELECT m.role, g.permissions FROM bane_resource_grants g
-    JOIN bane_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
-    JOIN bane_users u ON u.id=i.user_id
+    SELECT m.role, g.permissions FROM nightmail_resource_grants g
+    JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
+    JOIN nightmail_users u ON u.id=i.user_id
     JOIN workspace_members m ON m.workspace_id = ${workspaceId} AND m.user_id = i.user_id
     WHERE g.id = ${keyId} AND g.issuer = ${runtime.config.accountIssuer} AND NOT g.revoked AND g.expires_at > now()
       AND m.role IN ('owner','admin','member')
@@ -103,8 +103,8 @@ export function chooseWorkspace(connection: McpConnection, value: string | undef
 export async function mcpConnection(runtime: Runtime, keyId: string, scopes: Permission[] = permissions): Promise<McpConnection | null> {
   const { rows } = await runtime.db.execute<{ user_id: string; permissions: Permission[]; chosen: string | null; last_used: string | null; id: string | null; name: string | null; slug: string | null; role: McpWorkspace['role'] | null }>(sql`
     SELECT g.user_id, g.permissions, g.workspace_id AS chosen, u.selected_workspace_id AS last_used, w.id, w.name, w.slug, m.role
-    FROM bane_resource_grants g JOIN bane_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
-    JOIN bane_users u ON u.id = i.user_id
+    FROM nightmail_resource_grants g JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
+    JOIN nightmail_users u ON u.id = i.user_id
     LEFT JOIN workspace_members m ON m.user_id = i.user_id AND m.role IN ('owner','admin','member')
       AND (${runtime.config.multiTenant} OR (m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? i.subject))
     LEFT JOIN workspaces w ON w.id = m.workspace_id
@@ -127,7 +127,7 @@ export async function mcpConnection(runtime: Runtime, keyId: string, scopes: Per
 
 /** Sets the workspace a connection's calls use when they name none. Only one of the person's own. */
 export async function setDefaultWorkspace(runtime: Runtime, keyId: string, workspaceId: string) {
-  await runtime.db.execute(sql`UPDATE bane_resource_grants SET workspace_id=${workspaceId}, updated_at=now() WHERE id=${keyId} AND NOT revoked`);
+  await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET workspace_id=${workspaceId}, updated_at=now() WHERE id=${keyId} AND NOT revoked`);
 }
 
 /** The JWT's audience when it names this resource: /mcp on this origin, with any query (OpenCode sends the URL it was
@@ -179,10 +179,10 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   if (proof) {
     const {jti} = JSON.parse(Buffer.from(proof.split('.')[1]!, 'base64url').toString('utf8')) as {jti:string};
     const replay = await digest(JSON.stringify([claims.iss, claims.cnf, jti]));
-    const inserted = await runtime.db.execute(sql`INSERT INTO bane_dpop_proofs(id, expires_at) VALUES (${replay}, now()+interval '11 minutes') ON CONFLICT DO NOTHING RETURNING id`);
+    const inserted = await runtime.db.execute(sql`INSERT INTO nightmail_dpop_proofs(id, expires_at) VALUES (${replay}, now()+interval '11 minutes') ON CONFLICT DO NOTHING RETURNING id`);
     if (!inserted.rowCount) return denied(401);
   }
-  const identity = await runtime.db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub}`);
+  const identity = await runtime.db.execute<{user_id:string}>(sql`SELECT user_id FROM nightmail_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub}`);
   const userId=identity.rows[0]?.user_id;
   if (!userId) return denied(403);
   // One approval per account and client: the same client used by two accounts (a personal and a work entry) gets two.
@@ -194,28 +194,28 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // connected the client again at the account service) starts it again under a new key, so nothing tied to the revoked
   // one comes back: its credentials, objects, ritual parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
-  if (consent) await runtime.db.execute(sql`UPDATE bane_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
+  if (consent) await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
       revoked=false, issuer_grant=${consent}, permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},
       profile=coalesce(${profile}, profile), created_at=now(), updated_at=now(), issuer=${claims.iss}, subject=${claims.sub}
     WHERE user_id=${userId} AND client_id=${claims.client_id} AND revoked AND issuer_grant IS NOT NULL AND NOT ${consent}=ANY(revoked_issuer_grants)`);
   // The approval follows the newest token: its scopes, expiry and consent. It names no workspace: every tool call names
   // one (or uses the connection's default, workspace_id) and is checked against the person's membership and role there.
-  const { rows: [upserted] } = await runtime.db.execute<{created:boolean}>(sql`INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at,profile,issuer_grant)
+  const { rows: [upserted] } = await runtime.db.execute<{created:boolean}>(sql`INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at,profile,issuer_grant)
     VALUES (${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id]))},${claims.iss},${claims.sub},${userId},${claims.client_id},${sql.param(allowed)}::text[],to_timestamp(${claims.exp}),${claims.iat},${profile},${consent})
-    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,bane_resource_grants.profile),
-      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,bane_resource_grants.issuer_grant)
-    WHERE NOT bane_resource_grants.revoked AND NOT coalesce(excluded.issuer_grant=ANY(bane_resource_grants.revoked_issuer_grants), false)
-      AND (excluded.issued_at>bane_resource_grants.issued_at OR (excluded.issued_at=bane_resource_grants.issued_at AND
-        excluded.permissions=bane_resource_grants.permissions AND excluded.expires_at>bane_resource_grants.expires_at))
+    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,nightmail_resource_grants.profile),
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,nightmail_resource_grants.issuer_grant)
+    WHERE NOT nightmail_resource_grants.revoked AND NOT coalesce(excluded.issuer_grant=ANY(nightmail_resource_grants.revoked_issuer_grants), false)
+      AND (excluded.issued_at>nightmail_resource_grants.issued_at OR (excluded.issued_at=nightmail_resource_grants.issued_at AND
+        excluded.permissions=nightmail_resource_grants.permissions AND excluded.expires_at>nightmail_resource_grants.expires_at))
     RETURNING (xmax=0) AS created`);
   if (upserted?.created) log('info', { code: 'MCP_APPROVAL_CREATED', userId, client: String(claims.client_id).slice(0, 200) });
   // The same statement notes when the agent was last used (the API keys page shows it), at most once a minute and
   // never waiting: a row another transaction holds (a revoke, a receiving write) is skipped this time.
-  const { rows: [approval] } = await runtime.db.execute<{ id: string; blocked: boolean }>(sql`WITH used AS (UPDATE bane_resource_grants SET last_used_at=now()
-      WHERE id IN (SELECT id FROM bane_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id} AND NOT revoked
+  const { rows: [approval] } = await runtime.db.execute<{ id: string; blocked: boolean }>(sql`WITH used AS (UPDATE nightmail_resource_grants SET last_used_at=now()
+      WHERE id IN (SELECT id FROM nightmail_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id} AND NOT revoked
         AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute') FOR NO KEY UPDATE SKIP LOCKED))
     SELECT id, revoked OR coalesce(${consent}::text=ANY(revoked_issuer_grants), false) AS blocked
-    FROM bane_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id}`);
+    FROM nightmail_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id}`);
   if (!approval || approval.blocked) return denied(403);
   const keyId = approval.id;
   // The presented token's own scopes: a token older than the approval's newest may carry fewer.

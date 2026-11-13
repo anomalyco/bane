@@ -15,7 +15,7 @@ export type Attempt = { issuer: string; subject: string; acr: string | null; pro
 
 export async function listSigninAttempts(db: pg.Client, hours: number, issuer?: string) {
   const { rows } = await db.query<Attempt>(`SELECT issuer,subject,acr,provider,provider_hd,email,name,outcome,attempts,first_at::text,last_at::text
-    FROM bane_signin_attempts WHERE last_at > now() - make_interval(hours => $1) AND ($2::text IS NULL OR issuer = $2) ORDER BY last_at DESC LIMIT 200`,
+    FROM nightmail_signin_attempts WHERE last_at > now() - make_interval(hours => $1) AND ($2::text IS NULL OR issuer = $2) ORDER BY last_at DESC LIMIT 200`,
     [hours, issuer ?? null]);
   return rows;
 }

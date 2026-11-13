@@ -75,7 +75,7 @@ const hashSql=(expr:string)=>`encode(sha256(convert_to(${expr},'UTF8')),'hex')`;
 
 async function schemaCheck(db:Client) {
   const dir=new URL('../migrations/',import.meta.url), files=(await readdir(dir)).filter(n=>/^\d+_[a-z_]+\.sql$/.test(n)).sort();
-  const applied=await db.query('SELECT name,checksum FROM bane_migrations ORDER BY name COLLATE "C"');
+  const applied=await db.query('SELECT name,checksum FROM nightmail_migrations ORDER BY name COLLATE "C"');
   const sums=new Map(applied.rows.map(r=>[r.name,r.checksum]));
   if (files.length!==sums.size || !(await Promise.all(files.map(async n=>sums.get(n)===sha(await readFile(new URL(n,dir),'utf8'))))).every(Boolean)) throw Error('Wrong migration set or checksum.');
   const {rows:[database]}=await db.query(`SELECT system_identifier::text AS system_id,current_database() AS database,current_schema() AS schema FROM pg_catalog.pg_control_system()`);

@@ -28,7 +28,7 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
     { action: 'member.join', workspaceId: sql`joined.workspace_id`, target: { type: 'member', id: sql`joined.id` }, after: sql`jsonb_build_object('role', joined.role)`, details: { invitationId } }, { from: sql`joined` });
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
-    JOIN bane_users recipient ON recipient.id=${userId} AND recipient.email_verified AND lower(recipient.email)=i.email
+    JOIN nightmail_users recipient ON recipient.id=${userId} AND recipient.email_verified AND lower(recipient.email)=i.email
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
       AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner'))
       AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter,recipient
@@ -37,7 +37,7 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
   ), joined AS (
     INSERT INTO workspace_members (id, workspace_id, user_id, role) SELECT ${id('mem')}, workspace_id, ${userId}, role FROM claimed
     ON CONFLICT (workspace_id, user_id) DO NOTHING RETURNING id, workspace_id, role
-  ), audit AS (${audit}) UPDATE bane_users u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
+  ), audit AS (${audit}) UPDATE nightmail_users u SET selected_workspace_id = claimed.workspace_id FROM claimed WHERE u.id = ${userId} RETURNING claimed.workspace_id`);
   return result.rows[0]?.workspace_id;
 }
 
@@ -129,7 +129,7 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
     if (input.role === 'owner' && role !== 'owner') throw ownerRequired();
     const result = await db.execute<InviteRow>(sql`WITH invited AS (INSERT INTO workspace_invitations(id, workspace_id, email, role, inviter_id, expires_at)
       SELECT ${id('inv')}, ${wid}, ${input.email}, ${input.role}, ${uid}, now() + interval '7 days'
-      WHERE NOT EXISTS(SELECT 1 FROM workspace_members m JOIN bane_users u ON u.id = m.user_id WHERE m.workspace_id = ${wid} AND lower(u.email) = ${input.email})
+      WHERE NOT EXISTS(SELECT 1 FROM workspace_members m JOIN nightmail_users u ON u.id = m.user_id WHERE m.workspace_id = ${wid} AND lower(u.email) = ${input.email})
       ON CONFLICT (workspace_id, email) WHERE status = 'pending' DO UPDATE SET id = excluded.id, role = excluded.role, inviter_id = excluded.inviter_id, expires_at = excluded.expires_at, created_at = now()
       WHERE workspace_invitations.expires_at <= now()
       RETURNING id, workspace_id AS "workspaceId", email, role, expires_at AS "expiresAt"
@@ -211,7 +211,7 @@ export function registerWorkspaces(app: App) {
     // Same conditions as claimInvitation for a pending invitation, plus the idempotent accepted case.
     const result = await c.env.db.execute<z.infer<typeof InvitationPreview>>(sql`SELECT i.id, i.workspace_id AS "workspaceId", w.name AS "workspaceName", w.slug AS "workspaceSlug",
         u.name AS "inviterName", u.email AS "inviterEmail", i.role, i.expires_at AS "expiresAt", CASE WHEN i.status = 'accepted' THEN 'accepted' ELSE 'pending' END AS status
-      FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN bane_users u ON u.id = i.inviter_id
+      FROM workspace_invitations i JOIN workspaces w ON w.id = i.workspace_id JOIN nightmail_users u ON u.id = i.inviter_id
       JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
       WHERE i.id = ${invitationId} AND i.email = ${a.email.toLowerCase()} AND i.role IN ('owner','admin','member') AND (
         (i.status = 'pending' AND i.expires_at > now() AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner')))

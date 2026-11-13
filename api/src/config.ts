@@ -107,8 +107,9 @@ const values = z.object({
   JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
 });
 const baneKeys = Object.keys(values.shape).filter(key => key.startsWith('BANE_'));
-const legacyKey = (key: string) => `MX_${key.slice(5)}`;
-export const CONFIG_KEYS = [...Object.keys(values.shape), ...baneKeys.map(legacyKey)];
+// Each BANE_<x> setting is also read as NIGHTMAIL_<x>, which wins, and as the older MX_<x>. BANE_ and MX_: remove after rename cleanup.
+const legacyKey = (key: string) => `MX_${key.slice(5)}`, nightmailKey = (key: string) => `NIGHTMAIL_${key.slice(5)}`;
+export const CONFIG_KEYS = [...Object.keys(values.shape), ...baneKeys.map(legacyKey), ...baneKeys.map(nightmailKey)];
 export function migrationSettings(input: Record<string, unknown>) {
   return {workspaceId: 'default', regions: [values.shape.DEFAULT_SES_REGION.parse(input.DEFAULT_SES_REGION)]};
 }
@@ -123,7 +124,7 @@ export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
 export function loadConfig(input: Record<string, unknown>): Config {
-  const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[key] ?? input[legacyKey(key)]]))});
+  const parsed = values.safeParse({...input, ...Object.fromEntries(baneKeys.map(key => [key, input[nightmailKey(key)] ?? input[key] ?? input[legacyKey(key)]]))});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');

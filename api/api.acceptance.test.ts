@@ -686,9 +686,9 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
     // Never overwrite/reuse an existing user's email or credentials. A collision
     // fails the fixture; choose a dedicated AUTH_TEST_EMAIL rather than deleting it.
     const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
-    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
-    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
-    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
+    await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,$4)',[userId,'Synthetic acceptance operator',email,options.verified??true]);
+    await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,userId,userId]);
+    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),userId,issuer,email]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),userId]);
     await db.query('COMMIT');
   } catch (cause) {
@@ -700,7 +700,7 @@ async function seedSession(db: pg.Client, options: { email?: string; hostedDomai
 async function sessionFixture(t: TestContext, options: Parameters<typeof seedSession>[1] = {}): Promise<SessionFixture> {
   assert.ok(authDb, 'Synthetic session database must be bootstrapped first.');
   const fixture = await seedSession(authDb, options);
-  cleanup(t, async () => { await authDb!.query('DELETE FROM bane_users WHERE id = $1', [fixture.userId]); });
+  cleanup(t, async () => { await authDb!.query('DELETE FROM nightmail_users WHERE id = $1', [fixture.userId]); });
   return fixture;
 }
 before(async () => {
@@ -722,7 +722,7 @@ before(async () => {
 after(async () => {
   await fixtureWorker?.close();
   if (authDb) {
-    try { if (manager) await authDb.query('DELETE FROM bane_users WHERE id = $1', [manager.userId]); }
+    try { if (manager) await authDb.query('DELETE FROM nightmail_users WHERE id = $1', [manager.userId]); }
     finally { await authDb.end(); }
   }
 });
@@ -839,8 +839,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     return result;
   }
   const subjects=[subject];
-  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
-  const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM bane_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
+  cleanup(t,async()=>{await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,subjects]);});
+  const attempt = async () => (await db.query('SELECT acr,provider,provider_hd,outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0];
   // Staff sign-up needs the provider identity of a staff Google Workspace domain. Nothing else admits a new subject:
   // no claim, another provider, another domain. Each refusal is recorded by subject for the operator.
   // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
@@ -857,7 +857,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const landed=(response:Response)=>{const url=new URL(response.headers.get('location')!);assert.match(url.searchParams.get('account')??'',/^[0-9a-f-]{36}$/);url.searchParams.delete('account');return url.href;};
   const result=await login();assert.equal(landed(result),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
-  assert.equal((await db.query('SELECT u.email_verified FROM bane_users u JOIN bane_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
+  assert.equal((await db.query('SELECT u.email_verified FROM nightmail_users u JOIN nightmail_oidc_identities i ON i.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2',[issuer,subject])).rows[0].email_verified,false);
   verified=true;
   const session=result.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
@@ -872,7 +872,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const changed=await login();const newSession=changed.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
   assert.equal((await request('/v1/me','GET',session)).status,401);
   runtime.config.accountClient!.requiredAcr=googleAcr;
-  const sessionCount = async () => (await db.query('SELECT count(*) FROM bane_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
+  const sessionCount = async () => (await db.query('SELECT count(*) FROM nightmail_sessions WHERE issuer=$1 AND subject=$2',[issuer,subject])).rows[0].count;
   const before = await sessionCount();
   for (const wrong of [undefined,'urn:anomaly:acr:passkey']) {
     tokenAcr=wrong;
@@ -888,7 +888,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.ok(accepted.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   assert.equal((await (await request('/v1/me','GET',newSession)).json() as {email:string}).email,email);
   assert.equal((await request(`/v1/workspaces/invitations/${oldInvitation}/accept`,'POST',newSession,{})).status,404);
-  verified=false;const unverified=await login();assert.equal((await db.query('SELECT email_verified FROM bane_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
+  verified=false;const unverified=await login();assert.equal((await db.query('SELECT email_verified FROM nightmail_users WHERE id=$1',[me.id])).rows[0].email_verified,false);
   // An address change ends older sessions; the new session of the same admitted subject works without a verified address.
   assert.equal((await request('/v1/me','GET',newSession)).status,401);
   const unverifiedSession=unverified.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
@@ -907,8 +907,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
   const seatId=randomUUID();
-  await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
-  await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
+  await db.query("INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
+  await db.query('INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)',[issuer,subject,seatId]);
   await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'admin')",[randomUUID(),seatId,me.workspaceId]);
   const seated=await login();assert.equal(landed(seated),origin+'/');
   const seatSession=seated.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))!.split(';')[0]!;
@@ -966,7 +966,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
     }
   });
   const people: Person[] = [];
-  cleanup(t,async()=>{await db.query('DELETE FROM bane_users WHERE id IN (SELECT user_id FROM bane_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,people.map(p=>p.subject)]);});
+  cleanup(t,async()=>{await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=ANY($2))',[issuer,people.map(p=>p.subject)]);});
   const someone = (name: string): Person => { const p = {subject:randomUUID(), email:`${name}-${randomUUID()}@example.org`}; people.push(p); return p; };
   // One browser: its cookie jar, as Set-Cookie leaves it.
   const jar = new Map<string,string>();
@@ -1074,12 +1074,12 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   const gone = await request('/v1/me','GET',undefined,as(work));
   assert.equal(gone.status,401); assert.equal(await code(gone),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(personal)), personal.id);
-  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1',[work.id])).rows[0].n,0);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM nightmail_sessions WHERE user_id=$1',[work.id])).rows[0].n,0);
 
   // A session revoked on the server, or expired, drops only that account; the list clears just its cookie.
   await connect(work, true);
   assert.equal(jar.get('__Host-nightmail.account'), work.id);
-  await db.query('DELETE FROM bane_sessions WHERE user_id=$1',[work.id]);
+  await db.query('DELETE FROM nightmail_sessions WHERE user_id=$1',[work.id]);
   assert.equal(await code(await request('/v1/me','GET',undefined,as(work))),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(personal)), personal.id);
   assert.equal(jar.get('__Host-nightmail.account'), work.id, 'A tab naming its account leaves the default alone');
@@ -1090,18 +1090,18 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.deepEqual(((await pruned.json()) as {accounts:{id:string}[]}).accounts.map(a=>a.id),[personal.id]);
   assert.deepEqual([...jar.keys()].filter(k=>k.includes('session_token')),['__Host-nightmail.session_token']);
   await connect(work, true);
-  await db.query("UPDATE bane_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[personal.id]);
+  await db.query("UPDATE nightmail_sessions SET expires_at=now()-interval '1 second' WHERE user_id=$1",[personal.id]);
   assert.equal(await code(await request('/v1/me','GET',undefined,as(personal))),'ACCOUNT_SIGNED_OUT');
   assert.equal(await who(as(work)), work.id);
   assert.equal(await who(), work.id, 'The default falls to a live account');
   await connect(personal, true);
 
   // An add that doesn't meet the required authentication changes no session.
-  const before = (await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows;
+  const before = (await db.query('SELECT token_hash FROM nightmail_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows;
   tokenAcr = 'urn:anomaly:acr:passkey';
   assert.equal((await signIn(someone('passkey'), true)).headers.get('location'), origin+'/?auth=google_required');
   tokenAcr = googleAcr;
-  assert.deepEqual((await db.query('SELECT token_hash FROM bane_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows,before);
+  assert.deepEqual((await db.query('SELECT token_hash FROM nightmail_sessions WHERE user_id=ANY($1) ORDER BY 1',[[personal.id,work.id]])).rows,before);
   assert.equal(await who(as(personal)), personal.id);
   // An add in a popup returns to the popup page, which tells the tab that opened it; so does a refused one.
   const popup = await signIn(someone('popup'), true, origin+'/signed-in/?tab=fixture');
@@ -1117,7 +1117,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.equal(new URL(again.headers.get('location')!).searchParams.get('account'), personal.id);
   assert.notEqual(jar.get('__Host-nightmail.session_token'), previous, 'Signing in again replaces the account’s own session, in its own slot');
   assert.equal(jar.size, size);
-  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE user_id=$1 AND expires_at>now()',[personal.id])).rows[0].n,1);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM nightmail_sessions WHERE user_id=$1 AND expires_at>now()',[personal.id])).rows[0].n,1);
   // At most five accounts. A sign-in started at four that finishes after a fifth was added is refused at the callback,
   // and nothing of it is kept; at five, every sign-in is refused before the account service is asked.
   await connect(someone('fourth'), true);
@@ -1125,7 +1125,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   await connect(someone('fifth'), true);
   assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length, 5);
   assert.equal((await late()).headers.get('location'), origin+'/?auth=account_limit');
-  assert.equal((await db.query('SELECT FROM bane_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,sixth.subject])).rowCount,0,'Nothing of a refused sixth account is kept');
+  assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,sixth.subject])).rowCount,0,'Nothing of a refused sixth account is kept');
   for (const prompt of [{prompt:'select_account'},{}]) {
     const full = await request('/api/auth/sign-in/account','POST',{callbackURL:origin+'/',...prompt});
     assert.equal(full.status,409); assert.equal(await code(full),'ACCOUNT_LIMIT');
@@ -1138,7 +1138,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.equal(store(await request('/api/auth/sign-out','POST',{all:true})).status,200);
   assert.equal([...jar.keys()].filter(k=>k.includes('session_token')).length,0);
   assert.equal((await request('/v1/me')).status,401);
-  assert.equal((await db.query('SELECT count(*)::int AS n FROM bane_sessions WHERE issuer=$1 AND expires_at>now()',[issuer])).rows[0].n,0);
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM nightmail_sessions WHERE issuer=$1 AND expires_at>now()',[issuer])).rows[0].n,0);
 });
 
 // MCP profiles: one MCP connection is one account. Two entries of one client signed in as two accounts get two
@@ -1173,11 +1173,11 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
   try {
     for (const [slot,name] of ['personal','work'].entries()) {
       const user = unique('mcp-profile'), workspace = unique('mcp-profile-ws'), session = createHash('sha256').update(randomUUID()).digest('base64url');
-      await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,name,`${user}@example.org`]);
-      await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[issuer,user]);
+      await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,name,`${user}@example.org`]);
+      await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$2)',[issuer,user]);
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[workspace]);
       await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),user,workspace]);
-      await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
+      await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(session).digest('hex'),user,issuer]);
       jar.push(`__Host-nightmail.session_token${slot?'.'+slot:''}=${session}`);
       accounts.push({user,subject:user,workspace});
     }
@@ -1189,7 +1189,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     assert.notEqual(first.body.keyId,second.body.keyId);
     const swapped = await mcp(personal.subject,'work');
     assert.deepEqual([swapped.status,swapped.body.workspaceId,swapped.body.keyId],[200,personal.workspace,first.body.keyId],'A label never selects another approval');
-    const grants = (await db.query('SELECT user_id,profile FROM bane_resource_grants WHERE client_id=$1 AND user_id=ANY($2)',['opencode',[personal.user,work.user]])).rows;
+    const grants = (await db.query('SELECT user_id,profile FROM nightmail_resource_grants WHERE client_id=$1 AND user_id=ANY($2)',['opencode',[personal.user,work.user]])).rows;
     assert.equal(grants.length,2,'One approval per account and client');
     assert.deepEqual(Object.fromEntries(grants.map(g=>[g.user_id,g.profile])),{[personal.user]:'work',[work.user]:'work'},'The label follows the entry that last connected; it is not part of the approval');
     // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
@@ -1236,7 +1236,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
   await db.query('BEGIN');
   try {
     assert.ok(manager);
-    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
+    await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
     const described={read:'Read workspace data.',send:'Send email from the workspace.',manage:'Manage workspace mail and resources.'};
     const both=['bane:read','bane:send','bane:manage','nightmail:read','nightmail:send','nightmail:manage'];
     // Both scope sets are published until the rename cleanup; the requested ones (bane:* by default) come first.
@@ -1279,9 +1279,9 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.deepEqual(await (await run(token({acr:'urn:anomaly:acr:google',jti:randomUUID()}))).json(),['read']);
     runtime.config.accountRequiredAcr=undefined;
     // The address is not an identity input: an unverified one leaves the admitted subject's MCP access alone.
-    await db.query('UPDATE bane_users SET email_verified=false WHERE id=$1',[manager.userId]);
+    await db.query('UPDATE nightmail_users SET email_verified=false WHERE id=$1',[manager.userId]);
     assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read']);
-    await db.query('UPDATE bane_users SET email_verified=true WHERE id=$1',[manager.userId]);
+    await db.query('UPDATE nightmail_users SET email_verified=true WHERE id=$1',[manager.userId]);
     assert.equal((await run(token({scope:'openid'}))).status,403);
     const thumbprint=createHash('sha256').update(JSON.stringify({crv:jwk.crv,kty:jwk.kty,x:jwk.x,y:jwk.y})).digest('base64url');
     const bound=token({cnf:{jkt:thumbprint}});
@@ -1290,7 +1290,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal((await run(bound,proof)).status,200);
     assert.equal((await run(bound,proof)).status,401);
     assert.equal((await run(token({jti:randomUUID()}))).status,200);
-    const grants=await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,claims.client_id]);
+    const grants=await db.query('SELECT id FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,claims.client_id]);
     assert.equal(grants.rowCount,1,'Two tokens from the same client must resolve to one approval');
     const {createApp}=await import('./src/app.js');const app=createApp();
     const dashboard={...runtime,config:{...runtime.config,accountIssuer:process.env.ACCOUNT_ISSUER,accountClient:{id:'fixture',privateKey:'unused',algorithm:'ES256' as const}}};
@@ -1319,7 +1319,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal(typeof secondKey,'string');assert.notEqual(secondKey,firstKey,'A new consent starts the approval under a new key');
     assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent never takes over the new approval');
     assert.equal(await keyOf(consented('consent-second')),secondKey);
-    assert.deepEqual((await db.query('SELECT id,revoked,revoked_issuer_grants FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,[{id:secondKey,revoked:false,revoked_issuer_grants:['consent-first']}]);
+    assert.deepEqual((await db.query('SELECT id,revoked,revoked_issuer_grants FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,[{id:secondKey,revoked:false,revoked_issuer_grants:['consent-first']}]);
     // Several workspaces: the connection works at once. A call acts in the workspace it names (or the default), with the
     // token's scopes intersected with the person's role there: members read and send, owners and admins also manage and
     // reach the receiving tools. Members count on hosted installations.
@@ -1329,13 +1329,13 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$2)',[workspace+suffix,workspace+suffix]);
       await db.query('INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,$4)',[randomUUID(),manager.userId,workspace+suffix,role]);
     }
-    await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
+    await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
     type Seen={default:{id:string;source:string}|null;workspaces:[string,string,string[]][]};
     const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'bane:read bane:manage'});
     const connection=async()=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({default:a.defaultWorkspace,workspaces:a.workspaces.map(w=>[w.id,w.role,w.permissions])}));
       assert.equal(r.status,200);const seen=await r.json() as Seen;return {...seen,workspaces:seen.workspaces.filter(w=>w[0].endsWith(suffix))};};
     assert.deepEqual(await connection(),{default:{id:'mcp-admin'+suffix,source:'last-used'},workspaces:[['mcp-admin'+suffix,'admin',['read','manage']],['mcp-member'+suffix,'member',['read']]]});
-    const multiId=(await db.query('SELECT id FROM bane_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id as string;
+    const multiId=(await db.query('SELECT id FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-multi'])).rows[0].id as string;
     const acting=async(workspace:string)=>{const a=await externalMcpGrant(runtime,multiId,workspace);return a&&[a.workspaceId,a.role,a.permissions,a.receivingConsent];};
     assert.deepEqual(await acting('mcp-admin'+suffix),['mcp-admin'+suffix,'admin',['read','manage'],true]);
     assert.deepEqual(await acting('mcp-member'+suffix),['mcp-member'+suffix,'member',['read'],false],'A member reads; manage and receiving need an owner or admin');
@@ -1346,9 +1346,9 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal((await bind(multiId,{workspaceId:'missing'+suffix})).status,403);
     assert.equal((await bind(multiId,{workspaceId:'default',extra:true})).status,422);
     const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
-    await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
-    await db.query('INSERT INTO bane_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
-    await db.query("INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
+    await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)',[otherUser,`${otherUser}@example.org`]);
+    await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$2)',[dashboardIssuer,otherUser]);
+    await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')",[createHash('sha256').update(otherToken).digest('hex'),otherUser,dashboardIssuer,`${otherUser}@example.org`]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,'default','owner')",[randomUUID(),otherUser]);
     const otherDashboard={...dashboard,config:{...dashboard.config,allowedSubjects:[...dashboard.config.allowedSubjects,otherUser]}};
     assert.equal((await call('/v1/mcp-connections','GET',undefined,`${COOKIE_NAME}=${otherToken}`,otherDashboard)).status,200,'The other user has a working dashboard session');
@@ -1363,7 +1363,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal((await bind(multiId,{workspaceId:null})).status,422,'A default is one of your workspaces');
     // A default the person no longer belongs to falls back: to the last-used workspace, then to the only one left.
     await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id=$2',[manager.userId,'mcp-admin'+suffix]);
-    await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-member'+suffix]);
+    await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-member'+suffix]);
     assert.deepEqual((await connection()).default,{id:'mcp-member'+suffix,source:'last-used'});
     assert.equal(await acting('mcp-admin'+suffix),null,'Removed from a workspace, the approval no longer acts there');
     await db.query('DELETE FROM workspace_members WHERE user_id=$1 AND workspace_id<>$2',[manager.userId,'mcp-member'+suffix]);
@@ -1376,9 +1376,11 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
   const db=await fixtureDatabase(t);
   await db.query('BEGIN');
   try {
-    for(const table of ['oauth_client','oauth_consent','oauth_access_token','oauth_refresh_token','agent_tokens','mail_grant_objects','api_keys','bane_expired_approvals','bane_resource_grants']) {
+    for(const table of ['oauth_client','oauth_consent','oauth_access_token','oauth_refresh_token','agent_tokens','mail_grant_objects','api_keys','nightmail_expired_approvals','nightmail_resource_grants','nightmail_retired_grant_objects']) {
       await db.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS INCLUDING INDEXES) ON COMMIT DROP`);
     }
+    // Migration 276 predates the nightmail_* names; it writes through the bane_* views, here onto the temporary tables.
+    for(const table of ['expired_approvals','resource_grants','retired_grant_objects']) await db.query(`CREATE TEMP VIEW bane_${table} AS SELECT * FROM pg_temp.nightmail_${table}`);
     await db.query('CREATE TRIGGER mail_grant_removed AFTER DELETE ON mail_grant_objects FOR EACH ROW EXECUTE FUNCTION mail_disable_grant_object()');
     await db.query("INSERT INTO oauth_client(id,client_id,name,redirect_uris) VALUES('client','legacy-client','Old app','{}')");
     await db.query("INSERT INTO oauth_consent(id,client_id,user_id,scopes,created_at,updated_at) VALUES('consent','legacy-client',$1,'{bane:read}',now(),now())",[manager.userId]);
@@ -1394,7 +1396,7 @@ test('MCP cutover expires legacy approvals and tokens but keeps the objects they
     // Objects a retired approval created keep working; only the approval itself and its tokens expire.
     assert.deepEqual((await db.query('SELECT id FROM api_keys WHERE revoked_at IS NULL ORDER BY id')).rows,[{id:'derived'},{id:'independent'}]);
     assert.equal((await db.query('SELECT FROM mail_grant_objects')).rowCount,0);
-    assert.deepEqual((await db.query("SELECT kind,resource FROM bane_retired_grant_objects WHERE grant_id='consent'")).rows,[{kind:'api_key',resource:'derived'}]);
+    assert.deepEqual((await db.query("SELECT kind,resource FROM nightmail_retired_grant_objects WHERE grant_id='consent'")).rows,[{kind:'api_key',resource:'derived'}]);
     const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
     const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
     const response=await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections',{headers:{cookie:manager.cookie}}),runtime);
@@ -1411,7 +1413,7 @@ test('an MCP client name is shown as one short line of the characters that are d
   try {
     const names:Record<string,string>={long:`Desk\u202E\u2066 hel\u200Bper\u2069\u202C\r\n\u0007notes ${'x'.repeat(400)}`,
       shaped:'\u200D👩\u200D💻 ❤\uFE0F\uFE0F می\u200Cخواهم Sup\u00ADport\u034F\u200D',blank:'\u034F\u00AD\u206A',cells:'\u2800 \u3164\u{E0041}\uFEFF'};
-    for(const [id,name] of Object.entries(names)) await db.query("INSERT INTO bane_expired_approvals(id,user_id,client_id,name,scopes,created_at,updated_at) VALUES($1,$2,$1,$3,'{bane:read}',now(),now())",['legacy_name_'+id,manager.userId,name]);
+    for(const [id,name] of Object.entries(names)) await db.query("INSERT INTO nightmail_expired_approvals(id,user_id,client_id,name,scopes,created_at,updated_at) VALUES($1,$2,$1,$3,'{bane:read}',now(),now())",['legacy_name_'+id,manager.userId,name]);
     const [{drizzle},{loadConfig},{createApp}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/app.js')]);
     const runtime:import('./src/core.js').Runtime={config:loadConfig({...process.env,PUBLIC_URL:PUBLIC_ORIGIN}),db:drizzle(db),snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async get(){throw Error('unused');},async delete(){throw Error('unused');}}};
     const {data}=await (await createApp().fetch(new Request(PUBLIC_ORIGIN+'/v1/mcp-connections?limit=100',{headers:{cookie:manager.cookie}}),runtime)).json() as {data:{id:string;name:string|null}[]};
@@ -1950,10 +1952,10 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       const base='/v1/workspaces/current',select=(id:string)=>({'X-Nightmail-Workspace':id}); // Other scenarios still select with X-Bane-Workspace.
       const {privateKey}=generateKeyPairSync('rsa',{modulusLength:2048});
       async function workspaceFixture(email:string,own:boolean){
-        const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM bane_users WHERE id=$1',[f.userId]);});
+        const f=await seedSession(authDb!,{email}); cleanup(t,async()=>{await pool.query('DELETE FROM nightmail_users WHERE id=$1',[f.userId]);});
         await pool.query('DELETE FROM workspace_members WHERE user_id=$1',[f.userId]);
         const org={id:'ws_'+randomUUID().replaceAll('-',''),name:'Fixture organization',slug:unique('slug')};
-        if(own){await pool.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[f.userId]);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
+        if(own){await pool.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1',[f.userId]);await pool.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$3)',[org.id,org.name,org.slug]);cleanup(t,async()=>{await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[org.id]);await pool.query('DELETE FROM workspaces WHERE id=$1',[org.id]);});await pool.query("INSERT INTO workspace_members VALUES($1,$2,$3,'owner',now())",[randomUUID(),org.id,f.userId]);await pool.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,$2,$3,$4::jsonb)',[org.id,randomUUID(),REGION,JSON.stringify([REGION])]);}
         return {org,cookie:f.cookie.replace(/^nightmail\./,'__Host-nightmail.')};
       }
       const ownerEmail=address(), otherEmail=address(), guestEmail=address();
@@ -3106,7 +3108,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const issued = mintResourceToken(resourceUrl,manager!.userId,scope);
     const first=await request('POST','/mcp',issued.token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders);
     assert.equal(first.status,200,diagnostic(first));
-    cleanup(t,async()=>{ await db.query('DELETE FROM bane_resource_grants WHERE grant_key=$1',[issued.consentId]); });
+    cleanup(t,async()=>{ await db.query('DELETE FROM nightmail_resource_grants WHERE grant_key=$1',[issued.consentId]); });
     return issued;
   }
   async function rpc(token: string, method: string, params: Json = {}, path = '/mcp?codemode=true'): Promise<Json> {
@@ -3404,7 +3406,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const parent=await callTool(token,'createApiKey',{confirm:true,body:{name:'grant administration fixture',permissions:['manage']}},201);
       // The policy the server passes (receivingPolicy): this shard is self-hosted, so the address must be allowlisted.
       const grantPolicy={hosted:false,subjects:(process.env.AUTH_ALLOWED_SUBJECTS??'').split(',').map(e=>e.trim())};
-      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)||$2::jsonb) AS ok FROM bane_resource_grants WHERE grant_key=$1",[consentId,JSON.stringify(grantPolicy)])).rows[0].ok;
+      const live=async()=>(await db.query("SELECT mail_receiving_grant('default',grant_key,jsonb_build_object('issuer',issuer)||$2::jsonb) AS ok FROM nightmail_resource_grants WHERE grant_key=$1",[consentId,JSON.stringify(grantPolicy)])).rows[0].ok;
       assert.equal(await live(),true);
       await assert.rejects(db.query(await readFile(new URL('./migrations/119_mvp_ownership_preflight.sql',import.meta.url),'utf8')),/MVP_OWNERSHIP_PREFLIGHT/);
       secrets.add(parent.secret);grantKeys.push(parent.id);
@@ -3420,7 +3422,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // Without bane:manage (here the newest token asked for less) the approval no longer changes receiving, and nothing it
       // created does: a key it made, and a key that key made, stop working until the scope is back.
       const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
-      await db.query("UPDATE bane_resource_grants SET permissions='{read}' WHERE grant_key=$1",[consentId]);
+      await db.query("UPDATE nightmail_resource_grants SET permissions='{read}' WHERE grant_key=$1",[consentId]);
       assert.equal(await live(),false);
       const policy=ok(await http('GET','/v1/inbound/policy',MANAGER));
       for(const secret of [parent.secret,derived.secret]){
@@ -3429,7 +3431,7 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await http('POST','/v1/inbound/addresses',secret,{address:'fixture@example.invalid'}),401,'AUTH_INVALID');
       }
       assert.deepEqual(ok(await http('GET','/v1/inbound/policy',MANAGER)),policy);
-      await db.query("UPDATE bane_resource_grants SET permissions='{read,manage}' WHERE grant_key=$1",[consentId]);
+      await db.query("UPDATE nightmail_resource_grants SET permissions='{read,manage}' WHERE grant_key=$1",[consentId]);
       assert.equal(await live(),true);
       error(await http('POST','/v1/inboxes',parent.secret,{type:'sandbox',credential:{name:'fixture',permissions:['read']}}),422,'USE_INBOX_CONNECTION');
     });
@@ -3457,7 +3459,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const member = await sessionFixture(t);
     await db.query("UPDATE workspace_members SET role = 'member' WHERE user_id = $1 AND workspace_id = 'default'", [member.userId]);
     const otherAgent = `mcp_at_${randomUUID().replaceAll('-', '')}`, otherToken = `agt_${randomUUID().replaceAll('-', '')}`;
-    await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at) VALUES($1,$2,$3,$3,'fixture-member-client','{read,send}',now()+interval '1 hour',0)", [otherAgent, process.env.ACCOUNT_ISSUER, member.userId]);
+    await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at) VALUES($1,$2,$3,$3,'fixture-member-client','{read,send}',now()+interval '1 hour',0)", [otherAgent, process.env.ACCOUNT_ISSUER, member.userId]);
     await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at) VALUES($1,'default',$2,'["read"]','[]','Member script',now()+interval '1 hour')`, [otherToken, otherAgent]);
     cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id = $1', [otherToken]); });
     const theirs = (await agents()).find(a => a.id === otherAgent);
@@ -3469,7 +3471,7 @@ describe('Hosted MCP OAuth and tools', () => {
     cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id = $1', [farToken]); await db.query('DELETE FROM workspaces WHERE id = $1', [elsewhere]); });
     assert.deepEqual((await agents()).find(a => a.id === otherAgent)?.tokens.map((x: Json) => x.id), [otherToken], 'Only its tokens in this workspace are listed.');
     assert.equal(ok(await http('POST', `/v1/agents/${otherAgent}/revoke`, MANAGER)).scope, 'tokens');
-    assert.deepEqual((await db.query('SELECT t.id, t.revoked_at IS NOT NULL AS ended, g.revoked FROM agent_tokens t JOIN bane_resource_grants g ON g.id = t.grant_id WHERE t.grant_id = $1 ORDER BY t.id = $2 DESC', [otherAgent, otherToken])).rows,
+    assert.deepEqual((await db.query('SELECT t.id, t.revoked_at IS NOT NULL AS ended, g.revoked FROM agent_tokens t JOIN nightmail_resource_grants g ON g.id = t.grant_id WHERE t.grant_id = $1 ORDER BY t.id = $2 DESC', [otherAgent, otherToken])).rows,
       [{ id: otherToken, ended: true, revoked: false }, { id: farToken, ended: false, revoked: false }]);
     error(await http('POST', '/v1/agents/mcp_at_missing/revoke', MANAGER), 404, 'NOT_FOUND');
     // Revoking your own agent ends the sign-in and every token it made.
@@ -3538,7 +3540,7 @@ describe('Hosted MCP OAuth and tools', () => {
         }
         assert.ok(gets>=80,String(gets));
         // As a workspace member the same approval also loses the owner and admin areas.
-        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[runtime.config.workspaceId,consentId]);
+        await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM nightmail_resource_grants g JOIN nightmail_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[runtime.config.workspaceId,consentId]);
         for(const codemode of [true,false]){
           const ops=await listed(codemode);assert.ok(ops.has('sendEmail')&&ops.has('getCurrentIdentity'),`codemode=${codemode}`);
           for(const name of ['sendCampaign','createAgentToken','listDomains','createContactList'])assert.ok(!ops.has(name),`member ${name} codemode=${codemode}`);
@@ -3600,15 +3602,15 @@ describe('Hosted MCP OAuth and tools', () => {
       try {
         const { token, consentId } = await oauthGrant(t, db, 'bane:read bane:send bane:manage offline_access', request);
         const own = runtime.config.workspaceId, suffix = randomUUID().slice(0, 8);
-        const { rows: [{ user_id: userId }] } = await db.query('SELECT user_id FROM bane_resource_grants WHERE grant_key=$1', [consentId]);
+        const { rows: [{ user_id: userId }] } = await db.query('SELECT user_id FROM nightmail_resource_grants WHERE grant_key=$1', [consentId]);
         // The person owns `own`, is a member of `shared`, and doesn't belong to `foreign` (another person's).
         const [shared, foreign] = [`mcp-shared-${suffix}`, `mcp-foreign-${suffix}`];
         for (const id of [shared, foreign]) await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)', [id, id === shared ? `Shared ${suffix}` : `Foreign ${suffix}`]);
         await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'member')", [randomUUID(), userId, shared]);
         const stranger = unique('mcp-stranger');
-        await db.query('INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [stranger, `${stranger}@example.org`]);
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [stranger, `${stranger}@example.org`]);
         await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), stranger, foreign]);
-        await db.query('UPDATE bane_users SET selected_workspace_id=$2 WHERE id=$1', [userId, own]);
+        await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1', [userId, own]);
         const send = async (method: string, params: Json, path = '/mcp?codemode=false') => ok(await request('POST', path, token, { jsonrpc: '2.0', id: 1, method, params }, rpcHeaders)).result;
         const call = (name: string, args: Json = {}, path?: string) => send('tools/call', { name, arguments: args }, path);
         const failure = (result: Json) => [result.isError, result.structuredContent?.error?.code, result._meta?.status];
@@ -3659,14 +3661,14 @@ describe('Hosted MCP OAuth and tools', () => {
         const chosen = await call('setDefaultWorkspace', { workspace: `Shared ${suffix}` });
         assert.deepEqual([chosen.structuredContent.default, chosen.structuredContent.defaultSource], [shared, 'set']);
         assert.deepEqual(await identity(), [shared, 'member', ['read', 'send']]);
-        assert.equal((await db.query('SELECT workspace_id FROM bane_resource_grants WHERE grant_key=$1', [consentId])).rows[0].workspace_id, shared);
+        assert.equal((await db.query('SELECT workspace_id FROM nightmail_resource_grants WHERE grant_key=$1', [consentId])).rows[0].workspace_id, shared);
         assert.deepEqual(failure(await call('setDefaultWorkspace', { workspace: foreign })), [true, 'WORKSPACE_ACCESS_DENIED', 403]);
         const groupedList = await call('workspaces', { action: 'list' }, '/mcp');
         assert.equal(groupedList.structuredContent.default, shared);
         for (const args of [{ workspace: '' }, { workspace: 42 }]) assert.deepEqual(failure(await call('getCurrentIdentity', args)).slice(0, 2), [true, 'INVALID_ARGUMENTS']);
         // With no default to fall back on, a call must name its workspace.
-        await db.query('UPDATE bane_resource_grants SET workspace_id=NULL WHERE grant_key=$1', [consentId]);
-        await db.query('UPDATE bane_users SET selected_workspace_id=NULL WHERE id=$1', [userId]);
+        await db.query('UPDATE nightmail_resource_grants SET workspace_id=NULL WHERE grant_key=$1', [consentId]);
+        await db.query('UPDATE nightmail_users SET selected_workspace_id=NULL WHERE id=$1', [userId]);
         assert.deepEqual(failure(await call('getCurrentIdentity')), [true, 'WORKSPACE_REQUIRED', 400]);
         assert.deepEqual(await identity(own), [own, 'owner', ['read', 'send', 'manage']]);
         // Removed from a workspace, the connection can't act there on its next call; with one workspace left, it is the default.
@@ -3686,7 +3688,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // The revoke commits between this request's authorization and the row that ties the new key to the approval.
       const wire=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
         const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
-        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM bane_resource_grants WHERE grant_key=$1',[consentId]).then(()=>query.apply(this,args));}
+        if(this===db&&!revoked&&/^INSERT INTO mail_grant_objects/i.test(text)){revoked=true;return query.call(this,'DELETE FROM nightmail_resource_grants WHERE grant_key=$1',[consentId]).then(()=>query.apply(this,args));}
         return query.apply(this,args);} as typeof pg.Client.prototype.query);
       let result:Json;
       try{result=ok(await request('POST','/mcp?codemode=true',token,{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'createApiKey',arguments:{confirm:true,idempotencyKey:'race-revoke-1',body:{name:'tear raced key',permissions:['read']}}}},rpcHeaders)).result;}finally{wire.mock.restore();}
@@ -3876,7 +3878,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         if (this !== db || removed || !/FROM mail_endpoints d JOIN mailbox_webhooks h/.test(text)) return query.apply(this, args);
         removed = true;
-        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
       try { error(await local('PATCH', '/v1/endpoints/untouched', { paused: false }), 409, 'ENDPOINT_URL_REQUIRED'); } finally { wire.mock.restore(); }
       assert.equal(removed, true);
@@ -3902,8 +3904,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         // The first read of the approval authenticates the key; the second is the write's own.
-        if (this !== db || !/FROM bane_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
-        return query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [third.consentId]).then(() => query.apply(this, args));
+        if (this !== db || !/FROM nightmail_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
+        return query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [third.consentId]).then(() => query.apply(this, args));
       } as typeof pg.Client.prototype.query);
       try { error(await request('PATCH', `/v1/inbound/webhooks/${hook.id}`, key, { url: 'https://example.net/hooks/elsewhere', paused: false }), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
       assert.equal(reads, 2);
@@ -4015,7 +4017,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await pausedAt;
       let settled = false;
       const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
-      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%bane_resource_grants%'")).rows[0].n > 0;
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%nightmail_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the write holds.');
       assert.equal(settled, false);
@@ -4059,16 +4061,16 @@ describe('Hosted MCP OAuth and tools', () => {
       for(const path of [`${detail}?includeDelivery=true`,'/v1/inbound/messages?includeDelivery=true',`${detail}/raw`,`${detail}/parts/fixture`])error(await request('GET',path,parent.secret),403,'ADMIN_REQUIRED');
       assert.deepEqual(ok(await request('GET',`${detail}?includeDelivery=true`,dashboardKey.secret)).envelopeTo,['recipient@example.net']);
       error(await request('GET',`${detail}/parts/fixture`,dashboardKey.secret),404);
-      await db.query('UPDATE bane_resource_grants SET revoked=true WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE nightmail_resource_grants SET revoked=true WHERE client_id=$1',[clientId]);
       for(const [id,from] of [[child.id,'sender@example.com'],[mbk.id,box.address]])assert.equal(await allowed(id,from),false);
       await run('email.dispatch');
       for(const emailId of [second,mailboxEmail])assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[emailId])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[control])).rows[0].status,'accepted');
       // Non-deleting lapse: the client and both key rows remain live, but the
       // approving user no longer has management authority in this workspace.
-      await db.query('UPDATE bane_resource_grants SET revoked=false WHERE client_id=$1',[clientId]);
+      await db.query('UPDATE nightmail_resource_grants SET revoked=false WHERE client_id=$1',[clientId]);
       const afterDemotion=await queue(child.secret);
-      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM bane_resource_grants g JOIN bane_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[wid,consentId]);
+      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=(SELECT i.user_id FROM nightmail_resource_grants g JOIN nightmail_oidc_identities i USING(issuer,subject) WHERE g.grant_key=$2)",[wid,consentId]);
       assert.equal((await db.query('SELECT FROM api_keys WHERE id=$1 AND revoked_at IS NULL',[child.id])).rowCount,1);
       assert.equal(await allowed(child.id),false);assert.equal(await allowed(mbk.id,box.address),false);
       await run('email.dispatch');assert.deepEqual((await db.query('SELECT status,error_code,provider_id FROM sending_emails WHERE id=$1',[afterDemotion])).rows,[{status:'canceled',error_code:'ORIGIN_KEY_REVOKED',provider_id:null}]);
@@ -4097,12 +4099,12 @@ describe('Hosted MCP OAuth and tools', () => {
       t.after(() => { runtime.webhookFetch = transport; });
       // While the approval is not active (its client is switched off here), nothing is posted to a webhook tied to it.
       // The delivery fails unsent, and can be retried by hand once the approval is active again.
-      await db.query('UPDATE bane_resource_grants SET revoked=true WHERE client_id=$1', [clientId]);
+      await db.query('UPDATE nightmail_resource_grants SET revoked=true WHERE client_id=$1', [clientId]);
       const [idle, free] = [await test(made.id), await test(untouched.id)];
       await run('operation.webhook');
       assert.deepEqual(posted, [hook('untouched').url]);
       assert.deepEqual([await delivery(idle), await delivery(free)], [{ status: 'failed', last_error: 'APPROVAL_INACTIVE' }, { status: 'delivered', last_error: null }]);
-      await db.query('UPDATE bane_resource_grants SET revoked=false WHERE client_id=$1', [clientId]);
+      await db.query('UPDATE nightmail_resource_grants SET revoked=false WHERE client_id=$1', [clientId]);
       ok(await local('POST', `/v1/webhooks/${made.id}/deliveries/${idle}/retry`), 202);
       await run('operation.webhook');
       assert.deepEqual(posted.splice(0), [hook('untouched').url, hook('made').url]);
@@ -4156,8 +4158,8 @@ describe('Hosted MCP OAuth and tools', () => {
         let reads = 0;
         const late = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
           const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
-          if (this !== db || !/FROM bane_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
-          return query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]).then(() => query.apply(this, args));
+          if (this !== db || !/FROM nightmail_resource_grants/i.test(text) || ++reads !== 2) return query.apply(this, args);
+          return query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [second.consentId]).then(() => query.apply(this, args));
         } as typeof pg.Client.prototype.query);
         try { error(await request(method, `/v1/webhooks/${untouched.id}${suffix}`, secondKey), 401, 'AUTH_INVALID'); } finally { late.mock.restore(); }
         assert.equal(reads, 2);
@@ -4170,7 +4172,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
         if (this !== db || removed || !/from "operation_webhooks"/.test(text)) return query.apply(this, args);
         removed = true;
-        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM bane_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
+        return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
       try { error(await local('PATCH', `/v1/webhooks/${untouched.id}`, { paused: false }), 409, 'WEBHOOK_URL_REQUIRED'); } finally { wire.mock.restore(); }
       assert.equal(removed, true);
@@ -4211,7 +4213,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await pausedAt;
       let settled = false;
       const removal = request('POST', '/v1/mcp-connections/mcp_' + consentId + '/revoke', MANAGER).finally(() => { settled = true; });
-      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%bane_resource_grants%'")).rows[0].n > 0;
+      const waiting = async () => (await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%nightmail_resource_grants%'")).rows[0].n > 0;
       for (let i = 0; i < 100 && !await waiting(); i++) await new Promise(resolve => setTimeout(resolve, 30));
       assert.equal(await waiting(), true, 'The removal waits for the approval the rotation holds.');
       assert.equal(settled, false);
@@ -8919,7 +8921,7 @@ describe('Billing: API, MCP and notices', () => {
       // sign-in identity, so a changed email doesn't matter.
       const other = unique('free-other'), owner2 = unique('user');
       await db.query('INSERT INTO workspaces (id,name,slug) VALUES ($1,$1,$1)', [other]);
-      await db.query(`INSERT INTO bane_users (id,name,email,email_verified) VALUES ($1,'Second owner',$2,true)`, [owner2, `${owner2}@example.com`]);
+      await db.query(`INSERT INTO nightmail_users (id,name,email,email_verified) VALUES ($1,'Second owner',$2,true)`, [owner2, `${owner2}@example.com`]);
       await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member')`, [unique('wm'), other, owner2, unique('wm'), me]);
       error(await local('PUT', `/v1/operator/billing/people/${owner2}/free`, { free: true, reason: 'A friend of the company' }), 422, 'NO_SIGN_IN_IDENTITY');
       const granted = ok(await local('PUT', `/v1/operator/billing/people/${me}/free`, { free: true, reason: 'Anomaly staff account', ticketRef: 'OPS-1' }));
@@ -8927,10 +8929,10 @@ describe('Billing: API, MCP and notices', () => {
       assert.equal((await mode(other)).mode, 'prepaid', 'A member’s workspace is not free.');
       assert.deepEqual((await db.query(`SELECT workspace_id,user_id,action FROM audit_events WHERE action LIKE 'billing.free_%' AND actor_id=$1 AND (workspace_id=$2 OR workspace_id IS NULL AND user_id=$1) ORDER BY action`, [me, wid])).rows.map(r => [r.workspace_id, r.user_id, r.action]),
         [[null, me, 'billing.free_account_on'], [wid, null, 'billing.free_on'], [wid, null, 'billing.free_owner_on']]);
-      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, `renamed-${me}@example.com`]);
+      await db.query(`UPDATE nightmail_users SET email=$2 WHERE id=$1`, [me, `renamed-${me}@example.com`]);
       await db.query('SELECT billing_free_sweep()');
       assert.deepEqual(await mode(), { mode: 'exempt', free_via: 'account' }, 'Bound to the identity, not the email.');
-      await db.query(`UPDATE bane_users SET email=$2 WHERE id=$1`, [me, AUTH_EMAIL]);
+      await db.query(`UPDATE nightmail_users SET email=$2 WHERE id=$1`, [me, AUTH_EMAIL]);
       // Ownership transfer re-evaluates: handing the workspace to someone else ends it; taking another one over starts it.
       await db.query(`INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')`, [unique('wm'), wid, owner2]);
       await db.query(`UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2`, [wid, me]);
@@ -9812,6 +9814,27 @@ test('stdio MCP connects with legacy env, key, health and API title',async()=>{
   const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
 });
+test('Brand: internal names are nightmail_* tables, NIGHTMAIL_* settings and nightmail:*-or-bane:* tag checks; the old names still work until cutover',async t=>{
+  const db=await fixtureDatabase(t);
+  const tables=['users','sessions','oidc_identities','signin_attempts','login_flows','resource_grants','dpop_proofs','expired_approvals','retired_grant_objects','migrations'];
+  const kinds=(await db.query("SELECT relname,relkind FROM pg_class WHERE relnamespace='public'::regnamespace AND relname=ANY($1)",[tables.flatMap(n=>['nightmail_'+n,'bane_'+n])])).rows;
+  for(const n of tables) assert.deepEqual([kinds.find(r=>r.relname==='nightmail_'+n)?.relkind,kinds.find(r=>r.relname==='bane_'+n)?.relkind],['r','v'],n);
+  // A release still running during the deploy writes through the old names.
+  const id=unique('legacy-writer');
+  await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true) ON CONFLICT(id) DO UPDATE SET name=excluded.name",[id,`${id}@example.org`]);
+  cleanup(t,async()=>{await db.query('DELETE FROM nightmail_users WHERE id=$1',[id]);});
+  assert.equal((await db.query('SELECT name FROM nightmail_users WHERE id=$1',[id])).rows[0].name,id);
+  const {loadConfig}=await import('./src/config.js'),base={PUBLIC_URL:'https://example.org',BANE_ROOT_SECRET:'r'.repeat(40)};
+  assert.equal(loadConfig({...base,NIGHTMAIL_ROOT_SECRET:'n'.repeat(40)}).authSecret,'n'.repeat(40),'NIGHTMAIL_<x> wins over BANE_<x>.');
+  assert.equal(loadConfig({PUBLIC_URL:'https://example.org',NIGHTMAIL_ROOT_SECRET:'n'.repeat(40)}).authSecret,'n'.repeat(40));
+  assert.equal(loadConfig(base).authSecret,'r'.repeat(40));
+  const {hasTags,ownerTag,tagKey}=await import('./src/resource-tags.js'),want=[ownerTag,{Key:tagKey('domain-claim'),Value:'token'}];
+  assert.deepEqual([ownerTag,tagKey('purpose')],[{Key:'bane:owner',Value:'bane'},'bane:purpose'],'Writes stay bane:* until the IAM policies allow nightmail:*.');
+  assert.ok(hasTags([{Key:'bane:owner',Value:'bane'},{Key:'bane:domain-claim',Value:'token'}],want));
+  assert.ok(hasTags([{Key:'nightmail:owner',Value:'nightmail'},{Key:'nightmail:domain-claim',Value:'token'}],want));
+  assert.ok(!hasTags([{Key:'nightmail:owner',Value:'nightmail'},{Key:'nightmail:domain-claim',Value:'other'}],want));
+  assert.ok(!hasTags([{Key:'opensend:owner',Value:'bane'},{Key:'bane:domain-claim',Value:'token'}],want));
+});
 test('Brand: the hosted support hosts, docs examples and stdio MCP identity come from src/brand.ts, old names still accepted',async()=>{
   const brand=await import('./src/brand.js'),{spawnSync}=await import('node:child_process'),{readFile}=await import('node:fs/promises');
   for(const copy of ['../sdk/src/brand.ts','../mcp/src/brand.ts']) assert.equal(await readFile(copy,'utf8'),await readFile('./src/brand.ts','utf8'),`${copy} is bun run sdk's copy of src/brand.ts`);
@@ -9891,7 +9914,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     });
     await db.query('COMMIT');
   }
-  await db.query('CREATE TABLE opensend_migrations (LIKE public.bane_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.bane_migrations WHERE name NOT LIKE \'092_%\'');
+  await db.query('CREATE TABLE opensend_migrations (LIKE public.nightmail_migrations INCLUDING ALL); INSERT INTO opensend_migrations SELECT * FROM public.nightmail_migrations WHERE name NOT LIKE \'092_%\'');
   await t.test('secretless migration preserves ciphertext and the legacy ledger; explicit rotation rewraps it',async mt=>{
     const {loadConfig}=await import('./src/config.js'), {encrypt,decrypt}=await import('./src/operations.js'), {spawnSync}=await import('node:child_process');
     const url=new URL(FIXTURE_DATABASE_URL!);url.searchParams.set('options','-c search_path='+schema);
@@ -9909,21 +9932,21 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await db.query("INSERT INTO oauth_client(id,client_id,redirect_uris,scopes) VALUES('legacy','legacy','{}','{opensend:read,offline_access}')");
     await db.query("INSERT INTO oauth_consent(id,client_id,reference_id,scopes,created_at,updated_at) VALUES('legacy','legacy',$1,'{opensend:read,opensend:live,offline_access}',now(),now())",[reference]);
     await mt.test('ambiguous ledgers refuse migration without changing either table',async()=>{
-      await db.query('CREATE TABLE bane_migrations (LIKE opensend_migrations INCLUDING ALL)');
-      migrate({},/MIGRATION_LEDGER_AMBIGUOUS: both opensend_migrations and bane_migrations exist/);
-      assert.equal((await db.query('SELECT FROM bane_migrations')).rowCount,0);
+      await db.query('CREATE TABLE nightmail_migrations (LIKE opensend_migrations INCLUDING ALL)');
+      migrate({},/MIGRATION_LEDGER_AMBIGUOUS: more than one of opensend_migrations, bane_migrations and nightmail_migrations exists/);
+      assert.equal((await db.query('SELECT FROM nightmail_migrations')).rowCount,0);
       assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='091_byo_requested_account_format.sql'")).rowCount,1);
-      await db.query('DROP TABLE bane_migrations');
+      await db.query('DROP TABLE nightmail_migrations');
     });
     await mt.test('wrong webhook root fails before ledger rename or migration writes',async()=>{
       migrate({BANE_ROOT_SECRET:randomUUID()},/KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs/);
-      assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('bane_migrations') AS t")).rows[0].t,null);
+      assert.equal(await read(),encrypted);assert.equal((await db.query("SELECT to_regclass('nightmail_migrations') AS t")).rows[0].t,null);
       assert.equal((await db.query("SELECT FROM opensend_migrations WHERE name='092_bane_scopes.sql'")).rowCount,0);
       assert.equal((await db.query("SELECT reference_id FROM oauth_consent WHERE id='legacy'")).rows[0].reference_id,reference);
     });
     assert.match(migrate(),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
     await mt.test('concurrent index waits are bounded and retried before the ledger advances',async()=>{
-      await db.query("DROP INDEX workspace_quota_sponsor; DELETE FROM bane_migrations WHERE name='102_hosted_sponsor_index.sql'");
+      await db.query("DROP INDEX workspace_quota_sponsor; DELETE FROM nightmail_migrations WHERE name='102_hosted_sponsor_index.sql'");
       const holder=await fixtureDatabase(mt);
       await holder.query(`BEGIN; LOCK TABLE ${schema}.workspaces IN SHARE UPDATE EXCLUSIVE MODE`);
       // Release on the actual lock timeout, not a guessed sleep long enough
@@ -9938,7 +9961,10 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       } finally {if(!retried)await holder.query('ROLLBACK');}
       assert.equal((await db.query("SELECT indisvalid FROM pg_index WHERE indexrelid='workspace_quota_sponsor'::regclass")).rows[0]?.indisvalid,true);
     });
-    assert.equal((await db.query("SELECT name FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
+    assert.equal((await db.query("SELECT name FROM nightmail_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
+    // The ledger moved to nightmail_migrations; bane_migrations stays a view of it for an earlier release's migrator.
+    assert.deepEqual((await db.query("SELECT relkind FROM pg_class WHERE oid=to_regclass('bane_migrations')")).rows,[{relkind:'v'}]);
+    assert.equal((await db.query("SELECT FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
     assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
     assert.match(migrate({BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
     const next={...config,BANE_ROOT_SECRET:randomUUID()};
@@ -10021,7 +10047,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     await refused('account-bound data without connection',`INSERT INTO mail_threads(id,workspace_id) VALUES('personal',$1)`,`DELETE FROM mail_threads WHERE id='personal'`,personal);
     await refused('foreign mailbox region residue',`INSERT INTO mailbox_regions(workspace_id,region) VALUES($1,'us-east-2')`,`DELETE FROM mailbox_regions WHERE workspace_id=$1`,personal);
     await db.query(`UPDATE provider_connections SET requested_account='438095551154'`);await assert.rejects(db.query(`UPDATE provider_connections SET requested_account='malformed'`),/check constraint/);await db.query('UPDATE provider_connections SET requested_account=NULL');
-    await refused('migration set or checksum',`UPDATE bane_migrations SET checksum='changed' WHERE name='090_hosted_rehome_runs.sql'`,`UPDATE bane_migrations m SET checksum=p.checksum FROM public.bane_migrations p WHERE p.name=m.name`);
+    await refused('migration set or checksum',`UPDATE nightmail_migrations SET checksum='changed' WHERE name='090_hosted_rehome_runs.sql'`,`UPDATE nightmail_migrations m SET checksum=p.checksum FROM public.nightmail_migrations p WHERE p.name=m.name`);
     await refused('unexpected workspaces',"INSERT INTO workspaces(id,name,slug) VALUES('outsider','extra','extra')","DELETE FROM workspaces WHERE id='outsider'");
     await refused('unexpected connections',"INSERT INTO workspaces(id,name,slug) VALUES('extra','extra','extra'); INSERT INTO provider_connections(id,workspace_id,region,kind,state) VALUES('extra','extra','us-east-2','shared','ready')","DELETE FROM workspaces WHERE id='extra'");
     await refused('BYO connections',`INSERT INTO workspaces(id,name,slug) VALUES('byo','byo','byo'); INSERT INTO provider_connections(id,workspace_id,kind,region,template_version,external_id,platform_principal_arn) VALUES('byo','byo','byo','us-east-2','v4',gen_random_uuid(),'fixture')`,`DELETE FROM workspaces WHERE id='byo'`);
@@ -12419,7 +12445,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await gradedSender(db, f.wid, 10000);
       // The same owner opens a second workspace while the first is paused (it inherits the sponsor, as signup does).
       // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
-      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1', [manager!.userId]);
       const other = ok(await local('POST', '/v1/workspaces', { name: 'Second synthetic workspace' }), 201).id;
       await db.query(`UPDATE workspaces SET quota_sponsor='sponsor-fixture' WHERE id=ANY($1)`, [[f.wid, other]]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [other, REGION, f.pool]);
@@ -12562,7 +12588,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const set=(state:string,reason:string)=>setWorkspaceExemption(db,[wid,state,'--reason',reason]);
       await assert.rejects(set('on',''),/Usage:/); await assert.rejects(set('on','No connection'),/No Hosted connection/);
       // Hosted workspace creation is for staff, decided at sign-in from the provider identity (rolled back with the fixture).
-      await db.query('UPDATE bane_sessions SET staff=true WHERE user_id=$1',[manager!.userId]);
+      await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id=$1',[manager!.userId]);
       const other=ok(await local('POST','/v1/workspaces',{name:'Other synthetic workspace'}),201).id;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
       for (const [workspace,host] of [[wid,domain],[other,'ordinary.example']]) {
@@ -20732,7 +20758,7 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
     assert.equal(invited.user_id, null); assert.deepEqual(invited.summary.after, { email: `invitee-${hex}@example.net`, role: 'member' });
     await audited(await call('DELETE', `/v1/workspaces/current/invitations?id=${invite.body.id}`), 'member.invite_revoke', ['invitation', invite.body.id]);
     const peer = unique('audit-peer'), membership = unique('mem');
-    await db.query("INSERT INTO bane_users (id, name, email, email_verified) VALUES ($1, 'Audit peer', $2, true)", [peer, `${peer}@example.net`]);
+    await db.query("INSERT INTO nightmail_users (id, name, email, email_verified) VALUES ($1, 'Audit peer', $2, true)", [peer, `${peer}@example.net`]);
     await db.query("INSERT INTO workspace_members (id, workspace_id, user_id, role) VALUES ($1, $2, $3, 'member')", [membership, wid, peer]);
     const promoted = await audited(await call('PATCH', `/v1/workspaces/current/members/${membership}`, { role: 'admin' }), 'member.role_change', ['member', membership]);
     assert.equal(promoted.user_id, peer); assert.deepEqual([promoted.summary.before, promoted.summary.after], [{ role: 'member' }, { role: 'admin' }]);

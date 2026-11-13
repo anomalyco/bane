@@ -302,7 +302,7 @@ function registerOperatorBilling(app: App) {
         'workspace', (SELECT jsonb_build_object('at',${isoAt(sql`free_at`)},'until',${isoAt(sql`free_until`)},'reason',free_reason,'by',free_by,'expired',coalesce(free_until<=now(),false))
           FROM billing_accounts WHERE workspace_id=${wid} AND free_at IS NOT NULL),
         'people', coalesce((SELECT jsonb_agg(jsonb_build_object('userId',m.user_id,'email',u.email,'role',m.role,'free',f.free) ORDER BY m.role,u.email)
-          FROM workspace_members m JOIN bane_users u ON u.id=m.user_id
+          FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id
           LEFT JOIN LATERAL (SELECT jsonb_build_object('reason',p.reason,'until',${isoAt(sql`p.until`)},'grantedAt',${isoAt(sql`p.granted_at`)},'grantedBy',p.granted_by,'live',p.until IS NULL OR p.until>now()) AS free
             FROM billing_user_identities(m.user_id) i JOIN billing_free_people p ON p.issuer=i.issuer AND p.subject=i.subject ORDER BY p.granted_at DESC LIMIT 1) f ON true
           WHERE m.workspace_id=${wid}),'[]')) AS free`);
@@ -387,7 +387,7 @@ function registerOperatorBilling(app: App) {
     responses: { 200: response(z.object({ ok: z.literal(true), workspaces: z.array(z.object({ workspaceId: z.string(), free: z.boolean(), via: z.string().nullable(), until: z.string().nullable(), mode: z.string() })) })), ...errors } }), async c => {
     const operator = await operatorActor(c, 'operator'), userId = c.req.valid('param').userId, body = c.req.valid('json'), until = body.free ? futureUntil(body.until) : null, who = `operator:${operator.userId}`;
     if (!body.free && body.until) throw new ApiError(422, 'VALIDATION_FAILED', 'until applies only when making the account free.', 'until');
-    const { rows: [person] } = await c.env.db.execute<{ id: string | null; identities: number }>(sql`SELECT (SELECT id FROM bane_users WHERE id=${userId}) AS id,(SELECT count(*)::int FROM billing_user_identities(${userId})) AS identities`);
+    const { rows: [person] } = await c.env.db.execute<{ id: string | null; identities: number }>(sql`SELECT (SELECT id FROM nightmail_users WHERE id=${userId}) AS id,(SELECT count(*)::int FROM billing_user_identities(${userId})) AS identities`);
     if (!person?.id) notFound('User');
     if (body.free && !person.identities) throw new ApiError(422, 'NO_SIGN_IN_IDENTITY', 'This person has no sign-in identity to bind a free account to; they need to sign in once first.');
     type Changed = { workspaceId: string; free: boolean; via: string | null; until: string | null; mode: string };

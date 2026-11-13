@@ -19,8 +19,10 @@ try {
   await client.query('RESET lock_timeout');
   // Before workspaces existed (migration 038), installations had one internal namespace: never silently
   // strand an older tenant. Once the workspaces table exists, other workspaces are legitimate data.
-  const workspacesTable = await client.query("SELECT to_regclass('public.workspaces') AS t, to_regclass('opensend_migrations') IS NOT NULL AND to_regclass('bane_migrations') IS NOT NULL AS ambiguous");
-  if (workspacesTable.rows[0].ambiguous) throw new Error('MIGRATION_LEDGER_AMBIGUOUS: both opensend_migrations and bane_migrations exist');
+  // The ledger was opensend_migrations, then bane_migrations, now nightmail_migrations: more than one table is ambiguous.
+  const workspacesTable = await client.query(`SELECT to_regclass('public.workspaces') AS t, (SELECT count(*) FROM unnest(ARRAY['opensend_migrations','bane_migrations','nightmail_migrations']) n
+    JOIN pg_class c ON c.oid=to_regclass(n) WHERE c.relkind='r')>1 AS ambiguous`);
+  if (workspacesTable.rows[0].ambiguous) throw new Error('MIGRATION_LEDGER_AMBIGUOUS: more than one of opensend_migrations, bane_migrations and nightmail_migrations exists');
   const scopedTables = workspacesTable.rows[0]?.t ? { rows: [] as { table_name: string }[] }
     : await client.query<{ table_name: string }>("SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'workspace_id'");
   for (const { table_name } of scopedTables.rows) {
@@ -29,32 +31,40 @@ try {
     if (foreign.rowCount) throw new Error('LEGACY_WORKSPACE_MIGRATION_REQUIRED: non-default workspace data requires an explicit migration plan before this upgrade. No data was modified.');
   }
   // Fresh databases have neither table. Older schemas still include environment in the binding.
-  if (!rotation && process.env.BANE_ROOT_SECRET !== undefined) {
+  const rootSecret = process.env.NIGHTMAIL_ROOT_SECRET ?? process.env.BANE_ROOT_SECRET;
+  if (!rotation && rootSecret !== undefined) {
     for (const table of ['operation_webhooks','mailbox_webhooks']) {
       if (!(await client.query('SELECT to_regclass($1) AS t',[table])).rows[0].t) continue;
       const sample=(await client.query(`SELECT id,workspace_id,encrypted_secret,coalesce(to_jsonb(w)->>'environment','live') AS env FROM ${table} w LIMIT 1`)).rows[0];
       if (!sample) continue;
       const binding=`${sample.workspace_id}:${sample.env}:${table==='mailbox_webhooks'?'mailbox:':''}${sample.id}`;
-      try { await decrypt({config:{encryptionKey:deriveEncryptionKey(process.env.BANE_ROOT_SECRET)}},sample.encrypted_secret,binding); }
+      try { await decrypt({config:{encryptionKey:deriveEncryptionKey(rootSecret)}},sample.encrypted_secret,binding); }
       catch { throw new Error('KEY_ROTATION_REQUIRED: BANE_ROOT_SECRET differs from the secret that encrypted the stored webhooks. Restore it or configure explicit rotation. No data was modified.'); }
       log('info', {code:'STORED_WEBHOOK_SECRET_DECRYPT_VERIFIED'});
       break;
     }
   }
-  // The advisory lock serializes this rename with old and new migrators.
+  // The advisory lock serializes this rename with old and new migrators. bane_migrations stays as a view of the ledger
+  // so an earlier release's migrator still finds its rows (remove after rename cleanup).
   await client.query(`DO $$ BEGIN
     SET LOCAL lock_timeout='1s';
-    IF to_regclass('opensend_migrations') IS NOT NULL THEN
-      ALTER TABLE opensend_migrations RENAME TO bane_migrations;
-    ELSE
-      CREATE TABLE IF NOT EXISTS bane_migrations (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
+    IF to_regclass('nightmail_migrations') IS NULL THEN
+      IF to_regclass('opensend_migrations') IS NOT NULL THEN
+        ALTER TABLE opensend_migrations RENAME TO nightmail_migrations;
+      ELSIF to_regclass('bane_migrations') IS NOT NULL THEN
+        ALTER TABLE bane_migrations RENAME TO nightmail_migrations;
+        ALTER INDEX IF EXISTS bane_migrations_pkey RENAME TO nightmail_migrations_pkey;
+      ELSE
+        CREATE TABLE nightmail_migrations (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
+      END IF;
     END IF;
+    IF to_regclass('bane_migrations') IS NULL THEN CREATE VIEW bane_migrations AS SELECT * FROM nightmail_migrations; END IF;
   END $$`);
   const directory = new URL('../migrations/', import.meta.url);
   for (const name of (await readdir(directory)).filter(n => /^\d+_[a-z_]+\.sql$/.test(n)).sort()) {
     const source = await readFile(new URL(name, directory), 'utf8');
     const hash = createHash('sha256').update(source).digest('hex');
-    const previous = await client.query<{ checksum: string }>('SELECT checksum FROM bane_migrations WHERE name = $1', [name]);
+    const previous = await client.query<{ checksum: string }>('SELECT checksum FROM nightmail_migrations WHERE name = $1', [name]);
     if (previous.rowCount) {
       if (previous.rows[0]!.checksum !== hash) throw new Error(`MIGRATION_CHANGED: ${name} differs from the applied migration. Add a new migration instead.`);
       continue;
@@ -69,7 +79,7 @@ try {
         const next:string|null=(await client.query(source,[cursor])).rows[0].cursor;
         if(next===null)break;if(next===cursor)throw new Error(`Stuck backfill cursor in ${name}`);cursor=next;
       }
-      await client.query('INSERT INTO bane_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
+      await client.query('INSERT INTO nightmail_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
       await client.query('RESET lock_timeout; RESET statement_timeout');continue;
     }
     if(source.startsWith('-- bane:no-transaction\n')) {
@@ -90,14 +100,14 @@ try {
           }
         }
       }
-      await client.query('INSERT INTO bane_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
+      await client.query('INSERT INTO nightmail_migrations(name,checksum) VALUES ($1,$2)',[name,hash]);
       await client.query('RESET lock_timeout; RESET statement_timeout');
       log('info',{code:'MIGRATION_APPLIED',migration:name});continue;
     }
     await client.query('BEGIN');
     try {
       await client.query(source);
-      await client.query('INSERT INTO bane_migrations(name, checksum) VALUES ($1, $2)', [name, hash]);
+      await client.query('INSERT INTO nightmail_migrations(name, checksum) VALUES ($1, $2)', [name, hash]);
       await client.query('COMMIT');
       log('info', { code: 'MIGRATION_APPLIED', migration: name });
     } catch (error) { await client.query('ROLLBACK'); throw error; }

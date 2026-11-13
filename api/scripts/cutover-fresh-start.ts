@@ -35,15 +35,15 @@ const MARKER = 'cutover-fresh-start';
 // People, every credential or approval tied to a person, and the retired Better Auth key material (its JWKS signed
 // the legacy OAuth tokens; nothing reads it after migration 276). Wiped whole; FK order is handled by retrying.
 const PEOPLE = ['access_requests', 'auth_verification', 'auth_session', 'auth_account', 'oauth_access_token', 'oauth_refresh_token',
-  'oauth_consent', 'oauth_client_assertion', 'oauth_client_resource', 'oauth_client', 'oauth_resource', 'auth_jwks', 'agent_tokens', 'bane_sessions',
-  'bane_login_flows', 'bane_dpop_proofs', 'bane_resource_grants', 'bane_expired_approvals', 'workspace_invitations', 'workspace_members',
-  'bane_oidc_identities', 'auth_user', 'bane_users'];
+  'oauth_consent', 'oauth_client_assertion', 'oauth_client_resource', 'oauth_client', 'oauth_resource', 'auth_jwks', 'agent_tokens', 'nightmail_sessions',
+  'nightmail_login_flows', 'nightmail_dpop_proofs', 'nightmail_resource_grants', 'nightmail_expired_approvals', 'workspace_invitations', 'workspace_members',
+  'nightmail_oidc_identities', 'auth_user', 'nightmail_users'];
 // Kept-workspace rows the wipe is meant to change: people-scoped rows, and grant objects detached into the audit table.
-const PEOPLE_SCOPED = new Set(['agent_tokens', 'bane_resource_grants', 'workspace_invitations', 'workspace_members', 'mail_grant_objects', 'bane_retired_grant_objects']);
+const PEOPLE_SCOPED = new Set(['agent_tokens', 'nightmail_resource_grants', 'workspace_invitations', 'workspace_members', 'mail_grant_objects', 'nightmail_retired_grant_objects']);
 // The audit trail is append-only by design (migration 260: unexpired rows refuse UPDATE, DELETE and TRUNCATE). A
 // deleted workspace's entries stay until their retain_until; the retention purge removes them. Never swept.
 const APPEND_ONLY = new Set(['audit_events']);
-const NEVER = new Set(['workspaces', 'bane_migrations', ...PEOPLE, ...APPEND_ONLY]);
+const NEVER = new Set(['workspaces', 'nightmail_migrations', ...PEOPLE, ...APPEND_ONLY]);
 
 type Key = { table: string; column: string; by: 'workspace' | 'connection' };
 type Connection = { id: string; kind: string; region: string; aws_account_id: string | null; role_arn: string | null; external_id: string | null;
@@ -88,7 +88,7 @@ export async function inspect(db: pg.Client, ownerSubject: string, issuer: strin
   if (marker) return { anchor: { id: '', name: '' }, domains: {}, victims: [], kept: [], keptConnections: [], people: {}, rows: {}, history: {}, keys: [],
     owner: { subject: ownerSubject, issuer, acr: null, email: null, name: null, last_at: '' }, appliedAt: marker.at };
   // The owner is bound by subject: it must be a recorded, verified, Google-authenticated sign-in at this issuer.
-  const { rows: [owner] } = await db.query<Owner>(`SELECT subject,issuer,acr,email,name,last_at::text FROM bane_signin_attempts
+  const { rows: [owner] } = await db.query<Owner>(`SELECT subject,issuer,acr,email,name,last_at::text FROM nightmail_signin_attempts
     WHERE issuer=$1 AND subject=$2`, [issuer, ownerSubject]);
   if (!owner) throw new Error(`Refusing: no recorded sign-in by subject ${ownerSubject} at ${issuer}. Have the owner sign in once, then read the subject with scripts/list-signin-attempts.ts.`);
   if (owner.acr !== GOOGLE_ACR) throw new Error(`Refusing: subject ${ownerSubject} last signed in with ${owner.acr ?? 'no acr'}, not ${GOOGLE_ACR}.`);
@@ -239,7 +239,7 @@ export async function apply(db: pg.Client, plan: Plan) {
     const before = await keptCounts(db, fresh.keys, fresh.kept, fresh.keptConnections);
     // Keep what MCP approvals created in the kept workspaces: detach their ownership rows with the triggers that would
     // revoke keys, pause endpoints and disable routes turned off (as migration 276 does for legacy approvals).
-    await db.query(`INSERT INTO bane_retired_grant_objects(grant_id,workspace_id,kind,resource)
+    await db.query(`INSERT INTO nightmail_retired_grant_objects(grant_id,workspace_id,kind,resource)
       SELECT grant_id,workspace_id,kind,resource FROM mail_grant_objects WHERE workspace_id=ANY($1) ON CONFLICT DO NOTHING`, [fresh.kept]);
     await db.query('ALTER TABLE mail_grant_objects DISABLE TRIGGER USER');
     await db.query('DELETE FROM mail_grant_objects WHERE workspace_id=ANY($1)', [fresh.kept]);
@@ -262,8 +262,8 @@ export async function apply(db: pg.Client, plan: Plan) {
     if (lost.length) throw new Error(`Refusing: rows of a kept workspace would be lost: ${lost.map(k => `${k} ${before[k]}->${after[k]}`).join(', ')}`);
     // The owner's seat, bound by subject. The first sign-in fills in the address from the ID token (display only).
     const userId = randomUUID();
-    await db.query('INSERT INTO bane_users(id,name,email,email_verified,selected_workspace_id) VALUES($1,$2,NULL,false,$3)', [userId, plan.owner.name ?? 'Owner', anchorId]);
-    await db.query('INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)', [plan.owner.issuer, plan.owner.subject, userId]);
+    await db.query('INSERT INTO nightmail_users(id,name,email,email_verified,selected_workspace_id) VALUES($1,$2,NULL,false,$3)', [userId, plan.owner.name ?? 'Owner', anchorId]);
+    await db.query('INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES($1,$2,$3)', [plan.owner.issuer, plan.owner.subject, userId]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), userId, anchorId]);
     // quota_sponsor is the creating user; the old one is gone. The kept workspace is exempt from hosted quotas anyway.
     await db.query('UPDATE workspaces SET quota_sponsor=$1 WHERE id=$2', [userId, anchorId]);
