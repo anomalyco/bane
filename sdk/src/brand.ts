@@ -5,15 +5,13 @@
  * package compiles it.
  *
  * Bane is becoming Nightmail (nightmail.com). Until that domain is live the hosted service stays on bane.mx: the
- * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. A name a customer may already
- * have (key prefix, DNS proof, header, scope, cookie) stays accepted until the cutover, which removes them all at once
- * (each site is marked "remove after rename cleanup"). Infrastructure names (Workers, buckets, SES resources) are not here.
+ * switch is `hostedDomain`, with bane.mx moving to `previousDomains` so it stays served. The pre-rename forms a customer
+ * could hold (bane_ keys, _bane proofs, X-Bane- headers, bane: scopes, bane.* cookies) were accepted until the cutover
+ * and are gone now.
  */
 export const productName = 'Nightmail';
 /** Lowercase, for identifiers. */
 export const productSlug = 'nightmail';
-/** Earlier names, newest first. Still accepted wherever a customer may have saved one. */
-export const legacySlugs = ['bane', 'opensend'] as const;
 
 /** The product's own domain. The hosted service moves to it once it is live. */
 export const productDomain = 'nightmail.com';
@@ -49,34 +47,31 @@ export const addresses = {
 export const sdkPackage = '@nightmail/sdk';
 export const apiKeyEnv = 'NIGHTMAIL_API_KEY';
 export const mcpServerName = 'nightmail';
-/** Environment variable names: NIGHTMAIL_<name>, else the earlier BANE_<name> (remove after rename cleanup). */
-export const envNames = (name: string) => [`NIGHTMAIL_${name}`, `BANE_${name}`];
+/** Environment variable names: NIGHTMAIL_<name>. */
+export const envNames = (name: string) => [`NIGHTMAIL_${name}`];
 
-/** OAuth scope prefixes the MCP server accepts (nightmail:read, …). Which one it asks for is OAUTH_SCOPE_PREFIX
- * (config.ts): bane until account.anoma.ly supports nightmail:*. bane: remove after rename cleanup. */
-export const oauthScopePrefixes = [productSlug, 'bane'] as const;
+/** OAuth scopes: nightmail:read, nightmail:send, nightmail:manage. */
+export const oauthScopePrefixes = [productSlug] as const;
 export type OauthScopePrefix = typeof oauthScopePrefixes[number];
 /** The scopes an installation asks for, for read, send and manage. */
-export const requestedScopes = (config: { oauthScopePrefix?: OauthScopePrefix }) => (['read', 'send', 'manage'] as const).map(p => `${config.oauthScopePrefix ?? 'bane'}:${p}`);
+export const requestedScopes = (_config?: unknown) => (['read', 'send', 'manage'] as const).map(p => `${productSlug}:${p}`);
 
 /** Prefixes of the secrets this service issues, by kind. New secrets get these. */
 export const secretPrefixes = { apiKey: 'nm_', addressKey: 'nm_mbx_', agentToken: 'nm_agent_', supportGrant: 'nm_support_', notesKey: 'nm_notes_' } as const;
-/** Earlier prefixes stay valid: bane_… and, before it, OpenSend's os_…. Remove after rename cleanup. */
-export const legacySecretPrefixes = ['bane', 'os'] as const;
 /** What a key list shows of a new secret: its kind's prefix and the first 8 characters after it. */
 export const shownPrefix = (secret: string) => secret.slice(0, secret.lastIndexOf('_') + 9);
-/** Any secret of ours (current or earlier prefix) inside text, for redaction. Use with replace or matchAll. */
+/** Any secret of ours inside text, for redaction, pre-rename ones included. Use with replace or matchAll. */
 export const ownSecretPattern = /\b(?:nm|bane|os)_[A-Za-z0-9_.-]{20,}/g;
 
 /** User-Agent of the webhook deliveries this service makes. */
 export const webhookUserAgent = `${productName}-Webhooks/1.0`;
-/** Marks a test delivery to a webhook. Bane-Test is still sent too (remove after rename cleanup). */
-export const webhookTestHeaders = [`${productName}-Test`, 'Bane-Test'] as const;
+/** Marks a test delivery to a webhook. */
+export const webhookTestHeaders = [`${productName}-Test`] as const;
 
 /** Request headers are X-Nightmail-<name>. */
 export const headerPrefix = `X-${productName}-`;
-/** A request header's accepted names, current first: X-Nightmail-, then X-Bane- and X-OpenSend- (remove after rename cleanup). */
-export const requestHeaderNames = (name: string) => [productSlug, ...legacySlugs].map(slug => `x-${slug}-${name.toLowerCase()}`);
+/** A request header's accepted names (X-Nightmail-<name>). */
+export const requestHeaderNames = (name: string) => [`x-${productSlug}-${name.toLowerCase()}`];
 /** The first accepted name a request carries. */
 export const requestHeader = (headers: { get(name: string): string | null }, name: string) => {
   for (const candidate of requestHeaderNames(name)) { const value = headers.get(candidate); if (value !== null) return value; }
@@ -84,7 +79,8 @@ export const requestHeader = (headers: { get(name: string): string | null }, nam
 };
 /** Added to mail a ritual forwards; any accepted name on incoming mail stops a forwarding loop. */
 export const loopHeader = `${headerPrefix}Loop`;
-export const loopHeaderNames = requestHeaderNames('loop');
+// X-Bane-Loop still stops one: mail forwarded before the rename can still arrive.
+export const loopHeaderNames = [...requestHeaderNames('loop'), 'x-bane-loop'];
 
 /** The Domain Connect provider ID registered with DNS providers (domain-connect/bane.mx.mail.json). Never follows the brand. */
 export const domainConnectProviderId = 'bane.mx';

@@ -111,7 +111,6 @@ export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:bo
       add('sending',{dkim1:selectors[0]!,dkim2:selectors[1]!,dkim3:selectors[2]!,dkimZone:zone.slice(0,-'.amazonses.com'.length)});
     }
   }
-  // The registered template publishes the token as _bane, which proves a claim shown with any label.
   const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && isProofRecord(r.name,domain.name));
   if(shared && proof) add('ownership',{ownership:proof.value});
   const mx=pending.find(r=>r.purpose==='receiving' && r.type==='MX');

@@ -224,30 +224,14 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   return {session, slot, userId, returnUrl:returnUrl.href};
 }
 
-// Cookies are named nightmail.* (__Host- on HTTPS). A browser that still holds the bane.* cookies from before the rename
-// is read through them, and its next dashboard request moves them over (migrateLegacyCookies): nobody is signed out.
-// bane.*: remove after rename cleanup.
+// Cookies are named nightmail.* (__Host- on HTTPS).
 const cookieHost = (runtime: Runtime) => runtime.config.publicUrl.startsWith('https:') ? '__Host-' : '';
 const cookieName = (runtime: Runtime, name: string) => `${cookieHost(runtime)}nightmail.${name}`;
-const legacyCookieName = (runtime: Runtime, name: string) => `${cookieHost(runtime)}bane.${name}`;
-const readCookie = (runtime: Runtime, headers: Headers, name: string) => cookieValue(headers, cookieName(runtime, name)) ?? cookieValue(headers, legacyCookieName(runtime, name));
+const readCookie = (runtime: Runtime, headers: Headers, name: string) => cookieValue(headers, cookieName(runtime, name));
 const cookieOptions = (runtime: Runtime, maxAge: number) => ({ httpOnly:true, secure:runtime.config.publicUrl.startsWith('https:'), sameSite:'Lax' as const, path:'/', maxAge });
-/** Clears a cookie under its current name and, when the browser still has it, its pre-rename one. */
-const clearCookie = (c: Ctx, name: string) => {
-  setCookie(c, cookieName(c.env, name), '', cookieOptions(c.env, 0));
-  if (cookieValue(c.req.raw.headers, legacyCookieName(c.env, name)) !== null) setCookie(c, legacyCookieName(c.env, name), '', cookieOptions(c.env, 0));
-};
+const clearCookie = (c: Ctx, name: string) => setCookie(c, cookieName(c.env, name), '', cookieOptions(c.env, 0));
 const SESSION_SECONDS = 604800;
 
-/** Moves a browser's pre-rename bane.* session and default-account cookies to nightmail.*, once, without signing it out. */
-export function migrateLegacyCookies(c: Ctx) {
-  for (const name of [...Array.from({ length: MAX_ACCOUNTS }, (_, slot) => slotName(slot)), 'account']) {
-    const legacy = cookieValue(c.req.raw.headers, legacyCookieName(c.env, name));
-    if (legacy === null) continue;
-    if (cookieValue(c.req.raw.headers, cookieName(c.env, name)) === null) setCookie(c, cookieName(c.env, name), legacy, cookieOptions(c.env, SESSION_SECONDS));
-    setCookie(c, legacyCookieName(c.env, name), '', cookieOptions(c.env, 0));
-  }
-}
 
 /** The session this request acts as, or null. A tab naming an account this browser has no live session for gets null. */
 async function currentSession(runtime: Runtime, headers: Headers) {

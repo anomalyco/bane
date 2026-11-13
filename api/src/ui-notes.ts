@@ -134,7 +134,7 @@ async function sessionOperator(c: Ctx): Promise<Caller> {
 /** The only requests a UI notes key may make: list and read notes, and change one (support.ts operatorGate). */
 export const notesKeyRoute = (method: string, path: string) =>
   (method === 'GET' && /^\/v1\/operator\/ui-notes(?:\/uin_[0-9a-f]{32})?$/.test(path)) || (method === 'PATCH' && /^\/v1\/operator\/ui-notes\/uin_[0-9a-f]{32}$/.test(path));
-const NOTES_KEY = /^Bearer ((?:nm|bane)_notes_[0-9a-f]{64})$/; // bane_: remove after rename cleanup
+const NOTES_KEY = /^Bearer (nm_notes_[0-9a-f]{64})$/;
 /**
  * Authenticates a UI notes key for operatorGate, or refuses with the gate's own 403: a live, unexpired, unrevoked key
  * whose operator still holds the operator role, within its minute budget. One statement reads and touches it.

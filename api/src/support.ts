@@ -28,7 +28,7 @@ import { productName, secretPrefixes } from './brand.js';
 // Access: /v1/operator/* answers only an operator (operatorGate), /v1/support/* only a live support grant (supportGate).
 // Every other credential, including a workspace owner's session, gets the same 403 for every path under them, real or not.
 
-const SUPPORT_TOKEN = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
+const SUPPORT_TOKEN = /^nm_support_[0-9a-f]{64}$/;
 /** Requests per minute per support grant. */
 export const SUPPORT_RATE_PER_MINUTE = 120;
 /**

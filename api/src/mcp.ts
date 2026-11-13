@@ -88,7 +88,7 @@ const withWorkspace = (tool: Tool, arg: Record<string, string | number> = WORKSP
 const WORKSPACE_LIST: Tool['outputSchema'] = { type: 'object', required: ['data', 'default', 'defaultSource'], properties: {
   data: { type: 'array', items: { type: 'object', required: ['id', 'name', 'slug', 'role', 'permissions', 'default'], properties: {
     id: { type: 'string' }, name: { type: 'string' }, slug: { type: 'string' }, role: { type: 'string', enum: ['owner', 'admin', 'member'] },
-    permissions: { type: 'array', items: { type: 'string', enum: ['nightmail:read', 'nightmail:send', 'nightmail:manage', 'bane:read', 'bane:send', 'bane:manage'] } }, default: { type: 'boolean' } } } },
+    permissions: { type: 'array', items: { type: 'string', enum: ['nightmail:read', 'nightmail:send', 'nightmail:manage'] } }, default: { type: 'boolean' } } } },
   default: { type: ['string', 'null'] }, defaultSource: { type: ['string', 'null'], enum: ['set', 'only', 'last-used', null] } } };
 const workspaceTools: Tool[] = [
   { name: 'workspaces', description: `List your ${productName} workspaces, your role and what this connection may do in each, and the default workspace a call without workspace uses.`,
@@ -132,7 +132,7 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Mc
   /** The workspaces tool: the person's workspaces, this connection's access in each, and the default. */
   function workspaceList() {
     const current = connection!.defaultWorkspace;
-    return { data: connection!.workspaces.map(w => ({ id: w.id, name: w.name, slug: w.slug, role: w.role, permissions: w.permissions.map(p => `${runtime.config.oauthScopePrefix ?? 'bane'}:${p}`), default: w.id === current?.id })),
+    return { data: connection!.workspaces.map(w => ({ id: w.id, name: w.name, slug: w.slug, role: w.role, permissions: w.permissions.map(p => `nightmail:${p}`), default: w.id === current?.id })),
       default: current?.id ?? null, defaultSource: current?.source ?? null };
   }
   /** The actor a tool call acts as: the approval in the workspace the call names (or the default), checked now. */
@@ -345,7 +345,7 @@ export function registerMcp(app: App): void {
       catalog ??= buildMcpCatalog(app);
       return serve(app, c.req.raw, c.env, actor, catalog);
     };
-    const token=c.req.header('authorization')?.match(/^Bearer ((?:nm|bane)_mbx_[0-9a-f]{64})$/i)?.[1]; // bane_: remove after rename cleanup
+    const token=c.req.header('authorization')?.match(/^Bearer (nm_mbx_[0-9a-f]{64})$/i)?.[1];
     const response=preflight?new Response(null,{status:204}):token?await handler(await (await import('./mailbox.js')).authorizeInboxKey(c,token)):await withMcpAuthorization(c.env,c.req.raw,handler);
     // Authorization and the protocol SDK answer with their own responses, which never reach onError: name the failure
     // from the status and the stage it came from. Never from the body.

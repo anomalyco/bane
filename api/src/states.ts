@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { ApiError, id, type DbExecutor } from './core.js';
 import type { MxReport } from './db/mailbox.js';
-import { legacySlugs, productName, productSlug } from './brand.js';
+import { productName, productSlug } from './brand.js';
 
 // Every MX entity has one explicit state column, and this module is the only writer of those columns.
 // Readers use the predicates below instead of spelling out state names; transitions are pure
@@ -63,7 +63,7 @@ export type IdentityFacts = {
 };
 /** Labels of the ownership TXT record (`_<label>.<domain>`), current first. A claim shows the one it was made with
  * (domain_claims.proof_label: claims from before the rename keep `_bane`), and any of them proves any claim. */
-export const PROOF_LABELS = [productSlug, ...legacySlugs] as const; // legacySlugs: remove after rename cleanup (pre-rename claims then republish as _nightmail)
+export const PROOF_LABELS = [productSlug] as const;
 export type ProofLabel = typeof PROOF_LABELS[number];
 export const proofRecordName = (label: ProofLabel, domain: string) => `_${label}.${domain}`;
 export const isProofRecord = (name: string, domain: string) => PROOF_LABELS.some(label => name === proofRecordName(label, domain));

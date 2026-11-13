@@ -44,8 +44,7 @@ try {
       break;
     }
   }
-  // The advisory lock serializes this rename with old and new migrators. bane_migrations stays as a view of the ledger
-  // so an earlier release's migrator still finds its rows (remove after rename cleanup).
+  // The advisory lock serializes this rename with old and new migrators.
   await client.query(`DO $$ BEGIN
     SET LOCAL lock_timeout='1s';
     IF to_regclass('nightmail_migrations') IS NULL THEN
@@ -58,7 +57,6 @@ try {
         CREATE TABLE nightmail_migrations (name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now());
       END IF;
     END IF;
-    IF to_regclass('bane_migrations') IS NULL THEN CREATE VIEW bane_migrations AS SELECT * FROM nightmail_migrations; END IF;
   END $$`);
   const directory = new URL('../migrations/', import.meta.url);
   for (const name of (await readdir(directory)).filter(n => /^\d+_[a-z_]+\.sql$/.test(n)).sort()) {

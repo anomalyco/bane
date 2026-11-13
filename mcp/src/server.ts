@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
-import { envNames, legacySlugs, mcpServerName, productName, productSlug } from './brand.js';
+import { envNames, mcpServerName, productName, productSlug } from './brand.js';
 
 type ObjectValue = Record<string, any>;
 const SPEC_LIMIT = 2 * 1024 * 1024;
@@ -34,8 +34,7 @@ class Failure extends Error {
 function fail(code: string, message: string): never { throw new Failure(code, message); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 
-// NIGHTMAIL_* names take precedence; the earlier BANE_* and OPENSEND_* names remain accepted (remove after rename cleanup).
-function env(name: string): string | undefined { return [...envNames(name), `OPENSEND_${name}`].map(key => process.env[key]).find(value => value !== undefined); }
+function env(name: string): string | undefined { return envNames(name).map(key => process.env[key]).find(value => value !== undefined); }
 
 function configuration() {
   let base: URL;
@@ -49,8 +48,8 @@ function configuration() {
     fail('CONFIGURATION_ERROR', 'NIGHTMAIL_API_URL must be an HTTPS origin without credentials, query, fragment, or path. HTTP is allowed only on loopback.');
   }
   const key = env('API_KEY') ?? '';
-  const addressKey = /^(?:nm|bane|os)_mbx_[0-9a-f]{64}$/.test(key); // bane_/os_: remove after rename cleanup
-  if (!addressKey && !/^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/.test(key)) {
+  const addressKey = /^nm_mbx_[0-9a-f]{64}$/.test(key);
+  if (!addressKey && !/^nm_[0-9a-f]{64}$/.test(key)) {
     fail('CONFIGURATION_ERROR', `Set NIGHTMAIL_API_KEY to a scoped ${productName} API key or address key.`);
   }
   const writes = env('MCP_ALLOW_WRITES') ?? 'false';
@@ -234,10 +233,11 @@ async function main() {
     }
   }
   const health = await request('/health', {}, false, 4096);
-  if (!health.response.ok || !object(health.data) || ![productSlug, ...legacySlugs].includes(health.data.service) || health.data.status !== 'ok') fail('INVALID_SERVICE', `API health check did not identify a healthy ${productName} service.`);
+  // /health still names the service bane until the infra step renames it (app.ts, worker.ts, receiving-health.ts).
+  if (!health.response.ok || !object(health.data) || ![productSlug, 'bane'].includes(health.data.service) || health.data.status !== 'ok') fail('INVALID_SERVICE', `API health check did not identify a healthy ${productName} service.`);
   const fetched = await request('/openapi.json', {}, false, SPEC_LIMIT);
   const spec = fetched.data;
-  if (!fetched.response.ok || !object(spec) || spec.openapi !== '3.1.0' || ![`${productName} API`, 'Bane API', 'OpenSend API'].includes(spec.info?.title) || spec.info?.version !== '0.1.0' || !object(spec.paths)) fail('INVALID_SPEC', `Expected ${productName} API 0.1.0 with OpenAPI 3.1.0.`);
+  if (!fetched.response.ok || !object(spec) || spec.openapi !== '3.1.0' || spec.info?.title !== `${productName} API` || spec.info?.version !== '0.1.0' || !object(spec.paths)) fail('INVALID_SPEC', `Expected ${productName} API 0.1.0 with OpenAPI 3.1.0.`);
   inspectSpec(spec);
   const ajv = new Ajv2020({ strict: false, validateFormats: false, allErrors: false, ownProperties: true });
   const operations = new Map<string, { tool: Tool; method: string; path: string; write: boolean; validate: ValidateFunction; validateOutput: ValidateFunction }>();

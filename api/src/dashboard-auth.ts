@@ -1,7 +1,7 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {sql} from 'drizzle-orm';
 import {ApiError,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
-import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,settleDefaultAccount} from './account-login.js';
+import {accountBrowserRoute,accountSessionActor,accountSessionUser,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
 import {ConnectionSummary,connectionSummary} from './provider-connections.js';
 import { productName, requestedScopes } from './brand.js';
@@ -27,7 +27,7 @@ export async function invitationRecipient(runtime:Runtime,headers:Headers) {
   return verifiedDashboardUser(runtime,headers,true);
 }
 export const getDashboardActor = accountSessionActor;
-export { migrateLegacyCookies, settleDefaultAccount };
+export { settleDefaultAccount };
 export function registerDashboardAuth(app: App) {
   app.on(['GET','POST','OPTIONS'],'/api/auth/*',accountBrowserRoute);
   app.openapi(createRoute({method:'get',path:'/v1/me',operationId:'getCurrentIdentity',tags:['Auth'],security,
@@ -42,6 +42,6 @@ export function registerDashboardAuth(app: App) {
     // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
     const uiNotes=session?.operator==='operator' && userId ? await import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false;
     const billing=session?await import('./billing/state.js').then(async({readBilling})=>{const b=await readBilling(c.env.db,identity.workspaceId,{amounts:false});return {enforcement:b.enforcement,free:b.mode==='exempt',...b.state};}):null;
-    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,workspaces:session?.workspaces??null,operator:session?.operator??null,uiNotes,billing},200);
+    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(),connection,workspaces:session?.workspaces??null,operator:session?.operator??null,uiNotes,billing},200);
   });
 }

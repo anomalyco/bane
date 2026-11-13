@@ -28,7 +28,7 @@ export async function createAgentToken(config: Config, input: { id: string; gran
 }
 
 export async function verifyAgentToken(config: Config, token: string): Promise<AgentTokenPayload | null> {
-  const match = token.match(/^(?:nm|bane|os)_agent_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/); // bane_/os_: remove after rename cleanup
+  const match = token.match(/^nm_agent_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/);
   if (!match || token.length > 16 * 1024) return null;
   try {
     const payload = Payload.parse(JSON.parse(new TextDecoder().decode(decode(match[1]!))));

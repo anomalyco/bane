@@ -22,7 +22,7 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/staff\/verify$/],
 ];
 const SUPPORT_READ = /^\/v1\/support\/[A-Za-z0-9_./-]{1,200}$/;
-const SUPPORT_GRANT = /^(?:nm|bane)_support_[0-9a-f]{64}$/; // bane_: remove after rename cleanup
+const SUPPORT_GRANT = /^nm_support_[0-9a-f]{64}$/;
 
 /** Whether the binding may make this call: the five operator support routes, or a grant's GET under /v1/support. */
 export function supportPlatformAllows(method: string, path: string) {

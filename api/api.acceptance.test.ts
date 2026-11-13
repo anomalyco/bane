@@ -974,7 +974,7 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   const cookie = () => [...jar].map(([name,value])=>`${name}=${value}`).join('; ');
   const request = (path: string, method = 'GET', body?: object, headers: Record<string,string> = {}) => app.fetch(new Request(origin+path,{method,
     headers:{origin,cookie:cookie(),'content-type':'application/json','x-bane-client-ip':`192.0.2.${peer}`,...headers},body:body?JSON.stringify(body):undefined}),runtime);
-  const as = (p: Person, extra: Record<string,string> = {}) => ({'x-bane-account':p.id!,...extra});
+  const as = (p: Person, extra: Record<string,string> = {}) => ({'x-nightmail-account':p.id!,...extra});
   const code = async (response: Response) => ((await response.json()) as {error?:{code:string}}).error?.code;
   // A sign-in in two halves: started here, finished when the account service redirects back (a cross-site GET).
   async function begin(p: Person, add = false, callbackURL = origin+'/') {
@@ -1013,17 +1013,16 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
   assert.equal(await who(), work.id);
   assert.equal(await who(as(personal)), personal.id);
   assert.equal(await who(as(work)), work.id);
-  // A browser from before the rename holds bane.* cookies: they still sign it in, and its next dashboard request moves
-  // them to nightmail.* without signing anyone out (remove after rename cleanup).
+  // Since the cutover a browser's pre-rename bane.* cookies sign nobody in.
+  const current = new Map(jar);
   for (const [name, value] of [...jar]) { jar.delete(name); jar.set(name.replace('__Host-nightmail.', '__Host-bane.'), value); }
-  assert.equal(await who(as(personal)), personal.id);
-  assert.deepEqual([...jar.keys()].sort(),['__Host-nightmail.account','__Host-nightmail.session_token','__Host-nightmail.session_token.1']);
-  assert.equal(await who(as(work)), work.id);
+  assert.equal((await request('/v1/me','GET',undefined,as(personal))).status, 401);
+  jar.clear(); for (const [name, value] of current) jar.set(name, value);
   // Another account's workspace is refused, not served as the tab's account.
-  const crossed = await request('/v1/me','GET',undefined,as(personal,{'x-bane-workspace':work.workspace!}));
+  const crossed = await request('/v1/me','GET',undefined,as(personal,{'x-nightmail-workspace':work.workspace!}));
   assert.equal(crossed.status,403); assert.equal(await code(crossed),'WORKSPACE_ACCESS_DENIED');
   for (const forged of ['someone-else', 'bad value', '']) {
-    const refused = await request('/v1/me','GET',undefined,{'x-bane-account':forged});
+    const refused = await request('/v1/me','GET',undefined,{'x-nightmail-account':forged});
     assert.equal(refused.status,401,forged); assert.equal(await code(refused),'ACCOUNT_SIGNED_OUT');
   }
   // The browser's account list: only the accounts connected here, each with its own workspaces.
@@ -1160,7 +1159,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
   const now = Math.floor(Date.now()/1000);
   let tick = 0;
   const token = (subject: string) => {
-    const body = [{alg:'ES256',typ:'at+jwt',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:'opencode',iat:now+tick++,exp:now+300,jti:randomUUID(),scope:'bane:read bane:send',acr:'urn:anomaly:acr:google'}].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
+    const body = [{alg:'ES256',typ:'at+jwt',kid:'fixture'},{iss:issuer,aud:resource,sub:subject,client_id:'opencode',iat:now+tick++,exp:now+300,jti:randomUUID(),scope:'nightmail:read nightmail:send',acr:'urn:anomaly:acr:google'}].map(p=>Buffer.from(JSON.stringify(p)).toString('base64url')).join('.');
     return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:signer.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url');
   };
   const mcp = async (subject: string, profile?: string) => {
@@ -1194,7 +1193,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
     assert.deepEqual(Object.fromEntries(grants.map(g=>[g.user_id,g.profile])),{[personal.user]:'work',[work.user]:'work'},'The label follows the entry that last connected; it is not part of the approval');
     // The label is display only: sanitized, bounded, and shown in that account's connections list alone.
     await mcp(work.subject,'  Work <script>  laptop  ');
-    const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-bane-account':account.user}}),runtime);
+    const browser = (path: string, account: typeof personal, method = 'GET') => app.fetch(new Request(origin+path,{method,headers:{origin,cookie:jar.join('; '),'x-nightmail-account':account.user}}),runtime);
     const list = async (account: typeof personal) => ((await (await browser('/v1/mcp-connections',account)).json()) as {data:{id:string;profile:string|null;workspaceId:string}[]}).data;
     // No default is set: each account's only workspace is the default.
     assert.deepEqual((await list(work)).map(c=>[c.id,c.profile,c.workspaceId]),[[second.body.keyId,'Work script laptop',null]]);
@@ -1230,7 +1229,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     return body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key,dsaEncoding:'ieee-p1363'})).toString('base64url');
   };
   const now = Math.floor(Date.now()/1000);
-  const claims = {iss:issuer, aud:resource, sub:'subject', client_id:'fixture', iat:now, exp:now+300, jti:randomUUID(), scope:'bane:read'};
+  const claims = {iss:issuer, aud:resource, sub:'subject', client_id:'fixture', iat:now, exp:now+300, jti:randomUUID(), scope:'nightmail:read'};
   const token = (extra: object = {}) => jwt(signer.privateKey,{alg:'ES256',typ:'at+jwt',kid:'fixture'},{...claims,...extra});
   const run = (access: string, proof?: string) => authorizeResource(runtime, new Request(resource,{method:'POST',headers:{authorization:`${proof?'DPoP':'Bearer'} ${access}`,...(proof?{DPoP:proof}:{})}}),async a=>Response.json(a.permissions));
   await db.query('BEGIN');
@@ -1238,33 +1237,13 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.ok(manager);
     await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
     const described={read:'Read workspace data.',send:'Send email from the workspace.',manage:'Manage workspace mail and resources.'};
-    const both=['bane:read','bane:send','bane:manage','nightmail:read','nightmail:send','nightmail:manage'];
-    // Both scope sets are published until the rename cleanup; the requested ones (bane:* by default) come first.
-    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Nightmail',authorization_servers:[issuer],scopes_supported:both,bearer_methods_supported:['header'],scope_descriptions:Object.fromEntries(both.map(s=>[s,described[s.split(':')[1] as keyof typeof described]]))});
+    const scopes=['nightmail:read','nightmail:send','nightmail:manage'];
+    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Nightmail',authorization_servers:[issuer],scopes_supported:scopes,bearer_methods_supported:['header'],scope_descriptions:Object.fromEntries(scopes.map(s=>[s,described[s.split(':')[1] as keyof typeof described]]))});
     assert.deepEqual(await (await run(token())).json(),['read']);
-    // nightmail:* and bane:* scopes grant the same; OAUTH_SCOPE_PREFIX only picks the names the server asks for.
+    assert.match((await run('not-a-token')).headers.get('www-authenticate')??'',/scope="nightmail:read nightmail:send nightmail:manage"/);
+    // Since the cutover, pre-rename bane:* scopes grant nothing.
     assert.deepEqual(await (await run(token({client_id:'fixture-nightmail',scope:'nightmail:read nightmail:send',jti:randomUUID()}))).json(),['read','send']);
-    assert.deepEqual(await (await run(token({client_id:'fixture-mixed',scope:'nightmail:read bane:manage',jti:randomUUID()}))).json(),['read','manage']);
-    assert.equal((await run(token({client_id:'fixture-unknown',scope:'opensend:read nightmail:live',jti:randomUUID()}))).status,403);
-    runtime.config.oauthScopePrefix='nightmail';
-    try {
-      const switched=protectedResourceMetadata(runtime),order=['nightmail:read','nightmail:send','nightmail:manage','bane:read','bane:send','bane:manage'];
-      assert.deepEqual([switched.scopes_supported,Object.keys(switched.scope_descriptions)],[order,order]);
-      assert.match((await run('not-a-token')).headers.get('www-authenticate')??'',/scope="nightmail:read nightmail:send nightmail:manage"/);
-      assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read'],'A bane:read token keeps working after the switch.');
-    } finally { runtime.config.oauthScopePrefix=undefined; }
-    // After a domain switch the earlier origin stays a resource of its own (PREVIOUS_PUBLIC_URLS): a token minted for it
-    // works there and only there, and the new origin's resource never accepts it.
-    const earlier='https://earlier.example.org', earlierResource=earlier+'/mcp';
-    runtime.config.previousOrigins=[earlier];
-    try {
-      const at=(url:string,access:string)=>authorizeResource(runtime,new Request(url,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.permissions));
-      assert.equal(protectedResourceMetadata(runtime,earlierResource).resource,earlierResource);
-      assert.equal(protectedResourceMetadata(runtime,'https://elsewhere.example.org/mcp').resource,resource,'An unknown host gets PUBLIC_URL\'s resource.');
-      assert.deepEqual(await (await at(earlierResource,token({aud:earlierResource,jti:randomUUID()}))).json(),['read']);
-      assert.equal((await at(resource,token({aud:earlierResource,jti:randomUUID()}))).status,401);
-      assert.equal((await at(earlierResource,token({jti:randomUUID()}))).status,401);
-    } finally { runtime.config.previousOrigins=undefined; }
+    for(const scope of ['bane:read bane:manage','opensend:read nightmail:live']) assert.equal((await run(token({client_id:'fixture-old-'+scope.length,scope,jti:randomUUID()}))).status,403,scope);
     for(const extra of [{aud:issuer},{iss:resource},{exp:now-60}]) assert.equal((await run(token(extra))).status,401);
     assert.equal((await run(token({iat:now+300,jti:randomUUID()}))).status,401,'A token issued in the future is refused');
     // Google-only covers MCP: every access token, refreshed ones included, must carry the configured acr.
@@ -1331,7 +1310,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     }
     await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
     type Seen={default:{id:string;source:string}|null;workspaces:[string,string,string[]][]};
-    const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'bane:read bane:manage'});
+    const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'nightmail:read nightmail:manage'});
     const connection=async()=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({default:a.defaultWorkspace,workspaces:a.workspaces.map(w=>[w.id,w.role,w.permissions])}));
       assert.equal(r.status,200);const seen=await r.json() as Seen;return {...seen,workspaces:seen.workspaces.filter(w=>w[0].endsWith(suffix))};};
     assert.deepEqual(await connection(),{default:{id:'mcp-admin'+suffix,source:'last-used'},workspaces:[['mcp-admin'+suffix,'admin',['read','manage']],['mcp-member'+suffix,'member',['read']]]});
@@ -1841,16 +1820,14 @@ describe('Public contract and authentication', () => {
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
-    // Keys from before the Nightmail rename (bane_) and OpenSend (os_) still authenticate; even with a matching stored
-    // hash, the retired test key format cannot.
+    // Since the cutover, keys with a pre-rename prefix (bane_, OpenSend's os_) or the retired test format never
+    // authenticate, even with a matching stored hash.
     for (const prefix of ['bane_', 'os_', 'os_live_', 'os_test_', 'bane_test_', 'nm_test_']) {
       const old = prefix + key.secret.slice('nm_'.length), id = unique('legacy-key');
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,$3,'["read"]','[]')`, [id, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
       cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
       const me = await http('GET','/v1/me',old);
-      if (!prefix.endsWith('test_')) assert.equal(ok(me).id,id); else {
-        error(me,401,'AUTH_INVALID');
-      }
+      error(me,401,'AUTH_INVALID');
     }
     const rows = await allPages('/v1/api-keys', MANAGER);
     const saved = rows.find(row => row.id === key.id);
@@ -1899,17 +1876,18 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
     assert.equal(me.email, AUTH_EMAIL);
     assert.equal(me.name, 'Synthetic acceptance operator');
     assert.equal(me.environment, undefined);
-    assert.deepEqual(me.mcpScopes, ['bane:read', 'bane:send', 'bane:manage'], 'MCP asks for bane:* until OAUTH_SCOPE_PREFIX switches it.');
+    assert.deepEqual(me.mcpScopes, ['nightmail:read', 'nightmail:send', 'nightmail:manage']);
     assert.ok(me.permissions.includes('manage'));
-    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'live' })).environment, undefined);
-    // X-Nightmail-Environment, and the earlier X-Bane- and X-OpenSend- names, are refused unless they say live.
-    for (const name of ['x-nightmail-environment', 'x-bane-environment', 'x-opensend-environment']) error(await http('POST', '/v1/emails/send', MANAGER, mail(), { [name]: 'test' }), 400, 'ENVIRONMENT_REMOVED');
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-nightmail-environment': 'live' })).environment, undefined);
+    // X-Nightmail-Environment is refused unless it says live; the pre-rename names mean nothing since the cutover.
+    error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-nightmail-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-bane-environment': 'test' })).environment, undefined);
     assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-nightmail-environment': 'live' })).environment, undefined);
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
     assert.equal(inspected.id, manager!.userId);
     assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
     const machine = await keyFixture(t, { permissions: ['read'] });
-    const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-bane-environment': 'live' }));
+    const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-nightmail-environment': 'live' }));
     assert.equal(machineMe.id, machine.id);
     assert.equal(machineMe.email, null);
     assert.equal(machineMe.name, null);
@@ -2196,7 +2174,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             if(url.origin==='https://cloudflare-dns.com') {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
-              if(q===`_nightmail.${name}` || q===`_bane.${name}` || q===`_opensend.${name}`) return Response.json({Status:3});
+              if(q===`_nightmail.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${name}`) return Response.json({Status:3});
               if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
               if(type==='NS') return Response.json({Status:3}); // Receiving hosts here are not delegated zones.
@@ -2260,9 +2238,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
             const type=record.type==='SPFM'?'TXT':record.type, value=record.type==='SPFM'?`v=spf1 ${record.spfRules} ~all`:expand(record.pointsTo ?? record.data);
-            // The registered template publishes the ownership token as _bane, which proves a claim shown as _nightmail.
-            const same=(shown:string)=>record.groupId==='ownership' ? shown.replace(/^_(?:nightmail|bane|opensend)\./,'')===target.replace(/^_bane\./,'') : shown===target;
-            assert.ok(manual.dns.some((r:Json)=>same(r.name) && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
+            assert.ok(manual.dns.some((r:Json)=>r.name===target && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
           }
           assert.deepEqual((await getSetup('?groups=ownership')).groups,['ownership']); assert.equal(requests.length,before,'Cached consent URL generation makes no outbound calls.');
           const ret=new URL(params.get('redirect_uri')!); assert.equal(ret.origin,origin); const token=params.get('state')!; assert.equal(ret.pathname.split('/').at(-1),token);
@@ -2341,7 +2317,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               dmarcQueries++; const records=policies.get(q.slice(7));
               return Response.json(dmarcFailure ? {Status:2} : records ? {Status:0,Answer:records.map(data=>({name:q,type:16,data}))} : {Status:3});
             }
-            lookups++; return Response.json(answer && q.startsWith('_opensend.') ? { Status:0, Answer:[{ name:`${q}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
+            lookups++; return Response.json(answer && q.startsWith('_nightmail.') ? { Status:0, Answer:[{ name:`${q}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
           });
           const before = calls.length;
           error(await local('GET',discovery,undefined,b.cookie),409,'CONNECTION_MANAGED_REGION');
@@ -2422,8 +2398,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
 
           identity.DkimAttributes=dkim; answer=''; await pace();
           await assert.rejects(check(40),e=>e instanceof JobDeferred && Date.parse(e.availableAt)<=Date.now()+16_000 && e.payload?.poll===1);
-          assert.equal(lookups,3,'The first DKIM success checks TXT (each label); NXDOMAIN restarts at the short delay even after 40 polls.');
-          await assert.rejects(check(),JobDeferred); assert.equal(lookups,3,'Account pacing must prevent a second SES read.');
+          assert.equal(lookups,1,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
           await pace();
           // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
           await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
@@ -2437,7 +2413,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`GET verified domain: 1 domain statement; ${verifiedQueries} pg round trips including dashboard auth; no wake.`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
-          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,9,"Three checks of the three ownership labels; the legacy _opensend TXT proves the claim.");
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,3,"Three checks of the _nightmail TXT.");
           assert.ok(associations.has(`bane-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
           // A verified sender on a connection whose tenant is not ready is refused at admission, never queued silently.
           await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
@@ -2509,8 +2485,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             const probe=async(addr:string,id=unique('probe'))=>acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});
             assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
             // Proven ownership is enough to create addresses; nothing routes until the MX record is observed.
-            const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-bane-environment':'live'}),201);
-            assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-bane-environment':'live'}));
+            const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-nightmail-environment':'live'}),201);
+            assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-nightmail-environment':'live'}));
               const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
@@ -2577,7 +2553,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'active',receiving_lost:false});
             answer=proof.value;
             // Exercise legacy auto-creation deliberately. New hosts now keep unmatched mail.
-            for(const [user,domainId] of [[a,other.id],[b,created.id]] as const){const path=`/v1/inbound/domains/${domainId}`,headers={'x-bane-environment':'live'};assert.equal(ok(await local('GET',path,undefined,user.cookie,headers)).catchAll,'store');ok(await local('PATCH',path,{catchAll:'create_address'},user.cookie,headers));}
+            for(const [user,domainId] of [[a,other.id],[b,created.id]] as const){const path=`/v1/inbound/domains/${domainId}`,headers={'x-nightmail-environment':'live'};assert.equal(ok(await local('GET',path,undefined,user.cookie,headers)).catchAll,'store');ok(await local('PATCH',path,{catchAll:'create_address'},user.cookie,headers));}
             const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
             const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
             const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
@@ -2594,8 +2570,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
               // N1: the fixture S3 has no IAM, so check the key this ingest wrote against the checked-in runtime policies.
               assert.deepEqual(await hostedAttachmentAccess(file.storage_key),{get:true,put:true,orphan:true,otherTag:false},`runtime IAM must authorize ${file.storage_key}`);
-              if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
-              const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-bane-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
+              if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-nightmail-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
+              const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-nightmail-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
             }
             message.receipt.recipients=[dropped];message.mail.messageId=unique('unmatched');message.receipt.action.objectKey='staging/'+message.mail.messageId;
             assert.equal(await accept(),0);assert.equal((await pool.query('SELECT 1 FROM mail_receipts WHERE ses_message_id=$1',[message.mail.messageId])).rowCount,0);
@@ -2605,7 +2581,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             });
             message.receipt.recipients=[custom];message.receipt.timestamp='2020-01-01T00:00:00Z';assert.equal(await accept(),0,'A delayed notification predating this domain claim does not transfer old mail.');
             const deliveries=await pool.query('SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1',[hook]);assert.equal(deliveries.rowCount,1);assert.ok(!JSON.stringify(deliveries.rows).includes(blind));
-            const live={'x-bane-environment':'live'},awsCount=calls.length;
+            const live={'x-nightmail-environment':'live'},awsCount=calls.length;
             const inboundPath=`/v1/inbound/domains/${created.id}`;
             const inboundView=ok(await local('GET',inboundPath,undefined,b.cookie,live));assert.equal(inboundView.name,mx.name);assert.equal(inboundView.dns[0].name,mx.name);assert.equal(inboundView.status,'active');assert.equal(inboundView.addressCount,1);
             assert.equal(ok(await local('PATCH',inboundPath,{catchAll:'store'},b.cookie,live)).catchAll,'store');
@@ -2848,8 +2824,6 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
             }),e=>e===rollback);
           }); } finally { runtime.db=original; }
           assert.ok(calls.slice(start).every(n=>/^(Get|List)/.test(n)),'No writes to customer AWS resources during verification or import.');
-          // A claim made before the Nightmail rename keeps showing (and is proven by) the _bane record its owner published.
-          await pool.query("UPDATE domain_claims SET proof_label='bane' WHERE workspace_id=$1 AND name=$2",[a.org.id,reserved]);
           const list:Json[]=ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;assert.equal(list.length,3);
           const signedDomain=list.find(x=>x.name===imported)!;
           assert.deepEqual([signedDomain.sending,signedDomain.verificationStatus,signedDomain.dkimStatus,signedDomain.mailFromDomain,signedDomain.mailFromStatus],['verified','SUCCESS','SUCCESS','bounce.'+imported,'SUCCESS']);
@@ -2874,7 +2848,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           await check(signedDomain,false);await canReserve(true);
           assert.equal((await pool.query('SELECT 1 FROM mailbox_domains WHERE workspace_id=$1 AND domain_id=$2',[a.org.id,signedDomain.id])).rowCount,0,'An unproven import is authorized only for sending.');
           await check(signedDomain,true);await canReserve(false);
-          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true,'bane'),JobDeferred);
+          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true),JobDeferred);
           await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
           const scopes=(await pool.query('SELECT name,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,reserved]])).rows;
           assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'txt'},'A pending foreign reservation does not block either valid DNS proof');
@@ -2897,7 +2871,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['sending','sending','sending','receiving']);
         const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
         await providerTest.test('BYO inbound uses its assumed role and per-domain rule, never the platform catch-all',async bt=>{
-          const headers={'x-bane-environment':'live'},wid=a.org.id;
+          const headers={'x-nightmail-environment':'live'},wid=a.org.id;
           bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{assert.equal(new URL(String(input)).searchParams.get('type'),'MX');return Response.json({Status:0,Answer:[{name:domain,type:15,data:`10 inbound-smtp.${region}.amazonaws.com.`}]});});
           bt.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'customer-set'},Rules:[]};
@@ -2980,7 +2954,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type IN ('domain.verify','domain.mx') AND status='pending'",[a.org.id])).rowCount,0);
         assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
         assert.deepEqual(ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data,[]); error(await local('GET',`/v1/domains/${byoDomain.id}`,undefined,a.cookie),404);
-        assert.deepEqual(ok(await local('GET','/v1/inbound/domains',undefined,a.cookie,{'x-bane-environment':'live'})).data,[]);
+        assert.deepEqual(ok(await local('GET','/v1/inbound/domains',undefined,a.cookie,{'x-nightmail-environment':'live'})).data,[]);
         error(await add(a.cookie,domain),409,'CONNECTION_REQUIRED');
         ok(await choose('shared', a.cookie),201);
         const reproved=ok(await local('POST','/v1/domains',{name:domain},a.cookie),201); // Region defaults to the connection.
@@ -3101,7 +3075,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
 
 describe('Hosted MCP OAuth and tools', () => {
   const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
-  const writableScope = 'bane:read bane:manage offline_access';
+  const writableScope = 'nightmail:read nightmail:manage offline_access';
   const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
   async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope, request = http) {
     const { mintResourceToken } = await import('./scripts/fixture-issuer.js');
@@ -3152,7 +3126,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(listContactsBranch.properties.email, undefined);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     for (const name of ['search_tools', 'describe_tool']) assert.ok(!tools.has(name), name);
-    // Receiving follows the role: the person owns the workspace and approved bane:manage, so the receiving tools are listed.
+    // Receiving follows the role: the person owns the workspace and approved nightmail:manage, so the receiving tools are listed.
     for (const name of ['workspaces', 'setDefaultWorkspace', 'applyRituals', 'createEndpoint', 'createRoute', 'applyRouting', 'enableInboundDomain', 'createInboundAddress', 'listInboundAddresses', 'getInboundScanPolicy']) assert.ok(tools.has(name), name);
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
@@ -3313,9 +3287,11 @@ describe('Hosted MCP OAuth and tools', () => {
     const mac = (body: string, key: string | Buffer) => createHmac('sha256', key).update(`opensend-agent-token-v1:${body}`).digest('base64url');
     assert.equal(payload.v, 4); assert.ok(signature === mac(encoded, derived));
     const legacy = Buffer.from(JSON.stringify({ ...payload, v: 3 })).toString('base64url');
-    ok(await http('GET', '/v1/me', `os_agent_${legacy}.${mac(legacy, AUTH_SECRET!)}`));
+    ok(await http('GET', '/v1/me', `nm_agent_${legacy}.${mac(legacy, AUTH_SECRET!)}`));
+    // Since the cutover a pre-rename prefix is refused, however it is signed.
+    error(await http('GET', '/v1/me', `bane_agent_${encoded}.${signature}`), 401, 'AUTH_INVALID');
     for (const [body, key] of [[legacy, derived], [encoded, AUTH_SECRET!]] as const) {
-      error(await http('GET', '/v1/me', `os_agent_${body}.${mac(body, key)}`), 401, 'AUTH_INVALID');
+      error(await http('GET', '/v1/me', `nm_agent_${body}.${mac(body, key)}`), 401, 'AUTH_INVALID');
     }
     error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
     const managed = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic managed acceptance script' }, confirm: true }, 201);
@@ -3339,7 +3315,7 @@ describe('Hosted MCP OAuth and tools', () => {
       } finally { ok(await http('DELETE', `${path}/${owned.id}`, MANAGER)); }
     });
     await t.test('routing H2: delegated manage cannot create durable hooks or repoint a content destination',async()=>{
-      const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-bane-environment':'live'};
+      const path='/v1/inbound/webhooks',url='https://example.com/synthetic',headers={'x-nightmail-environment':'live'};
       for(const fields of [{},{format:'inbound'},{include:['message','raw']}])error(await http('POST',path,managed.token,{url,...fields},headers),403,'ADMIN_REQUIRED');
       const owned=ok(await http('POST',path,MANAGER,{url,format:'inbound',paused:true},headers),201);
       error(await http('PATCH',`${path}/${owned.id}`,managed.token,{url:'https://example.org/synthetic'},headers),403,'ADMIN_REQUIRED');
@@ -3370,10 +3346,10 @@ describe('Hosted MCP OAuth and tools', () => {
       finally { await db.query("DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = 'webhook-secret:reveal'", [wid]); }
       assert.equal((await db.query("SELECT count(*)::int AS n FROM webhook_secret_audit WHERE webhook_id = $1 AND action = 'revealed'", [hook.id])).rows[0].n, 2);
     });
-    const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-bane-environment': 'live' }));
+    const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-nightmail-environment': 'live' }));
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
-    ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-bane-environment': 'live' }));
+    ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-nightmail-environment': 'live' }));
     error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
     const connections = page(await http('GET', '/v1/mcp-connections', MANAGER));
     assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
@@ -3383,7 +3359,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await t.test('receiving MCP: receiving follows the role and scope; receiving writes bind to the approval',async t=>{
       const passwords=['listInboxAppPasswords','createInboxAppPassword','revokeInboxAppPassword'];
       const listing=async()=>new Set((await rpc(token,'tools/list')).tools.map((t:Json)=>t.name));
-      // No consent checkbox: an owner or admin of the workspace reaches the receiving tools, and changes them with bane:manage.
+      // No consent checkbox: an owner or admin of the workspace reaches the receiving tools, and changes them with nightmail:manage.
       const apply=await rpc(token,'tools/call',{name:'applyRituals',arguments:{confirm:true,body:{rituals:[{key:'bulk',source:'export default function route(email){if(email.subject.includes("newsletter")) junk()}' }]}}});assert.equal(apply.isError,false,redact(apply));assert.equal((await db.query("SELECT owners->>'ritual:bulk' AS owner FROM mail_ritual_configs WHERE workspace_id='default'" )).rows[0].owner,consentId);
       const tools=await listing();assert.ok(passwords.every(op=>tools.has(op)));
       // A mail client password outlives the token that asks for it, so a temporary token cannot issue one. It can still list them.
@@ -3419,7 +3395,7 @@ describe('Hosted MCP OAuth and tools', () => {
         ['DELETE','/v1/routing/routes/billing',undefined],['DELETE','/v1/routing/routes/test',undefined],['POST','/v1/routing/versions/1/restore',undefined]] as const)
         error(await http(method,path,child.secret,body,{'if-match':'1'}),403,'PERMISSION_DENIED');
       assert.equal((await db.query("SELECT resource FROM mail_grant_objects WHERE grant_id=$1 AND kind='api_key' AND resource=ANY($2) ORDER BY resource",[consentId,grantKeys])).rowCount,2);
-      // Without bane:manage (here the newest token asked for less) the approval no longer changes receiving, and nothing it
+      // Without nightmail:manage (here the newest token asked for less) the approval no longer changes receiving, and nothing it
       // created does: a key it made, and a key that key made, stop working until the scope is back.
       const derived=ok(await http('POST','/v1/api-keys',parent.secret,{name:'N-M1 fixture',permissions:['manage']}),201);secrets.add(derived.secret);
       await db.query("UPDATE nightmail_resource_grants SET permissions='{read}' WHERE grant_key=$1",[consentId]);
@@ -3512,7 +3488,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
       runtime.config.multiTenant=true;
       try{
-        const {token,consentId}=await oauthGrant(t,db,'bane:read bane:send offline_access',request);
+        const {token,consentId}=await oauthGrant(t,db,'nightmail:read nightmail:send offline_access',request);
         const listed=async(codemode:boolean)=>{const tools=ok(await request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders)).result.tools as Json[];
           return new Set(codemode?tools.map(x=>x.name as string):tools.flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`)!).filter(Boolean)));};
         for(const codemode of [true,false]){
@@ -3571,7 +3547,7 @@ describe('Hosted MCP OAuth and tools', () => {
       for (const secret of minted) assert.equal(ok(await request('GET', '/v1/inbound/overview', secret)).manage, true);
       // A read approval of the same owner reaches receiving, but REST refuses it the overview (mailboxAuth needs a manage
       // credential), so it is not offered.
-      const read = await oauthGrant(t, db, 'bane:read offline_access', request);
+      const read = await oauthGrant(t, db, 'nightmail:read offline_access', request);
       assert.deepEqual(await offered(read.token), [false, false]);
       const [{ createApp }, { dispatchAsActor }, { getMcpGrantActor }] = await Promise.all([import('./src/app.js'), import('./src/auth.js'), import('./src/mcp-auth.js')]);
       const reader = (await getMcpGrantActor(runtime, 'mcp_' + read.consentId, runtime.config.workspaceId))!; assert.ok(reader?.receivingConsent);
@@ -3584,7 +3560,7 @@ describe('Hosted MCP OAuth and tools', () => {
   test('a send-only MCP grant sees and calls getCurrentIdentity, which REST allows any authenticated actor',async t=>{
     await simulatedSesFixture(t,async({db,request})=>{
       const {resourceInventory}=await import('./src/mcp-resources.js');const actions=new Map(resourceInventory().map(x=>[`${x.name}.${x.action}`,x.operation]));
-      const {token}=await oauthGrant(t,db,'bane:send offline_access',request);
+      const {token}=await oauthGrant(t,db,'nightmail:send offline_access',request);
       const rpc=(codemode:boolean,method:string,params:Json={})=>request('POST',codemode?'/mcp?codemode=false':'/mcp',token,{jsonrpc:'2.0',id:1,method,params},rpcHeaders);
       const code=new Set((ok(await rpc(true,'tools/list')).result.tools as Json[]).map(x=>x.name as string));
       const plain=new Set((ok(await rpc(false,'tools/list')).result.tools as Json[]).flatMap(x=>((x.inputSchema?.properties?.action?.enum??[]) as string[]).map(a=>actions.get(`${x.name}.${a}`))));
@@ -3600,7 +3576,7 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t, async ({ db, request, runtime }) => {
       runtime.config.multiTenant = true;
       try {
-        const { token, consentId } = await oauthGrant(t, db, 'bane:read bane:send bane:manage offline_access', request);
+        const { token, consentId } = await oauthGrant(t, db, 'nightmail:read nightmail:send nightmail:manage offline_access', request);
         const own = runtime.config.workspaceId, suffix = randomUUID().slice(0, 8);
         const { rows: [{ user_id: userId }] } = await db.query('SELECT user_id FROM nightmail_resource_grants WHERE grant_key=$1', [consentId]);
         // The person owns `own`, is a member of `shared`, and doesn't belong to `foreign` (another person's).
@@ -3619,7 +3595,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const listed = await call('workspaces');
         assert.equal(listed.isError, false, redact(listed));
         const mine = (rows: Json[]) => rows.filter((w: Json) => [own, shared].includes(w.id)).map((w: Json) => [w.id, w.role, w.permissions, w.default]);
-        assert.deepEqual(mine(listed.structuredContent.data).sort(), [[own, 'owner', ['bane:read', 'bane:send', 'bane:manage'], true], [shared, 'member', ['bane:read', 'bane:send'], false]].sort());
+        assert.deepEqual(mine(listed.structuredContent.data).sort(), [[own, 'owner', ['nightmail:read', 'nightmail:send', 'nightmail:manage'], true], [shared, 'member', ['nightmail:read', 'nightmail:send'], false]].sort());
         assert.ok(!listed.structuredContent.data.some((w: Json) => w.id === foreign), 'Only the person\'s own workspaces');
         assert.deepEqual([listed.structuredContent.default, listed.structuredContent.defaultSource], [own, 'last-used']);
 
@@ -3722,7 +3698,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const w = runtime.config.workspaceId, path = '/v1/rituals/version', sha = (value: string) => createHash('sha256').update(value).digest('hex');
       const hex64 = () => (randomUUID() + randomUUID()).replaceAll('-', '');
       // An API key an agent works with, and one restricted to a sending domain (no receiving administration).
-      const agent = { id: unique('key'), secret: `bane_${hex64()}` }, restricted = `bane_${hex64()}`;
+      const agent = { id: unique('key'), secret: `nm_${hex64()}` }, restricted = `nm_${hex64()}`;
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Refund agent',$3,$4,'["read","send","manage"]','[]'),($5,$2,'Sender',$6,$7,'["read","send","manage"]','["mail.example.com"]')`,
         [agent.id, w, sha(agent.secret), agent.secret.slice(0, 14), unique('key'), sha(restricted), restricted.slice(0, 14)]);
       const { token, consentId, clientId } = await oauthGrant(t, db, writableScope, request);
@@ -3786,7 +3762,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await local('GET', `${path}?wait=26`), 422);
 
       // Workspace isolation: another workspace's version, saves and endpoint changes never reach this one, and back.
-      const other = unique('live-other'), outsider = { id: unique('key'), secret: `bane_${hex64()}` };
+      const other = unique('live-other'), outsider = { id: unique('key'), secret: `nm_${hex64()}` };
       await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Other agent',$3,$4,'["read","send","manage"]','[]')`, [outsider.id, other, sha(outsider.secret), outsider.secret.slice(0, 14)]);
       await db.query('INSERT INTO mail_routing_state(workspace_id,version) VALUES ($1,4100)', [other]);
@@ -3965,7 +3941,7 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('PUT', '/v1/rituals', {}));
 
       // Another workspace's manage key can't read, edit or list them.
-      const other = unique('edit-other'), outsider = `bane_${(randomUUID() + randomUUID()).replaceAll('-', '')}`;
+      const other = unique('edit-other'), outsider = `nm_${(randomUUID() + randomUUID()).replaceAll('-', '')}`;
       await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Other',$3,$4,'["read","send","manage"]','[]')`, [unique('key'), other, createHash('sha256').update(outsider).digest('hex'), outsider.slice(0, 14)]);
       error(await request('PATCH', '/v1/endpoints/pager', outsider, { name: 'taken', url: 'https://discord.com/api/webhooks/1/theirs', paused: false }), 404, 'NOT_FOUND');
@@ -3993,7 +3969,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
       PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
-    const app = createApp(), runtime = instance.runtime, live = { 'x-bane-environment': 'live' };
+    const app = createApp(), runtime = instance.runtime, live = { 'x-nightmail-environment': 'live' };
     const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
     const { token, consentId } = await oauthGrant(t, db, writableScope, request);
     const key = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'createApiKey', arguments: { confirm: true, body: { name: 'race fixture', permissions: ['manage'] } } } }, rpcHeaders)).result.structuredContent.secret as string;
@@ -4259,13 +4235,13 @@ describe('Hosted MCP OAuth and tools', () => {
       // Every customer credential type.
       const keys: Record<string, string> = {};
       for (const permissions of [['read'], ['send'], ['read', 'send', 'manage']]) {
-        const secret = `bane_${hex()}`; secrets.add(secret); keys[permissions.at(-1)!] = secret;
+        const secret = `nm_${hex()}`; secrets.add(secret); keys[permissions.at(-1)!] = secret;
         await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'audit fixture',$3,$4,$5,'[]')`, [unique('key'), wid, sha(secret), secret.slice(0, 14), JSON.stringify(permissions)]);
       }
-      const inboxKey = `bane_mbx_${hex()}`; secrets.add(inboxKey);
+      const inboxKey = `nm_mbx_${hex()}`; secrets.add(inboxKey);
       await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES ($1,$2,'audit fixture',$3,$4,NULL,'["read","send","modify"]')`, [unique('mbk'), wid, sha(inboxKey), inboxKey.slice(0, 14)]);
       const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', origin: PUBLIC_ORIGIN };
-      const { token: mcpToken } = await oauthGrant(t, db, 'bane:read bane:manage offline_access', request);
+      const { token: mcpToken } = await oauthGrant(t, db, 'nightmail:read nightmail:manage offline_access', request);
       const rpc = async (method: string, params: Json) => ok(await send('POST', '/mcp?codemode=true', { ...rpcHeaders, ...bearer(mcpToken) }, { jsonrpc: '2.0', id: 1, method, params })).result;
       const agentToken = (await rpc('tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'audit trail fixture' }, confirm: true } })).structuredContent.token as string;
       assert.match(agentToken, /^nm_agent_/); secrets.add(agentToken);
@@ -4433,7 +4409,7 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
         VALUES ($1, $2, $3, 'fixture', 'beta@example.com', '["someone@example.org"]', '[]', '[]', 'Beta receipt', 'delivered', $4, true)`,
         [betaEmail, beta, REGION, JSON.stringify({ from: 'beta@example.com', to: ['someone@example.org'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Beta receipt', text: 'beta body words', attachments: [], tracking: false })]);
-      const fromBeta = async () => ok(await local('POST', '/v1/contact-support', { shareContent: true }, 'live', { 'x-bane-workspace': beta }), 201);
+      const fromBeta = async () => ok(await local('POST', '/v1/contact-support', { shareContent: true }, 'live', { 'x-nightmail-workspace': beta }), 201);
       const betaHandoff = await fromBeta(), wider = await fromBeta();
       const betaGrant = ok(await mint({ userId: manager!.userId, ticketRef: 'T-5', verification: 'handoff', handoffId: betaHandoff.id }), 201); secrets.add(betaGrant.token);
       assert.deepEqual([betaGrant.workspaceIds, betaGrant.contentWorkspaceId], [[beta], beta]);
@@ -4493,7 +4469,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // operator too, and `reader` is listed but only operator:read: both must see nothing of the feature.
       const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly';
       runtime.config.uiNotesSubjects = [{ issuer, subject: operator.userId }, { issuer, subject: reader.userId }];
-      const apiKey = `bane_${hex()}`; secrets.add(apiKey);
+      const apiKey = `nm_${hex()}`; secrets.add(apiKey);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'UI notes fixture',$3,$4,'["read","send","manage"]','[]')`, [unique('key'), runtime.config.workspaceId, sha(apiKey), apiKey.slice(0, 14)]);
       const context = { viewport: { width: 1440, height: 900 }, dpr: 2, theme: 'dark', device: 'desktop', pointer: 'fine', build: 'abc123def456', title: 'Campaigns · bane' };
       const element = { selector: '#main-content > header.ui-page-header > div.cluster > h1', alternatives: ['[data-component="PageHeader"] > div.cluster > h1'], testId: null, component: 'PageHeader', components: ['PageHeader'],
@@ -4614,7 +4590,7 @@ describe('Hosted MCP OAuth and tools', () => {
         const done = await uiNotes(['set-status', created.id, 'fixed', '--pr', 'https://github.com/anomalyco/bane/pull/2'], scriptEnv, () => {}) as Json;
         assert.deepEqual([done.status, done.prUrl], ['fixed', 'https://github.com/anomalyco/bane/pull/2']);
         await assert.rejects(uiNotes(['set-status', created.id, 'closed'], scriptEnv, () => {}), /Usage/);
-        await assert.rejects(uiNotes(['list'], { ...scriptEnv, BANE_UI_NOTES_KEY: `bane_notes_${hex()}` }, () => {}), /403 OPERATOR_REQUIRED/);
+        await assert.rejects(uiNotes(['list'], { ...scriptEnv, BANE_UI_NOTES_KEY: `nm_notes_${hex()}` }, () => {}), /403 OPERATOR_REQUIRED/);
       } finally { globalThis.fetch = guarded; }
       // It stops when its operator loses the operator role, when it expires and when it is revoked.
       await db.query(`UPDATE platform_operators SET role = 'operator:read' WHERE user_id = $1`, [operator.userId]);
@@ -5100,8 +5076,8 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
-      const manager = await oauthGrant(t, db, `${writableScope} bane:live`, request);
-      const reader = await oauthGrant(t, db, 'bane:read bane:live offline_access', request);
+      const manager = await oauthGrant(t, db, `${writableScope} nightmail:live`, request);
+      const reader = await oauthGrant(t, db, 'nightmail:read nightmail:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
       await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4), ($5,$2,'example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
@@ -5156,7 +5132,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const { token,consentId } = await oauthGrant(t, db, `${writableScope} bane:live`, request);
+      const { token,consentId } = await oauthGrant(t, db, `${writableScope} nightmail:live`, request);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -5307,7 +5283,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('hosted MCP read-only OAuth hides state changes except read-only delegation, offers REST read operations, and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
-    const { token, consentId } = await oauthGrant(t, db, 'bane:read offline_access');
+    const { token, consentId } = await oauthGrant(t, db, 'nightmail:read offline_access');
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
@@ -5515,7 +5491,7 @@ describe('DB region catalog and explicit SES setup', () => {
         await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, runtime.config);
         async function local(method: string, path: string, body?: Json, key?: string, environment: 'test' | 'live' = 'live'): Promise<Reply> {
           const response = await app.fetch(new Request(`${runtime.config.publicUrl}${path}`, {
-            method, headers: { origin: runtime.config.publicUrl, 'x-bane-environment': environment,
+            method, headers: { origin: runtime.config.publicUrl, 'x-nightmail-environment': environment,
               ...(key ? { authorization: `Bearer ${key}` } : { cookie: manager!.cookie }), ...(body ? { 'content-type': 'application/json' } : {}) },
             ...(body ? { body: JSON.stringify(body) } : {}),
           }), runtime);
@@ -6499,23 +6475,19 @@ describe('Private attachment assets and campaign revisions', () => {
     for (const content of ['QUJDR', 'QUJD\x01RA==', 'QUJD====', 'data:text/plain;base64,QUJDRA==']) error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content }), 422, 'INVALID_BASE64');
     const calendar = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n');
     const upload = async (filename: string, contentType: string, content: Buffer, extra: Record<string, string> = {}) => {
-      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-bane-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
+      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-nightmail-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
       return { status: response.status, body: await response.json(), headers: response.headers } satisfies Reply;
     };
     const raw = ok(await upload('invite.ics', 'text/calendar; method=REQUEST; charset=utf-8', calendar), 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${raw.id}`, key.secret), [200, 404]); });
     assert.equal(raw.contentType, 'text/calendar; method=REQUEST; charset=utf-8');
     assert.equal(ok(await http('GET', `/v1/attachments/${raw.id}/content`, key.secret)).content, calendar.toString('base64'));
-    const legacyUpload=await fetch(`${BASE}/v1/attachments/upload`,{method:'POST',headers:{authorization:`Bearer ${key.secret}`,'content-type':'image/gif','x-opensend-filename':'old%20logo.gif','x-opensend-disposition':'inline','x-opensend-content-id':'opensend-logo'},body:Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64')});
-    assert.equal(legacyUpload.status,201);const oldAsset=await legacyUpload.json() as Json;
-    cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${oldAsset.id}`,key.secret),[200,404]);});
-    assert.deepEqual([oldAsset.filename,oldAsset.disposition,oldAsset.contentId],['old logo.gif','inline','opensend-logo']);
-    // The current names win over the earlier ones when a request carries both.
-    const current=ok(await upload('ignored.gif','image/gif',Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64'),{'x-nightmail-filename':'new%20logo.gif','x-nightmail-disposition':'inline','x-nightmail-content-id':'nightmail-logo','x-bane-content-id':'bane-logo'}),201);
+    // Only the X-Nightmail- names count since the cutover.
+    const current=ok(await upload('ignored.gif','image/gif',Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64'),{'x-nightmail-filename':'new%20logo.gif','x-nightmail-disposition':'inline','x-nightmail-content-id':'nightmail-logo','x-bane-content-id':'bane-logo','x-opensend-disposition':'attachment'}),201);
     cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${current.id}`,key.secret),[200,404]);});
     assert.deepEqual([current.filename,current.disposition,current.contentId],['new logo.gif','inline','nightmail-logo']);
     error(await upload('unsafe.vbs', 'text/plain', bytes), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
-    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-bane-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
+    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-nightmail-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
     // An attachment belongs to the workspace, not a sender domain: a domain-restricted send key can't delete one.
@@ -9368,7 +9340,7 @@ describe('Operational configuration and public event boundaries', () => {
       const logs=t.mock.method(console,'error',()=>{});
       const send=()=>app.fetch(new Request(PUBLIC_ORIGIN+'/v1/events/ses',{method:'POST',headers:{'content-type':'application/json'},body:'{'}),runtime);
       assert.equal((await send()).status,400);assert.equal((await send()).status,429);assert.equal(logs.mock.callCount(),0);
-      const res=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me',{headers:{authorization:'Bearer bane_'+'c'.repeat(64)}}),runtime);
+      const res=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me',{headers:{authorization:'Bearer nm_'+'c'.repeat(64)}}),runtime);
       assert.equal(res.status,401);assert.equal(res.headers.get('server-timing'),null);
     });
   });
@@ -9523,7 +9495,7 @@ describe('Operational configuration and public event boundaries', () => {
         function checkCallback(index: number, value: string | undefined, synthetic: boolean) {
           const { headers, body } = callbacks[index];
           assert.equal(headers.authorization, value); assert.equal(headers['content-type'], 'application/json');
-          assert.equal(headers['nightmail-test'], synthetic ? 'true' : undefined); assert.equal(headers['bane-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
+          assert.equal(headers['nightmail-test'], synthetic ? 'true' : undefined); assert.equal(headers['bane-test'], undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
           assert.equal(headers['user-agent'], 'Nightmail-Webhooks/1.0');
           assert.match(String(headers['webhook-timestamp']), /^\d+$/);
           assert.equal(headers['webhook-signature'], 'v1,' + createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.${body}`).digest('base64'));
@@ -9680,7 +9652,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       await ensureRegionSettings(runtime.db, runtime.config);
       async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'live', headers: Record<string, string> = {}): Promise<Reply> {
         const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
-          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
+          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-nightmail-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
           ...(body ? { body: JSON.stringify(body) } : {}),
         }), runtime);
         return { status: response.status, body: await response.json(), headers: response.headers };
@@ -9806,24 +9778,19 @@ test('reply quotes of crafted received HTML stay within time and memory bounds a
   }
 });
 
-test('stdio MCP connects with legacy env, key, health and API title',async()=>{
+test('stdio MCP refuses OpenSend-era settings, keys and API title since the cutover',async()=>{
   const {spawnSync}=await import('node:child_process');
   const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:'opensend'});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:'OpenSend API',version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
   const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
   const env={PATH:process.env.PATH,OPENSEND_API_URL:'http://127.0.0.1',OPENSEND_API_KEY:'os_mbx_'+'1'.repeat(64)};
   const result=spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:env as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
-  assert.equal(result.status,0,result.stderr);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+  assert.notEqual(result.status,0);assert.match(result.stderr,/CONFIGURATION_ERROR/);
 });
-test('Brand: internal names are nightmail_* tables, NIGHTMAIL_* settings and nightmail:*-or-bane:* tag checks; the old names still work until cutover',async t=>{
+test('Brand: internal names are nightmail_* tables (the bane_* views are gone), NIGHTMAIL_* settings and nightmail:*-or-bane:* tag checks',async t=>{
   const db=await fixtureDatabase(t);
   const tables=['users','sessions','oidc_identities','signin_attempts','login_flows','resource_grants','dpop_proofs','expired_approvals','retired_grant_objects','migrations'];
   const kinds=(await db.query("SELECT relname,relkind FROM pg_class WHERE relnamespace='public'::regnamespace AND relname=ANY($1)",[tables.flatMap(n=>['nightmail_'+n,'bane_'+n])])).rows;
-  for(const n of tables) assert.deepEqual([kinds.find(r=>r.relname==='nightmail_'+n)?.relkind,kinds.find(r=>r.relname==='bane_'+n)?.relkind],['r','v'],n);
-  // A release still running during the deploy writes through the old names.
-  const id=unique('legacy-writer');
-  await db.query("INSERT INTO bane_users(id,name,email,email_verified) VALUES($1,$1,$2,true) ON CONFLICT(id) DO UPDATE SET name=excluded.name",[id,`${id}@example.org`]);
-  cleanup(t,async()=>{await db.query('DELETE FROM nightmail_users WHERE id=$1',[id]);});
-  assert.equal((await db.query('SELECT name FROM nightmail_users WHERE id=$1',[id])).rows[0].name,id);
+  for(const n of tables) assert.deepEqual([kinds.find(r=>r.relname==='nightmail_'+n)?.relkind,kinds.find(r=>r.relname==='bane_'+n)?.relkind],['r',undefined],n);
   const {loadConfig}=await import('./src/config.js'),base={PUBLIC_URL:'https://example.org',BANE_ROOT_SECRET:'r'.repeat(40)};
   assert.equal(loadConfig({...base,NIGHTMAIL_ROOT_SECRET:'n'.repeat(40)}).authSecret,'n'.repeat(40),'NIGHTMAIL_<x> wins over BANE_<x>.');
   assert.equal(loadConfig({PUBLIC_URL:'https://example.org',NIGHTMAIL_ROOT_SECRET:'n'.repeat(40)}).authSecret,'n'.repeat(40));
@@ -9842,25 +9809,26 @@ test('Brand: the hosted support hosts, docs examples and stdio MCP identity come
   for(const host of brand.hostedHosts) assert.ok(csp.includes(` https://support.${host} wss://support.${host}`),`connect-src names support.${host}`);
   const llms=await (await fetch(BASE+'/llms.txt')).text();
   assert.ok(llms.includes(`${brand.publicOrigin}/v1/emails/send`) && llms.includes(`$${brand.apiKeyEnv}`) && llms.includes(brand.sdkPackage));
-  const connect=(service:string,title:string,key='bane_'+'1'.repeat(64))=>{
+  const connect=(service:string,title:string,key='nm_'+'1'.repeat(64))=>{
     const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
     const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
     return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,NIGHTMAIL_API_URL:'http://127.0.0.1',NIGHTMAIL_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   };
-  for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
+  // /health still says bane until the infra step; the title and keys are Nightmail's only.
+  for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane',`${brand.productName} API`]]) {
     const result=connect(service,title);
     assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
     assert.equal(JSON.parse(result.stdout).result.serverInfo.name,brand.mcpServerName);
   }
-  assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
-  for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
-  assert.notEqual(connect(brand.productSlug,`${brand.productName} API`,'nm_live_'+'1'.repeat(64)).status,0);
+  for(const [service,title] of [['elsewhere','Elsewhere API'],['bane','Bane API'],['opensend','OpenSend API']]) assert.notEqual(connect(service,title).status,0,title);
+  for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
+  for(const key of ['nm_live_'+'1'.repeat(64),'bane_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.notEqual(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
 });
 
 // PR #55 recheck P2: the overview's recovery path (listInboundWebhooks, paged) must exist wherever the overview does.
 test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and filter by address; stdio inbox keys are not offered it', async () => {
   const [{ spawnSync }, { mkdtemp, writeFile }, { tmpdir }, { join }, { createOpenApiApp }, { buildMcpCatalog }] = await Promise.all([import('node:child_process'), import('node:fs/promises'), import('node:os'), import('node:path'), import('./src/app.js'), import('./src/mcp-catalog.js')]);
-  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } });
+  const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Nightmail API', version: '0.1.0' } });
   const fields = (schema: unknown): string[] => !schema || typeof schema !== 'object' ? [] : Object.entries(schema as Json).flatMap(([k, v]) => k === 'properties' ? [...Object.keys(v as Json), ...Object.values(v as Json).flatMap(fields)] : fields(v));
   const hosted = buildMcpCatalog(app).get('listInboundWebhooks')!;
   for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(hosted.tool.inputSchema).includes(name), `hosted input ${name}`);
@@ -9869,11 +9837,11 @@ test('inbound webhooks over MCP: hosted and stdio catalogs page by cursor and fi
   const fixture = `import {readFileSync} from 'node:fs';globalThis.fetch=async url=>{if(url.href==='http://127.0.0.1/health')return Response.json({status:'ok',service:'bane'});if(url.href==='http://127.0.0.1/openapi.json')return Response.json(JSON.parse(readFileSync(process.env.SPEC_FILE,'utf8')));throw Error('unexpected request')}`;
   const tools = (key: string) => {
     const input = [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'fixture', version: '1' } } }, { jsonrpc: '2.0', method: 'notifications/initialized' }, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }].map(m => JSON.stringify(m)).join('\n') + '\n';
-    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, BANE_API_URL: 'http://127.0.0.1', BANE_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
+    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(fixture), '--import', 'tsx', '../mcp/src/server.ts'], { env: { PATH: process.env.PATH, NIGHTMAIL_API_URL: 'http://127.0.0.1', NIGHTMAIL_API_KEY: key, SPEC_FILE: file } as unknown as NodeJS.ProcessEnv, input, encoding: 'utf8', timeout: 20000 });
     assert.equal(result.status, 0, result.stderr);
     return new Map<string, Json>(result.stdout.trim().split('\n').map(line => JSON.parse(line)).find(m => m.id === 2).result.tools.map((t: Json) => [t.name, t]));
   };
-  const workspace = tools('bane_' + '1'.repeat(64)), inbox = tools('bane_mbx_' + '1'.repeat(64));
+  const workspace = tools('nm_' + '1'.repeat(64)), inbox = tools('nm_mbx_' + '1'.repeat(64));
   assert.ok(workspace.has('getInboundOverview') && workspace.has('getInboundWebhook'));
   for (const name of ['cursor', 'limit', 'addressId', 'eventType']) assert.ok(fields(workspace.get('listInboundWebhooks')?.inputSchema).includes(name), `stdio input ${name}`);
   assert.deepEqual([inbox.has('listInboundWebhooks'), inbox.has('getInboundWebhook'), inbox.has('getInboundOverview')], [false, false, true], 'REST refuses inbox keys webhook administration');
@@ -9962,9 +9930,8 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       assert.equal((await db.query("SELECT indisvalid FROM pg_index WHERE indexrelid='workspace_quota_sponsor'::regclass")).rows[0]?.indisvalid,true);
     });
     assert.equal((await db.query("SELECT name FROM nightmail_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
-    // The ledger moved to nightmail_migrations; bane_migrations stays a view of it for an earlier release's migrator.
-    assert.deepEqual((await db.query("SELECT relkind FROM pg_class WHERE oid=to_regclass('bane_migrations')")).rows,[{relkind:'v'}]);
-    assert.equal((await db.query("SELECT FROM bane_migrations WHERE name='092_bane_scopes.sql'")).rowCount,1);
+    // The ledger moved to nightmail_migrations.
+    assert.equal((await db.query("SELECT to_regclass('bane_migrations') AS t")).rows[0].t,null,'The pre-rename ledger view is gone since the cutover.');
     assert.deepEqual((await db.query("SELECT scopes,reference_id FROM oauth_consent WHERE id='legacy'")).rows,[{scopes:['bane:read','bane:live','offline_access'],reference_id:reference.replaceAll('opensend:','bane:')}]);
     assert.match(migrate({BANE_ROOT_SECRET:config.BANE_ROOT_SECRET}),/WEBHOOK_SECRETS_REKEY_SKIPPED/);assert.equal(await read(),encrypted);
     const next={...config,BANE_ROOT_SECRET:randomUUID()};
@@ -10139,7 +10106,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   await t.test('flags-on reconciliation, fresh claim-tagged identities, receiving and signed historical feedback',async integration=>{
     const [{operationJobs},{reconcileSharedConnections},{JobDeferred},{SESv2Client},{SNSClient},{SESClient},{S3Client},{STSClient}]=await Promise.all([
       import('./src/operations.js'),import('./src/provider-connections.js'),import('./src/jobs.js'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sns'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-s3'),import('@aws-sdk/client-sts')]);
-    const apiKey='os_'+'1'.repeat(64),app=createApp();await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key',$1,'fixture',$2,'os_fixture','["manage","read","send"]','[]')`,[w[0],createHash('sha256').update(apiKey).digest('hex')]);
+    const apiKey='nm_'+'1'.repeat(64),app=createApp();await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key',$1,'fixture',$2,'os_fixture','["manage","read","send"]','[]')`,[w[0],createHash('sha256').update(apiKey).digest('hex')]);
     const api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{authorization:'Bearer '+apiKey,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const sets=new Map<string,Json>(),topics=new Map<string,Json>(),setup=setupStore(sets,topics,dest),identities=new Map<string,Json>(),tenants=new Set<string>(),associations=new Set<string>();
     seedPool(topics,r,dest,origin+'/v1/events/ses',sets);const deployed=deployedReceiving(r,dest,origin+'/v1/events/ses');
@@ -10178,9 +10145,9 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const pem=await selfSignedPem(privateKey);
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.href===certUrl)return new Response(pem);
       if(u.hostname===bucket(dest)+`.s3.${r}.amazonaws.com`){assert.match(u.searchParams.get('X-Amz-Credential')!,/^fixture-rehome\//);return new Response(new Uint8Array(objects.get(decodeURIComponent(u.pathname.slice(1)))!));}
-      assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_bane\./,''));
+      assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name')!,type=u.searchParams.get('type'),n=names.indexOf(name.replace(/^_nightmail\./,''));
       const mx=name===names[0]?'mx.other.invalid.':name==='reply.'+names[0] || name==='reply.'+names[2]?`inbound-smtp.${r}.amazonaws.com.`:null;
-      return Response.json({Status:0,Answer:type==='MX' && mx?[{name,type:15,data:'10 '+mx}]:type==='TXT' && name.startsWith('_bane.') && n!==1?[{name,type:16,data:JSON.stringify(tokens[n])}]:[]});});
+      return Response.json({Status:0,Answer:type==='MX' && mx?[{name,type:15,data:'10 '+mx}]:type==='TXT' && name.startsWith('_nightmail.') && n!==1?[{name,type:16,data:JSON.stringify(tokens[n])}]:[]});});
     const jobs=(await db.query(`SELECT * FROM jobs WHERE type='domain.verify'`)).rows;assert.equal(jobs.length,names.length);
     const newKey=runtime.config.aws;runtime.config.platformAccount=old;runtime.config.aws={accessKeyId:'fixture-retired',secretAccessKey:'fixture'};
     const j=jobs[0],jobArgs={id:j.id,workspaceId:j.workspace_id,attempts:1};
@@ -10190,7 +10157,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     const tracked=()=>db.query(`SELECT to_jsonb(j) AS job FROM jobs j WHERE type='domain.verify' ORDER BY id`);
     const before=(await tracked()).rows;error(await api('POST',`/v1/domains/${dom[0]}/verify`),503,'AWS_ACCOUNT_MISMATCH');assert.deepEqual((await tracked()).rows,before);
     const dashboard=await seedSession(db);await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('owner',$1,$2,'owner')`,[w[0],dashboard.userId]);
-    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),'x-bane-workspace':w[0]!}}),runtime);
+    const detail=await app.fetch(new Request(origin+`/v1/domains/${dom[0]}`,{headers:{cookie:dashboard.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),'x-nightmail-workspace':w[0]!}}),runtime);
     assert.equal(detail.status,200);assert.equal((await detail.json() as Json).id,dom[0]);assert.deepEqual((await tracked()).rows,before);
     const {workspaceCredentials}=await import('./src/provider-credentials.js');await assert.rejects(workspaceCredentials(runtime,r,{kind:'shared',id:'fixture',aws_account_id:dest,role_arn:'',external_id:''}),mismatch);
     const {tenantJob}=await import('./src/provider-connections.js'),{MAX_ATTEMPTS}=await import('./src/jobs.js'),cid='conn_'+w[0];
@@ -10245,12 +10212,12 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
     // POST /connection takes its account only from a ready sending pool.
     await db.query(`UPDATE provider_pool_regions SET sending_state='pending'`);
     const owner=await seedSession(db),host='cold-rehome.example.org';await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES('personal-owner',$1,$2,'owner')`,[personal,owner.userId]);
-    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),origin,'x-bane-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const app=createApp(),api=async(method:string,path:string,body?:Json)=>{const res=await app.fetch(new Request(origin+path,{method,headers:{cookie:owner.cookie.replace(/^(?:__Host-)?nightmail/,'__Host-nightmail'),origin,'x-nightmail-workspace':personal,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const {SESv2Client}=await import('@aws-sdk/client-sesv2'),{operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
     let tags:Json[]=[];const dkim={Status:'SUCCESS',SigningEnabled:true,SigningHostedZone:'dkim.amazonses.com',Tokens:['cold-a','cold-b','cold-c']};
     cold.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){assert.equal(cmd.input.EmailIdentity,host);assert.equal((await this.config.credentials()).accessKeyId,'fixture-rehome');
       if(cmd.constructor.name==='CreateEmailIdentityCommand'){tags=cmd.input.Tags;return {DkimAttributes:dkim};}assert.equal(cmd.constructor.name,'GetEmailIdentityCommand');return {VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:dkim,Tags:tags};});
-    cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_bane.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='bane:domain-claim')!.Value)}]:[]});});
+    cold.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name==='_nightmail.'+host?[{name,type:16,data:JSON.stringify(tags.find(t=>t.Key==='bane:domain-claim')!.Value)}]:[]});});
     ok(await api('POST','/v1/connection',{kind:'shared'}),201);assert.equal((await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[personal])).rows[0].aws_account_id,null);
     const d=ok(await api('POST','/v1/domains',{name:host}),201);assert.deepEqual(ok(await api('GET','/v1/domains')).data.map((v:Json)=>v.id),[d.id]);
     assert.ok(ok(await api('GET',`/v1/domains/${d.id}`)).dns.some((v:Json)=>v.name.startsWith('cold-a.')),'Create saved DKIM facts on the unbound connection.');
@@ -10876,14 +10843,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid,regions:[oh]});
     await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
-    const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const api=async(method:string,path:string,body?:Json):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-nightmail-workspace':wid,'content-type':'application/json'},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey,pem=await selfSignedPem(signedKey);
     let confirmed=false,policy=JSON.stringify(deployedFeedback(va,acct,'bane-trusted',false)),sub:Json|undefined,drift=false,failAssociation=true;const calls:string[]=[],sets=new Map<string,Json>(),members=new Set<string>();
     const missing=()=>Object.assign(new Error('not found'),{name:'NotFoundException'});
     const tags=(purpose:string)=>({'bane:owner':'bane','bane:installation-id':'bane:pool','bane:purpose':purpose});
     const checkTags=(ts:Json[],purpose:string)=>assert.deepEqual(Object.fromEntries(ts.map(t=>[t.Key,t.Value])),tags(purpose));
     let managedTags:{Key:string;Value:string}[]=[];
-    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.hostname==='cloudflare-dns.com') {const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name===`_bane.${managed}`?[{name,type:16,data:JSON.stringify(managedTags[0]?.Value)}]:[]});}assert.equal(u.hostname,`sns.${va}.amazonaws.com`);if(u.pathname.endsWith('.pem'))return new Response(pem);assert.equal(u.searchParams.get('TopicArn'),topic);confirmed=true;return new Response(null);});
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));if(u.hostname==='cloudflare-dns.com') {const name=u.searchParams.get('name');return Response.json({Status:0,Answer:name===`_nightmail.${managed}`?[{name,type:16,data:JSON.stringify(managedTags[0]?.Value)}]:[]});}assert.equal(u.hostname,`sns.${va}.amazonaws.com`);if(u.pathname.endsWith('.pem'))return new Response(pem);assert.equal(u.searchParams.get('TopicArn'),topic);confirmed=true;return new Response(null);});
     t.mock.method(SESClient.prototype,'send',()=>assert.fail('Virginia receipt call'));t.mock.method(S3Client.prototype,'send',()=>assert.fail('Virginia S3 call'));
     t.mock.method(STSClient.prototype,'send',(cmd:any)=>{assert.equal(cmd.constructor.name,'GetCallerIdentityCommand');return {Account:acct,Arn:`arn:aws:iam::${acct}:user/bane-runtime`};});
     const identity=(name:string)=>({IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningEnabled:true,Status:'SUCCESS',SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:['c','a','b']},MailFromAttributes:{MailFromDomain:`bounce.${name}`,MailFromDomainStatus:'SUCCESS',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}});
@@ -10992,7 +10959,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     for (const w of [owner,other]) {
       await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:w,regions:[oh]});
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,managed_tenant,pool_tenant_name) VALUES($1,$1,$2,'ready','shared',$3,'ready',true,$4)`,[w,oh,acct,`bane-probation-${w}`]);
-      const secret='bane_'+randomUUID().replaceAll('-','')+randomUUID().replaceAll('-','');keys[w]=secret;
+      const secret='nm_'+randomUUID().replaceAll('-','')+randomUUID().replaceAll('-','');keys[w]=secret;
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'Platform fixture',$3,$4,'["read","send","manage"]','[]')`,[unique('key'),w,createHash('sha256').update(secret).digest('hex'),secret.slice(0,14)]);
     }
     const api=(w:string,method:string,path:string,body?:Json)=>http(method,path,keys[w],body,{},5_000,publicUrl,req=>app.fetch(req,runtime));
@@ -11112,7 +11079,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     domain=await read();assert.deepEqual([domain.receiving,domain.dns[0].status],['verified','verified']);
     for (const local of ['abuse','postmaster','security','dmarc']) assert.equal(await probe(`${local}@${host}`),1);
     assert.equal(await probe(`fixture@e2e.${host}`),0,'The root never receives for the platform’s own hosts.');
-    assert.ok(!queried.some(q=>q.endsWith(`_nightmail.${host}`) || q.endsWith(`_bane.${host}`) || q.endsWith(`_opensend.${host}`)),'The attestation replaces the ownership TXT.');
+    assert.ok(!queried.some(q=>q.endsWith(`_nightmail.${host}`)),'The attestation replaces the ownership TXT.');
     // Ingest: an inbox created on purpose receives; nothing else becomes an address, and the validation mailboxes
     // a certificate authority could use never do, even after someone switches the catch-all back to creating addresses.
     const stored=async(recipients:string[],catchAll:'store'|'create_mailbox')=>{let result:Json={};const mid=unique('platform-ingest'),message=unique('msg');
@@ -11423,7 +11390,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
     await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
     await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid});
-    const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-bane-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-nightmail-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
     const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey;
     const pem=await selfSignedPem(signedKey);
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
@@ -11719,8 +11686,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
       // DNS stub (cloudflare-dns.com JSON): exact names first, then a *.domain wildcard for names without records of their own.
       const zone = new Map<string, { mx?: string[]; cname?: string; ns?: string[] }>();
-      // Each claim publishes the legacy _bane ownership TXT, which proves a new (_nightmail) claim too: the hourly recheck
-      // requires a fresh proof before a claim may receive.
+      // Each claim publishes its _nightmail ownership TXT: the hourly recheck requires a fresh proof before a claim may receive.
       const proofs = new Map<string, string>();
       // Lookups in flight, their abort signals, and an optional resolver delay: how parallel one check is and what bounds it.
       let inFlight = 0, maxInFlight = 0, delayMs = 0; const signals: (AbortSignal | null | undefined)[] = [];
@@ -11729,7 +11695,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.after(() => { globalThis.fetch = networkGuard; });
       const answer = (url: URL) => {
         const name = url.searchParams.get('name')!, type = url.searchParams.get('type');
-        if (type === 'TXT' && name.startsWith('_bane.') && proofs.has(name.slice(6))) return Response.json({ Status: 0, Answer: [{ name, type: 16, data: JSON.stringify(proofs.get(name.slice(6))) }] });
+        if (type === 'TXT' && name.startsWith('_nightmail.') && proofs.has(name.slice(11))) return Response.json({ Status: 0, Answer: [{ name, type: 16, data: JSON.stringify(proofs.get(name.slice(11))) }] });
         if (type === 'NS') { const ns = zone.get(name)?.ns; return Response.json(ns ? { Status: 0, Answer: ns.map(data => ({ name, type: 2, data })) } : { Status: 3 }); }
         if (type !== 'MX') return Response.json({ Status: 3 }); // DMARC and the legacy _opensend label: none.
         const entry = zone.get(name) ?? (name.startsWith('*.') ? undefined : zone.get(`*.${name.split('.').slice(1).join('.')}`));
@@ -11768,7 +11734,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         zone.set(`inbound.${d.name}`, { mx: ['10 mx.other.example.'] });
         assert.equal(receiving(await read(d)).name, `reply.${d.name}`, 'Before any DNS check the suggestion is reply.<domain>, never the root.');
         await recheck(d);
-        assert.equal((await db.query('SELECT receiving_state FROM domain_claims WHERE name=$1', [d.name])).rows[0].receiving_state, 'pending', 'The fresh _bane proof keeps the claim receivable, so later rechecks still read MX.');
+        assert.equal((await db.query('SELECT receiving_state FROM domain_claims WHERE name=$1', [d.name])).rows[0].receiving_state, 'pending', 'The fresh _nightmail proof keeps the claim receivable, so later rechecks still read MX.');
         const suggested = await read(d), record = receiving(suggested);
         assert.equal(record.name, `mail.${d.name}`); assert.equal(suggested.receivingIssue, null);
         assert.match(record.note, new RegExp(`reply\\.${d.name.replaceAll('.', '\\.')} is a CNAME to shop\\.vendor\\.example`));
@@ -11794,7 +11760,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(reserved.message, new RegExp(`MAIL FROM subdomain, so its MX must point to feedback-smtp\\.${REGION}`)); assert.match(reserved.message, /Use inbound\./);
         error(await choose(d, `tokena._domainkey.${d.name}`), 422); // Underscore names (DKIM, _bane) are never valid receiving hosts.
         const ses = { DkimAttributes: { Tokens: tokens }, MailFromAttributes: { MailFromDomain: `reply.${d.name}` } } as Json;
-        assert.deepEqual([`tokena._domainkey.${d.name}`, `_nightmail.${d.name}`, `_bane.${d.name}`, `_opensend.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', 'ownership TXT record', 'ownership TXT record', 'custom MAIL FROM subdomain', null]);
+        assert.deepEqual([`tokena._domainkey.${d.name}`, `_nightmail.${d.name}`, `_bane.${d.name}`, `reply.${d.name}`, `inbound.${d.name}`].map(host => baneRecordUse(host, d.name, ses)), ['DKIM CNAME', 'ownership TXT record', null, 'custom MAIL FROM subdomain', null]);
         assert.deepEqual(receivingCandidates('acme.example').slice(0, 3), ['reply.acme.example', 'inbound.acme.example', 'mail.acme.example']);
         // The other direction: MAIL FROM can't take the suggested receiving host either (refused before any SES call).
         error(await local('POST', `/v1/domains/${d.id}/mail-from`, { mailFromDomain: `inbound.${d.name}` }), 409, 'MAIL_FROM_RECEIVING_CONFLICT');
@@ -12452,7 +12418,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('second.example',$1,$1,'verified')`, [other]);
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('second-reader',$1,'reader@example.net','subscribed')`, [other]);
       await gradedSender(db, other, 10000);
-      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: 'news@second.example', to: 'reader@example.net', subject: 'Hello', text: 'Fixture', kind }, 'live', { 'X-Bane-Workspace': other });
+      const send = (kind: 'marketing' | 'transactional') => local('POST', '/v1/emails/send', { from: 'news@second.example', to: 'reader@example.net', subject: 'Hello', text: 'Fixture', kind }, 'live', { 'X-Nightmail-Workspace': other });
       await db.query(`UPDATE provider_connections SET pool_tenant_name='bane-probation-second' WHERE id=$1`, [other]);
       await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1`, [other]);
       const { runDispatcher } = await import('./src/dispatcher.js'), { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
@@ -12595,7 +12561,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[workspace,REGION,account]);
         await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[host,workspace]);
       }
-      const post=(path:string,body:Json,workspace=wid)=>local('POST',path,body,'live',{'X-Bane-Workspace':workspace});
+      const post=(path:string,body:Json,workspace=wid)=>local('POST',path,body,'live',{'X-Nightmail-Workspace':workspace});
       const send=()=>post('/v1/emails/send',mail({from}));
       const md=unique('mdom');
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,$4,$5,'active')`,[md,wid,unique('domain'),domain,REGION]);
@@ -12620,7 +12586,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('UPDATE sending_campaigns SET auto_pause=false WHERE id=$1',[c.id]);
       await db.query(`INSERT INTO sending_emails(id,workspace_id,campaign_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
         SELECT 'history-'||n,$1,$2,$3,'fixture',$4,'["older@example.net"]','[]','[]','Historical fixture','{}',false,CASE WHEN n<=21 THEN 'bounced' ELSE 'delivered' END,now()-interval '2 days' FROM generate_series(1,1000)n`,[wid,c.id,REGION,from]);
-      const view=async()=>ok(await local('GET',path,undefined,'live',{'X-Bane-Workspace':wid}));
+      const view=async()=>ok(await local('GET',path,undefined,'live',{'X-Nightmail-Workspace':wid}));
       await run('campaign.run'); assert.equal((await view()).delivery.pauseReason.code,'BOUNCE_RATE_HIGH');
       ok(await post(`${path}/resume`,{})); await run('campaign.run');
       assert.equal((await view()).delivery.expanded,1); assert.equal((await view()).delivery.waiting,null);
@@ -13300,10 +13266,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return {MessageId:'same-provider-id-in-both-accounts'};
       });
       const wakes: string[]=[]; runtime.dispatch=async (region, accountId)=>{ wakes.push(`${region}:${accountId}`); };
-      const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-bane-workspace':wid});
+      const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-nightmail-workspace':wid});
       const headers=[{name:'X-Ticket',value:'42'}];
       const template={template:{name:'fixture',data:{}},headers}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
-      const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-bane-workspace':shared}),201);
+      const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-nightmail-workspace':shared}),201);
       const a=ok(await send(shared,{to:bouncedAddress,subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id],headers}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
       assert.deepEqual(wakes,[pool,account,pool].map(id=>`${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
@@ -13332,7 +13298,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const uncapped = ok(await send(byo,{to:['one@example.org','two@example.org'],subject:'uncapped',text:'fixture'}),202);
       await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) SELECT gen_random_uuid()::text,$1,x,'complaint',false FROM unnest($2::text[]) x`,[byo,[b.id,uncapped.id]]);
       await (await import('./src/maintenance.js')).checkHostedHealth(runtime);
-      assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-bane-workspace':byo})).connection.sendingPause,null);
+      assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-nightmail-workspace':byo})).connection.sendingPause,null);
     });
   });
   test('sending review benchmark: attachment preflight, exhausted burst and classifier outage',async t=>{
@@ -14180,7 +14146,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (const path of ['/v1/emails/send','/v1/emails/batch','/v1/inbound/webhooks']) {
         let reads=0;
         const body=new ReadableStream({pull(c){reads++;c.close();}},{highWaterMark:0});
-        const res=await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`,{method:'POST',headers:{authorization:'Bearer bane_'+'1'.repeat(64),'content-type':'application/json'},body,duplex:'half'} as RequestInit),runtime);
+        const res=await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`,{method:'POST',headers:{authorization:'Bearer nm_'+'1'.repeat(64),'content-type':'application/json'},body,duplex:'half'} as RequestInit),runtime);
         assert.equal(res.status,401);assert.equal(reads,0,'An unknown key cannot read any body bytes.');
       }
       assert.equal(queries.mock.callCount(),3);
@@ -14323,7 +14289,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const late={from:'late@new.invalid',to:'to@example.invalid',subject:'Not yet',text:'Fixture'},good={...late,from:'a@bench.invalid'};
       const large={...good,html:'<p>'+'fixture '.repeat(10000)+'</p>'};
       const probe=t.mock.method(db,'query');
-      error(await local('POST','/v1/emails/send',large,'live',{authorization:'Bearer bane_'+'0'.repeat(64)}),401,'AUTH_INVALID');probe.mock.restore();
+      error(await local('POST','/v1/emails/send',large,'live',{authorization:'Bearer nm_'+'0'.repeat(64)}),401,'AUTH_INVALID');probe.mock.restore();
       assert.equal(probe.mock.callCount(),1);assert.ok(JSON.stringify(probe.mock.calls[0]!.arguments).length<16000,'A cold, unknown key does not prepare the large envelope');
       const warmLarge=await meter('warm-large-admission',async()=>ok(await local('POST','/v1/emails/send',large,'live',{authorization:`Bearer ${key.secret}`}),202),1);
       await db.query("UPDATE sending_emails SET status='canceled' WHERE id=$1",[warmLarge.id]);
@@ -14439,7 +14405,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.match(scoped.secret,/^nm_mbx_[0-9a-f]{64}$/);
       const old=scoped.secret.replace('nm_mbx_','os_mbx_');
       await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) SELECT 'legacy-fixture',workspace_id,name,$1,$2,mailbox_ids,permissions FROM mailbox_keys WHERE id=$3`,[createHash('sha256').update(old).digest('hex'),old.slice(0,14),scoped.id]);
-      assert.equal(ok(await local('GET',`${root}/${support.id}`,undefined,'live',{authorization:`Bearer ${old}`})).id,support.id);
+      error(await local('GET',`${root}/${support.id}`,undefined,'live',{authorization:`Bearer ${old}`}),401,'AUTH_INVALID');
       const agent = { authorization: `Bearer ${scoped.secret}` };
       const webhook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/support-hook', addressIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
       const payload = { from: support.address, to: 'customer@example.net', subject: 'Case 42', text: 'An update', replyMailboxId: support.id }, idem = { 'Idempotency-Key': 'fixture-case-42' };
@@ -14869,7 +14835,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
   test('ephemeral inbox: wait wakes for a delivery during the call and never skips concurrent commits',async t=>{
     const a=await fixtureDatabase(t),b=await fixtureDatabase(t),wid=unique('cursor-work'),host=wid+'.invalid',bid=unique('mbx'),domain=unique('mdom'),addr='cursor@'+host;
-    const {digest,randomSecret}=await import('./src/core.js'), token=randomSecret('bane_mbx_');
+    const {digest,randomSecret}=await import('./src/core.js'), token=randomSecret('nm_mbx_');
     await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[domain,wid,host,REGION]);
     await a.query("INSERT INTO mailboxes(id,workspace_id,address,domain_id,kind,retention_mode,expires_at,delete_after,quota_messages,quota_bytes) VALUES($1,$2,$3,$4,'inbox','ephemeral',now()+interval '1 day',now()+interval '2 days',200,26214400)",[bid,wid,addr,domain]);
     await a.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,addr,bid]);await a.query('INSERT INTO inbox_state(workspace_id,inbox_id) VALUES($1,$2)',[wid,bid]);
@@ -14895,7 +14861,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   test('H1: permanent removal holds the ingest lane; a reopened envelope delivers only the new membership',async t=>{
     const writer=await fixtureDatabase(t),peer=await fixtureDatabase(t),w=unique('reopen'),domain=unique('mdom'),mid=unique('msg');
     const bids=[unique('mbx'),unique('mbx')],addrs=['a@reopen.invalid','b@reopen.invalid'];
-    const {randomSecret,digest}=await import('./src/core.js'),tokens=[randomSecret('bane_mbx_'),randomSecret('bane_mbx_')];
+    const {randomSecret,digest}=await import('./src/core.js'),tokens=[randomSecret('nm_mbx_'),randomSecret('nm_mbx_')];
     await writer.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'reopen.invalid',$3,'active','store')",[domain,w,REGION]);
     for(const [i,bid] of bids.entries()){
       await writer.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,domain,addrs[i]]);
@@ -15617,15 +15583,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const hex = () => randomUUID().replaceAll('-', ''), hash = (value: string) => createHash('sha256').update(value).digest('hex');
       // Each kind as its rows exist before 305: an inbound key, an inbox key, a provisioning key and a connection key.
       const earlier: Record<string, { prefix: string; ids: string[] | null; mail: string[]; expires?: string }> = {
-        every: { prefix: 'os_mbx_', ids: null, mail: ['read', 'send', 'modify'] },
-        chosen: { prefix: 'bane_mbx_', ids: [a.id], mail: ['read'] },
-        reply: { prefix: 'bane_mbx_', ids: [a.id], mail: ['read', 'send'] },
-        provisioning: { prefix: 'bane_mbx_', ids: [], mail: ['create', 'read', 'modify'] },
-        inbox: { prefix: 'bane_mbx_', ids: [ephemeral.id], mail: ['read'], expires: ephemeral.deleteAfter },
-        persistent: { prefix: 'bane_mbx_', ids: [kept.id], mail: ['read', 'send'] },
+        every: { prefix: 'nm_mbx_', ids: null, mail: ['read', 'send', 'modify'] },
+        chosen: { prefix: 'nm_mbx_', ids: [a.id], mail: ['read'] },
+        reply: { prefix: 'nm_mbx_', ids: [a.id], mail: ['read', 'send'] },
+        provisioning: { prefix: 'nm_mbx_', ids: [], mail: ['create', 'read', 'modify'] },
+        inbox: { prefix: 'nm_mbx_', ids: [ephemeral.id], mail: ['read'], expires: ephemeral.deleteAfter },
+        persistent: { prefix: 'nm_mbx_', ids: [kept.id], mail: ['read', 'send'] },
         // createInboundKey on one ephemeral inbox set no expiry, so deleting the inbox never ended it.
-        stray: { prefix: 'bane_mbx_', ids: [stray.id], mail: ['read'] },
-        connection: { prefix: 'bane_mbx_', ids: [later.id, a.id], mail: ['read'] },
+        stray: { prefix: 'nm_mbx_', ids: [stray.id], mail: ['read'] },
+        connection: { prefix: 'nm_mbx_', ids: [later.id, a.id], mail: ['read'] },
       };
       const keys: Record<string, { id: string; secret: string }> = {};
       for (const [name, k] of Object.entries(earlier)) {
@@ -15634,7 +15600,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           [id, wid, name, hash(secret), secret.slice(0, 14), k.ids === null ? null : JSON.stringify(k.ids), JSON.stringify(k.mail), k.expires ?? null]);
         keys[name] = { id, secret };
       }
-      const legacy = { id: `key_${hex()}`, secret: `os_live_${hex()}${hex()}` };
+      const legacy = { id: `key_${hex()}`, secret: `nm_${hex()}${hex()}` };
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,$2,'legacy',$3,$4,'["read","send","manage"]','[]')`, [legacy.id, wid, hash(legacy.secret), legacy.secret.slice(0, 14)]);
       // 305's backfill on those rows: exactly the keys the old inbox_end ended belong to their inbox.
       await db.query('UPDATE mailbox_keys SET inbox_id = NULL WHERE workspace_id = $1', [wid]);
@@ -15736,7 +15702,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await request('GET', '/v1/app-passwords', sender), 403, 'ADMIN_REQUIRED');
 
       // Another workspace: its keys are never listed, revoked or usable here, and its addresses never chosen.
-      const other = unique('keys-ws'), otherDomain = unique('mdom'), foreign = { id: `mbx_${hex()}`, key: `mbk_${hex()}`, secret: `bane_mbx_${hex()}${hex()}` };
+      const other = unique('keys-ws'), otherDomain = unique('mdom'), foreign = { id: `mbx_${hex()}`, key: `mbk_${hex()}`, secret: `nm_mbx_${hex()}${hex()}` };
       await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
       await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [otherDomain, other, `${other}.example`, REGION]);
       await db.query('INSERT INTO mailboxes(id,workspace_id,domain_id,address) VALUES($1,$2,$3,$4)', [foreign.id, other, otherDomain, `team@${other}.example`]);
@@ -19970,7 +19936,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         try {
           await drizzle(client).transaction(async tx => {
             const wid = 'ws_' + 'a'.repeat(32), msgId = 'msg_' + 'b'.repeat(32), attId = 'matt_' + 'c'.repeat(32), domId = 'dom_' + 'd'.repeat(32), mdomId = 'mdom_' + 'e'.repeat(32), thrId = 'thr_' + 'f'.repeat(32);
-            const secret = 'os_live_' + '1'.repeat(64);
+            const secret = 'nm_' + '1'.repeat(64);
             await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold','cold-fixture')", [wid]);
             await client.query("INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES($1,'inst_cold','us-east-2',$2::jsonb)", [wid, JSON.stringify(['us-east-2'])]);
             await client.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES('key_cold',$1,'cold',$2,'os_live_111111',$3::jsonb,'[]'::jsonb)", [wid, await digest(secret), JSON.stringify(['read', 'send', 'manage'])]);
@@ -20096,7 +20062,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const rollback = new Error('rollback cold dispatcher fixture');
         try {
           await drizzle(client).transaction(async tx => {
-            const wid = 'ws_' + 'd'.repeat(32), reg = 'me-central-1', acct = '999988887777', secret = 'bane_' + '2'.repeat(64);
+            const wid = 'ws_' + 'd'.repeat(32), reg = 'me-central-1', acct = '999988887777', secret = 'nm_' + '2'.repeat(64);
             const topic = 'arn:aws:sns:' + reg + ':' + acct + ':bane-feedback';
             const config = loadConfig({ BANE_ROOT_SECRET: 's'.repeat(32), PUBLIC_URL: 'https://dev.bane.mx', MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', BANE_HOSTED_SCREEN:'false', BANE_PLATFORM_AWS_ACCOUNT: acct, DEFAULT_SES_REGION: reg, SHARED_SENDING_REGIONS: reg, ENABLE_LIVE_SES: 'true', AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', AWS_SECRET_ACCESS_KEY: 'secret' });
             await client.query("INSERT INTO workspaces(id,name,slug) VALUES($1,'cold-do','cold-do-fixture')", [wid]);
@@ -20194,7 +20160,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         };
         await stagingJobs['mailbox.sweepStaging']({ config, db, storage: {} }, { bucket: 'bane-mail', topic: 'arn:aws:sns:us-east-2:111122223333:bane-inbound', shared: false }, { id: 'j1', attempts: 1, workspaceId: 'default' });
         const app = createApp();
-        const sesRes = await app.fetch(new Request('https://dev.bane.mx/v1/settings/ses', { headers: { authorization: 'Bearer bane_' + '1'.repeat(64) } }), { config, db, storage: {} });
+        const sesRes = await app.fetch(new Request('https://dev.bane.mx/v1/settings/ses', { headers: { authorization: 'Bearer nm_' + '1'.repeat(64) } }), { config, db, storage: {} });
         assert.equal(sesRes.status, 200);
         assert.equal((await sesRes.json()).quota.max24HourSend, 50000);
       `),
@@ -20591,7 +20557,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           for(const path of ['/v1/domains','/unsubscribe/test']) for(let n=0;n<40;n++) await guardPublicRequest(path,new Headers({authorization:'fixture'}),peer,async()=>new Response(null,{status:401}));
 
           const encodedAuthRes = await worker.fetch(new Request('https://dev.bane.mx/%761/domains', {
-            headers: { 'CF-Connecting-IP': '203.0.113.9', authorization: 'Bearer bane_' + 'f'.repeat(64) },
+            headers: { 'CF-Connecting-IP': '203.0.113.9', authorization: 'Bearer nm_' + 'f'.repeat(64) },
           }), env);
           assert.equal(encodedAuthRes.status, 429, 'Exhausted auth failure budget must reject encoded /%761/domains with 429.');
           assert.equal((await encodedAuthRes.json()).error?.code, 'PUBLIC_RATE_LIMITED');

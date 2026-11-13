@@ -79,7 +79,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
-    if (/^(?:nm|bane|os)_agent_/.test(token)) { // bane_/os_: remove after rename cleanup
+    if (/^nm_agent_/.test(token)) {
       const [{ verifyAgentToken }, { getMcpGrantActor }] = await wrapModuleLoad(() => Promise.all([import('./agent-token.js'), import('./mcp-auth.js')]));
       const temporary = await verifyAgentToken(c.env.config, token);
       // The approval acts in the workspace the token was minted in (a call names it; the token keeps it).
@@ -96,7 +96,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       if (!tracked) throw invalid();
       c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken',tokenId:temporary.id });
     } else {
-      if (!/^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.'); // bane_/os_: remove after rename cleanup
+      if (!/^nm_[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
       const limit = c.env.config.apiRateLimitPerMinute;
       const credential = sql`
@@ -124,10 +124,10 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Dashboard sign-in is not configured for this deployment.');
     }
     if (!hasSessionCookie(c.req.raw.headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
-    const { getDashboardActor, migrateLegacyCookies, requireDashboardOrigin, settleDefaultAccount } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
+    const { getDashboardActor, requireDashboardOrigin, settleDefaultAccount } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
     const dashboard = await timed(c,'session-db',()=>getDashboardActor(c.env,c.req.raw.headers));
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in or supply a bearer API key.');
-    migrateLegacyCookies(c); settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
+    settleDefaultAccount(c, dashboard.keyId.slice('user_'.length));
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
     c.set('actor', dashboard);
   }

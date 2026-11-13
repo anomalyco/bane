@@ -47,10 +47,6 @@ export interface Config {
   mailGatewayToken?:string;
   previousAuthSecret?: string;
   accountIssuer?: string;
-  /** The OAuth scope names the MCP server asks for (config OAUTH_SCOPE_PREFIX); tokens with any accepted prefix work. */
-  oauthScopePrefix?: 'bane' | 'nightmail';
-  /** Earlier origins still served (PREVIOUS_PUBLIC_URLS): their /mcp resource stays valid for tokens minted there. */
-  previousOrigins?: string[];
   /** The stack and role name prefix a new BYO connection gets (BYO_STACK_PREFIX). */
   byoStackPrefix?: 'Bane' | 'Nightmail';
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
@@ -388,11 +384,10 @@ export function applySecurityHeaders(headers: Headers): Headers {
 export function secureResponse(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: applySecurityHeaders(new Headers(response.headers)) });
 }
-// HTTPS installations name auth cookies `__Host-nightmail.*`; plain-HTTP local development uses `nightmail.*`. A browser may
-// still hold the pre-rename `bane.*` ones (account-login.ts reads and migrates them; remove after rename cleanup).
+// HTTPS installations name auth cookies `__Host-nightmail.*`; plain-HTTP local development uses `nightmail.*`.
 export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
-  return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?(?:nightmail|bane)\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
+  return Boolean(cookie && /(?:^|;\s*)(?:__Host-)?nightmail\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
 export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
   // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.

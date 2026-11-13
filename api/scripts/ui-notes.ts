@@ -24,7 +24,7 @@ const usage = 'Usage: ui-notes.ts list [--status S,…] [--kind K,…] [--route 
 
 export async function uiNotes(args: string[], env: Record<string, string | undefined> = process.env, out: (line: string) => void = line => console.log(line)) {
   const base = (env.BANE_URL ?? 'https://bane.mx').replace(/\/$/, ''), key = env.BANE_UI_NOTES_KEY;
-  if (!key || !/^(?:nm|bane)_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set BANE_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
+  if (!key || !/^nm_notes_[0-9a-f]{64}$/.test(key)) throw new Error('Set BANE_UI_NOTES_KEY to a UI notes key (make one on /operator/notes → Agent keys).');
   if (!/^https?:\/\/[^/]+$/.test(base)) throw new Error('Set BANE_URL to the deployment origin, such as https://bane.mx.');
   const api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const response = await fetch(base + path, { method, headers: { authorization: `Bearer ${key}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined, redirect: 'error' });

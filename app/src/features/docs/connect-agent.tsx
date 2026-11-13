@@ -85,7 +85,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
     try {
       const made = await request<{ id: string | null; config: object; nextStep: string }>('/v1/inbox-connections', { method: 'POST', body: { inboxes: [chosen], client, auth: 'key', reply }, idempotencyKey: crypto.randomUUID() })
       // The key is inside the config, shown once; the snippet for every client is rebuilt from it.
-      const bearer = JSON.stringify(made.config).match(/Bearer ((?:nm|bane)_mbx_[A-Za-z0-9_-]+)/)?.[1] ?? null // bane_: remove after rename cleanup
+      const bearer = JSON.stringify(made.config).match(/Bearer (nm_mbx_[A-Za-z0-9_-]+)/)?.[1] ?? null
       setResult({ ...made, key: bearer, client })
     } catch (e) { setError(errorText(e)) }
     finally { setBusy(false) }

@@ -15,12 +15,6 @@ const values = z.object({
   ACCOUNT_CLIENT_ID: optional(z.string().min(1)),
   ACCOUNT_CLIENT_PRIVATE_KEY: optional(z.string().min(1)),
   ACCOUNT_ID_TOKEN_ALG: z.enum(['ES256', 'RS256']).default('ES256'),
-  // The OAuth scopes the MCP server asks for: bane:* until account.anoma.ly supports nightmail:*, then nightmail.
-  // Access tokens with either are accepted.
-  OAUTH_SCOPE_PREFIX: z.enum(['bane', 'nightmail']).default('bane'),
-  // Origins this installation served before PUBLIC_URL and still answers on (https://bane.mx after the switch to
-  // nightmail.com), comma-separated. Their /mcp resource stays valid for tokens minted there. Remove after rename cleanup.
-  PREVIOUS_PUBLIC_URLS: z.string().default(''),
   // The name a new BYO connection gives its CloudFormation stack and IAM role (<prefix>-<id>). Bane until the runtime's
   // sts:AssumeRole policy also allows role/Nightmail-*, then Nightmail. Existing connections keep their stack's name.
   BYO_STACK_PREFIX: z.enum(['Bane', 'Nightmail']).default('Bane'),
@@ -174,7 +168,6 @@ export function loadConfig(input: Record<string, unknown>): Config {
     supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
   }
   const url = new URL(v.PUBLIC_URL);
-  const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
   return {
@@ -194,7 +187,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects,
-    accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
+    accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG, requiredAcr } : undefined,
     encryptionKey: deriveEncryptionKey(v.BANE_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_BANE_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_BANE_ROOT_SECRET) : v.ENCRYPTION_KEY,
