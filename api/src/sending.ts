@@ -181,6 +181,43 @@ const CampaignStats = z.object({
   totals: z.object({ accepted: z.number().int(), delivered: z.number().int(), bounced: z.number().int(), complained: z.number().int(), opened: z.number().int(), clicked: z.number().int(), failed: z.number().int(), deliveryDelayed: z.number().int(), simulated: z.number().int() }).describe('Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.'),
   rates: z.object({ delivery: CampaignRate.describe('Delivered / accepted. Receiving-server acceptance, not inbox placement.'), bounce: CampaignRate.describe('Bounced / accepted.'), complaint: CampaignRate.describe('Complained / accepted.'), open: CampaignRate.describe('Unique opened emails / delivered.'), click: CampaignRate.describe('Unique clicked emails / delivered, not click-to-open rate.') }),
 }).describe('Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.').openapi('CampaignStats');
+/**
+ * Lifetime statistics of campaigns (GET /v1/campaigns/{id}/stats, and the support reads in src/support-deliverability.ts):
+ * one statement over the campaign and per-email event indexes for all of them. Grouping by current status keeps
+ * progress and lifetime outcomes in the same snapshot without loading mail bodies.
+ */
+export async function campaignStats(db: DbExecutor, a: Pick<Actor, 'workspaceId'>, rows: (typeof campaigns.$inferSelect)[]) {
+  const result = new Map<string, z.infer<typeof CampaignStats>>();
+  if (!rows.length) return result;
+  const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
+  const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
+  const grouped = await db.select({
+    campaignId: emails.campaignId, status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
+    accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
+    delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
+    opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
+    failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
+    deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
+  }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId)))
+    .where(and(scope(emails, a), rows.length === 1 ? eq(emails.campaignId, rows[0]!.id) : inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status, emails.simulated);
+  for (const row of rows) {
+    const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
+    const counts = emptyCounts(), totals = { ...real, simulated: 0 };
+    for (const item of grouped) {
+      if (item.campaignId !== row.id) continue;
+      counts.byStatus[item.status] += item.count; counts.total += item.count;
+      if (item.simulated) totals.simulated += item.count;
+      for (const key of Object.keys(real) as (keyof typeof real)[]) {
+        totals[key] += item[key];
+        if (!item.simulated) real[key] += item[key];
+      }
+    }
+    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
+    result.set(row.id, { id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
+      rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) } });
+  }
+  return result;
+}
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
@@ -1255,32 +1292,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
-    const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
-    // Aggregate in the database, using the campaign and per-email event indexes. Grouping by
-    // current status keeps progress and lifetime outcomes in the same snapshot without loading mail bodies.
-    const grouped = await c.env.db.select({
-      status: emails.status, simulated: emails.simulated, count: sql<number>`count(DISTINCT ${emails.id})::int`,
-      accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay','non_permanent_bounce'))`),
-      delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
-      opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
-      failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
-      deliveryDelayed: distinct(sql`${emails.status}='delayed' OR ${emailEvents.type} IN ('delivery_delay','non_permanent_bounce')`),
-    }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId))).where(and(scope(emails, a), eq(emails.campaignId, row.id))).groupBy(emails.status, emails.simulated);
-    const real = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0 };
-    const counts = emptyCounts(), totals = { ...real, simulated: 0 };
-    for (const item of grouped) {
-      counts.byStatus[item.status] += item.count; counts.total += item.count;
-      if (item.simulated) totals.simulated += item.count;
-      for (const key of Object.keys(real) as (keyof typeof real)[]) {
-        totals[key] += item[key];
-        if (!item.simulated) real[key] += item[key];
-      }
-    }
-    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && enabled ? numerator / denominator : null });
-    return c.json(CampaignStats.parse({ id: row.id, name: row.draft.name, state: row.state, tracking: row.draft.tracking, counts, delivery: deliveryView(row), totals,
-      rates: { delivery: rate(real.delivered, real.accepted), bounce: rate(real.bounced, real.accepted), complaint: rate(real.complained, real.accepted), open: rate(real.opened, real.delivered, row.draft.tracking), click: rate(real.clicked, real.delivered, row.draft.tracking) },
-    }), 200);
+    return c.json(CampaignStats.parse((await campaignStats(c.env.db, a, [row])).get(row.id)!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
     actor(c);

@@ -174,8 +174,9 @@ export type OperatorIdentity = { id: string; role: OperatorRole; via: 'console' 
 /**
  * Who the operator is, for the audit and support routes and the /v1/operator/* gate (support.ts operatorGate). There is
  * one operator check: a signed-in dashboard session goes through #115's operatorActor (src/operator.ts, which reads the
- * role through src/operator-identity.ts). The only other operator is the support platform's server with its own
- * read-only credential (BANE_SUPPORT_PLATFORM_TOKEN). Never a workspace role: owners get 403.
+ * role through src/operator-identity.ts). The only other operator is the support platform's Worker, through the
+ * SupportPlatform service binding (src/support-platform.ts), read-only and on the support routes only. Never a
+ * workspace role: owners get 403.
  */
 export async function requireOperator(c: Ctx, level: OperatorRole): Promise<OperatorIdentity> {
   const a = c.get('actor');
