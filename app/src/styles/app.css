@@ -207,7 +207,9 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar__context { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: min(220px, 52vw); }
 .mobile-bar__context .demo-indicator { padding: 0; }
-.mobile-bar .theme-toggle { position: static; flex: none; width: 44px; height: 44px; }
+/* Positioned (not static), so a touch screen's enlarged hit area (ui.css, .ui-button--sm::after) stays on the button
+   instead of spreading over the whole bar: a tap on the workspace picker used to switch the theme. */
+.mobile-bar .theme-toggle { position: relative; inset: auto; flex: none; width: 44px; height: 44px; }
 .app-shell--compact .page-surface { --page-pad: max(var(--space-16), env(safe-area-inset-left), env(safe-area-inset-right)); height: auto; min-height: calc(100dvh - var(--mobile-bar-height) - var(--tab-bar-height) - env(safe-area-inset-top) - env(safe-area-inset-bottom)); margin: 0; padding: var(--space-20) var(--page-pad) var(--space-32); overflow-x: clip; overflow-y: visible; border-radius: 0; box-shadow: 0 -.5px 0 var(--color-border-muted); scrollbar-gutter: auto; overscroll-behavior: auto; }
 .tab-bar { position: fixed; inset: auto 0 0; z-index: 30; display: grid; grid-template-columns: repeat(5, minmax(0, 128px)); justify-content: center; height: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: color-mix(in srgb, var(--color-deep) 94%, transparent); box-shadow: 0 -.5px 0 var(--color-border); backdrop-filter: blur(12px); }
 .tab-bar__item { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-width: 0; padding: 0; border: 0; background: none; color: var(--color-muted); font-size: 11px; line-height: 14px; text-decoration: none; -webkit-tap-highlight-color: transparent; transition: color var(--motion-duration); }
