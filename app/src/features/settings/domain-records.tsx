@@ -100,9 +100,9 @@ export function DnsRecordTable({ domain, records, status }: { domain: string; re
   }
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
     { ...settingsColumns.dns[0], render: record => record.type },
-    { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: record => <code>{relativeHost(record.name, domain)}</code> },
-    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{record.value}</code> : '—' },
-    { key: 'status', label: 'Status', width: 112, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
+    { ...settingsColumns.dns[1], width: '36%', render: record => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: record => <code>{breakable(relativeHost(record.name, domain))}</code> },
+    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{breakable(record.value)}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—', cardRender: record => record.value ? <code>{breakable(record.value)}</code> : '—' },
+    { key: 'status', label: 'Status', width: 136, card: 'aside', render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
     { key: 'copy', label: '', card: 'end', table: false, render: record => <DropdownMenu label={`Copy ${record.type} record`} title={`${record.type} ${relativeHost(record.name, domain)}`} items={[
       { label: 'Copy full name', icon: <Copy size={16} />, onSelect: () => void copy(record.name, 'name') },
       { label: 'Copy value', icon: <Copy size={16} />, disabled: !record.value, onSelect: () => void copy(record.value, 'value') },
@@ -201,7 +201,7 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
 export function receivingHostCopy(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
   if (!host) return `Receive mail at ${domain}.`
-  if (host !== domain) return `Mail to addresses on ${host}, like support@${host}, comes to Bane. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
+  if (host !== domain) return `Mail to addresses on ${host} comes to Bane. Mail to ${domain} itself is unchanged, so your current mailboxes keep working.`
   return receiving.every(record => record.status === 'verified')
     ? `Every address at ${domain} receives here: its MX record already points to Bane.`
     : `This MX record sends all mail for ${domain} to Bane, including mailboxes hosted elsewhere today. To keep them, receive on a subdomain like reply.${domain}.`
