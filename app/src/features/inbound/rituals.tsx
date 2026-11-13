@@ -27,6 +27,7 @@ import './receiving.css'
 import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { RitualAgentCard } from './ritual-agent'
+import { AddressSelect } from './shared'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -509,7 +510,7 @@ export function RitualsPage() {
         <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
           empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
         <div className="ritual-attach">
-          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
+          <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><AddressSelect value={target} onValueChange={setTarget} placeholder="Choose an address" options={[{ label: 'Choose an address', value: '' }, ...targets.map(t => ({ value: t.value, address: t.label }))]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
           <Button loading={binding || (pending && !isSaved)} disabled={!target || !keyValid || attached || binding || pending} onClick={() => void saveBindings([...bindings, { ritual: key, target, continue: next }], `Attached ${key} to ${targetName(target)}`)}>{isSaved ? 'Attach' : 'Save and attach'}</Button>
         </div>
@@ -517,7 +518,7 @@ export function RitualsPage() {
       </section>
 
       <section className="section section--bordered stack ritual-settings" aria-label="Sender lists and omens">
-        <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
+        <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: <PrivateAddress value="ceo@example.com" />, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
           <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
         <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>

@@ -28,7 +28,7 @@ export function Match({ value, host = true }: { value: string; host?: boolean })
 // The masked form holds the first two characters of the local part; the rest and the host arrive when it is revealed.
 function MaskedMatch({ local, domain }: { local: string; domain: string }) {
   const masked = useMasked(local + domain), shown = [...local].slice(0, 2).join('')
-  return <span {...masked.root} className="rcv-match private-address">
+  return <span {...masked.root} title={masked.revealed ? local + domain : masked.root.title} className="rcv-match private-address">
     <span ref={masked.box} className="private-address__value">{masked.revealed
       ? <><span className="rcv-match__local">{wild(local)}</span>{domain && <span className="rcv-match__host">{domain}</span>}</>
       : <>{wild(shown)}<span className="private-address__rest" aria-hidden="true" /></>}</span>
@@ -52,5 +52,5 @@ export function Chain({ keys, empty }: { keys: string[]; empty?: ReactNode }) {
 
 /** One plain line about a concept, with an example in code type and a link to its guide. */
 export function ConceptLine({ line, example, guide }: { line: ReactNode; example?: string; guide?: string }) {
-  return <p className="rcv-concept"><span>{line}</span>{example && <code className="rcv-concept__example">{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
+  return <p className="rcv-concept"><span>{line}</span>{example && <code className="rcv-concept__example" title={example}>{example}</code>}{guide && <Link className="guide-link" to={guide}>Guide</Link>}</p>
 }
