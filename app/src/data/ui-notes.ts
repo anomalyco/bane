@@ -1,7 +1,7 @@
 import { request, selectedAccount } from './live'
 import { ApiError } from './types'
 
-// UI notes (/v1/operator/ui-notes): Bane staff's design and bug notes on the dashboard itself, global to the deployment.
+// UI notes (/v1/operator/ui-notes): Nightmail staff's design and bug notes on the dashboard itself, global to the deployment.
 // Left out of the public SDK, like the rest of the operator API, so the dashboard calls it with its own request helper.
 export const noteKinds = ['alignment', 'spacing', 'copy', 'bug', 'motion', 'mobile', 'other'] as const
 export const noteSeverities = ['low', 'medium', 'high'] as const

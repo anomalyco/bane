@@ -1,4 +1,5 @@
 import type { ClientMessage, ServerMessage, SupportTransport, TransportEvent } from './protocol'
+import { productName } from '../../../../api/src/brand'
 
 // The demo transport: a scripted conversation over the same protocol messages as the support Worker, with no network.
 // A greeting; a deliverability investigation (Outlook bounces after an import → advice → a consent card, which ends the
@@ -24,13 +25,13 @@ const investigate: Step[] = [
   { tool: 'bounce_reasons', running: 'Checking your Outlook bounces for the last 7 days…', done: 'Checked your Outlook bounces for the last 7 days', ms: 1200 },
   { tool: 'imports', running: 'Looking at Monday’s import…', done: 'Looked at Monday’s import: 2,140 contacts', ms: 900 },
   { tool: 'standing', running: 'Checking acme.com with Microsoft…', done: 'Checked acme.com with Microsoft', ms: 1000 },
-  { say: 'Found it. Since Monday, **186 of 212** hard bounces are Outlook and Hotmail addresses from that import, almost all `550 5.5.0 mailbox unavailable`. That usually means an old list.\n\nBane already suppressed them. Before your next send:\n\n1. Don’t re-import the bounced addresses.\n2. Send that import only to people who opened in the last 90 days.\n\nOutlook weighs content too, so I’d like to look at the email itself.' },
+  { say: `Found it. Since Monday, **186 of 212** hard bounces are Outlook and Hotmail addresses from that import, almost all \`550 5.5.0 mailbox unavailable\`. That usually means an old list.\n\n${productName} already suppressed them. Before your next send:\n\n1. Don’t re-import the bounced addresses.\n2. Send that import only to people who opened in the last 90 days.\n\nOutlook weighs content too, so I’d like to look at the email itself.` },
   { consent: 'To check November product update for what Outlook’s filters penalize, I need to read its HTML.',
     allow: [
       { tool: 'campaign_content', running: 'Reading November product update…', done: 'Read November product update', ms: 1100 },
-      { say: 'One content tip: **November product update** is one 1.2 MB image with 14 words of text, linked through a URL shortener. Outlook reads both as spam signals: add a few lines of real text and link straight to acme.com.\n\nIf Outlook still refuses after that, I can pass this to the Bane team to check acme.com with Microsoft. Want me to?' },
+      { say: `One content tip: **November product update** is one 1.2 MB image with 14 words of text, linked through a URL shortener. Outlook reads both as spam signals: add a few lines of real text and link straight to acme.com.\n\nIf Outlook still refuses after that, I can pass this to the ${productName} team to check acme.com with Microsoft. Want me to?` },
     ],
-    deny: [{ say: 'No problem. Without the content I can only go on the bounces, so start with the two steps above. If Outlook keeps refusing, I can pass this to the Bane team. Want me to?' }] },
+    deny: [{ say: `No problem. Without the content I can only go on the bounces, so start with the two steps above. If Outlook keeps refusing, I can pass this to the ${productName} team. Want me to?` }] },
 ]
 // The person answers the offer with a screenshot of the failing re-import (the real Import contacts dialog).
 const screenshot: Step[] = [
@@ -44,7 +45,7 @@ const screenshot: Step[] = [
 const file: Step[] = [
   { pause: 300 },
   { tool: 'file_ticket', running: 'Filing a ticket with what we found…', done: 'Filed a ticket with what we found', ms: 1000 },
-  { say: 'Done. I’ve passed this to the Bane team with everything we found, so you won’t need to explain it again.' },
+  { say: `Done. I’ve passed this to the ${productName} team with everything we found, so you won’t need to explain it again.` },
   { ticket: 'deliverability' },
 ]
 const later: Step[] = [{ pause: 500 }, { say: 'I’ve added that to the ticket, so the team sees it when they pick it up. Anything else I can check while you wait?' }]
@@ -136,7 +137,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     await wait(450)
     if (id !== conversation) return
     emit({ type: 'connection', state: 'open' })
-    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: 'Bane support', ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: true })
+    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: `${productName} support`, ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: true })
     server({ type: 'history', messages: [], pending: { consent: null, ticket: null } })
     // The agent reads the account before it writes the greeting: a typing state, then the greeting.
     await wait(900)

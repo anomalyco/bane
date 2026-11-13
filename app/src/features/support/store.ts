@@ -1,5 +1,6 @@
 import type { ConsentRequest, Connection, ConversationStatus, MessageKind, ServerMessage, SupportTransport, TicketFiled, TransportEvent } from './protocol'
 import { MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MESSAGE, sniff } from './protocol'
+import { productName } from '../../../../api/src/brand'
 
 // One conversation's state, built from the transport's events. It lives outside React (one per workspace, see
 // supportStore), so the conversation, the draft and the unread mark survive navigation, a resize that swaps the shell, and
@@ -47,7 +48,7 @@ const spoken = (text: string) => text.replace(/\[([^\]\n]+)\]\([^)\s]+\)/g, '$1'
 const id = () => `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 /** What a ticket is, in a few words, from its type and topic: a report the team works on ("Bug report filed"), or a
- *  request passed to the team ("Billing question passed to the Bane team"). Older servers send only the category. */
+ *  request passed to the team ("Billing question passed to the Nightmail team"). Older servers send only the category. */
 export function ticketTitle(ticket: TicketFiled) {
   const filed: Record<string, string> = { bug: 'Bug report', abuse_report: 'Abuse report', feature_request: 'Feature request', security: 'Security report' }
   const topics: Record<string, string> = { refund: 'Refund request', billing_dispute: 'Billing question', account_closure: 'Account closure request', limit_increase: 'Limit increase request', enforcement_review: 'Account review request', legal: 'Legal question' }
@@ -55,8 +56,8 @@ export function ticketTitle(ticket: TicketFiled) {
   const kind = filed[ticket.ticketType ?? ''] ?? filed[ticket.category]
   if (kind) return `${kind} filed`
   const request = topics[ticket.category] ?? types[ticket.ticketType ?? '']
-  if (request) return `${request} passed to the Bane team`
-  return ticket.category === 'human_requested' ? 'Passed to a person on the Bane team' : 'Passed to the Bane team'
+  if (request) return `${request} passed to the ${productName} team`
+  return ticket.category === 'human_requested' ? `Passed to a person on the ${productName} team` : `Passed to the ${productName} team`
 }
 
 export class SupportStore {
@@ -203,7 +204,7 @@ export class SupportStore {
         const parts: Part[] = !replace ? item.parts : [...item.parts.filter(part => part.kind !== 'text')]
         if (replace && message.text) parts.splice(first < 0 ? parts.length : Math.min(first, parts.length), 0, { kind: 'text', text: message.text })
         this.update(item.id, entry => ({ ...entry, parts, streaming: false }))
-        this.set({ announcement: `${this.state.hello?.agent.name ?? 'Bane support'}: ${spoken(message.text)}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${this.state.hello?.agent.name ?? `${productName} support`}: ${spoken(message.text)}`, unread: this.state.unread || !this.visible })
         break
       }
       case 'tool.start': this.append({ kind: 'tool', id: message.toolCallId, label: message.label, state: 'running' }, message.messageId); break
@@ -213,7 +214,7 @@ export class SupportStore {
         break
       case 'consent.request':
         this.append({ kind: 'consent', request: { requestId: message.requestId, workspace: message.workspace, why: message.why }, state: 'open' })
-        this.set({ announcement: `Bane support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
+        this.set({ announcement: `${productName} support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
         break
       case 'consent.resolved': this.setConsent(message.requestId, message.decision); break
       case 'ticket.filed': {

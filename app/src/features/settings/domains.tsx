@@ -159,7 +159,7 @@ function DomainDetail() {
   }
   const dns = useDnsSetup(domain.data)
   // Hosted receiving: a free subdomain by default. Choosing a host goes through the API's DNS checks: a CNAME, one of
-  // Bane's own names or a host in use elsewhere is refused; a host another provider receives for asks before moving its mail.
+  // Nightmail's own names or a host in use elsewhere is refused; a host another provider receives for asks before moving its mail.
   const [moveMail, setMoveMail] = useState<{ host: string; message: string } | null>(null)
   const choose = useApiMutation(async (api, input: { host: string | null; confirm?: boolean }) => {
     const updated = await api.domains.chooseReceivingHost!(id, input)

@@ -2,6 +2,7 @@ import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type Pa
 
 import type { Agent, ApiKey, AppPassword, CreatedAppPassword } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
+import { productName } from '../../../api/src/brand'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Bane-Account. It is per tab
@@ -63,13 +64,13 @@ export async function request<T = Json>(path: string, options: { method?: string
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError('Cannot reach Bane. Check the API service and try again.', 'NETWORK_UNAVAILABLE')
+    throw new ApiError(`Cannot reach ${productName}. Check the API service and try again.`, 'NETWORK_UNAVAILABLE')
   }
   const data = await response.json().catch(() => null)
   // The tab switched accounts while this was in flight: its answer belongs to the other account and is never shown.
   if (account !== accountSelection && !path.startsWith('/api/auth/')) throw aborted()
   const durationMs = Number((performance.now() - started).toFixed(1))
-  if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info('[Bane timing] request', {
+  if (path.includes('/campaigns') || path === '/api/auth/get-session' || path === '/v1/me') console.info(`[${productName} timing] request`, {
     path: new URL(path, window.location.origin).pathname,
     status: response.status,
     durationMs,

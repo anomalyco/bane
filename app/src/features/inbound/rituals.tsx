@@ -28,6 +28,7 @@ import { useSingleFlight } from '../../lib/single-flight'
 import { actorText, changedLines, diffLines, useLiveVersion, type ChangeActor, type DiffLine, type LiveChange } from './live'
 import { RitualAgentCard } from './ritual-agent'
 import { addressOption } from './shared'
+import { productName } from '../../../../api/src/brand'
 
 const errorText = (e: unknown): string => e instanceof ApiError ? e.text : (e as Error).message
 type Binding = { ritual: string; target: string; continue: boolean }
@@ -51,7 +52,7 @@ function textToLists(text: string): Record<string, string[]> {
   return out
 }
 const domainsToText = (domains: string[]) => domains.join(', ')
-// Bane's color tokens, so the editor follows the light and dark themes. Few colors on purpose.
+// Nightmail's color tokens, so the editor follows the light and dark themes. Few colors on purpose.
 const highlight = syntaxHighlighting(HighlightStyle.define([
   { tag: [tags.keyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword, tags.operatorKeyword], color: 'var(--color-muted)', fontWeight: '600' },
   { tag: [tags.string, tags.special(tags.string)], color: 'var(--color-success)' },
@@ -491,7 +492,7 @@ export function RitualsPage() {
       {check !== null && recent.isFetched && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
-        <ConceptLine line={`Runs ${key || 'this ritual'} as written, as if attached to the address the email was sent to. Nothing is sent or saved, and Bane’s AI isn’t asked: set each omen’s answer here.`} />
+        <ConceptLine line={`Runs ${key || 'this ritual'} as written, as if attached to the address the email was sent to. Nothing is sent or saved, and ${productName}’s AI isn’t asked: set each omen’s answer here.`} />
         <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
         <div className="ritual-try__options">
           {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to" hint="The address the ritual is attached to for this try."><Input id="ritual-try-to" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
@@ -521,7 +522,7 @@ export function RitualsPage() {
         <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: <PrivateAddress value="ceo@example.com" />, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
           <Textarea className="ritual-lists" rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
-        <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
+        <Field label="Omens can read mail at" hint={<>{concepts.omens.line} {productName}’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
         </Field>
       </section>

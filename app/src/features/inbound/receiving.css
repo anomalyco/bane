@@ -1,4 +1,4 @@
-/* Receiving: Routes, Rituals, Endpoints and Trace. Bane tokens only; addresses and code in OpenTUI Mono. */
+/* Receiving: Routes, Rituals, Endpoints and Trace. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .rcv-tab { gap: var(--space-12); }

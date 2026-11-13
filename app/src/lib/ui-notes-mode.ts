@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 
-// UI notes mode (Bane staff with the operator role): while it is on, ⌘-click (Ctrl-click off a Mac) or a long press
+// UI notes mode (Nightmail staff with the operator role): while it is on, ⌘-click (Ctrl-click off a Mac) or a long press
 // on a touch screen leaves a note on whatever is under it (features/ui-notes). Off, nothing of it is on the page and
 // every click behaves normally. Remembered per browser; ⇧N or the account menu toggles it.
 const KEY = 'bane.ui-notes'

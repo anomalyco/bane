@@ -14,6 +14,7 @@ import { useMcpUrl } from '../docs/connect-agent'
 import { guides } from './concepts'
 import { connectionTitle } from '../settings/key-labels'
 import '../docs/developer.css'
+import { productName } from '../../../../api/src/brand'
 
 const others = ['claude', 'cursor'] as const
 type Other = typeof others[number]
@@ -23,7 +24,7 @@ type Prompt = { text: string; shown: ReactNode }
 // With several workspaces the prompt names this one: the agent's calls act in the workspace they name, else its default.
 function prompts(ritual: string, address: string | null, workspace: string | null): Prompt[] {
   const at = address ?? 'my support address', shown = address ? <PrivateAddress value={address} /> : at
-  const name = ritual || 'triage', mine = workspace ? `my Bane workspace '${workspace}'` : 'Bane', shownMine = workspace ? <>my Bane workspace ‘{workspace}’</> : 'Bane'
+  const name = ritual || 'triage', mine = workspace ? `my ${productName} workspace '${workspace}'` : productName, shownMine = workspace ? <>my {productName} workspace ‘{workspace}’</> : productName
   return [
     { text: `In ${mine}, read my ritual '${name}' on ${at} and add a rule that labels refund requests and posts them to #support.`, shown: <>In {shownMine}, read my ritual ‘{name}’ on {shown} and add a rule that labels refund requests and posts them to #support.</> },
     { text: `In ${mine}, explain why my ritual '${name}' junked the last email to ${at}, and fix it if it shouldn't have.`, shown: <>In {shownMine}, explain why my ritual ‘{name}’ junked the last email to {shown}, and fix it if it shouldn’t have.</> },
@@ -67,7 +68,7 @@ export function RitualAgentCard({ ritual, address }: { ritual: string; address: 
         {limited && <p className="ritual-agent__note">{admin ? <>Rituals need full access. Connect the client again and approve full access, or <Link to={`/settings/mcp/${encodeURIComponent(limited.id)}`}>revoke it in Settings</Link> first.</> : 'Rituals need an owner or admin of this workspace.'}</p>}
         {!connected && <>
           <div className="stack ritual-agent__step">
-            <h3 className="ritual-agent__heading">Add Bane to OpenCode</h3>
+            <h3 className="ritual-agent__heading">Add {productName} to OpenCode</h3>
             <div className="developer-snippet">
               <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="OpenCode command"><code>{command || 'Loading this installation’s address…'}</code></pre>
               {command && <CopyAction value={command} label="Copy the OpenCode command" variant="ghost" size="sm" compact className="developer-copy-icon developer-snippet__copy" />}

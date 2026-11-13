@@ -11,11 +11,12 @@ import { plural, supportStore, ticketTitle, type Attachment, type ChatMessage, t
 import { IMAGE_TYPES, MAX_MESSAGE } from './protocol'
 import './support.css'
 import { BaneMark } from '../../components/BaneLogo'
+import { productName } from '../../../../api/src/brand'
 
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 
-// The support chat (hosted): Bane's AI support agent in a panel docked at the bottom left on a desktop, where it grows
+// The support chat (hosted): Nightmail's AI support agent in a panel docked at the bottom left on a desktop, where it grows
 // out of the Help button and leaves the page readable beside it, and a sheet above the tab bar on a phone. It is not
 // modal: on a desktop the page stays usable while the agent works, and the conversation carries on across pages.
 export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 'demo' | 'live'; open: boolean; onClose: () => void; onUnread: (unread: boolean) => void; resume: string | null }) {
@@ -84,12 +85,12 @@ function Header({ state, store, onClose }: { state: ChatState; store: SupportSto
   return <header className="support-panel__header">
     <BaneMark className="support-panel__mark" size={16} />
     <div className="support-panel__heading">
-      <h2 id="support-title">{hello?.agent.name ?? 'Bane support'}</h2>
+      <h2 id="support-title">{hello?.agent.name ?? `${productName} support`}</h2>
       <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text" title={subtitle}>{subtitle}</span></p>
     </div>
     <div className="support-panel__actions">
       <DropdownMenu label="Conversation options" title="Conversation" items={[
-        { label: ticketed ? 'Passed to the Bane team' : 'Talk to a person', icon: <UserRound size={16} />, disabled: ticketed || state.connection !== 'open' || Boolean(state.closed), onSelect: () => store.requestHuman() },
+        { label: ticketed ? `Passed to the ${productName} team` : 'Talk to a person', icon: <UserRound size={16} />, disabled: ticketed || state.connection !== 'open' || Boolean(state.closed), onSelect: () => store.requestHuman() },
         { label: 'End conversation', icon: <X size={16} />, disabled: Boolean(state.closed) || state.connection !== 'open', onSelect: () => store.end() },
       ]} />
       <IconButton label="Close" onClick={onClose}><X size={16} /></IconButton>
@@ -126,7 +127,7 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
     }}>
     <div ref={inner} className="support-log__inner">
       {state.messages.map(message => message.role === 'user' ? <UserMessage key={message.id} message={message} onRetry={() => store.retry()} /> : <AgentMessage key={message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
-      {typing && <p className="support-message support-typing" aria-label="Bane support is writing"><Caret /></p>}
+      {typing && <p className="support-message support-typing" aria-label={`${productName} support is writing`}><Caret /></p>}
       <InlineStatus state={state} store={store} />
     </div>
   </div>
@@ -231,7 +232,7 @@ function ToolLine({ label, state }: { label: string; state: 'running' | 'done' |
 function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: 'consent' }>; closed: boolean; onDecide: (decision: 'allow' | 'deny') => void }) {
   const decided = part.state === 'allow' || part.state === 'deny'
   return <div className="support-card support-consent" data-state={part.state} role="group" aria-label="Allow access to email content">
-    <p className="support-card__title">Let Bane support read the content of your emails in <strong>{part.request.workspace.name}</strong> for this conversation.</p>
+    <p className="support-card__title">Let {productName} support read the content of your emails in <strong>{part.request.workspace.name}</strong> for this conversation.</p>
     <p className="support-card__body">{part.request.why}</p>
     <div className="support-card__actions">
       <div className="support-card__choice" data-active={!decided || undefined} aria-hidden={decided || undefined}>
@@ -239,7 +240,7 @@ function ConsentCard({ part, closed, onDecide }: { part: Extract<Part, { kind: '
         <Button size="sm" disabled={decided || closed || part.state === 'allowing'} tabIndex={decided ? -1 : undefined} onClick={() => onDecide('deny')}>Not now</Button>
       </div>
       <p className="support-card__resolved" data-active={decided || undefined} data-decision={decided ? part.state : undefined} aria-hidden={!decided || undefined}>
-        {part.state === 'deny' ? 'Not shared. Bane support won’t read your emails.' : <><Check size={14} strokeWidth={2.5} aria-hidden="true" />Allowed for this conversation</>}
+        {part.state === 'deny' ? `Not shared. ${productName} support won’t read your emails.` : <><Check size={14} strokeWidth={2.5} aria-hidden="true" />Allowed for this conversation</>}
       </p>
     </div>
   </div>
@@ -267,7 +268,7 @@ function MaskedAddress({ value }: { value: string }) {
 
 function InlineStatus({ state, store }: { state: ChatState; store: SupportStore }) {
   if (state.closed) return null
-  if (state.connection === 'offline') return <div className="support-inline" data-tone="warning"><span className="support-inline__dot" aria-hidden="true" /><span>Can’t reach Bane support. Reconnecting when you’re back online.</span><Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try now</Button></div>
+  if (state.connection === 'offline') return <div className="support-inline" data-tone="warning"><span className="support-inline__dot" aria-hidden="true" /><span>Can’t reach {productName} support. Reconnecting when you’re back online.</span><Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try now</Button></div>
   if (state.connection === 'unavailable') return <div className="support-inline" data-tone="danger"><span className="support-inline__dot" aria-hidden="true" /><span>{state.reason === 'RATE_LIMITED' ? 'You’ve started a lot of conversations today. Try again later.' : 'Support chat isn’t available right now.'}</span>{state.reason !== 'RATE_LIMITED' && <Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try again</Button>}</div>
   if (state.limit) return <div className="support-inline" data-tone="warning"><span className="support-inline__dot" aria-hidden="true" /><span>{state.limit.message}</span></div>
   return null
@@ -303,7 +304,7 @@ function Composer({ state, store, input, busy, canAttach }: { state: ChatState; 
         {/* On a phone this opens the photo picker: images only, no camera capture. */}
         <input ref={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden tabIndex={-1} onChange={event => { void store.attach([...event.target.files ?? []]); event.target.value = '' }} />
       </>}
-      <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label="Message Bane support"
+      <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label={`Message ${productName} support`}
         placeholder={!online ? state.connection === 'offline' ? 'Waiting for the connection…' : 'Connecting…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
         onChange={event => store.setDraft(event.target.value)}
         onPaste={event => { const pasted = [...event.clipboardData.files]; if (pasted.length && canAttach) { event.preventDefault(); void store.attach(pasted) } }}

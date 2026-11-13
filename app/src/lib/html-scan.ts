@@ -3,7 +3,7 @@
 // again. No React here, so the API acceptance suite can test it.
 
 const FONT_STYLE = /<style data-(?:bane|opensend)-fonts>/g
-/** The HTML without the font block Bane adds to mail it sends, which names italic faces whether or not the message uses them. */
+/** The HTML without the font block Nightmail adds to mail it sends, which names italic faces whether or not the message uses them. */
 export function withoutFontStyles(html: string): string {
   let kept = '', from = 0
   for (const open of html.matchAll(FONT_STYLE)) {

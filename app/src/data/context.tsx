@@ -16,6 +16,7 @@ import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
+import { productName } from '../../../api/src/brand'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -41,7 +42,7 @@ export function useOnboardingStage() {
 }
 // What a finished sign-in (?auth=) means. account_limit only follows Add account.
 const authMessages: Record<string, string> = {
-  google_required: 'Bane requires Google sign-in. Try again and choose Google at Anomaly account.',
+  google_required: `${productName} requires Google sign-in. Try again and choose Google at Anomaly account.`,
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
   account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
@@ -81,7 +82,7 @@ const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeSty
 // Shown before anything changes. The slug tells apart workspaces that share a name. An account whose
 // only way in is this invitation has no workspace yet (M9): cancelling signs it out instead.
 function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
-  return <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
+  return <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
     <h2>Join {invitation.workspaceName}?</h2>
     <p>You were invited{email ? <> as <bdi>{email}</bdi></> : null}. {firstWorkspace ? 'Your account has no workspace yet. Nothing changes until you join; cancelling signs you out.' : 'Nothing changes until you join; you stay in your current workspace if you cancel.'}</p>
     <dl className="invitation-facts">
@@ -152,7 +153,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     queryFn: async ({signal}) => {
       const started = performance.now()
       const result = await loadIdentity(signal)
-      console.info('[Bane timing] Dashboard session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+      console.info(`[${productName} timing] Dashboard session ready`, { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
   })
@@ -178,7 +179,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     if (path) window.history.pushState(null, '', path)
     setGeneration(value => value + 1)
   }
-  // Act as another connected account in this tab, at once: no round trip to the account service, one /v1/me to Bane.
+  // Act as another connected account in this tab, at once: no round trip to the account service, one /v1/me to Nightmail.
   // Nothing from the previous account stays cached or mounted (the generation remounts every screen and dialog), and
   // responses to its requests still in flight are dropped (live.ts). null: the browser's default account.
   async function enter(account: string | null, options: { path?: string; workspace?: string } = {}) {
@@ -222,7 +223,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   }
   // Add account: the account service's chooser in a popup. The popup starts the sign-in itself and is opened with
   // noopener, so it holds no reference to this page; it reports back over the BroadcastChannel only. The account picked
-  // there opens in this tab; Bane never learns which other accounts are signed in at the account service.
+  // there opens in this tab; Nightmail never learns which other accounts are signed in at the account service.
   const adding = useRef<{ tab: string; path?: string; fallback: number } | null>(null)
   function addAccount(path?: string) {
     if (adding.current) window.clearTimeout(adding.current.fallback)
@@ -331,7 +332,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const authResult = new URLSearchParams(window.location.search).get('auth')
   // not_approved: a verified OIDC account outside the invite list. The API has already saved it as an access request.
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
-    : authResult === 'not_approved' ? <Alert tone="info" title="Bane is invite-only right now">{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an administrator to add it.'}</Alert>
+    : authResult === 'not_approved' ? <Alert tone="info" title={`${productName} is invite-only right now`}>{home.data ? 'We saved your request for access. If you were invited, open the invitation link and sign in again.' : 'This account isn’t approved here. Ask an administrator to add it.'}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with the invited account to review it. You join only after you confirm.</Alert>
@@ -341,15 +342,15 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
   const reviewing = !publicRoute && client.mode !== 'demo' && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, notice, dismissNotice: () => setNotice(null)}}>
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="Bane" /><div className="stack" style={{maxWidth: 520}}>
+    : publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
-        <h2>Sign in to Bane</h2>
+        <h2>Sign in to {productName}</h2>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
         <SignInConsent className="muted" />
       </> : <>
         <h2>Couldn’t check your session</h2>
-        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
+        <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : `${productName} couldn’t verify your session. Try again without signing in.`}</Alert>
       </>}
       <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
     </div></main>}

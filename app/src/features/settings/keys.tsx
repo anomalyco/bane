@@ -16,6 +16,7 @@ import { KeysGuide } from './keys-guide'
 import './api-keys.css'
 import { AddressList, PrivateAddress } from '../../components/PrivateAddress'
 import { ConnectAgentButton, ConnectAgentDialog } from '../docs/connect-agent'
+import { productName } from '../../../../api/src/brand'
 
 // One table for the three credential types: API keys, agent tokens (a connected agent, with the short-lived tokens it
 // made nested under it) and app passwords.
@@ -103,7 +104,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const empty = failed.length ? <EmptyState title="Nothing else to show" />
     : cursor && keysShown ? <EmptyState title="No keys on this page" />
     : type === 'api' ? <EmptyState title={`No ${active}API keys`} description={showRevoked ? undefined : 'An API key lets your server, a script or an agent send email or read mail.'} />
-    : type === 'agent' ? <EmptyState title="No agents connected" description="Connect an agent to let OpenCode, Claude Code or Cursor work with Bane as you. It shows up here once it signs in, with the tokens it makes." action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
+    : type === 'agent' ? <EmptyState title="No agents connected" description={`Connect an agent to let OpenCode, Claude Code or Cursor work with ${productName} as you. It shows up here once it signs in, with the tokens it makes.`} action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
     : type === 'app' ? <EmptyState title="No app passwords" description="An app password lets a mail app such as Apple Mail or Thunderbird open a persistent inbox over IMAP or SMTP." />
     : <EmptyState title={`No ${active}keys`} description={showRevoked ? undefined : 'Create a key to send from your app, connect an agent or open an inbox in a mail app.'} />
 
@@ -126,7 +127,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     if (row.kind === 'token') return { first: accessLabel(row.token.permissions, false), second: domainScope(row.token.domains) }
     return { first: protocolLabel(row.password.protocols), second: <PrivateAddress value={row.password.inboxAddress} /> }
   }
-  const used = (row: Row) => row.kind === 'key' ? lastUsed(row.key.lastUsedAt) : row.kind === 'agent' ? lastUsed(row.agent.lastUsedAt) : row.kind === 'token' ? lastUsed(row.token.lastUsedAt) : <span className="muted" title="Bane doesn’t track an app password’s last use">—</span>
+  const used = (row: Row) => row.kind === 'key' ? lastUsed(row.key.lastUsedAt) : row.kind === 'agent' ? lastUsed(row.agent.lastUsedAt) : row.kind === 'token' ? lastUsed(row.token.lastUsedAt) : <span className="muted" title={`${productName} doesn’t track an app password’s last use`}>—</span>
   // On a phone the last line says what matters most for each: a key's prefix and use, a token's expiry.
   const cardLast = (row: Row) => {
     if (row.kind === 'key') return <><code>{row.key.prefix}</code> · {keyState(row.key) ?? usedLine(row.key.lastUsedAt)}</>

@@ -6,8 +6,9 @@ import { useApi, useWorkspaceAccess } from '../../data/context'
 import type { SenderScore, SenderStanding } from '../../data/types'
 import { shortDateTime } from '../../lib/format'
 import { releaseLabel, standingDid, standingFallback, standingTitle, standingTone, stepAtLeast, type RaisedStep } from '../../lib/standing'
+import { productName } from '../../../../api/src/brand'
 
-// Overview's standing card, from Warn up: what happened (each reason, with its numbers), what Bane did, and the fix
+// Overview's standing card, from Warn up: what happened (each reason, with its numbers), what Nightmail did, and the fix
 // checklist. Owners and admins release a restrict or a bounce-only pause here once the API offers it; members read it.
 export function StandingCard({ report }: { report: SenderScore }) {
   const { canAdminister } = useWorkspaceAccess()
@@ -20,7 +21,7 @@ export function StandingCard({ report }: { report: SenderScore }) {
     <div className="standing-card__part"><h3>What happened</h3>
       {standing.reasons.length ? <ul>{standing.reasons.map(reason => <li key={reason.code}>{reason.message}</li>)}</ul> : <p>{standingFallback[step]}</p>}
     </div>
-    <div className="standing-card__part"><h3>What Bane did</h3><p>{standingDid[step]}{didExtra(standing)}</p></div>
+    <div className="standing-card__part"><h3>What {productName} did</h3><p>{standingDid[step]}{didExtra(standing)}</p></div>
     <div className="standing-card__part"><h3>How to fix it</h3>
       <ol className="standing-checklist">
         <li>Remove contacts that bounced or complained. <Link to="/audience">Audience</Link></li>

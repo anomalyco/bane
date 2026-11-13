@@ -16,6 +16,7 @@ import { MaskedText } from '../docs/agent-setup'
 import { when } from './shared'
 import { ownRecipient, receivedTo, type ReceivedRecipients } from '../../lib/private-address'
 import './receiving.css'
+import { productName } from '../../../../api/src/brand'
 
 export type TimelineStep =
   | { kind: 'condition'; line: number; column: number; endLine: number; endColumn: number; result: boolean }
@@ -244,7 +245,7 @@ export function TracePage() {
       {choice.mode !== 'sample' && <Field label="Trace it as mail to" htmlFor="trace-to" hint="Optional. Leave empty to use the message’s own recipients.">
         <Input id="trace-to" list="trace-addresses" value={to} onChange={e => { setTo(e.target.value); dry.clear() }} placeholder="The message’s own recipients" autoComplete="off" />
       </Field>}
-      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Runs your rituals as saved. Omens (questions for Bane’s AI) give their default answer; to set answers, try a ritual in its editor.</span></div>
+      <div className="cluster"><Button variant="primary" type="submit" loading={dry.pending} disabled={!input}>Trace</Button><span className="muted">Runs your rituals as saved. Omens (questions for {productName}’s AI) give their default answer; to set answers, try a ritual in its editor.</span></div>
     </form>
     <div ref={view} className="trace-out">
       {dry.error ? <Alert tone="danger" title="The trace didn’t run">{dry.error}</Alert>

@@ -7,6 +7,7 @@ import { relativeTime, shortDateTime } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { maskedParts } from '../../lib/private-address'
 import { settingsColumns } from './skeletons'
+import { productName } from '../../../../api/src/brand'
 
 // Settings → Activity (hosted, owners and admins): what happened in this workspace, newest first, 50 at a time.
 // Rows are one line each (53px); a row opens its details (before → after, reason, request ID). The section takes the
@@ -16,8 +17,8 @@ const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_k
 function Who({ actor }: { actor: AuditEntry['actor'] }) {
   if (actor.type === 'member') return actor.email ? <PrivateAddress value={actor.email} /> : <>{actor.label ?? 'A member'}</>
   // Support reading the workspace under a grant stands out from everything the workspace did itself.
-  if (actor.type === 'support') return <StatusBadge status="Bane support" tone="info" />
-  if (actor.type === 'system' || actor.type === 'operator') return <>Bane</>
+  if (actor.type === 'support') return <StatusBadge status={`${productName} support`} tone="info" />
+  if (actor.type === 'system' || actor.type === 'operator') return <>{productName}</>
   if (actor.type === 'stripe') return <>Stripe</>
   const detail = actor.label ?? actor.id
   return <>{credential[actor.type] ?? actor.type}{detail && <span className="muted"> · {detail}</span>}</>
@@ -25,8 +26,8 @@ function Who({ actor }: { actor: AuditEntry['actor'] }) {
 const plain = (text: string | null | undefined) => text && !maskedParts(text) ? text : null
 function whoText(actor: AuditEntry['actor']) {
   if (actor.type === 'member') return actor.email ? null : plain(actor.label ?? 'A member')
-  if (actor.type === 'support') return 'Bane support'
-  if (actor.type === 'system' || actor.type === 'operator') return 'Bane'
+  if (actor.type === 'support') return `${productName} support`
+  if (actor.type === 'system' || actor.type === 'operator') return productName
   if (actor.type === 'stripe') return 'Stripe'
   const detail = actor.label ?? actor.id
   return plain(`${credential[actor.type] ?? actor.type}${detail ? ` · ${detail}` : ''}`)
@@ -52,7 +53,7 @@ function Target({ entry }: { entry: AuditEntry }) {
   return name ? <PrivateAddress value={name} /> : <span className="muted">—</span>
 }
 // Where it came from: the client family and network, or, without a client (support, jobs, webhooks), the channel.
-const channel: Record<string, string> = { dashboard: 'Dashboard', api: 'API', mcp: 'MCP', imap: 'IMAP', smtp: 'SMTP', console: 'Bane', support: 'Bane support', script: 'Bane', job: 'Bane', webhook: 'Webhook' }
+const channel: Record<string, string> = { dashboard: 'Dashboard', api: 'API', mcp: 'MCP', imap: 'IMAP', smtp: 'SMTP', console: productName, support: `${productName} support`, script: productName, job: productName, webhook: 'Webhook' }
 const source = (entry: AuditEntry) => entry.client ?? channel[entry.via] ?? entry.via
 const fromText = (entry: AuditEntry) => [source(entry), entry.network].filter(Boolean).join(' · ')
 function targetText(entry: AuditEntry) {

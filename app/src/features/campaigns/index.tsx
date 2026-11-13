@@ -19,6 +19,7 @@ import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { CampaignPacing, CampaignProgress, campaignDisplayStatus, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
+import { productName } from '../../../../api/src/brand'
 export { CampaignsPage } from './CampaignList'
 export { TemplatesPage, TemplateEditorPage } from './templates'
 import { TemplatePickerDialog } from './templates'
@@ -75,7 +76,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   const opened = useRef<Campaign | null | undefined>(undefined)
   useEffect(() => { void composerChunk.preload().catch(() => {}) }, [])
   useEffect(() => {
-    if (query.data) console.info('[Bane timing] campaign content ready', { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
+    if (query.data) console.info(`[${productName} timing] campaign content ready`, { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
   }, [query.data])
   if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && campaignEditable(query.data)))) opened.current = query.data
   // Once opened, background refetches must never unmount an unsaved working copy.
@@ -345,7 +346,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
               : <div key={key} className="campaign-compose-row"><label htmlFor={`campaign-fallback-${key}`}>{`{{${key}}}`}</label><Input id={`campaign-fallback-${key}`} placeholder={placeholderLabel[key] ? `Used when ${placeholderLabel[key]}, e.g. there` : `Used when a contact has no ${key}`} value={form.defaults?.[key] ?? ''} aria-invalid={!form.defaults?.[key]?.trim() || undefined} onChange={event => change('defaults', { ...formRef.current.defaults, [key]: event.target.value })} disabled={controlsDisabled} /></div>)}
           </section>}
           {/* The saved draft is checked: autosave (800 ms after typing stops) is the debounce, and the score then covers what
-              Bane sends: the rendered layout, the unsubscribe link it adds and the audience size. */}
+              Nightmail sends: the rendered layout, the unsubscribe link it adds and the audience size. */}
           <div className="email-insight campaign-insight"><EmailInsight source={accepted ? { kind: 'campaign', id: accepted.id, revision: accepted.revision ?? 0 } : null} pending={dirty || pending} warnBelow={LOW_SENDABILITY} placeholder="Name the campaign to check it. Drafts save automatically." /></div>
         </div>
       </div>
@@ -534,8 +535,8 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
   const canceled = (byStatus.canceled ?? 0) + (campaign.delivery?.canceled ?? 0)
   const rows: [string, number, string][] = [
     ['Delivered', (byStatus.delivered ?? 0) + (byStatus.simulated ?? 0), 'Accepted by the recipient’s mail server'],
-    ['Bounced', byStatus.bounced ?? 0, 'Rejected by the recipient’s mail server; Bane stops emailing these addresses'],
-    ['Complaints', byStatus.complained ?? 0, 'Marked as spam; Bane stops emailing these addresses'],
+    ['Bounced', byStatus.bounced ?? 0, `Rejected by the recipient’s mail server; ${productName} stops emailing these addresses`],
+    ['Complaints', byStatus.complained ?? 0, `Marked as spam; ${productName} stops emailing these addresses`],
     ['Failed', (byStatus.rejected ?? 0) + (byStatus.rendering_failed ?? 0), 'Couldn’t be sent'],
     ['Suppressed', byStatus.suppressed ?? 0, 'Skipped because the address is suppressed'],
     ['Canceled', canceled, 'Never sent because the campaign was canceled'],

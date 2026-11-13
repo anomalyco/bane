@@ -5,7 +5,7 @@ import { CopyAction } from '../../components/motion'
 import type { HomeProps } from '.'
 import './variant-terminal.css'
 import { BaneWordmark } from '../../components/BaneLogo'
-import { apiKeyEnv, hostedDomain, mcpUrl, publicOrigin, sdkPackage } from '../../../../api/src/brand'
+import { apiKeyEnv, hostedDomain, mcpUrl, productName, publicOrigin, sdkPackage } from '../../../../api/src/brand'
 
 // Direction 1: the page reads like a man page whose synopsis is a real request and its real response.
 const samples = {
@@ -71,7 +71,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
   const [sample, setSample] = useState<Sample>('curl')
   return <div className="vt-page">
     <header className="vt-header">
-      <a className="wordmark" href="/" aria-label="bane home"><BaneWordmark /></a>
+      <a className="wordmark" href="/" aria-label={`${productName.toLowerCase()} home`}><BaneWordmark /></a>
       <nav className="vt-nav" aria-label="Site">
         <a href="/docs">docs</a>
         <a className="vt-hide-narrow" href="/openapi.json">openapi.json</a>
@@ -83,7 +83,7 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
     <main className="vt-main">
       <section className="vt-section" aria-labelledby="vt-name">
         <h2 className="vt-heading">Name</h2>
-        <h1 id="vt-name" className="vt-title">bane <span className="vt-faint">-</span> send, receive, reply to and thread email</h1>
+        <h1 id="vt-name" className="vt-title">{productName.toLowerCase()} <span className="vt-faint">-</span> send, receive, reply to and thread email</h1>
       </section>
 
       <section className="vt-section" aria-label="Request">
@@ -150,6 +150,6 @@ export function TerminalHome({ onSignIn, onSignInIntent, busy, notice }: HomePro
       </section>
     </main>
 
-    <footer className="vt-footer"><span>{hostedDomain}</span><span>BANE(1)</span></footer>
+    <footer className="vt-footer"><span>{hostedDomain}</span><span>{productName.toUpperCase()}(1)</span></footer>
   </div>
 }

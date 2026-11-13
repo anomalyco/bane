@@ -3,7 +3,7 @@ import { Link } from 'react-router'
 import { hostedHosts, supportHost } from '../../../../api/src/brand'
 
 // The agent's restricted Markdown (support/PROTOCOL.md §4.2): paragraphs, **bold**, `code`, fenced code, numbered and
-// bulleted lists, and links. Built as React elements, never HTML. Links render only to Bane's own sites and repository;
+// bulleted lists, and links. Built as React elements, never HTML. Links render only to Nightmail's own sites and repository;
 // any other URL stays plain text. While a message streams, settled() holds back an inline token until it closes, so a
 // marker never shows raw.
 type Block = { type: 'p'; text: string } | { type: 'ul' | 'ol'; items: string[]; start: number } | { type: 'code'; text: string }

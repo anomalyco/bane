@@ -8,6 +8,7 @@ import { monthEstimate } from '../../data/usage'
 import { balanceState, total, usd } from '../../data/billing'
 import { date, number } from '../../lib/format'
 import './usage.css'
+import { productName } from '../../../../api/src/brand'
 
 const money = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2 }).format(value)
 
@@ -42,7 +43,7 @@ export function PlanUsage({ row: Row }: { row: (props: { title: ReactNode; hint?
       <Row title="Stored past 90 days" hint="1 GB free, then $0.25 per GB-month">{value(b, () => `${gigabytes(aged)} of ${gigabytes(b!.free.storage.limitBytes)}`, 140)}</Row>
       <Row title="This month" hint={usage ? `Since ${date(usage.month.from, { month: 'short', day: 'numeric', timeZone: 'UTC' })}${usage.simulated ? ', simulated' : ''}` : 'This calendar month'}>{value(usage && (!canAdminister || omens.data || omens.isError), () => [`${number(usage!.month.sent)}\u00a0sent`, usage!.month.received === null ? null : `${number(usage!.month.received)}\u00a0received`, canAdminister && !omens.isError ? `${number(omenCount)}\u00a0Omens` : null].filter(Boolean).join(' · '), 200)}</Row>
       <Row title="Estimated cost" hint={free ? 'Not charged: free plan' : b?.monthToDate ? 'At $0.20 per 1,000 emails' : usage?.month.received === null ? 'Sent mail only' : 'This month'}>{value(b && usage, () => b!.monthToDate ? usd(b!.monthToDate.cost) : money(monthEstimate(usage!)), 80)}</Row>
-      <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? 'Custom, set by the Bane team' : 'Recipients, last 24 hours'}>{value(usage, () => !usage!.daily ? <span className="muted">Connect sending first</span> : usage!.daily.cap === null ? 'No daily limit' : <DailyMeter used={usage!.daily.used} cap={usage!.daily.cap} resetAt={usage!.daily.resetAt} />, 160)}</Row>
+      <Row title="Daily limit" hint={usage?.daily?.cap != null && usage.daily.step === null ? `Custom, set by the ${productName} team` : 'Recipients, last 24 hours'}>{value(usage, () => !usage!.daily ? <span className="muted">Connect sending first</span> : usage!.daily.cap === null ? 'No daily limit' : <DailyMeter used={usage!.daily.used} cap={usage!.daily.cap} resetAt={usage!.daily.resetAt} />, 160)}</Row>
     </div>
     <section className="usage-steps-section" aria-labelledby="usage-steps-title">
       <SectionHeader title={<span id="usage-steps-title">How the daily limit grows</span>} />

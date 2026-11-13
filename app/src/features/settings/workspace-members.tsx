@@ -9,11 +9,12 @@ import { date } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { settingsColumns } from './skeletons'
+import { productName } from '../../../../api/src/brand'
 
 // A phone shares an invitation link through the system share sheet; everything can copy it.
 const canShare = () => typeof navigator.share === 'function'
 async function shareLink(url: string, toast: ReturnType<typeof useToast>) {
-  try { await navigator.share({ title: 'Join the workspace on Bane', url }) } catch (error) { if (!(error instanceof DOMException && error.name === 'AbortError')) toast('Couldn’t open sharing.', 'error') }
+  try { await navigator.share({ title: `Join the workspace on ${productName}`, url }) } catch (error) { if (!(error instanceof DOMException && error.name === 'AbortError')) toast('Couldn’t open sharing.', 'error') }
 }
 async function copyLink(url: string, toast: ReturnType<typeof useToast>) {
   try { await navigator.clipboard.writeText(url); toast('Invitation link copied', 'success') } catch { toast('Couldn’t copy to clipboard.', 'error') }
@@ -110,11 +111,11 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
-  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Invitation link" description={`Share this link with them yourself; Bane doesn’t email it. It works only for that address, until ${date(created.expiresAt)}.`} footer={<Button variant="primary" onClick={close}>Done</Button>}>
+  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title="Invitation link" description={`Share this link with them yourself; ${productName} doesn’t email it. It works only for that address, until ${date(created.expiresAt)}.`} footer={<Button variant="primary" onClick={close}>Done</Button>}>
     <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description="You get a link to share; Bane doesn’t email it. They join by signing in with this address." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description={`You get a link to share; ${productName} doesn’t email it. They join by signing in with this address.`} footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
     <form id="invite-member" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>

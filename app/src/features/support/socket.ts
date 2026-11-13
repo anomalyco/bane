@@ -1,9 +1,9 @@
 import { supportApi } from '../../data/support'
 import { ApiError } from '../../data/types'
-import { hostedHosts, supportHost } from '../../../../api/src/brand'
 import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
+import { hostedHosts, productName, supportHost } from '../../../../api/src/brand'
 
-// The live transport (support/PROTOCOL.md §1–2, §5): a handoff from Bane, then /chat/start or /chat/resume on the support
+// The live transport (support/PROTOCOL.md §1–2, §5): a handoff from Nightmail, then /chat/start or /chat/resume on the support
 // Worker, then one WebSocket. The conversation ID is kept per workspace in sessionStorage, so a reload reconnects to the
 // same conversation; a lost connection retries with backoff and again as soon as the browser is back online.
 type Started = { conversationId: string; chatToken: string; socketUrl: string; expiresAt: string }
@@ -40,7 +40,7 @@ function postImage(url: string, token: string, type: string, file: File, onProgr
     // Held under 100% until the server has stored it.
     xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress(Math.min(.95, event.loaded / event.total)) }
     xhr.onload = () => { let body = null; try { body = JSON.parse(xhr.responseText) } catch { /* No JSON body. */ } resolve({ status: xhr.status, body }) }
-    xhr.onerror = () => reject(new Error('Couldn’t reach Bane support. Try again.'))
+    xhr.onerror = () => reject(new Error(`Couldn’t reach ${productName} support. Try again.`))
     xhr.onloadend = () => signal.removeEventListener('abort', abort)
     if (signal.aborted) { abort(); return }
     signal.addEventListener('abort', abort, { once: true })
@@ -56,7 +56,7 @@ async function post(origin: string, path: string, body: unknown): Promise<Starte
   if (!response.ok || !data?.socketUrl) throw new StartError(response.status, data?.error?.code ?? 'UNAVAILABLE', data?.error?.retryAfter)
   return data
 }
-// The handoff from Bane. No token means support signing isn't configured here; a refusal (not a lost network) is final too.
+// The handoff from Nightmail. No token means support signing isn't configured here; a refusal (not a lost network) is final too.
 const handoff = async (shareContent: boolean) => {
   let token: string | null
   try { ({ token } = await supportApi.contact({ shareContent })) }
@@ -172,7 +172,7 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       const type = await sniff(file)
       if (!type) throw new Error(UPLOAD_ERRORS.UNSUPPORTED_TYPE)
       for (let tries = 0; ; tries++) {
-        if (!started) throw new Error('Not connected to Bane support yet. Try again in a moment.')
+        if (!started) throw new Error(`Not connected to ${productName} support yet. Try again in a moment.`)
         const token = started.chatToken || new URL(started.socketUrl).searchParams.get('token') || ''
         const { status, body } = await postImage(`${origin}/c/${encodeURIComponent(started.conversationId)}/attachments`, token, type, file, onProgress, signal)
         if (status === 201 && body?.attachment?.id) return { id: body.attachment.id }

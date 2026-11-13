@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { request } from './live'
 import type { WorkspaceMembership } from './types'
 
-// The accounts this browser connected to Bane, one session each (api/src/account-login.ts). Only accounts added here
+// The accounts this browser connected to Nightmail, one session each (api/src/account-login.ts). Only accounts added here
 // are listed, never every account signed in at the account service. Each tab acts as one of them (live.ts).
 export type ConnectedAccount = { id: string; name: string; email: string | null; workspaces: WorkspaceMembership[] }
 export type AccountList = { accounts: ConnectedAccount[]; active: string | null; limit: number; connection?: { id: string; account: string | null } }
@@ -12,7 +12,7 @@ export const accountApi = {
   // The browser's default account: what a new tab, or a link opened outside the dashboard, acts as.
   makeDefault: (account: string) => request<{ account: string }>('/api/auth/accounts/switch', { method: 'POST', body: { account } }),
   signOut: (input: { account?: string; all?: true }) => request<{ success: true; accounts: string[]; active: string | null }>('/api/auth/sign-out', { method: 'POST', body: input }),
-  // select: the account service shows its account chooser (Add account), and Bane learns only the account picked.
+  // select: the account service shows its account chooser (Add account), and Nightmail learns only the account picked.
   signIn: async (callbackURL: string, select: boolean) => {
     const { url } = await request<{ url: string }>('/api/auth/sign-in/account', { method: 'POST', body: { callbackURL, ...(select ? { prompt: 'select_account' } : {}) } })
     if (new URL(url).protocol !== 'https:') throw new Error('Invalid sign-in redirect.')

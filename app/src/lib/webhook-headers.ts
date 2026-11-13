@@ -1,3 +1,4 @@
+import { productName } from '../../../api/src/brand'
 // Mirrors the API's webhook header rules so the form and demo reject the same lists the server does.
 export const MAX_WEBHOOK_HEADERS = 10
 const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
@@ -6,7 +7,7 @@ const RESERVED = /^(?:host|content-length|content-type|content-encoding|transfer
 
 function reservedMessage(name: string) {
   if (/^cookie$/i.test(name)) return 'Cookie is not allowed. Use an endpoint token instead.'
-  if (/^(?:webhook-|(?:bane|opensend)-test$)/i.test(name)) return `${name} is set by Bane.`
+  if (/^(?:webhook-|(?:bane|opensend)-test$)/i.test(name)) return `${name} is set by ${productName}.`
   return `${name} is reserved for the HTTP connection.`
 }
 

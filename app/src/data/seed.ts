@@ -1,4 +1,5 @@
 import type { MailRoute, Agent, ApiKey, AppPassword, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import { productName } from '../../../api/src/brand'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -154,7 +155,7 @@ export function createSeed(now = Date.now()): DemoState {
     const id = i === 0 ? 'em_invoice' : `em_activity_${String(i).padStart(2, '0')}`
     const sentAt = ago(i * 3.2 + 0.15)
     const subject = ['Your invoice is ready', 'Welcome to Acme', 'Your weekly digest', 'Your order has shipped', 'September product update', 'Reset your password'][i % 6]!
-    return { id, regionId: i % 4 === 3 ? 'eu-west-1' : 'us-east-1', to: contact.email, from: 'hello@acme.com', subject, stream: i % 3 === 2 ? 'marketing' : 'transactional', status, sentAt, html: `<h1>${subject}</h1><p>Hi ${contact.name},</p><p>This is a simulated email from the Bane demo. No message was sent.</p><p>The Acme team</p>`, events: [{ id: `${id}_send`, type: 'send', at: sentAt, description: 'Demo message accepted for delivery.' }, { id: `${id}_${status}`, type: status, at: new Date(Date.parse(sentAt) + 1000).toISOString(), description: status === 'bounced' ? 'Permanent delivery failure. Recipient added to suppression list.' : `Demo delivery event: ${status}.`, ...(status === 'bounced' ? { diagnostic: 'smtp; 550 5.1.1 The email account does not exist.' } : {}) }] }
+    return { id, regionId: i % 4 === 3 ? 'eu-west-1' : 'us-east-1', to: contact.email, from: 'hello@acme.com', subject, stream: i % 3 === 2 ? 'marketing' : 'transactional', status, sentAt, html: `<h1>${subject}</h1><p>Hi ${contact.name},</p><p>This is a simulated email from the ${productName} demo. No message was sent.</p><p>The Acme team</p>`, events: [{ id: `${id}_send`, type: 'send', at: sentAt, description: 'Demo message accepted for delivery.' }, { id: `${id}_${status}`, type: status, at: new Date(Date.parse(sentAt) + 1000).toISOString(), description: status === 'bounced' ? 'Permanent delivery failure. Recipient added to suppression list.' : `Demo delivery event: ${status}.`, ...(status === 'bounced' ? { diagnostic: 'smtp; 550 5.1.1 The email account does not exist.' } : {}) }] }
   })
   const campaigns: Campaign[] = [
     { id: 'cmp_followup', name: 'September follow-up', status: 'draft', regionId: 'us-east-1', listId: 'list_newsletter', segmentId: 'seg_engaged' },
