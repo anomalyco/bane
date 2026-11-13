@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, LogOut, Plus, UserPlus } from 'lucide-react'
+import { Check, ChevronDown, LifeBuoy, LogOut, Plus, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
@@ -9,9 +9,10 @@ import { fieldError, MutationError } from '../features/settings/shared'
 import { usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
 import { Button, Dialog, Field, Input, Sheet, useToast } from './ui'
+import { ContactSupportDialog } from './ContactSupport'
 
-// One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account and
-// sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
+// One menu for who and where: the accounts this browser connected, each with its workspaces, then Add account,
+// Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
 // in the dashboard sidebar, the phone's top bar (as a sheet) and the onboarding header.
 type Entry = { key: string; label: ReactNode; text: string; hint?: ReactNode; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
 export function AccountAvatar({ name, email, size = 'md' }: { name: string | null | undefined; email?: string | null; size?: 'sm' | 'md' }) {
@@ -30,6 +31,7 @@ export function AccountSwitcher() {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [support, setSupport] = useState(false)
   const list = useAccounts(open)
   const load = () => client.fetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 })
   const intent = () => { void load().catch(() => {}) }
@@ -65,6 +67,7 @@ export function AccountSwitcher() {
   })
   const full = accounts.length >= limit
   sections.push([
+    { key: 'support', text: 'Contact support…', label: 'Contact support…', icon: <LifeBuoy />, onSelect: () => { setOpen(false); setSupport(true) } },
     { key: 'add', text: 'Add account', label: 'Add account', icon: <UserPlus />, disabled: full, hint: full ? `Up to ${limit} accounts. Sign out of one to add another.` : undefined, onSelect: () => { setOpen(false); session!.addAccount() } },
     { key: 'sign-out', text: 'Sign out of this account', label: 'Sign out of this account', icon: <LogOut />, onSelect: () => void run(() => session!.signOutAccount(self.id), 'Couldn’t sign out.') },
     ...accounts.length > 1 ? [{ key: 'sign-out-all', text: 'Sign out of all accounts', label: 'Sign out of all accounts', icon: <LogOut />, destructive: true, onSelect: () => void run(() => session!.signOutAll(), 'Couldn’t sign out.') }] : [],
@@ -74,7 +77,11 @@ export function AccountSwitcher() {
     <span className="account-switcher__current"><AccountAvatar name={self.name} email={self.email} size="sm" /><span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span></span>
     <span><ChevronDown size={14} aria-hidden="true" /></span>
   </button>
-  const create = creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus()) }} onCreated={id => void run(() => session!.switchWorkspace(id, '/'), 'Couldn’t switch workspace.')} />
+  const refocus = () => requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus())
+  const create = <>
+    {creating && <CreateWorkspaceDialog onClose={() => { setCreating(false); refocus() }} onCreated={id => void run(() => session!.switchWorkspace(id, '/'), 'Couldn’t switch workspace.')} />}
+    {support && <ContactSupportDialog onClose={() => { setSupport(false); refocus() }} />}
+  </>
   // A phone gets a sheet: full-width rows at the bottom of the screen, in thumb reach, and Cancel.
   if (phone) return <>
     {trigger}

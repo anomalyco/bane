@@ -54,10 +54,10 @@ export function Members({ owner, onInvite }: { owner: boolean; onInvite: () => v
     {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable loading={members.isPending} skeletonRows={2} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
       { key: 'name', label: 'Name', width: '28%', render: member => <>{member.name || '—'}{member.userId === session?.identity?.id && <span className="muted"> · You</span>}</> },
       { key: 'email', label: 'Email', width: '34%', card: 'line', render: member => <span className="settings-break"><PrivateAddress value={member.email} /></span> },
-      { key: 'role', label: 'Role', width: 160, card: 'inline', render: member => manageable(member) && !lastOwner(member) ? <Select aria-label={`Role for ${member.email}`} value={member.role} onValueChange={role => { if (role !== member.role) setChanging({ member, role: role as WorkspaceRole }) }} disabled={update.isPending} options={roleOptions(owner)} /> : roleLabel[member.role], cardRender: member => roleLabel[member.role] },
+      { key: 'role', label: 'Role', width: 160, card: 'inline', render: member => manageable(member) && !lastOwner(member) ? <Select aria-label={`Role for ${member.name || 'this member'}`} value={member.role} onValueChange={role => { if (role !== member.role) setChanging({ member, role: role as WorkspaceRole }) }} disabled={update.isPending} options={roleOptions(owner)} /> : roleLabel[member.role], cardRender: member => roleLabel[member.role] },
       // A phone puts the role and Remove in the row's action sheet.
       { key: 'actions', label: '', align: 'right', card: 'end', render: member => manageable(member) && !lastOwner(member) ? <Button variant="danger" onClick={() => setRemoving(member)}>Remove</Button> : null,
-        cardRender: member => manageable(member) && !lastOwner(member) ? <DropdownMenu label={`Actions for ${member.name || member.email}`} title={member.name || member.email} items={[
+        cardRender: member => manageable(member) && !lastOwner(member) ? <DropdownMenu label={`Actions for ${member.name || 'this member'}`} title={member.name || <PrivateAddress value={member.email} />} items={[
           ...roleOptions(owner).filter(option => option.value !== member.role).map(option => ({ label: `Make ${option.label.toLowerCase()}`, hint: roleHint[option.value], disabled: update.isPending, onSelect: () => setChanging({ member, role: option.value }) })),
           { label: 'Remove from workspace', destructive: true, onSelect: () => setRemoving(member) },
         ]} /> : null },
@@ -80,7 +80,7 @@ export function Invitations({ owner }: { owner: boolean }) {
       { key: 'role', label: 'Role', width: 160, card: 'line', render: invitation => roleLabel[invitation.role] },
       { key: 'expires', label: 'Expires', card: 'inline', render: invitation => date(invitation.expiresAt), cardRender: invitation => `Expires ${date(invitation.expiresAt)}` },
       { key: 'actions', label: '', align: 'right', width: 160, card: 'end', render: invitation => <span className="cluster settings-row-actions"><CopyButton value={invitation.acceptUrl} label="Copy invitation link" />{(owner || invitation.role !== 'owner') && <Button variant="danger" onClick={() => setRevoking(invitation)}>Revoke</Button>}</span>,
-        cardRender: invitation => <DropdownMenu label={`Actions for the invitation to ${invitation.email}`} title="Invitation" items={[
+        cardRender: invitation => <DropdownMenu label="Actions for this invitation" title="Invitation" items={[
           ...canShare() ? [{ label: 'Share invitation link', onSelect: () => void shareLink(invitation.acceptUrl, toast) }] : [],
           { label: 'Copy invitation link', onSelect: () => void copyLink(invitation.acceptUrl, toast) },
           ...owner || invitation.role !== 'owner' ? [{ label: 'Revoke invitation', destructive: true, onSelect: () => setRevoking(invitation) }] : [],

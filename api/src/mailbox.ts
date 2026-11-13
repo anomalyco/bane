@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { actorMailAccess, mailboxRoute, receivingConsentRoute, ApiError, digest, errors, getSes, id, json, lazyModule, log, ModuleLoadError, randomSecret, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential, checkBudget, delegatedInbox, requireReceivingConsent } from './auth.js';
 import { boundRequestBody } from './request-body.js';
+import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
 import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
 import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
@@ -287,6 +288,7 @@ function registerReceivingDomains(app: App) {
       if (!current) await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: value.workspaceId, domainId: row.id, name: row.name, region: row.region, status: 'provisioning', catchAll: input.catchAll, mx, checkedAt: mx.checkedAt });
       else await tx.update(mailboxDomains).set({ ...(['disabled', 'disabling', 'failed'].includes(current.status) ? { status: 'provisioning' as const, lastError: null } : {}), catchAll: input.catchAll, mx, checkedAt: mx.checkedAt, updatedAt: now }).where(eq(mailboxDomains.id, current.id));
       await queueReconcile(tx, value.workspaceId, row.region);
+      await recordAudit(tx, c, { action: 'inbound_domain.enable', workspaceId: value.workspaceId, target: { type: 'domain', id: row.id }, before: current ? { status: current.status } : undefined, after: { name: row.name, catchAll: input.catchAll, force: input.force, mx: mx.state } });
     });
     log('info', { code: 'MAILBOX_DOMAIN_ENABLE_QUEUED', region: row.region, mx: mx.state });
     return c.json((await domainViews(c, [row]))[0]!, 202);
@@ -296,7 +298,10 @@ function registerReceivingDomains(app: App) {
     if (c.env.config.multiTenant) throw new ApiError(409,'HOSTED_RECEIVING_MANAGED','Receiving follows verified DNS. Remove the MX record to stop delivery.');
     await c.env.db.transaction(async tx => {
       const updated = await tx.update(mailboxDomains).set({ status: 'disabling', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active', 'failed']))).returning({ id: mailboxDomains.id });
-      if (updated.length) await queueReconcile(tx, value.workspaceId, row.region);
+      if (updated.length) {
+        await queueReconcile(tx, value.workspaceId, row.region);
+        await recordAudit(tx, c, { action: 'inbound_domain.disable', workspaceId: value.workspaceId, target: { type: 'domain', id: row.id }, before: { name: row.name } });
+      }
     });
     return c.json((await domainViews(c, [row]))[0]!, 202);
   });
@@ -309,6 +314,8 @@ function registerReceivingDomains(app: App) {
       if (!before) return [];
       const saved = await tx.update(mailboxDomains).set({ catchAll: input.catchAll, ...(input.acceptSubdomains !== undefined ? { acceptSubdomains: input.acceptSubdomains } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, before.id)).returning({ id: mailboxDomains.id });
       if (input.acceptSubdomains !== undefined && input.acceptSubdomains !== before.acceptSubdomains) await queueReconcile(tx, value.workspaceId, before.region);
+      await recordAudit(tx, c, { action: 'inbound_domain.update', workspaceId: value.workspaceId, target: { type: 'domain', id: row.id }, details: { fields: Object.keys(input) },
+        before: { catchAll: input.catchAll !== undefined ? before.catchAll : undefined, acceptSubdomains: input.acceptSubdomains !== undefined ? before.acceptSubdomains : undefined }, after: input });
       return saved;
     });
     if (!updated.length) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', 'Enable receiving for this domain first.');
@@ -347,6 +354,7 @@ function registerReceivingDomains(app: App) {
         await tx.update(mailboxDomains).set({ acceptSubdomains: true, updatedAt: now }).where(eq(mailboxDomains.id, parent.id));
         await queueReconcile(tx, value.workspaceId, parent.region);
       }
+      await recordAudit(tx, c, { action: 'inbound_subdomain.create', workspaceId: value.workspaceId, target: { type: 'inbound_subdomain', id: saved!.id }, after: { name, parentId: parent.id, catchAll: input.catchAll, restored: !!existing } });
       return saved!;
     });
     log('info', { code: 'MAILBOX_SUBDOMAIN_ADDED', region: parent.region, mx: mx.state });
@@ -360,7 +368,11 @@ function registerReceivingDomains(app: App) {
     request: { params: SubParams, body: json(z.object({ catchAll: InboundCatchAll.optional(), metadata: Metadata.optional() }).strict().openapi('UpdateInboundSubdomain')) }, responses: { 200: response(InboundSubdomainSchema), ...errors } }), async c => {
     admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id); const input = c.req.valid('json');
     const current = await subdomainRow(c, parent, params.subdomainId);
-    const [row] = await c.env.db.update(mailboxDomains).set({ catchAll: input.catchAll, ...(input.metadata ? { metadata: input.metadata } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+    const [row] = await c.env.db.transaction(async tx => {
+      const rows = await tx.update(mailboxDomains).set({ catchAll: input.catchAll, ...(input.metadata ? { metadata: input.metadata } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+      await recordAudit(tx, c, { action: 'inbound_subdomain.update', workspaceId: current.workspaceId, target: { type: 'inbound_subdomain', id: current.id }, details: { fields: Object.keys(input) }, after: { name: current.name, catchAll: input.catchAll } });
+      return rows;
+    });
     return c.json((await subdomainViews(c.env, parent, [row!]))[0]!, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: `${subdomains}/{subdomainId}`, operationId: 'removeInboundSubdomain', summary: 'Stop receiving for a subdomain',
@@ -368,7 +380,11 @@ function registerReceivingDomains(app: App) {
     admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id);
     if (c.env.config.multiTenant) throw new ApiError(409,'HOSTED_RECEIVING_MANAGED','Receiving follows verified DNS. Remove the MX record to stop delivery.');
     const current = await subdomainRow(c, parent, params.subdomainId);
-    const [row] = await c.env.db.update(mailboxDomains).set({ status: 'disabled', updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+    const [row] = await c.env.db.transaction(async tx => {
+      const rows = await tx.update(mailboxDomains).set({ status: 'disabled', updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+      if (current.status !== 'disabled') await recordAudit(tx, c, { action: 'inbound_subdomain.delete', workspaceId: current.workspaceId, target: { type: 'inbound_subdomain', id: current.id }, before: { name: current.name, status: current.status } });
+      return rows;
+    });
     return c.json((await subdomainViews(c.env, parent, [row!]))[0]!, 200);
   });
 }
@@ -433,6 +449,8 @@ function registerAddresses(app: App) {
         if (!claimed) throw new ApiError(409, 'ADDRESS_TAKEN', `${publicAddress} already belongs to a mailbox.`, 'publicAddress');
       }
       await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
+      // Temporary addresses are agent working state, created at a high rate: only permanent ones are audited.
+      if (input.ttlSeconds === undefined) await recordAudit(tx, c, { action: 'address.create', workspaceId: scope.workspaceId, target: { type: 'address', id: created.id }, after: { address: created.address, key: input.key ?? null, publicAddress: publicAddress ?? null, aliases: input.aliases.length, rules: created.rules.length } });
       return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]) };
     });
     if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
@@ -471,17 +489,19 @@ function registerAddresses(app: App) {
         }
       }
       if (added.length || rules?.length) await claimUnrouted(tx, scope, updated!, added, rules ?? []);
+      if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.update', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, details: { fields: Object.keys(input) }, after: { address: mailbox.address, key: input.key, requireDmarc: input.requireDmarc } });
     });
     const [row] = await c.env.db.select().from(mailboxes).where(eq(mailboxes.id, mailbox.id));
     return c.json((await mailboxViews(c.env, [row!]))[0]!, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: detail, operationId: 'deleteInboundAddress', description: 'Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing. If a route delivers to this inbox, pass detach=true to remove it from those routes in the same change.', request: { params, query: z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove this inbox from every route that delivers to it, as one routing version.') }) }, responses: { 200: response(Ok), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').addressId);
-    if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`);return c.json({ok:true as const},200);}
+    if(mailbox.kind==='inbox'){await endInbox(c.env.db,sql`b.workspace_id=${scope.workspaceId} AND b.id=${mailbox.id}`,auditContext(c));return c.json({ok:true as const},200);}
     const runnable = await c.env.db.transaction(async tx => {
       await detachDestination(tx,c,scope.workspaceId,mailbox.id);
       await tx.delete(mailboxThreads).where(eq(mailboxThreads.mailboxId, mailbox.id));
       await tx.delete(mailboxes).where(eq(mailboxes.id, mailbox.id));
+      if (mailbox.expiresAt === null) await recordAudit(tx, c, { action: 'address.delete', workspaceId: scope.workspaceId, target: { type: 'address', id: mailbox.id }, before: { address: mailbox.address, key: mailbox.key } });
       return recordEvents(tx, scope.workspaceId, [{ type: 'address.deleted', mailboxId: mailbox.id, data: { address: mailbox.address } }]);
     });
     if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
@@ -507,11 +527,14 @@ export function registerMailbox(app: App) {
   registerMailObjects(app);
   registerMailGateway(app);
   app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
-    const v=admin(c);await c.env.db.execute(sql`DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()}`);return c.json({ok:true as const},200);
+    const v=admin(c);await c.env.db.execute(sql`WITH released AS (DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()} RETURNING address),
+      audit AS (${auditInsert(auditContext(c),{action:'address.release',workspaceId:v.workspaceId,target:{type:'address',id:sql`released.address`},before:sql`jsonb_build_object('address',released.address)`},{from:sql`released`})}) SELECT 1`);return c.json({ok:true as const},200);
   });
   const policy=z.object({spam:z.enum(['store','quarantine'])}).strict().openapi('InboundScanPolicy');
   app.openapi(createRoute({method:'get',path:'/v1/inbound/policy',operationId:'getInboundScanPolicy',tags:['Inbound domains'],security,responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c);const {rows}=await c.env.db.execute<{spam:'store'|'quarantine'}>(sql`SELECT spam_policy AS spam FROM mail_receive_limits WHERE workspace_id=${workspaceId}`);return c.json({spam:rows[0]?.spam??'store'},200);});
-  app.openapi(createRoute({method:'patch',path:'/v1/inbound/policy',operationId:'updateInboundScanPolicy',tags:['Inbound domains'],security,description:'Non-PASS virus scans are always quarantined. Store non-PASS spam scans without normal receipt notifications, or quarantine them privately.',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c),{spam}=c.req.valid('json');await c.env.db.execute(sql`INSERT INTO mail_receive_limits(workspace_id,spam_policy) VALUES(${workspaceId},${spam}) ON CONFLICT(workspace_id) DO UPDATE SET spam_policy=excluded.spam_policy`);return c.json({spam},200);});
+  app.openapi(createRoute({method:'patch',path:'/v1/inbound/policy',operationId:'updateInboundScanPolicy',tags:['Inbound domains'],security,description:'Non-PASS virus scans are always quarantined. Store non-PASS spam scans without normal receipt notifications, or quarantine them privately.',request:{body:json(policy)},responses:{200:response(policy),...errors}}),async c=>{const {workspaceId}=admin(c),{spam}=c.req.valid('json');await c.env.db.execute(sql`WITH old AS (SELECT spam_policy FROM mail_receive_limits WHERE workspace_id=${workspaceId}),
+    changed AS (INSERT INTO mail_receive_limits(workspace_id,spam_policy) VALUES(${workspaceId},${spam}) ON CONFLICT(workspace_id) DO UPDATE SET spam_policy=excluded.spam_policy RETURNING workspace_id),
+    audit AS (${auditInsert(auditContext(c),{action:'settings.inbound_policy',workspaceId,target:{type:'workspace',id:workspaceId},before:sql`jsonb_build_object('spam',(SELECT spam_policy FROM old))`,after:{spam}},{from:sql`changed`})}) SELECT 1`);return c.json({spam},200);});
   // These routes call the same region-checked send admission as /v1/emails/send.
   app.on('POST', ['/v1/inbound/threads', '/v1/inbound/threads/:threadId/reply'], async (c, next) => {
     c.env = await withRegionSettings(c.env, access(c).workspaceId);
@@ -685,6 +708,7 @@ function registerInboundKeys(app: App) {
     const [row] = await c.env.db.transaction(async tx => {
       const rows = await tx.insert(mailboxKeys).values({ id: id('mbk'), workspaceId: value.workspaceId, name: input.name, hash: await digest(secret), prefix: secret.slice(0, 14), mailboxIds, permissions: [...new Set(input.permissions)] }).returning();
       await ownReceiving(tx, c, 'key', rows[0]!.id);
+      await recordAudit(tx, c, { action: 'inbox_key.create', workspaceId: value.workspaceId, target: { type: 'inbox_key', id: rows[0]!.id }, after: { name: input.name, permissions: rows[0]!.permissions, addressIds: mailboxIds } });
       return rows;
     });
     c.header('Cache-Control', 'no-store');
@@ -697,7 +721,11 @@ function registerInboundKeys(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: `${base}/{id}/revoke`, operationId: 'revokeInboundKey', tags, security, request: { params: IdParam }, responses: { 200: response(KeySchema), ...errors } }), async c => {
     const value = admin(c);
-    const [row] = await c.env.db.update(mailboxKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), eq(mailboxKeys.id, c.req.valid('param').id), isNull(mailboxKeys.revokedAt))).returning();
+    const row = await c.env.db.transaction(async tx => {
+      const [row] = await tx.update(mailboxKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.workspaceId, value.workspaceId), eq(mailboxKeys.id, c.req.valid('param').id), isNull(mailboxKeys.revokedAt))).returning();
+      if (row) await recordAudit(tx, c, { action: 'inbox_key.revoke', workspaceId: value.workspaceId, target: { type: 'inbox_key', id: row.id }, before: { name: row.name, permissions: row.permissions, addressIds: row.mailboxIds } });
+      return row;
+    });
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Key was not found or is already revoked.');
     return c.json(keyView(row), 200);
   });
@@ -748,7 +776,9 @@ function registerInboundWebhooks(app: App) {
       if (junk === 'include') await enableRouting(tx, value.workspaceId);
       // A keyed webhook is also an endpoint; its key must not collide with a Slack, Discord or forward endpoint name.
       if (input.key) { await lockMailboxLane(tx, value.workspaceId, 'address'); await (await import('./ritual-endpoints.js')).assertEndpointName(tx, value.workspaceId, input.key, '', false); }
-      const r=await tx.insert(mailboxWebhooks).values(values).returning();await ownReceiving(tx,c,'endpoint',webhookId);return r;
+      const r=await tx.insert(mailboxWebhooks).values(values).returning();await ownReceiving(tx,c,'endpoint',webhookId);
+      await recordAudit(tx,c,{action:'inbound_webhook.create',workspaceId:value.workspaceId,target:{type:'inbound_webhook',id:webhookId},after:{url:webhookUrlHint(values.url),key:input.key ?? null,name:input.name ?? null,eventTypes:values.eventTypes,addressIds:input.addressIds,format,paused:input.paused,headerNames:input.headers?.map(h=>h.name)}});
+      return r;
     });
     c.header('Cache-Control', 'no-store');
     return c.json({ ...await webhookView(c, row!), secret, ...await inboundToken(format, secret) }, 201);
@@ -797,6 +827,10 @@ function registerInboundWebhooks(app: App) {
       if (input.key && input.key !== row.key) await (await import('./ritual-endpoints.js')).assertEndpointName(tx, row.workspaceId, input.key, row.id, false);
       const [result] = await tx.update(mailboxWebhooks).set({ key: input.key, name: input.name, mailboxIds: input.addressIds, description: input.description, paused: input.paused, reconfirm: url ? false : undefined, url, eventTypes, format, junk, include: input.include, timeoutSeconds: input.timeoutSeconds, retryAttempts: input.retryAttempts,
         encryptedSecret: url && url!==row.url && (format==='inbound'||row.format==='inbound') ? await encrypt(c.env,webhookSecret(),webhookSecretBinding(row.workspaceId,row.id)):undefined, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers ?? (url && url !== row.url ? [] : undefined), webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
+      // Changed field names and non-secret values: a URL hint, never header values.
+      await recordAudit(tx, c, { action: 'inbound_webhook.update', workspaceId: row.workspaceId, target: { type: 'inbound_webhook', id: row.id }, details: { fields: Object.keys(input) },
+        before: { url: url ? webhookUrlHint(row.url) : undefined, paused: input.paused !== undefined ? row.paused : undefined, eventTypes: eventTypes ? row.eventTypes : undefined },
+        after: { url: url ? webhookUrlHint(url) : undefined, paused: input.paused, eventTypes, addressIds: input.addressIds, key: input.key, format: input.format, junk: input.junk, headerNames: input.headers?.map(h => h.name) } });
       return result!;
     });
     return c.json(await webhookView(c, updated), 200);
@@ -804,7 +838,8 @@ function registerInboundWebhooks(app: App) {
   const detach = z.object({ detach: z.enum(['true', 'false']).optional().describe('Also remove it from every route that delivers to it, as one routing version. Without it, a referenced webhook is not deleted.') });
   app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam, query: detach }, responses: { 200: response(Ok), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id,manageHook(c));
-    await c.env.db.transaction(async tx => { await detachDestination(tx, c, row.workspaceId, row.id); await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id)); });
+    await c.env.db.transaction(async tx => { await detachDestination(tx, c, row.workspaceId, row.id); await tx.delete(mailboxWebhooks).where(eq(mailboxWebhooks.id, row.id));
+      await recordAudit(tx, c, { action: 'inbound_webhook.delete', workspaceId: row.workspaceId, target: { type: 'inbound_webhook', id: row.id }, before: { url: webhookUrlHint(row.url), key: row.key, name: row.name, eventTypes: row.eventTypes } }); });
     return c.json({ ok: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/test`, operationId: 'testInboundWebhook', security, tags, summary: 'Send a test delivery',
@@ -843,6 +878,7 @@ function registerInboundWebhooks(app: App) {
       await ownReceiving(tx,c,'endpoint',c.req.valid('param').id);
       const {row}=await getWebhook(c,c.req.valid('param').id,access,tx);
       await tx.update(mailboxWebhooks).set({encryptedSecret:await encrypt(c.env,secret,webhookSecretBinding(access.workspaceId,row.id)),updatedAt:new Date().toISOString()}).where(eq(mailboxWebhooks.id,row.id));
+      await recordAudit(tx,c,{action:'inbound_webhook.secret_rotate',workspaceId:access.workspaceId,target:{type:'inbound_webhook',id:row.id},details:{url:webhookUrlHint(row.url)}});
       return row;
     });
     c.header('Cache-Control', 'no-store');

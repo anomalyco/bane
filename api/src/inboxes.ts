@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, digest, id, randomSecret, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
 import { checkBudget } from './auth.js';
+import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import type { MailboxPermission, MailAddress, Verdicts } from './db/mailbox.js';
 import { safeForwardHtml } from './mailbox-send.js';
 import { simulateInbox } from './sandbox-inbox.js';
@@ -136,8 +137,11 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
  * End an inbox now: it stops receiving, keys created with it stop authenticating, and the hourly
  * sweep erases its mail. Shared by DELETE /v1/inboxes/{id} and DELETE /v1/inbound/addresses/{id}.
  */
-export async function endInbox(db: DbExecutor, where: SQL) {
-  return (await db.execute<{ at: string }>(sql`SELECT inbox_end(b.workspace_id,b.id)::text at FROM mailboxes b WHERE b.kind='inbox' AND ${where}`)).rows[0];
+export async function endInbox(db: DbExecutor, where: SQL, audit?: AuditContext) {
+  // Only a persistent inbox's first end is audited: inbox_end makes it ephemeral, and the row read here is the one before.
+  return (await db.execute<{ at: string }>(audit ? sql`WITH ended AS (SELECT b.id,b.workspace_id,b.address,b.retention_mode,inbox_end(b.workspace_id,b.id)::text at FROM mailboxes b WHERE b.kind='inbox' AND ${where}),
+    audit AS (${auditInsert(audit, { action: 'inbox.delete', workspaceId: sql`ended.workspace_id`, target: { type: 'inbox', id: sql`ended.id` }, before: sql`jsonb_build_object('address',ended.address,'type','persistent')` }, { from: sql`ended`, where: sql`ended.retention_mode='forever' AND ended.at IS NOT NULL` })})
+    SELECT at FROM ended` : sql`SELECT inbox_end(b.workspace_id,b.id)::text at FROM mailboxes b WHERE b.kind='inbox' AND ${where}`)).rows[0];
 }
 type Box = z.infer<typeof Inbox>;
 type FileRow = { id: string; filename: string; content_type: string; size_bytes: number; bucket: string; storage_key: string };
@@ -190,7 +194,12 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       sandboxHost: input.type === 'sandbox' ? `${(await digest(v.workspaceId)).slice(0, 24)}.sandbox.invalid` : undefined,
       locals: input.localPart ? [input.localPart] : [randomLocal(), randomLocal(), randomLocal()],
     };
-    const { r } = (await c.env.db.execute<{ r: CreateResult }>(sql`SELECT create_managed_inbox(${JSON.stringify(p)}::jsonb) AS r`)).rows[0]!;
+    // Ephemeral and sandbox inboxes are agent working state, created at a high rate: only persistent ones are audited.
+    const made = sql`SELECT create_managed_inbox(${JSON.stringify(p)}::jsonb) AS r`;
+    const { r } = (await c.env.db.execute<{ r: CreateResult }>(input.type !== 'persistent' ? made : sql`WITH made AS MATERIALIZED (${made}),
+      audit AS (${auditInsert(auditContext(c), { action: 'inbox.create', workspaceId: v.workspaceId, target: { type: 'inbox', id: sql`made.r->'inbox'->>'id'` }, after: sql`jsonb_build_object('type','persistent','address',made.r->'inbox'->>'address','name',made.r->'inbox'->>'name')`,
+        details: { inboxKey: input.credential ? { name: input.credential.name, permissions: input.credential.permissions } : undefined, send: input.send.enabled } }, { from: sql`made`, where: sql`made.r->>'error' IS NULL AND NOT coalesce((made.r->>'replay')::boolean,false)` })})
+      SELECT r FROM made`)).rows[0]!;
     if (r.error) {
       if (r.error === 'INBOX_CREATE_RATE') c.header('Retry-After', String(60 - new Date().getUTCSeconds()));
       throw createError(r, input);
@@ -227,7 +236,9 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'modify'), { id } = c.req.valid('param'), q = c.req.valid('json');
     const row = (await c.env.db.execute<{ box: Box }>(
-      sql`WITH changed AS (UPDATE mailboxes b SET display_name=coalesce(${q.name ?? null},display_name),metadata=coalesce(${q.metadata ? JSON.stringify(q.metadata) : null}::jsonb,metadata),delete_after=delete_after-expires_at+coalesce(${q.expiresAt ?? null}::timestamptz,expires_at),expires_at=coalesce(${q.expiresAt ?? null}::timestamptz,expires_at) WHERE ${visible(v)} AND b.id=${id} AND (${q.expiresAt ?? null}::timestamptz IS NULL OR b.retention_mode='ephemeral') AND (${q.expiresAt ?? null}::timestamptz IS NULL OR ${q.expiresAt ?? null}::timestamptz BETWEEN now() AND b.created_at+interval '30 days') RETURNING b.*), keys AS (UPDATE mailbox_keys k SET expires_at=b.delete_after FROM changed b WHERE k.workspace_id=b.workspace_id AND k.mailbox_ids=jsonb_build_array(b.id) AND k.expires_at IS NOT NULL) SELECT inbox_view(b::mailboxes) box FROM changed b`,
+      sql`WITH changed AS (UPDATE mailboxes b SET display_name=coalesce(${q.name ?? null},display_name),metadata=coalesce(${q.metadata ? JSON.stringify(q.metadata) : null}::jsonb,metadata),delete_after=delete_after-expires_at+coalesce(${q.expiresAt ?? null}::timestamptz,expires_at),expires_at=coalesce(${q.expiresAt ?? null}::timestamptz,expires_at) WHERE ${visible(v)} AND b.id=${id} AND (${q.expiresAt ?? null}::timestamptz IS NULL OR b.retention_mode='ephemeral') AND (${q.expiresAt ?? null}::timestamptz IS NULL OR ${q.expiresAt ?? null}::timestamptz BETWEEN now() AND b.created_at+interval '30 days') RETURNING b.*), keys AS (UPDATE mailbox_keys k SET expires_at=b.delete_after FROM changed b WHERE k.workspace_id=b.workspace_id AND k.mailbox_ids=jsonb_build_array(b.id) AND k.expires_at IS NOT NULL),
+        audit AS (${auditInsert(auditContext(c), { action: 'inbox.update', workspaceId: v.workspaceId, target: { type: 'inbox', id: sql`changed.id` }, details: { fields: Object.keys(q) }, after: { name: q.name, expiresAt: q.expiresAt } }, { from: sql`changed` })})
+        SELECT inbox_view(b::mailboxes) box FROM changed b`,
     )).rows[0];
     if (!row) throw absent();
     return c.json(row.box, 200);
@@ -238,7 +249,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     request: { params }, responses: { 202: response(z.object({ id: key, status: z.literal('deleting'), deleteAfter: z.string() })), ...errors },
   }), async c => {
     const v = access(c, 'modify'), { id } = c.req.valid('param');
-    const r = await endInbox(c.env.db, sql`${visible(v)} AND b.id=${id}`);
+    const r = await endInbox(c.env.db, sql`${visible(v)} AND b.id=${id}`, auditContext(c));
     if (!r) throw absent();
     return c.json({ id, status: 'deleting' as const, deleteAfter: new Date(r.at).toISOString() }, 202);
   });

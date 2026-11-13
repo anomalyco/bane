@@ -5,7 +5,7 @@ import { z } from '@hono/zod-openapi';
 import type { SESv2Client, Tenant } from '@aws-sdk/client-sesv2';
 import type { Subscription } from '@aws-sdk/client-sns';
 import type { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
-import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError } from './core.js';
+import { ApiError, assertSesConfigured, lazyModule, logError, ModuleLoadError } from './core.js';
 import type { Config, Runtime } from './core.js';
 import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
@@ -133,7 +133,7 @@ export function awsError(error: unknown): ApiError {
   if (/AccessDenied|AuthorizationError|Unauthorized/.test(name)) return new ApiError(403, 'AWS_ACCESS_DENIED', 'AWS denied a required SES, SNS or STS permission. Check the setup IAM policy.');
   if (/InvalidClientTokenId|UnrecognizedClient|ExpiredToken|SignatureDoesNotMatch|CredentialsProviderError|InvalidAccessKeyId/.test(name)) return new ApiError(503, 'AWS_CREDENTIALS_INVALID', 'AWS credentials are invalid or expired.');
   if (/Throttl|TooManyRequests|LimitExceeded/.test(name)) return new ApiError(503, 'AWS_THROTTLED', 'AWS rate-limited setup. Retry later.', undefined, true);
-  log('error', { code: 'AWS_SETUP_FAILED', errorType: name || 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 9).join('\n') : undefined });
+  logError(error, { code: 'AWS_SETUP_FAILED' });
   return new ApiError(503, 'AWS_SETUP_FAILED', 'AWS setup could not complete. Check regional service availability, network connectivity and the setup IAM policy.', undefined, true);
 }
 type SetupContext = { signal: AbortSignal; lastSesFinished: number; queue: Promise<void> };
@@ -789,6 +789,20 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: context.signal });
     if (!owned(set.Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
     await c.ses.send(validationInput(c.sdk, name, mode, options.installationId === POOL_INSTALLATION), { abortSignal: context.signal });
+  } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
+}
+
+/** Bane's own switch on a workspace tenant (customer-managed status), set by a pause or resume as a backstop to the
+ *  database hold. It is separate from AWS's own status: ENABLED never lifts a pause AWS applied. Returns the ARN. */
+export async function setTenantSendingStatus(runtime: Runtime, region: string, tenantName: string, arn: string | null, status: 'ENABLED' | 'DISABLED') {
+  const context = setupContext(20_000), c = await clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const { GetTenantCommand, UpdateReputationEntityCustomerManagedStatusCommand } = c.sdk.sesv2;
+  try {
+    const tenantArn = arn ?? (await c.ses.send(new GetTenantCommand({ TenantName: tenantName }), opts)).Tenant?.TenantArn;
+    if (!tenantArn?.startsWith(`arn:aws:ses:${region}:`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
+    await c.ses.send(new UpdateReputationEntityCustomerManagedStatusCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: tenantArn, SendingStatus: status }), opts);
+    return tenantArn;
   } catch (error) { if (error instanceof ModuleLoadError) throw error; throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }

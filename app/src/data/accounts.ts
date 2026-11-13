@@ -22,11 +22,19 @@ export const accountApi = {
 export function useAccounts(enabled = true) {
   return useQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), enabled, staleTime: 30_000, gcTime: Infinity })
 }
-// Where an add in a popup ends (public/signed-in/): it announces the result to this browser's tabs and closes.
+// The popup an add runs in (public/signed-in/): it starts the sign-in, and when it is back announces the result to this
+// browser's tabs and closes.
 export const POPUP_PATH = '/signed-in/'
+// A sign-in returns with ?account=<id>, and a provider return can too. The tab follows it only after a sign-in or setup
+// that the person started in this tab (within 15 minutes), never because a link said so.
+const expectKey = 'bane.expect-account'
+export function expectAccount() { try { sessionStorage.setItem(expectKey, String(Date.now())) } catch { /* Then the tab stays as it is. */ } }
+export function takeExpectedAccount() {
+  try { const at = Number(sessionStorage.getItem(expectKey)); sessionStorage.removeItem(expectKey); return at > 0 && Date.now() - at < 15 * 60_000 } catch { return false }
+}
 
 // Tabs tell each other about sign-ins and sign-outs, so a tab showing an account that was just signed out leaves it at once.
-export type AccountEvent = { type: 'signed-in'; tab: string | null; account: string | null; auth: string | null } | { type: 'signed-out'; accounts: string[] | 'all' }
+export type AccountEvent = { type: 'signed-in'; tab: string | null; account: string | null; auth: string | null } | { type: 'add-started'; tab: string | null } | { type: 'signed-out'; accounts: string[] | 'all' }
 const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('bane.accounts')
 export const announce = (event: AccountEvent) => channel?.postMessage(event)
 export function onAccountEvent(listener: (event: AccountEvent) => void) {

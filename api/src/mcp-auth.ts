@@ -3,6 +3,7 @@ import {sql} from 'drizzle-orm';
 import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type Ctx} from './core.js';
 import {protectedResourceMetadata} from './oidc-resource.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
+import {auditContext,auditInsert} from './audit.js';
 
 const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),workspaceId:z.string().nullable(),receiving:z.boolean(),
   profile:z.string().nullable().openapi({description:'The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.'})}).openapi('McpConnection');
@@ -60,10 +61,12 @@ export function registerMcpAuth(app:App) {
   // use: agent tokens, mailbox keys and protocol passwords all check the approval's current workspace.
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/workspace',operationId:'bindMcpConnection',tags:['Auth'],security,request:{params:IdParams,body:{required:true,content:{'application/json':{schema:Binding}}}},responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),receiving:z.boolean()})),...errors}}),async c=>{
     const user=owner(c),{id}=c.req.valid('param'),{workspaceId,receiving}=c.req.valid('json');
-    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked FROM bane_resource_grants WHERE id=${id} AND user_id=${user}),
+    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked,client_id,workspace_id,receiving FROM bane_resource_grants WHERE id=${id} AND user_id=${user}),
       membership AS (SELECT role FROM workspace_members WHERE workspace_id=${workspaceId} AND user_id=${user} AND role IN ('owner','admin','member')),
       bound AS (UPDATE bane_resource_grants SET workspace_id=${workspaceId},receiving=${receiving},updated_at=now() WHERE id=${id} AND user_id=${user} AND NOT revoked
-        AND EXISTS(SELECT FROM membership WHERE NOT ${receiving} OR role IN ('owner','admin')) RETURNING id)
+        AND EXISTS(SELECT FROM membership WHERE NOT ${receiving} OR role IN ('owner','admin')) RETURNING id),
+      audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.bind',workspaceId,userId:user,target:{type:'mcp_connection',id},
+        before:sql`jsonb_build_object('clientId',approval.client_id,'workspaceId',approval.workspace_id,'receiving',approval.receiving)`,after:{workspaceId,receiving}},{from:sql`bound, approval`})})
       SELECT (SELECT revoked FROM approval) revoked,(SELECT role FROM membership) role,EXISTS(SELECT FROM bound) bound`);
     if(result?.revoked==null) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
     if(result.revoked) throw new ApiError(409,'MCP_CONNECTION_REVOKED','This MCP connection is revoked. Reconnect the client to approve it again.');
@@ -73,9 +76,12 @@ export function registerMcpAuth(app:App) {
   });
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
     const user=owner(c),{id}=c.req.valid('param');
-    const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now() WHERE user_id=${user} AND id=${id} RETURNING id,grant_key),
+    const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now() WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
       agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
-      removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)) SELECT grant_key FROM revoked`);
+      removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)),
+      audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.revoke',workspaceId:sql`coalesce(revoked.workspace_id,${c.get('actor').workspaceId})`,userId:user,
+        target:{type:'mcp_connection',id},before:sql`jsonb_build_object('clientId',revoked.client_id,'scopes',revoked.permissions)`},{from:sql`revoked`})})
+      SELECT grant_key FROM revoked`);
     if(!changed.rowCount) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
     return c.json({id,revoked:true as const},200);
   });

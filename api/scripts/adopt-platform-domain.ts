@@ -16,6 +16,12 @@ const region = 'us-east-2';
 type Env = Record<string, string | undefined>;
 const ses = (s: GetEmailIdentityCommandOutput) => ({ VerificationStatus: s.VerificationStatus, VerifiedForSendingStatus: s.VerifiedForSendingStatus, DkimAttributes: s.DkimAttributes, MailFromAttributes: s.MailFromAttributes });
 
+// Every change is audited with the operator's reason; a dry run changes nothing and needs none. Checked before any read.
+function mutationReason(apply: boolean | undefined, reason: string | undefined) {
+  const why = reason?.trim();
+  if (apply && (!why || why.length < 10)) throw new Error('--apply needs --reason "why (at least 10 characters)"; it is written to hosted_operator_audit.');
+  return why ?? null;
+}
 // Checks shared by adoption and revocation: the Hosted configuration, the platform account and a signed-in operator.
 function platform(operator: string, env: Env) {
   if (env.MULTI_TENANT !== 'true' || !env.PUBLIC_URL) throw new Error('Run with the Hosted MULTI_TENANT=true and PUBLIC_URL configuration.');
@@ -38,7 +44,8 @@ function membership(client: SESv2Client, arn: string) {
 // that workspace's Ohio tenant and records the adoption. A dry run prints the identity's fingerprint; --apply needs
 // that reviewed fingerprint and refuses anything else. Run both again after any deliberate change to the identity
 // (DKIM, MAIL FROM, default set): until then the changed identity neither sends nor receives.
-export async function adoptPlatformDomain(db: Client, client: SESv2Client, wid: string, operator: string, options: { apply?: boolean; fingerprint?: string }, env: Env = process.env) {
+export async function adoptPlatformDomain(db: Client, client: SESv2Client, wid: string, operator: string, options: { apply?: boolean; fingerprint?: string; reason?: string }, env: Env = process.env) {
+  const reason = mutationReason(options.apply, options.reason);
   const { account, name, arn, publicUrl } = platform(operator, env);
   if (!/^ws_[0-9a-f]{32}$/.test(wid) || (env.BANE_PLATFORM_DOMAIN_WORKSPACE ?? env.MX_PLATFORM_DOMAIN_WORKSPACE) !== wid) throw new Error('BANE_PLATFORM_DOMAIN_WORKSPACE must name this exact workspace, as deployed.');
   if (!await claimNameAllowed(name, publicUrl, true)) throw new Error('PUBLIC_URL does not name a claimable platform domain.');
@@ -67,7 +74,7 @@ export async function adoptPlatformDomain(db: Client, client: SESv2Client, wid: 
   if (options.apply && options.fingerprint !== fingerprint) throw new Error('The live identity no longer matches the reviewed fingerprint. Review a new dry run.');
   const initial = await member(), plan = { workspace: wid, domain: name, identity: arn, fingerprint, dkimTokens: facts.dkimTokens, mailFrom: facts.mailFrom, defaultSet: facts.defaultSet,
     tenant: '', action: '', receiving: { name, type: 'MX', priority: 10, value: inboundHost(region) }, domainId: null as string | null };
-  const audit = { operator, domain: name, identity: arn, fingerprint, dkimTokens: facts.dkimTokens, mailFrom: facts.mailFrom, defaultSet: facts.defaultSet };
+  const audit = { operator, reason, via: 'script', domain: name, identity: arn, fingerprint, dkimTokens: facts.dkimTokens, mailFrom: facts.mailFrom, defaultSet: facts.defaultSet };
   await db.query('BEGIN');
   try {
     const c = await target();
@@ -115,7 +122,8 @@ export async function adoptPlatformDomain(db: Client, client: SESv2Client, wid: 
 // The undo, also for an aborted or mistaken adoption, and it doesn't depend on the configuration still naming the
 // workspace. It releases the workspace's adopted root claim first (sending, receiving and its jobs stop), then
 // removes the identity from the workspace's own SES tenant. The identity itself, its DNS and any other claim stay.
-export async function revokePlatformDomain(db: Client, client: SESv2Client, wid: string, operator: string, apply: boolean, env: Env = process.env) {
+export async function revokePlatformDomain(db: Client, client: SESv2Client, wid: string, operator: string, options: { apply: boolean; reason?: string }, env: Env = process.env) {
+  const apply = options.apply, reason = mutationReason(apply, options.reason);
   const { name, arn } = platform(operator, env);
   if (!/^ws_[0-9a-f]{32}$/.test(wid)) throw new Error('Expected an exact Hosted workspace ID.');
   const own = new Set([mxResourceName(wid), poolTenantName(wid, 'probation'), poolTenantName(wid, 'trusted')]);
@@ -131,7 +139,7 @@ export async function revokePlatformDomain(db: Client, client: SESv2Client, wid:
     await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,84912))', [name.split('.').slice(-2).join('.')]);
     const released = (await drizzle(db).execute<{ token: string }>(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND name=${name} AND identity ? 'adopted' RETURNING name,token),
       ${releasedClaimCleanup(wid)}, dropped AS (DELETE FROM operation_domains WHERE workspace_id=${wid} AND name IN (SELECT name FROM released)) SELECT token::text FROM released`)).rows[0];
-    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'platform-domain-revoked',$2)`, [wid, { operator, domain: name, identity: arn, token: released?.token ?? null, domainId: claim?.domain_id ?? null, tenant: disassociate ? tenant : null }]);
+    await db.query(`INSERT INTO hosted_operator_audit(workspace_id,action,details) VALUES($1,'platform-domain-revoked',$2)`, [wid, { operator, reason, via: 'script', domain: name, identity: arn, token: released?.token ?? null, domainId: claim?.domain_id ?? null, tenant: disassociate ? tenant : null }]);
     await db.query('COMMIT');
   } catch (e) { await db.query('ROLLBACK'); throw e; }
   if (disassociate) {
@@ -143,14 +151,15 @@ export async function revokePlatformDomain(db: Client, client: SESv2Client, wid:
 }
 
 if (import.meta.main) {
-  const { positionals: [wid, ...rest], values: v } = parseArgs({ allowPositionals: true, options: { apply: { type: 'boolean' }, fingerprint: { type: 'string' }, revoke: { type: 'boolean' } } });
-  if (!wid || rest.length || (v.revoke && v.fingerprint)) throw new Error('Usage: adopt-platform-domain.ts WORKSPACE_ID [--apply --fingerprint HEX] | WORKSPACE_ID --revoke [--apply]');
+  const { positionals: [wid, ...rest], values: v } = parseArgs({ allowPositionals: true, options: { apply: { type: 'boolean' }, fingerprint: { type: 'string' }, revoke: { type: 'boolean' }, reason: { type: 'string' } } });
+  if (!wid || rest.length || (v.revoke && v.fingerprint)) throw new Error('Usage: adopt-platform-domain.ts WORKSPACE_ID [--apply --fingerprint HEX --reason "why"] | WORKSPACE_ID --revoke [--apply --reason "why"]');
+  mutationReason(v.apply, v.reason);
   const cfg = { region, ignoreConfiguredEndpointUrls: true, maxAttempts: 1 }, sts = new STSClient(cfg), client = new SESv2Client(cfg); paceSetupSes(client);
   const db = new Client(postgresConnection(process.env.DATABASE_URL)); await db.connect();
   try {
     const op = await sts.send(new GetCallerIdentityCommand({}));
     if (!op.Arn) throw new Error('No signed-in operator.');
-    const result = v.revoke ? await revokePlatformDomain(db, client, wid, op.Arn, !!v.apply) : await adoptPlatformDomain(db, client, wid, op.Arn, { apply: v.apply, fingerprint: v.fingerprint });
+    const result = v.revoke ? await revokePlatformDomain(db, client, wid, op.Arn, { apply: !!v.apply, reason: v.reason }) : await adoptPlatformDomain(db, client, wid, op.Arn, { apply: v.apply, fingerprint: v.fingerprint, reason: v.reason });
     console.log(JSON.stringify(result, null, 2));
   } finally { await db.end(); sts.destroy(); client.destroy(); }
 }

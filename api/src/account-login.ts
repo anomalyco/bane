@@ -26,7 +26,7 @@ async function provider(runtime: Runtime) {
   const issuer = new URL(accountIssuer);
   const options = { signal: () => AbortSignal.timeout(6000) };
   const metadata = await oidc.processDiscoveryResponse(issuer, await oidc.discoveryRequest(issuer, options));
-  const client = { client_id: accountClient.id, id_token_signed_response_alg: accountClient.algorithm };
+  const client: oidc.Client = { client_id: accountClient.id, id_token_signed_response_alg: accountClient.algorithm };
   const jwk = JSON.parse(accountClient.privateKey) as JsonWebKey & {kid:string};
   const key = await crypto.subtle.importKey('jwk', jwk, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
   const authentication = oidc.PrivateKeyJwt({ key, kid: jwk.kid });
@@ -119,6 +119,11 @@ async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: P
       name=excluded.name,outcome=excluded.outcome,attempts=bane_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
 }
 
+// One retry when the server asks for a DPoP nonce: the handle stored it from the refusal.
+async function retryDPoPNonce<T>(attempt: () => Promise<T>) {
+  try { return await attempt(); } catch (error) { if (!oidc.isDPoPNonceError(error)) throw error; return attempt(); }
+}
+
 class AccountLimit extends Error {}
 export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string, jar: Jar = { slots: [], selected: null, preferred: null }, onFlow?: (returnUrl: string) => void) {
   const state = url.searchParams.get('state');
@@ -130,14 +135,21 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   onFlow?.(flow.return_url);
   const { metadata, client, authentication, callback, options } = await provider(runtime);
   const params = oidc.validateAuthResponse(metadata, client, url, state);
-  const response = await oidc.authorizationCodeGrantRequest(metadata, client, authentication, params, callback, flow.verifier, options);
-  const tokens = await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce});
+  // The account service refuses a first-party client's code exchange without a DPoP proof (invalid_dpop_proof) and
+  // asks for its nonce first (use_dpop_nonce). One ephemeral key per sign-in proves the exchange and the userinfo
+  // read; an issuer that doesn't advertise DPoP gets none.
+  const DPoP = metadata.dpop_signing_alg_values_supported?.includes('ES256') ? oidc.DPoP(client, await oidc.generateKeyPair('ES256')) : undefined;
+  const { response, tokens } = await retryDPoPNonce(async () => {
+    const response = await oidc.authorizationCodeGrantRequest(metadata, client, authentication, params, callback, flow.verifier, { ...options, DPoP });
+    return { response, tokens: await oidc.processAuthorizationCodeResponse(metadata, client, response, {requireIdToken:true,expectedNonce:flow.nonce}) };
+  });
   await oidc.validateApplicationLevelSignature(metadata, response, options);
   const claims = oidc.getValidatedIdTokenClaims(tokens)!;
   const requiredAcr = runtime.config.accountClient?.requiredAcr;
   const needUserInfo = (claims.email === undefined || claims.email_verified === undefined || !providerIdentity(claims)) && !!metadata.userinfo_endpoint;
+  const bound = tokens.token_type === 'dpop' ? { DPoP } : {};
   const profile = needUserInfo
-    ? await oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, options))
+    ? await retryDPoPNonce(async () => oidc.processUserInfoResponse(metadata, client, claims.sub, await oidc.userInfoRequest(metadata, client, tokens.access_token, { ...options, ...bound })))
     : claims;
   const address = verifiedEmail.safeParse(profile.email).data ?? null;
   const emailAtLogin = profile.email_verified === true ? address : null;
@@ -261,6 +273,16 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
   return { keyId:`user_${m.id}`, email:m.email, name:m.name, workspaceId:m.workspace, role:m.role, permissions:m.role==='member'?['read','send']:['manage'], domains:[],credential:'dashboard' };
 }
 
+/**
+ * A request without the tab's account acted as the browser default. When the default cookie named another account (one
+ * signed out, expired or revoked since), it now names the account actually used, so a stale default never lingers.
+ */
+export function settleDefaultAccount(c: Ctx, userId: string) {
+  if (c.req.header('x-bane-account') !== undefined) return;
+  const name = cookieName(c.env, 'account');
+  if (cookieValue(c.req.raw.headers, name) !== userId) setCookie(c, name, userId, cookieOptions(c.env, SESSION_SECONDS));
+}
+
 /** This browser's connected accounts, each with its own workspaces, read with that account's own session. */
 async function accountList(runtime: Runtime, c: Ctx, jar: Jar, connection?: string) {
   const { accounts, dead } = await connectedAccounts(runtime, jar);
@@ -274,6 +296,7 @@ async function accountList(runtime: Runtime, c: Ctx, jar: Jar, connection?: stri
   // Which connected account an MCP approval belongs to, so its page acts as that account and never as whichever is active.
   const owner = connection && unique.length ? (await runtime.db.execute<{ user_id: string }>(sql`SELECT user_id FROM bane_resource_grants WHERE id=${connection} AND user_id=ANY(${ids}::text[])`)).rows[0]?.user_id ?? null : null;
   const active = jar.selected !== null ? unique.find(account => account.id === jar.selected) : unique.find(account => account.id === jar.preferred) ?? unique[0];
+  if (jar.selected === null && active && active.id !== jar.preferred) setCookie(c, cookieName(runtime, 'account'), active.id, cookieOptions(runtime, SESSION_SECONDS));
   return {
     accounts: unique.map(({ id, name, email }) => ({ id, name, email, workspaces: memberships.filter(m => m.user_id === id).map(({ id, name, slug, role }) => ({ id, name, slug, role })) })),
     active: active?.id ?? null, limit: MAX_ACCOUNTS, ...connection === undefined ? {} : { connection: { id: connection, account: owner } },
@@ -298,8 +321,8 @@ export async function accountBrowserRoute(c: Ctx) {
   if (path === '/api/auth/sign-in/account' && c.req.method === 'POST') {
     const input = z.object({ callbackURL:z.url().max(2048), prompt:z.literal('select_account').optional() }).strict().safeParse(await c.req.json().catch(()=>null));
     if (!input.success) throw new ApiError(422,'AUTH_INPUT_INVALID','Supply the dashboard return URL.');
-    // Adding a sixth account is refused before the account service is asked; the callback checks again.
-    if (input.data.prompt && (await connectedAccounts(runtime, await jar())).accounts.length >= MAX_ACCOUNTS) throw new ApiError(409,'ACCOUNT_LIMIT',`A browser can connect at most ${MAX_ACCOUNTS} accounts. Sign out of one to add another.`);
+    // A sixth account is refused before the account service is asked, on every sign-in; the callback checks again.
+    if ((await connectedAccounts(runtime, await jar())).accounts.length >= MAX_ACCOUNTS) throw new ApiError(409,'ACCOUNT_LIMIT',`A browser can connect at most ${MAX_ACCOUNTS} accounts. Sign out of one to add another.`);
     const start = await beginAccountLogin(runtime,new URL(input.data.callbackURL),c.req.header('x-bane-client-ip') ?? 'unknown',input.data.prompt).catch(error=>{
       const issue = loginIssue(error, runtime.config.accountClient?.requiredAcr);
       if (issue) throw new ApiError(403,'SIGN_IN_DENIED',issue.message);
@@ -322,7 +345,11 @@ export async function accountBrowserRoute(c: Ctx) {
       return c.redirect(target.href,303);
     } catch (error) {
       const issue = error instanceof AccountLimit ? {reason:'account_limit'} : loginIssue(error, runtime.config.accountClient?.requiredAcr);
-      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error') });
+      // What failed, never a token or a claim: the error class, the issuer's error code and the library's message.
+      const failure = error as { name?: string; error?: unknown; status?: unknown; message?: unknown };
+      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error'), errorType: failure?.name,
+        issuerError: typeof failure?.error === 'string' ? failure.error.slice(0, 80) : undefined, issuerStatus: typeof failure?.status === 'number' ? failure.status : undefined,
+        detail: error instanceof ApiError || error instanceof AccountLimit ? undefined : String(failure?.message ?? '').slice(0, 200) });
       // An account added in a popup reports back to the page that opened it; every other failure lands on the dashboard.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);
       back.searchParams.set('auth', issue?.reason ?? 'error');

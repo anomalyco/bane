@@ -1,11 +1,11 @@
 import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type BaneApi, type WorkspaceInvitationPreview } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
 import { createLiveApi, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace } from './live'
-import { accountApi, accountsKey, announce, onAccountEvent, POPUP_PATH, type AccountList } from './accounts'
+import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
@@ -14,6 +14,8 @@ import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
 import { resourceOf, staleAfterWrite } from './invalidation'
+import { useGuardedMutation } from '../lib/single-flight'
+import { SignInConsent } from '../components/LegalLinks'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -92,15 +94,18 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
+/** Pages anyone can open, signed in or not. */
+export const isPublicPath = (path: string) => path === '/docs' || path === '/legal' || path.startsWith('/legal/')
 export function ApiProvider({ children, api }: { children: ReactNode; api?: BaneApi }) {
-  // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
-  const publicRoute = useLocation().pathname === '/docs'
+  // The docs and the legal pages are public: they render signed out, and /v1/me only adds the workspace's context.
+  const publicRoute = isPublicPath(useLocation().pathname)
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
-  // A sign-in (or a return from a provider) names the account the page opens as; the tab then stays with it.
+  // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
+  // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
   useState(() => {
     const url = new URL(window.location.href), account = url.searchParams.get('account')
     if (account === null) return
-    if (/^[A-Za-z0-9._:-]{1,200}$/.test(account)) selectAccount(account)
+    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) selectAccount(account)
     url.searchParams.delete('account')
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
   })
@@ -132,7 +137,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
       }
     },
   })
-  const join = useMutation({
+  const join = useGuardedMutation({
     mutationFn: async (pending: WorkspaceInvitationPreview) => {
       const { workspaceId } = await workspaceApi.acceptInvitation(pending.id)
       await switchWorkspace(workspaceId)
@@ -215,23 +220,33 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     rememberDashboardReady(selectedWorkspace(), false)
     selectAccount(null); selectWorkspace(null); cache.clear(); await identity.refetch()
   }
-  // Add account: the account service's chooser in a popup (a redirect when popups are blocked). The account picked
+  // Add account: the account service's chooser in a popup. The popup starts the sign-in itself and is opened with
+  // noopener, so it holds no reference to this page; it reports back over the BroadcastChannel only. The account picked
   // there opens in this tab; Bane never learns which other accounts are signed in at the account service.
-  const adding = useRef<{ tab: string; path?: string } | null>(null)
+  const adding = useRef<{ tab: string; path?: string; fallback: number } | null>(null)
   function addAccount(path?: string) {
-    const tab = crypto.randomUUID(), popup = window.open('', 'bane-add-account', 'popup,width=480,height=720')
-    adding.current = { tab, path }
-    const callback = new URL(popup ? POPUP_PATH : window.location.pathname, window.location.origin)
-    if (popup) callback.searchParams.set('tab', tab)
-    else { callback.search = window.location.search; callback.searchParams.delete('auth') }
-    accountApi.signIn(callback.href, true).then(url => { if (popup) popup.location.replace(url); else window.location.assign(url) })
-      .catch(error => { popup?.close(); adding.current = null; toast(error instanceof Error ? error.message : 'Couldn’t add an account.', 'error') })
+    if (adding.current) window.clearTimeout(adding.current.fallback)
+    const tab = crypto.randomUUID(), start = new URL(POPUP_PATH, window.location.origin)
+    start.searchParams.set('start', '1'); start.searchParams.set('tab', tab)
+    window.open(start.href, '_blank', 'popup,noopener,noreferrer,width=480,height=720')
+    // noopener leaves no handle to tell a blocked popup apart: one that hasn't announced itself within a few seconds
+    // didn't open, so the add continues in this tab as a redirect.
+    const fallback = window.setTimeout(() => { if (adding.current?.tab === tab) { adding.current = null; void redirectAdd() } }, 4000)
+    adding.current = { tab, path, fallback }
+  }
+  async function redirectAdd() {
+    const callback = new URL(window.location.pathname, window.location.origin)
+    callback.search = window.location.search; callback.searchParams.delete('auth')
+    try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
+    catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : error instanceof Error ? error.message : 'Couldn’t add an account.', 'error') }
   }
   useEffect(() => onAccountEvent(event => {
+    if (event.type === 'add-started') { if (event.tab && event.tab === adding.current?.tab) window.clearTimeout(adding.current.fallback); return }
     if (event.type === 'signed-in') {
       void cache.invalidateQueries({ queryKey: accountsKey })
       const pending = adding.current
       if (!event.tab || event.tab !== pending?.tab) return
+      window.clearTimeout(pending.fallback)
       adding.current = null
       if (event.auth || !event.account) { toast(authMessages[event.auth ?? 'error'] ?? authMessages.error, 'error'); return }
       void switchAccount(event.account, pending.path ?? sectionPath()).then(() => toast('Account added', 'success'), () => toast('Couldn’t open the account.', 'error'))
@@ -271,7 +286,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     void cache.prefetchQuery({ queryKey: ['bane', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
+  useEffect(() => { const denied = () => { if (!isPublicPath(window.location.pathname) && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('bane:unauthorized', denied); return () => window.removeEventListener('bane:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await signOutAccount() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
@@ -300,7 +315,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl())) }
+    try { const url = await (pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl()); expectAccount(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -331,6 +346,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Bane
         <h2>Sign in to Bane</h2>
         {authNotice}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue to sign in</Button>
+        <SignInConsent className="muted" />
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Sign-in is not configured on this installation.' : 'Bane couldn’t verify your session. Try again without signing in.'}</Alert>
@@ -372,11 +388,16 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: BaneApi, sig
     placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
-export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
+/** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
+ *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
+export function useApiMutation<TInput, TResult>(write: (api: BaneApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
-  return useMutation({
+  // One write while it is in flight: a repeat of the same operation on the same target with the same input is dropped
+  // (lib/single-flight.ts). The operation is the write's source, the same in every render.
+  return useGuardedMutation({
+    operation: write.toString(), target,
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {

@@ -504,6 +504,7 @@ jobs:
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+          DEPLOY_SHA: ${{ needs.authorize.outputs.sha }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
 
       - name: Health check

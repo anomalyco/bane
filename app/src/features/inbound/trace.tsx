@@ -2,7 +2,7 @@
 // each condition lights up true or false, omen answers fill in, then the actions and where the mail ends up.
 // Nothing is sent or saved. Steps are laid out up front and revealed in place, so the animation never moves the page.
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 import { Alert, Button, EmptyState, ErrorState, Field, Input, PageHeader, SkeletonText, Tabs, Textarea } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiDef, useApiQuery } from '../../data/context'
@@ -179,7 +179,7 @@ export function TraceView({ result, sources, overview, inboxes, runId }: { resul
           <span className="trace-result__items">
             {rcpt.dropped ? <span className="trace-chip"><TargetIcon type="drop" size={13} />{outcomes.drop}</span> : <>
               {rcpt.junk && <span className="trace-chip" data-tone="warning">Stored as junk</span>}
-              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} />{inboxName(id)}</span>)}
+              {(rcpt.inboxes ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type="inbox" size={13} /><PrivateAddress value={inboxName(id)} /></span>)}
               {(rcpt.webhooks ?? []).map(id => <span key={id} className="trace-chip"><TargetIcon type={hook(id)?.type ?? 'webhook'} size={13} />{hook(id)?.name ?? 'Webhook'}</span>)}
               {!rcpt.inboxes?.length && !rcpt.webhooks?.length && <span className="trace-chip"><TargetIcon type="store" size={13} />{outcomes.store}</span>}
               {(rcpt.labels ?? []).map(l => <span key={l} className="trace-chip trace-chip--label">{l}</span>)}
@@ -210,7 +210,8 @@ export function useDryRun() {
 export function TracePage() {
   const [params] = useSearchParams()
   const options = useApiDef(queries.inboundAddressOptions())
-  const preferred = params.get('to') ?? undefined
+  // An address page hands its address over in the navigation state, so a link never spells it out; ?to= still works.
+  const preferred = (useLocation().state as { to?: string } | null)?.to ?? params.get('to') ?? undefined
   const overview = useOverview({ limit: 100 })
   const saved = useApiQuery(['ritual-config'], (_api, signal) => request<{ config: { rituals: { key: string; source: string }[] } }>('/v1/rituals', { signal }))
   const addresses = (overview.data?.routes.data ?? []).filter(r => r.kind === 'address' && r.address).map(r => r.match)

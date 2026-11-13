@@ -123,6 +123,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `unsubscribeOneClick` | Recipient one-click unsubscribe; never an agent call. |
 | `getMetrics` | `usage` · `metrics` · sending |
 | `getSenderScore` | `usage` · `senderScore` · sending |
+| `releaseSenderStanding` | Human step: an owner or admin confirms the fix checklist in the dashboard. Agents read the standing with getSenderScore. |
 | `getUsage` | `usage` · `plan` · sending |
 | `listRegions` | `regions` · `list` · admin |
 | `configureRegion` | `regions` · `configure` · admin |
@@ -249,3 +250,5 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `verifyConnection` | Human step: account administration in a signed-in dashboard session (members, invitations, workspaces, BYO AWS). |
 | `getPublicStats` | Public, installation-wide homepage numbers; no workspace data. |
 | `getOverviewSetup` | `settings` · `setup` · admin |
+| `listActivity` | Human step: a workspace’s Activity is for its signed-in owners and admins (Settings → Activity). |
+| `contactSupport` | Human step: a signed-in person contacts Bane support from the dashboard. |

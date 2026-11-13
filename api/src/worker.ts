@@ -59,6 +59,11 @@ async function wakeDispatchers(env: Env, region: string, accountId?: string, ema
   }));
 }
 
+// Every line names the Worker and the commit it runs (DEPLOY_SHA, set by .github/scripts/deploy-worker.sh).
+function stampLogs(env: Env, core: typeof import('./core.js')) {
+  core.setLogContext({ service: 'worker', deploy: (env as unknown as Record<string, unknown>).DEPLOY_SHA });
+}
+
 let cachedConfig: { key: string; config: Config } | undefined;
 function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record<string, unknown>) => Config): Config {
   const input: Record<string, unknown> = {};
@@ -150,7 +155,7 @@ export default {
       let origin: string | undefined; try { origin = new URL(String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL)).origin; if (origin === 'null') origin = undefined; } catch { origin = undefined; }
       return fastSecure(new Response(request.method==='HEAD'?null:JSON.stringify({status:'ok',service:'bane',multiTenant,...(origin ? { origin } : {})}), { headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store', 'x-request-id': requestId } }));
     }
-    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/'));
+    const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
     if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       return fastSecure(await assets.fetch(request));
@@ -159,6 +164,7 @@ export default {
     try {
       deps = await loadHttpDeps();
       const { app, core } = deps;
+      stampLogs(env, core);
       const admissionStarted = performance.now();
       const address = core.admissionPeer(request.headers.get('CF-Connecting-IP') ?? '127.0.0.1');
       const peer = await core.digest(core.admissionKey(address, request.headers.get('CF-Worker')));
@@ -187,13 +193,15 @@ export default {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const known = deps && error instanceof deps.core.ApiError ? error : null;
       const code = known ? known.code : 'RUNTIME_UNAVAILABLE';
-      console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), requestId, code, message: known ? known.message : 'Unable to initialize Worker database/runtime.' }));
+      if (deps) { stampLogs(env, deps.core); deps.core.logError(known ?? error, { event: 'request', requestId, route: 'worker-runtime', method: request.method, status: 503, code }); }
+      else console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', event: 'request', requestId, route: 'worker-runtime', method: request.method, status: 503, code, message: 'Unable to load the Worker runtime modules.' }));
       return fastSecure(Response.json({ error: { code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } }, { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } }));
     }
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
     const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
+    stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
@@ -240,6 +248,7 @@ export default {
   },
   async scheduled(controller, env) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
+    stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
       import('./dispatch.js'), import('./provider-connections.js'), import('./mailbox-send.js'), import('./public-stats.js'),
     ]));
@@ -271,6 +280,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
+      // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
+      if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./standing.js'))).standingTick(runtime);
     }, concurrency);
   },
 } satisfies ExportedHandler<Env>;

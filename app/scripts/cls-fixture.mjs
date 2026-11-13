@@ -134,6 +134,7 @@ export async function start(repo, { log = () => {}, servers = 1 } = {}) {
 // ---------------------------------------------------------------- synthetic data
 // Northwind: an established hosted sender with sending history, receiving set up and audience content.
 // Lumen Labs: a verified domain and nothing else (Overview's setup state). Field Notes: no connection (onboarding).
+// Harbor Supply: restricted, so its pages carry the standing banner.
 // Connections, domain claims, mail and inbox rows go in as SQL because there is no SES or mail store here.
 const REGION = 'us-east-2';
 const ago = minutes => new Date(Date.now() - minutes * 60_000).toISOString();
@@ -226,6 +227,21 @@ async function agentInbox(db, workspaceId, { mdom, host }, name, hoursLeft, mess
   return id;
 }
 
+// Sender standing as the ten-minute standing job stores it (the gate runs no job worker), 14 published days of score
+// and the standing events the operator timeline reads.
+const factor = (key, label, weight, value, score) => ({ key, label, weight, value, score, points: score === null ? null : Math.round(weight * score) / 100, source: score === null ? 'neutral' : 'measured', basis: 'CLS fixture.' });
+async function standing(db, workspaceId, { score, limit, step, reasons = [], since, factors, events = [] }) {
+  await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,calibrated_at,score,day_score,score_day,target,quality,factors,band_limit,daily_limit,step,reasons,since,computed_at,version,sequence)
+    VALUES($1,'graded',100,now()-interval '20 days',$2,$2,(now() AT TIME ZONE 'UTC')::date,$2::numeric+1.5,$2::numeric+4,$3::jsonb,$4,$4,$5,$6::jsonb,$7,now(),$8::int,$8::int)
+    ON CONFLICT (workspace_id) DO UPDATE SET phase=excluded.phase,first_recipients=100,calibrated_at=excluded.calibrated_at,score=excluded.score,target=excluded.target,quality=excluded.quality,factors=excluded.factors,
+      band_limit=excluded.band_limit,daily_limit=excluded.daily_limit,step=excluded.step,reasons=excluded.reasons,since=excluded.since,computed_at=now(),version=excluded.version,sequence=excluded.sequence`,
+    [workspaceId, score, JSON.stringify(factors), limit, step, JSON.stringify(reasons), since, events.length + 1]);
+  await db.query(`INSERT INTO sender_score_daily(workspace_id,day,emails,accepted,delivered,bounced,complained,score,quality,target,daily_limit,step)
+    SELECT $1,(now() AT TIME ZONE 'UTC')::date-g,300,296,292,3,0,round(($2::numeric-g*0.6),2),$2::numeric+4,$2::numeric+1.5,$3,'ok' FROM generate_series(1,14) g ON CONFLICT DO NOTHING`, [workspaceId, score, limit]);
+  for (const [i, event] of events.entries()) await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,at,kind,from_step,to_step,reasons,actor,details) VALUES($1,$2,$3,$4,'step',$5,$6,$7::jsonb,'{"kind":"system"}'::jsonb,'{}'::jsonb)`,
+    [rid('stev'), workspaceId, i + 1, event.at, event.from, event.to, JSON.stringify(event.reasons ?? [])]);
+}
+
 export async function seed(fx) {
   const { db } = fx;
   const dana = await fx.signIn('dana', 'dana@northwind.example', 'Dana Rivera', { id: 'ws_northwind', name: 'Northwind' });
@@ -238,6 +254,12 @@ export async function seed(fx) {
   await dana.api('POST', '/v1/api-keys', { name: 'Billing worker', permissions: ['send'], domains: [] }, 201);
   const hook = await dana.api('POST', '/v1/webhooks', { description: 'Delivery events', url: 'https://hooks.northwind.example/bane', eventTypes: ['email.delivered', 'email.bounced', 'email.complained'] }, 201);
   await dana.api('POST', '/v1/workspaces/current/invitations', { email: 'ops@northwind.example', role: 'member' }, 201);
+  // Settings → Activity: the calls above write their own audit rows; a teammate joining and a support grant's read go
+  // in as SQL (once the audit table exists on this branch).
+  if ((await db.query("SELECT to_regclass('audit_events') IS NOT NULL AS ok")).rows[0].ok) await db.query(`INSERT INTO audit_events
+    (workspace_id,user_id,actor_type,actor_id,actor_label,via,action,target_type,target_id,summary,reason,request_id,ip_network,user_agent,internal,at,retain_until) VALUES
+    ('ws_northwind','user_sam','member','user_sam',NULL,'dashboard','member.join','member','user_sam','{"after":{"role":"admin"}}',NULL,'req_fixture_join','198.51.100.0/24','Safari 18 on macOS',false,now()-interval '6 days',now()+interval '1 year'),
+    ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The signed-out homepage's figures, as the minute job publishes them.
   const hourly = Array.from({ length: 24 }, (_, i) => 1200 + (i * 7919) % 900);
@@ -287,6 +309,25 @@ export async function seed(fx) {
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
   const contact = contacts[0];
 
+  // Northwind's standing: graded B with a notice (a first complaint). Dana is also a Bane operator, so the operator
+  // console has a signed-in user.
+  await standing(db, 'ws_northwind', { score: 86.4, limit: 5000, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
+    reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
+  await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
+
+  // Harbor Supply: restricted (marketing held) after complaints, with a quarantined campaign: the banner on every
+  // page, Overview's standing card and the operator's workspace page.
+  const rae = await fx.signIn('rae', 'rae@harborsupply.example', 'Rae Lind', { id: 'ws_harbor', name: 'Harbor Supply' });
+  const harborConn = await hosted(db, 'ws_harbor');
+  await domain(db, 'ws_harbor', harborConn, 'harborsupply.example', { mailFrom: true });
+  await rae.api('POST', '/v1/api-keys', { name: 'Production', permissions: ['send'], domains: [] }, 201);
+  await mail(db, 'ws_harbor', 3);
+  const springCatalog = await rae.api('POST', '/v1/campaigns', { name: 'Spring catalog', subject: 'New for spring', from: 'news@harborsupply.example', html: '<p>Hello</p>' });
+  await db.query('UPDATE sending_campaigns SET quarantines=1 WHERE id=$1', [springCatalog.id]);
+  const complaints = { code: 'COMPLAINTS_RESTRICT', metric: 'complaints', value: 0.0021, count: 4, threshold: 0.001, minimum: 3, window: '24h', step: 'restrict', message: '4 of 1,912 accepted emails were marked as spam in 24 hours (0.21%; the restrict line is 0.1% and 3).' };
+  await standing(db, 'ws_harbor', { score: 72.4, limit: 500, step: 'restrict', since: ago(2 * 24 * 60), reasons: [complaints], factors: [factor('complaints', 'Complaints', 30, 0.0021, 31.2), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.011, 86.7), factor('hygiene', 'List quality', 15, 0.034, 79.1), factor('auth', 'Authentication', 10, 0.7, 70), factor('engagement', 'Engagement', 10, 0.006, 77.8)],
+    events: [{ at: ago(3 * 24 * 60), from: 'ok', to: 'warn', reasons: [{ ...complaints, code: 'COMPLAINTS_WARN', step: 'warn', count: 2, message: '2 of 1,830 accepted emails were marked as spam in 24 hours (0.11%; the warn line is 0.05% and 2).' }] }, { at: ago(2 * 24 * 60), from: 'warn', to: 'restrict', reasons: [complaints] }] });
+
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
   await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
@@ -296,7 +337,7 @@ export async function seed(fx) {
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
   return {
-    mcp, email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    mcp, restricted: 'ws_harbor', email, receivedEmail: 'msg_northwind_invoice', domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id,
   };
 }

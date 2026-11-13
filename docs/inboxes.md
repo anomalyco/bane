@@ -287,7 +287,7 @@ With the SDK it is `createInbox({ client, body: { type: 'sandbox' } })`, then `s
 
 ## More
 
-- API reference: the **Agent inboxes** operations in `/docs.md` and `api/openapi.json`; behavior and limits in [api/README.md](../api/README.md#agent-inboxes).
+- API reference: the **Agent inboxes** operations in `/docs/tags/agent-inboxes.md` and `api/openapi.json`; behavior and limits in [api/README.md](../api/README.md#agent-inboxes).
 - SDK: [sdk/README.md](../sdk/README.md#an-agent-inbox-in-60-seconds). MCP: [mcp/README.md](../mcp/README.md#agent-inboxes).
 - Rollout, rollback and erasure guarantees: [receiving-operations.md](receiving-operations.md#mail-store-rollout-and-rollback). Measurements and the routing merge plan: [receiving-measurements.md](receiving-measurements.md).
 
