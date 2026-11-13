@@ -7,7 +7,7 @@ const FADES = [
   '.limits-table-scroll', '.docs-table-scroll', '.legal-table', '.docs-install > code', '.developer-url > code', '.trace-code',
   '.docs-sidebar', '.legal-toc', '.legal-switcher', '.settings-rail__groups', '.rcv-filters', '.mailbox-threads', '.mailbox-reader',
   '.delivery-timeline', '.template-picker', '.settings-key-domain-options', '.ritual-diff', '.ui-popover-scroll',
-  '.uin-list', '.uin-body',
+  '.uin-list', '.uin-body', '.docs-toc-scroll',
 ].join(', ')
 
 // Marks the edges with content beyond them (data-more-above, -below, -left, -right) from scrolling, the area's size
@@ -67,12 +67,14 @@ export function watchScrollFades(root: HTMLElement = document.body) {
   })
   observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] })
   document.addEventListener('focusin', revealFocus)
-  return () => { observer.disconnect(); document.removeEventListener('focusin', revealFocus); cancelAnimationFrame(frame); for (const { stop } of tracked.values()) stop(); tracked.clear() }
+  document.addEventListener('focusout', releaseClippedFocus)
+  return () => { observer.disconnect(); document.removeEventListener('focusin', revealFocus); document.removeEventListener('focusout', releaseClippedFocus); cancelAnimationFrame(frame); for (const { stop } of tracked.values()) stop(); tracked.clear() }
 }
 
 // Keyboard focus lands with its whole ring in view. Chrome leaves a control that is already partly visible where it is
 // (the last tab of a sideways rail, a field half below the fold), so it is scrolled the rest of the way, nearest edge
-// first; the area's scroll-padding keeps it clear of the edge, the fade and the ring.
+// first; the area's scroll-padding keeps it clear of the edge, the fade and the ring. A control that a text clip cuts
+// (an address past a cell's ellipsis) can't be scrolled into view, so its ring moves to that clip (data-focus-clipped).
 function revealFocus(event: FocusEvent) {
   const el = event.target
   if (!(el instanceof HTMLElement)) return
@@ -95,5 +97,15 @@ function revealFocus(event: FocusEvent) {
       hidden = outside({ left: c.left + n.clientLeft, top: c.top + n.clientTop, right: c.left + n.clientLeft + n.clientWidth, bottom: c.top + n.clientTop + n.clientHeight })
     }
     if (hidden) ring.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    // The control itself, not just its ring, cut by a clip on an axis that clips.
+    const after = ring.getBoundingClientRect()
+    for (let n = ring.parentElement; n && n !== document.body; n = n.parentElement) {
+      const s = getComputedStyle(n), x = /hidden|clip/.test(s.overflowX), y = /hidden|clip/.test(s.overflowY)
+      if (!x && !y) continue
+      const c = n.getBoundingClientRect()
+      if (x && (after.left < c.left - .5 || after.right > c.right + .5) || y && (after.top < c.top - .5 || after.bottom > c.bottom + .5)) { n.setAttribute('data-focus-clipped', ''); return }
+    }
   })
 }
+
+function releaseClippedFocus() { for (const el of document.querySelectorAll('[data-focus-clipped]')) el.removeAttribute('data-focus-clipped') }

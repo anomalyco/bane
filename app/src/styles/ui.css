@@ -39,6 +39,8 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
    edge for optical alignment draw an inset ring instead. */
 html, .page-surface { scroll-padding-block: var(--focus-reach); }
 :has(:focus-visible) { overflow-clip-margin: var(--focus-reach); }
+[data-focus-clipped] { outline: var(--focus-width) solid var(--color-focus); outline-offset: var(--focus-offset); border-radius: 2px; }
+[data-focus-clipped] :focus-visible { outline-color: transparent; }
 ::selection { background: var(--color-active-bg); color: var(--color-text); }
 .ui-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-6); height: var(--control-height); padding: 0 11px; border: 0; border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-bold); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration), color var(--motion-duration), opacity var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .ui-button svg { flex-shrink: 0; }
