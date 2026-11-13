@@ -24,7 +24,8 @@ const READS = {
     workspaces: [{ id: 'ws_acme', name: 'Acme Prod', role: 'owner', sending: { kind: 'shared', region: 'us-east-2', paused: false }, counts: { domains: 1, campaigns: 3 } }],
     domains: [{ workspaceId: 'ws_acme', id: 'dom_1', name: 'news.acme.test', sending: 'verified', dmarc: 'missing' }], recentFailures: { sends: [], bounces: [], webhookDeliveries: [] },
     standing: [], recentActivity: [], openEnforcement: [], handoff: null, links: { requestIds: [] } },
-  '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, stats: { delivered: 2140, uniqueOpens: 899, uniqueClicks: 64, bounced: 12, accepted: 2152 } }] },
+  '/v1/support/campaigns': { data: [{ id: 'cmp_1', name: 'Early access', state: 'sent', launchedAt: new Date(Date.now() - 86400000).toISOString(), tracking: true, audience: { size: 2160 }, pauseReason: null,
+    stats: { counts: { total: 2160, byStatus: { delivered: 2140 } }, totals: { accepted: 2152, delivered: 2140, opened: 899, clicked: 64, bounced: 12, complained: 0 }, rates: {} } }] },
   '/v1/support/standing': { data: [{ workspaceId: 'ws_acme', standing: { step: 'normal', score: 93, dailyLimit: 10000 }, last24h: { delivered: 1980, bounced: 20 } }] },
   '/v1/support/deliverability/bounces': { data: [{ provider: 'gmail', type: 'bounce', count: 61, diagnostic: 'smtp; 550 5.1.1 user unknown at someone@gmail.com from 203.0.113.9' }], findings: [{ severity: 'serious', code: 'HARD_BOUNCES', message: '6.1% hard bounces at Gmail' }], grant: { token: 'never-shown' }, operatorId: 'op_secret' },
 };

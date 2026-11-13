@@ -38,13 +38,17 @@ export function greetingBundle(input: { context?: Json | null; campaigns?: Json 
   const ws = (ctx.workspaces ?? [])[0];
   if (ws) facts.push(`workspace: ${esc(ws.name)}; ${ws.sending ? `sending via ${esc(ws.sending.kind)} in ${esc(ws.sending.region)}${ws.sending.paused ? ', PAUSED' : ''}` : 'no sending set up yet'}; ${Object.entries(ws.counts ?? {}).filter(([, n]) => Number(n) > 0).map(([k, n]) => `${n} ${k}`).slice(0, 6).join(', ') || 'nothing created yet'}`);
   const campaigns = (input.campaigns?.data ?? []) as Json[];
-  for (const c of campaigns.filter(c => c.launchedAt || c.state === 'sent' || c.state === 'sending').slice(0, 2)) {
-    const s = c.stats ?? {}, delivered = Number(s.delivered ?? 0);
+  for (const c of campaigns.filter(c => c.launchedAt || c.state === 'sent' || c.state === 'sending' || c.state === 'completed').slice(0, 2)) {
+    // /v1/support/campaigns: stats.totals counts and stats.rates { numerator, denominator, value } (campaign stats).
+    const t = c.stats?.totals ?? c.stats ?? {}, delivered = Number(t.delivered ?? 0), accepted = Number(t.accepted ?? t.sent ?? delivered);
     const parts = [`campaign "${esc(c.name ?? c.subject)}" ${esc(c.state)}${day(c.launchedAt ?? c.createdAt) ? ` on ${day(c.launchedAt ?? c.createdAt)}` : ''}`];
+    if (c.audience?.size) parts.push(`to ${c.audience.size} recipients`);
     if (delivered) parts.push(`${delivered} delivered`);
-    const opens = pct(Number(s.uniqueOpens ?? s.opened ?? 0), delivered); if (opens && c.tracking !== false) parts.push(`${opens} opens`);
-    const clicks = pct(Number(s.uniqueClicks ?? s.clicked ?? 0), delivered); if (clicks && c.tracking !== false) parts.push(`${clicks} clicks`);
-    const bounced = pct(Number(s.bounced ?? 0), Number(s.accepted ?? s.sent ?? delivered)); if (bounced && Number(s.bounced) > 0) parts.push(`${bounced} bounced`);
+    const opens = pct(Number(t.opened ?? t.uniqueOpens ?? 0), delivered); if (opens && c.tracking !== false) parts.push(`${opens} opens (${t.opened ?? t.uniqueOpens} of ${delivered})`);
+    const clicks = pct(Number(t.clicked ?? t.uniqueClicks ?? 0), delivered); if (clicks && c.tracking !== false) parts.push(`${clicks} clicks`);
+    if (Number(t.bounced) > 0) parts.push(`${pct(Number(t.bounced), accepted)} bounced (${t.bounced} of ${accepted})`);
+    if (Number(t.complained) > 0) parts.push(`${t.complained} spam complaints`);
+    if (c.pauseReason?.message) issues.push(`campaign "${esc(c.name)}" is paused: ${esc(c.pauseReason.message)}`);
     facts.push(parts.join(', '));
   }
   const last24 = ((input.standing?.data ?? ctx.standing ?? [])[0]?.last24h ?? {}) as Record<string, number>;
