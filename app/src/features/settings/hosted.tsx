@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
 import { ArrowUpRight, Info, Lock } from 'lucide-react'
-import { Button, Checkbox, ConfirmDialog, CopyButton, Input, SectionHeader, Select, Skeleton, StatusBadge } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, Input, SectionHeader, Select, Skeleton, StatusBadge } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
@@ -130,6 +130,8 @@ function DisconnectRow({ kind }: { kind: 'shared' | 'byo' | undefined }) {
     <ConfirmDialog open={confirming} onOpenChange={setConfirming} title="Disconnect sending?" description={kind === 'byo' ? `Sending stops until you connect again. ${keeps} AWS resources stay in your account; delete the Bane stack in AWS to revoke access.` : `Sending stops until you connect again. ${keeps}`} confirmLabel="Disconnect" danger pending={disconnect.isPending} onConfirm={async () => { await disconnect.mutateAsync(undefined); sync(null) }} />
   </div>
 }
+// The account service's connected apps page, on the installations that sign in with Anomaly account.
+const accountApps = ({ 'bane.mx': 'https://account.anoma.ly/apps', 'dev.bane.mx': 'https://account.dev.anoma.ly/apps' } as Record<string, string>)[window.location.hostname] ?? null
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
@@ -143,32 +145,34 @@ function AccountRows() {
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
-    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect at Bane':'Revoked'}</Row>
-      :<McpApproval key={`${app.id}:${app.workspaceId}:${app.receiving}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
+    {/* An MCP client signs in to the account service, which lists and disconnects it everywhere. Bane lists each
+        client's approval below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
+    {accountApps && <Row title="Connected apps" hint="Disconnect a client from your Anomaly account"><a href={accountApps}>Manage at Anomaly account</a></Row>}
+    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect the client':'Revoked · reconnect the client'}</Row>
+      :<McpApproval key={`${app.id}:${app.workspaceId}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
     {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
     <MutationError error={revoke.error}/>
-    {['bane.mx','dev.bane.mx'].includes(window.location.hostname) && <Row title="Issuer grants"><a href={window.location.hostname==='dev.bane.mx'?'https://account.dev.anoma.ly/apps':'https://account.anoma.ly/apps'}>Manage connected apps at Anomaly account</a></Row>}
     {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
 // A client's name and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of one client
 // are easy to tell apart. The label is display only.
 export const connectionTitle = (app: Pick<McpConnection, 'name' | 'clientId' | 'profile'>) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
-// Each approval acts in one workspace. A new one waits for this choice when you belong to several; receiving tools
-// need an owner or admin there. Save keeps its place whether or not it is shown, so choosing never moves the row.
+// One approval per client and account. Its tools act in the workspace each call names, checked against your role there
+// on every call; this picks the default for calls that name none (automatic: your only workspace, else the one you used
+// last). Receiving tools need an owner or admin there and full access. Save keeps its place whether or not it is shown,
+// so choosing never moves the row.
+const accessLabel = (scopes: string[]) => scopes.includes('bane:manage') ? 'Full access' : scopes.includes('bane:send') ? 'Read and send' : 'Read only'
 export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
-  const [receiving, setReceiving] = useState(app.receiving ?? false)
-  const bind = useApiMutation((api, input: { workspaceId: string; receiving: boolean }) => api.credentials.bindMcpConnection(app.id, input), 'Saved')
-  const admin = (id: string) => ['owner', 'admin'].includes(workspaces.find(workspace => workspace.id === id)?.role ?? '')
-  const changed = workspaceId !== '' && (workspaceId !== app.workspaceId || receiving !== (app.receiving ?? false))
+  const bind = useApiMutation((api, workspace: string) => api.credentials.bindMcpConnection(app.id, { workspaceId: workspace }), 'Saved')
+  const changed = workspaceId !== '' && workspaceId !== app.workspaceId
   const name = connectionTitle(app)
-  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={app.workspaceId ? app.clientId : 'Choose a workspace'}>
+  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={`${accessLabel(app.scopes)} · ${app.clientId}`}>
     <span className="settings-mcp">
-      <Select aria-label={`Workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Choose a workspace" disabled={bind.isPending}
-        options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={id => { setWorkspaceId(id); if (!admin(id)) setReceiving(false) }} />
-      <Checkbox label="Receiving tools" checked={receiving} disabled={bind.isPending || !admin(workspaceId)} onCheckedChange={setReceiving} />
-      <Button variant="primary" loading={bind.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} onClick={() => { bind.mutate({ workspaceId, receiving }) }}>Save</Button>
+      <Select aria-label={`Default workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Last used" disabled={bind.isPending}
+        options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={setWorkspaceId} />
+      <Button variant="primary" loading={bind.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} onClick={() => { bind.mutate(workspaceId) }}>Save</Button>
       <Button variant="danger" aria-label={`Revoke MCP access for ${name}`} onClick={onRevoke}>Revoke</Button>
       {bind.error ? <div className="settings-name-error"><MutationError error={bind.error} /></div> : null}
     </span>

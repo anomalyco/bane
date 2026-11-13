@@ -206,7 +206,7 @@ curl -sS "$BANE_URL/v1/inbound/keys" -H "$AUTH" -H 'Content-Type: application/js
 Point an MCP client at hosted Bane with a provisioning or inbox key as the bearer token. For OpenCode:
 
 ```json
-{"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp?codemode=true","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}
+{"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}
 ```
 
 The tools an agent then sees, and a real session (IDs shortened):
