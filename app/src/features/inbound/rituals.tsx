@@ -489,7 +489,7 @@ export function RitualsPage() {
       {check !== null && recent.isFetched && <>
       <section ref={tryRef} id="try" className="section section--bordered stack ritual-try" aria-labelledby="ritual-try">
         <SectionHeader title={<span id="ritual-try">Try it on an email</span>} />
-        <ConceptLine line={`Runs ${key || 'this ritual'} as written, unsaved, as if it were attached to the address the email was sent to. Nothing is sent or saved, and Bane’s AI isn’t asked: you set each omen’s answer here.`} />
+        <ConceptLine line={`Runs ${key || 'this ritual'} as written, as if attached to the address the email was sent to. Nothing is sent or saved, and Bane’s AI isn’t asked: set each omen’s answer here.`} />
         <EmailPicker value={choice} onChange={next => { setChoice(next); dry.clear() }} addresses={recipients} />
         <div className="ritual-try__options">
           {choice.mode !== 'sample' && <Field label="As mail to" htmlFor="ritual-try-to" hint="The address the ritual is attached to for this try."><Input id="ritual-try-to" list="trace-addresses" value={as} onChange={e => { setAs(e.target.value); dry.clear() }} placeholder={recipient || recipients[0] || 'support@acme.com'} autoComplete="off" /></Field>}
@@ -506,7 +506,7 @@ export function RitualsPage() {
         <SectionHeader title={<span id="ritual-attach">Runs on</span>} />
         <ConceptLine line="Attach a ritual to an address or alias; changes here save at once. Up to three run in order; the first that acts stops the rest unless “Run the next one too” is on." />
         <DataTable columns={bindingColumns} rows={bindings.map((b, i) => ({ ...b, i }))} rowKey={b => `${b.target}/${b.ritual}`}
-          empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual only runs on mail to the addresses it’s attached to." />} />
+          empty={<EmptyState title="Not attached yet" description="Pick an address below. A ritual runs only on mail to its addresses." />} />
         <div className="ritual-attach">
           <Field label={`Attach ${key || 'this ritual'} to`} hint={!isSaved && key ? `Saves ${key} with it.` : undefined}><Select value={target} onValueChange={setTarget} options={[{ label: 'Choose an address', value: '' }, ...targets]} /></Field>
           <Checkbox checked={next} onCheckedChange={setNext} label="Run the next one too" />
@@ -519,7 +519,7 @@ export function RitualsPage() {
         <Field label="Sender lists" hint={<>Named lists of senders, one per line: <code>vip: ceo@example.com, @partner.example</code>. Use with <code>lists.has("vip", email.from.address)</code>.</>}>
           <Textarea rows={3} value={lists} onChange={e => setLists(e.target.value)} spellCheck={false} />
         </Field>
-        <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI only reads mail at the receiving hosts listed here, separated by commas; everywhere else an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
+        <Field label="Omens can read mail at" hint={<>{concepts.omens.line} Bane’s AI reads mail only at these receiving hosts (comma-separated); elsewhere an omen gives its default answer. <Link to={guides.rituals}>How omens work</Link></>}>
           <Input value={domains} onChange={e => setDomains(e.target.value)} placeholder={(overview.data?.domains ?? []).find(d => d.status === 'active')?.name ?? 'reply.example.com'} />
         </Field>
       </section>
@@ -555,7 +555,7 @@ export function RitualsPage() {
     </>}
     {leaveGuard}
     <ConfirmDialog open={confirmTemplate !== null} onOpenChange={value => { if (!value) setConfirmTemplate(null) }} title={`Replace the script with “${ritualTemplates.find(t => t.id === confirmTemplate)?.name ?? 'this template'}”?`}
-      description="The script you’ve written is replaced. Nothing is saved until you save, and Discard brings back the saved version." confirmLabel="Replace script" onConfirm={() => { if (confirmTemplate) applyTemplate(confirmTemplate) }} />
+      description="Your script is replaced, but nothing is saved until you save. Discard brings back the saved version." confirmLabel="Replace script" onConfirm={() => { if (confirmTemplate) applyTemplate(confirmTemplate) }} />
     <ConfirmDialog open={confirmSwitch !== null} onOpenChange={value => { if (!value) setConfirmSwitch(null) }} title={`Discard the changes to ${key || 'this ritual'}?`}
       description="You haven’t saved them. Save first to keep them." confirmLabel="Discard changes" danger onConfirm={() => { if (confirmSwitch !== null) switchTo(confirmSwitch) }} />
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${key}?`} description={`It stops running on every address it’s attached to${bindings.some(b => b.ritual === key) ? ` (${bindings.filter(b => b.ritual === key).length})` : ''}. Earlier versions stay restorable over the API.`}

@@ -54,10 +54,10 @@ function GettingStarted({ overview, onCreate }: { overview: Overview; onCreate: 
   const step = (n: number, done: boolean, title: string, body: ReactNode, action: ReactNode) => <li className="rcv-step" data-done={done || undefined}>
     <span className="rcv-step__n" aria-hidden="true">{done ? <Check size={13} /> : n}</span><div className="rcv-step__body"><h3>{title}</h3><p className="muted">{body}</p>{action}</div></li>
   return <ol className="rcv-steps">
-    {step(1, live.length > 0, 'Receive on a domain', live.length ? `${live.map(d => d.name).join(', ')} receives mail.` : sendOnly.length ? `${sendOnly.map(d => d.name).join(', ')} only sends. Publish its receiving MX record to get mail too.` : 'Add a domain and publish its receiving MX record.',
+    {step(1, live.length > 0, 'Receive on a domain', live.length ? `${live.map(d => d.name).join(', ')} receives mail.` : sendOnly.length ? `${sendOnly.map(d => d.name).join(', ')} only sends. Publish its receiving MX record to receive too.` : 'Add a domain and publish its receiving MX record.',
       !live.length && <Link className="ui-button ui-button--secondary ui-button--md" to={sendOnly[0] ? `/domains/${sendOnly[0].id}` : '/domains'}>Set up receiving</Link>)}
-    {step(2, false, 'Create an address', <>Mail to it lands in the Inbox, where you, the API and agents read it. For example <code>support@{live[0]?.name ?? 'acme.com'}</code>.</>, <Button disabled={!live.length} onClick={onCreate}>New address</Button>)}
-    {step(3, false, 'Choose what happens', <>Optional. A ritual labels, filters or sends mail on to an endpoint: Slack, Discord, a webhook or a forward.</>,
+    {step(2, false, 'Create an address', <>Mail to it lands in the Inbox for you, the API and agents. For example <code>support@{live[0]?.name ?? 'acme.com'}</code>.</>, <Button disabled={!live.length} onClick={onCreate}>New address</Button>)}
+    {step(3, false, 'Choose what happens', <>Optional. A ritual labels, filters or sends mail to an endpoint: Slack, Discord, a webhook or a forward.</>,
       <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving/rituals">Write a ritual</Link><Link className="ui-button ui-button--ghost ui-button--md" to="/receiving?tab=endpoints">Add an endpoint</Link></div>)}
     <li className="rcv-steps__aside muted">Testing sign-up mail? An <Link to="/receiving/inboxes">agent inbox</Link> works before any DNS is set up.</li>
   </ol>
@@ -115,7 +115,7 @@ function RitualsTab({ overview }: { overview: Overview }) {
   return <div className="stack rcv-tab">
     <div className="rcv-kindline"><ConceptLine line={concepts.rituals.line} example={concepts.rituals.example} guide={guides.rituals} /><Link className="ui-button ui-button--secondary ui-button--sm" to="/receiving/rituals?new=1">New ritual</Link></div>
     <DataTable className="rcv-table" rows={overview.rituals} rowKey={r => r.key} rowHref={r => `/receiving/rituals?key=${encodeURIComponent(r.key)}`}
-      empty={<EmptyState title="No rituals yet" description="A ritual is a short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals?new=1">Write a ritual</Link>} />}
+      empty={<EmptyState title="No rituals yet" description="A short script that runs on a route’s mail. For example: if the subject mentions a refund, label it and post it to Slack." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rituals?new=1">Write a ritual</Link>} />}
       columns={[
         { key: 'key', label: 'Ritual', width: '20%', render: r => <span className="rcv-cell"><RitualIcon /><code>{r.key}</code></span> },
         { key: 'on', label: 'Runs on', width: '20%', card: 'line', render: r => r.attachedTo.length ? `${number(r.attachedTo.length)} ${r.attachedTo.length === 1 ? 'route' : 'routes'}` : <Link className="rcv-add" to={`/receiving/rituals?key=${encodeURIComponent(r.key)}#attach`} onClick={e => e.stopPropagation()}>Not attached · attach</Link> },
@@ -142,7 +142,7 @@ function EndpointsTab({ overview, refresh }: { overview: Overview; refresh: () =
     <div className="rcv-kindline"><ConceptLine line={concepts.endpoints.line} example={concepts.endpoints.example} guide={guides.endpoints} />
       <div className="cluster"><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/webhooks">Event webhooks</Link><Button size="sm" onClick={() => setCreating(true)}>New endpoint</Button></div></div>
     <DataTable className="rcv-table" rows={overview.endpoints} rowKey={e => e.id} rowHref={e => e.source === 'inbound_webhook' ? `/receiving/webhooks/${e.id}` : null}
-      empty={<EmptyState title="No endpoints yet" description="An endpoint is a named place rituals and routes send mail: Slack, Discord, a webhook or a forward. For example, a ritual calls endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
+      empty={<EmptyState title="No endpoints yet" description="A named place rituals and routes send mail: Slack, Discord, a webhook or a forward. A ritual calls it like endpoints.support({ text: email.subject })." action={<Button onClick={() => setCreating(true)}>New endpoint</Button>} />}
       columns={[
         { key: 'name', label: 'Endpoint', width: '30%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span>{e.call ? <code>{e.call}</code> : e.name}</span><span className="muted receiving-clip"><PrivateAddress value={e.target} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.call ? <code>{e.call}</code> : e.name}</span> },

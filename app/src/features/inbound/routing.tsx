@@ -68,7 +68,7 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
     </fieldset>
   }
   return <>
-    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? <>Where should mail to <PrivateAddress value={normalized} /> go?</> : 'Add route'} description="A route says where an address’s mail goes: its inbox, other inboxes, webhooks, or nowhere." 
+    <Dialog open onOpenChange={next => { if (!next && !save.isPending) onClose() }} title={route ? 'Edit route' : draft.match ? <>Where should mail to <PrivateAddress value={normalized} /> go?</> : 'Add route'} description="Where an address’s mail goes: its inbox, other inboxes, webhooks, or nowhere." 
       footer={<>
         {route && <Button variant="ghost" className="routing-delete" disabled={save.isPending} onClick={() => setConfirmDelete(true)}>Delete route</Button>}
         <Button disabled={save.isPending} onClick={onClose}>Cancel</Button>
@@ -85,9 +85,9 @@ function RouteDialog({ draft, destinations, owners, onClose, refreshWebhooks }: 
         {action === 'deliver' && <>
           {group('inbox', 'Inboxes', <>No addresses yet. <Link to="/receiving">Create one</Link>.</>)}
           {group('webhook', 'Webhooks', 'No webhooks yet. A webhook posts each message to your server as signed JSON.')}
-          <p className="muted routing-explain">Slack, Discord and forwards aren’t listed: a ritual sends to them, so it can pick which mail and what the message says. <Link to="/receiving/rituals?new=1">Write a ritual</Link>. If a ritual calls one of these webhooks with its own payload, that webhook gets the ritual’s payload instead of the whole message, once per message.</p>
+          <p className="muted routing-explain">Slack, Discord and forwards go through a ritual, which picks the mail and the message. <Link to="/receiving/rituals?new=1">Write a ritual</Link>. If a ritual calls one of these webhooks with its own payload, the webhook gets that payload instead of the whole message, once per message.</p>
         </>}
-        {action === 'keep' && <p className="muted routing-explain">Mail is stored and readable through the API by message ID, but appears in no inbox.</p>}
+        {action === 'keep' && <p className="muted routing-explain">Stored and readable over the API by message ID, but in no inbox.</p>}
         {action === 'drop' && <Alert tone="warning">Dropped mail is not stored and cannot be recovered. Its receipt still records that it arrived.</Alert>}
         {losesOwner && <Alert tone="warning">Mail to {normalized} will stop reaching {owner.displayName || owner.address}. Tick its inbox to keep it.</Alert>}
         {route && <Switch checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} label="On. When off, this mail follows the next most specific rule." />}

@@ -98,7 +98,7 @@ function WebhooksList() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/receiving?tab=endpoints" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail on inbound addresses: received messages and the replies you send from them. Without a public URL, long-poll <code>GET /v1/inbound/events</code>. For email sent through the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
+    <p className="muted inbound-note">Signed POSTs (Standard Webhooks) for mail at your addresses: received messages and your replies. No public URL? Long-poll <code>GET /v1/inbound/events</code>. For email sent with the send API, use <Link to="/settings#webhooks">Settings webhooks</Link>.</p>
     {addressId && <p className="muted inbound-note">The active and paused webhooks that get this address’s mail. <Link to="/receiving/webhooks">Show all webhooks</Link></p>}
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending || (addresses.isPending && !addresses.error)} skeletonRows={2} minRows={2} rows={webhooks.data?.data ?? []} rowKey={row => row.id} rowHref={row => `/receiving/webhooks/${row.id}`}
       empty={addressId ? <EmptyState title="No webhook gets this address’s mail" description="Webhooks subscribed to message.received for it, or for every address, show up here." /> : <EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
@@ -181,8 +181,8 @@ function WebhookDetail() {
         </form>}
       </section>
     </>}
-    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working immediately. Update your endpoint with the new secret right away." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
-    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped, and routes that deliver to it stop doing so. Events stay available through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
+    <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working at once. Update your endpoint with the new one." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
+    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped and routes stop delivering to it. Events stay readable through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }
