@@ -38,12 +38,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anomalyco/bane.git",
+    "url": "git+https://github.com/anomalyco/nightmail.git",
     "directory": "sdk"
   },
-  "homepage": "https://github.com/anomalyco/bane/tree/dev/sdk#readme",
+  "homepage": "https://github.com/anomalyco/nightmail/tree/dev/sdk#readme",
   "bugs": {
-    "url": "https://github.com/anomalyco/bane/issues"
+    "url": "https://github.com/anomalyco/nightmail/issues"
   },
   "keywords": [
     "bane",
