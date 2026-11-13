@@ -14,7 +14,10 @@ export function requireDashboardOrigin(runtime:Runtime,headers:Headers) {
   if (headers.get('origin')!==new URL(runtime.config.publicUrl).origin) throw new ApiError(403,'CSRF_ORIGIN_INVALID','Use the dashboard.');
 }
 export async function verifiedDashboardUser(runtime:Runtime,headers:Headers,requireCurrentEmail=false) {
-  const user=!headers.has('authorization') && await accountSessionUser(runtime,headers,requireCurrentEmail);
+  // A bearer credential (API key, MCP or agent token) never rides the session cookie. It is refused with 403, as on
+  // every other dashboard-only route (core.ts); 401 is for a caller with no session at all.
+  if (headers.has('authorization')) throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use a signed-in dashboard session.');
+  const user=await accountSessionUser(runtime,headers,requireCurrentEmail);
   if (!user) throw new ApiError(401,'AUTH_REQUIRED','Sign in to Bane.');
   return {userId:user.id,email:user.email};
 }
