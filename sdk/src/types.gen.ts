@@ -2340,6 +2340,40 @@ export type EndpointTest = {
     error: string | null;
 };
 
+export type RitualVersion = {
+    /**
+     * The routing version. Routes and rituals share it, and it is the If-Match for saving either.
+     */
+    version: number;
+    /**
+     * Marks the latest endpoint change seen. Pass it back as endpoints to wait for the next one.
+     */
+    endpoints: string;
+    /**
+     * version or endpoints moved past what you passed as after and endpoints.
+     */
+    changed: boolean;
+    actor: RitualChangeActor;
+};
+
+/**
+ * Who made the change returned: the save behind version, or else the latest endpoint change. Null when nothing changed.
+ */
+export type RitualChangeActor = {
+    /**
+     * member is a person in the dashboard, api_key an API key, mcp an MCP client (or a temporary token it made).
+     */
+    type: 'member' | 'api_key' | 'mcp';
+    /**
+     * The member’s name, the API key’s name or the MCP client and its profile label; null when it is gone. Never an email address.
+     */
+    name: string | null;
+    /**
+     * The credential making this request made the change (another tab, say).
+     */
+    self: boolean;
+} | null;
+
 export type RitualCheck = {
     ok: boolean;
     diagnostics: Array<RitualDiagnostic>;
@@ -14906,6 +14940,80 @@ export type CreateInboxConnectionResponses = {
 };
 
 export type CreateInboxConnectionResponse = CreateInboxConnectionResponses[keyof CreateInboxConnectionResponses];
+
+export type GetRitualVersionData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * The version you have. The call waits until the version differs from it.
+         */
+        after?: number | null;
+        /**
+         * The endpoints marker from the last response: also wait for an endpoint to be created, changed or deleted.
+         */
+        endpoints?: string;
+        /**
+         * Seconds to wait for a change (0–25). Ignored without after or endpoints.
+         */
+        wait?: number | null;
+    };
+    url: '/v1/rituals/version';
+};
+
+export type GetRitualVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetRitualVersionError = GetRitualVersionErrors[keyof GetRitualVersionErrors];
+
+export type GetRitualVersionResponses = {
+    /**
+     * Success
+     */
+    200: RitualVersion;
+};
+
+export type GetRitualVersionResponse = GetRitualVersionResponses[keyof GetRitualVersionResponses];
 
 export type CheckRitualData = {
     body: {

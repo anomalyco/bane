@@ -450,7 +450,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listLogs','testRouting','testRituals','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!['receiveSesSnsEvent','revealWebhookSecret','getRitualVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage'].sort());
   const { resourceTools, resourceInventory } = await import('./src/mcp-resources.js');
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
@@ -3434,6 +3434,107 @@ describe('Hosted MCP OAuth and tools', () => {
       ok(await local('POST','/v1/mcp-connections/mcp_'+consentId+'/revoke'));
       const inactive=await dry();for(const r of inactive.slice(0,2)){assert.equal(r.junk,true);assert.deepEqual(r.labels,['ritual-error']);assert.match(r.warnings.join(' '),/lost receiving approval/);}
       assert.deepEqual(inactive[2].labels,['human']);assert.equal(inactive[2].junk,false);
+    });
+  });
+
+  // The rituals page's live view (src/ritual-version.ts): one long poll per open editor, so an agent's saves show up
+  // while a person edits. It must answer on a commit, name who made it and nothing more, stay in its workspace and
+  // charge the caller's request budget for every tick it may take.
+  test('rituals live view: the version long poll wakes on a save, names who made it, stays in its workspace and is budgeted', async t => {
+    await simulatedSesFixture(t, async ({ db, local, request, runtime }) => {
+      const w = runtime.config.workspaceId, path = '/v1/rituals/version', sha = (value: string) => createHash('sha256').update(value).digest('hex');
+      const hex64 = () => (randomUUID() + randomUUID()).replaceAll('-', '');
+      // An API key an agent works with, and one restricted to a sending domain (no receiving administration).
+      const agent = { id: unique('key'), secret: `bane_${hex64()}` }, restricted = `bane_${hex64()}`;
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Refund agent',$3,$4,'["read","send","manage"]','[]'),($5,$2,'Sender',$6,$7,'["read","send","manage"]','["mail.example.com"]')`,
+        [agent.id, w, sha(agent.secret), agent.secret.slice(0, 14), unique('key'), sha(restricted), restricted.slice(0, 14)]);
+      const { token, consentId, clientId } = await oauthGrant(t, db, writableScope, request);
+      await db.query('UPDATE bane_resource_grants SET receiving=true WHERE grant_key=$1', [consentId]);
+      const sources = ['export default function route(email){if(/refund/i.test(email.subject)) label("refund")}', 'export default function route(email){if(/refund/i.test(email.subject)){label("refund");block()}}', 'export default function route(email){label("mine")}'];
+      const seen: Json[] = [];
+      // Each answer is the version, the endpoints marker, whether it changed and who made it: no IDs, sources or addresses.
+      const state = (reply: Reply, status = 200) => {
+        const body = ok(reply, status);
+        assert.deepEqual(Object.keys(body).sort(), ['actor', 'changed', 'endpoints', 'version']);
+        if (body.actor) assert.deepEqual(Object.keys(body.actor).sort(), ['name', 'self', 'type']);
+        assert.equal(reply.headers.get('cache-control'), 'no-store');
+        seen.push(body);
+        return body;
+      };
+      const timed = async <T>(work: Promise<T>) => { const started = Date.now(); const value = await work; return { value, ms: Date.now() - started }; };
+
+      // Without after it answers at once with the current version.
+      const first = state(await local('GET', path));
+      assert.equal(first.changed, false); assert.match(first.endpoints, /^\d+$/);
+
+      // A save by the agent's key that happened before the call: it answers at once, naming the key.
+      ok(await request('PUT', '/v1/rituals/scripts/refunds', agent.secret, { key: 'refunds', source: sources[0] }));
+      const saved = await timed(local('GET', `${path}?after=${first.version}&endpoints=${first.endpoints}&wait=25`));
+      const bySave = state(saved.value);
+      assert.ok(saved.ms < 2000, `${saved.ms} ms`);
+      assert.deepEqual([bySave.version, bySave.changed, bySave.endpoints, bySave.actor], [first.version + 1, true, first.endpoints, { type: 'api_key', name: 'Refund agent', self: false }]);
+
+      // A wait that is open when an MCP client saves wakes on that save, naming the client.
+      const waiting = timed(local('GET', `${path}?after=${bySave.version}&wait=25`));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const applied = ok(await request('POST', '/mcp?codemode=true', token, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'applyRituals', arguments: { confirm: true, body: { rituals: [{ key: 'refunds', source: sources[1] }] } } } }, rpcHeaders)).result;
+      assert.equal(applied.isError, false, redact(applied));
+      const woke = await waiting, byMcp = state(woke.value);
+      assert.ok(woke.ms >= 300 && woke.ms < 8000, `${woke.ms} ms`);
+      assert.deepEqual([byMcp.version, byMcp.changed, byMcp.actor], [bySave.version + 1, true, { type: 'mcp', name: clientId, self: false }]);
+
+      // Nothing changes: the wait runs out and names nobody.
+      const quiet = await timed(local('GET', `${path}?after=${byMcp.version}&endpoints=${byMcp.endpoints}&wait=1`));
+      assert.deepEqual(state(quiet.value), { version: byMcp.version, endpoints: byMcp.endpoints, changed: false, actor: null });
+      assert.ok(quiet.ms >= 900 && quiet.ms < 5000, `${quiet.ms} ms`);
+
+      // An endpoint created by the agent moves the endpoints marker, not the version.
+      ok(await request('POST', '/v1/endpoints', agent.secret, { type: 'discord', name: 'refunds', url: 'https://discord.com/api/webhooks/123/live-fixture' }), 201);
+      const endpoint = state(await local('GET', `${path}?after=${byMcp.version}&endpoints=${byMcp.endpoints}&wait=25`));
+      assert.equal(endpoint.version, byMcp.version); assert.equal(endpoint.changed, true);
+      assert.ok(BigInt(endpoint.endpoints) > BigInt(byMcp.endpoints));
+      assert.deepEqual(endpoint.actor, { type: 'api_key', name: 'Refund agent', self: false });
+
+      // The person's own save (another tab) is theirs; the name is a display name, never an address.
+      ok(await local('PUT', '/v1/rituals/scripts/mine', { key: 'mine', source: sources[2] }));
+      const own = state(await local('GET', `${path}?after=${endpoint.version}&endpoints=${endpoint.endpoints}&wait=25`));
+      assert.equal(own.actor.type, 'member'); assert.equal(own.actor.self, true); assert.doesNotMatch(String(own.actor.name), /@/);
+      // The agent's key reads the same version, with the person's save named but not as its own.
+      const forAgent = state(await request('GET', `${path}?after=${bySave.version}&wait=0`, agent.secret));
+      assert.deepEqual([forAgent.version, forAgent.actor.type, forAgent.actor.self], [own.version, 'member', false]);
+
+      // Auth: a credential is required, and receiving administration (a domain-restricted key is refused).
+      error(await request('GET', path), 401);
+      error(await request('GET', path, restricted), 403, 'ADMIN_REQUIRED');
+      error(await local('GET', `${path}?after=-1`), 422);
+      error(await local('GET', `${path}?wait=26`), 422);
+
+      // Workspace isolation: another workspace's version, saves and endpoint changes never reach this one, and back.
+      const other = unique('live-other'), outsider = { id: unique('key'), secret: `bane_${hex64()}` };
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [other]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'Other agent',$3,$4,'["read","send","manage"]','[]')`, [outsider.id, other, sha(outsider.secret), outsider.secret.slice(0, 14)]);
+      await db.query('INSERT INTO mail_routing_state(workspace_id,version) VALUES ($1,4100)', [other]);
+      // A forged history row naming this workspace's agent key: names are looked up only within the version's own workspace.
+      await db.query("INSERT INTO mail_routing_versions(workspace_id,version,route_ids,changed_ids,actor_type,actor_id,note) VALUES ($1,4100,'{}','{}','apiKey',$2,'Ritual configuration')", [other, agent.id]);
+      await db.query("INSERT INTO audit_events(workspace_id,actor_type,actor_id,via,action,target_type,target_id,retain_until) VALUES ($1,'api_key',$2,'api','endpoint.create','endpoint','hook_other',now()+interval '1 day')", [other, outsider.id]);
+      const theirs = state(await request('GET', path, outsider.secret));
+      assert.deepEqual([theirs.version, theirs.actor], [4100, { type: 'api_key', name: null, self: false }]);
+      assert.ok(BigInt(theirs.endpoints) > BigInt(own.endpoints), 'Their marker is their latest endpoint change.');
+      const ours = state(await local('GET', `${path}?after=${own.version}&endpoints=${own.endpoints}&wait=1`));
+      assert.deepEqual([ours.version, ours.changed, ours.endpoints], [own.version, false, own.endpoints]);
+
+      // Budget: every tick a call may take is charged before the first, on the caller's per-minute request counter.
+      const used = async () => (await db.query("SELECT used FROM api_request_budgets WHERE workspace_id=$1 AND key_id=$2 AND window_start=date_trunc('minute',now())", [w, agent.id])).rows[0]?.used ?? 0;
+      const before = await used();
+      state(await request('GET', `${path}?after=0&wait=25`, agent.secret));
+      assert.equal(await used(), before + 1 + 11, 'One for the request, eleven for the 25 s wait (a read every 2.5 s).');
+      const max = runtime.config.apiRateLimitPerMinute;
+      await db.query("UPDATE api_request_budgets SET used=$3 WHERE workspace_id=$1 AND key_id=$2", [w, agent.id, max - 5]);
+      error(await request('GET', `${path}?after=0&wait=25`, agent.secret), 429, 'REQUEST_RATE_LIMITED');
+
+      // Nothing beyond the version and who: no source, key ID, secret, grant, client address or member address.
+      const text = JSON.stringify(seen);
+      for (const value of [...sources, agent.id, agent.secret, outsider.id, consentId, `mcp_${consentId}`, '@']) assert.ok(!text.includes(value), `A version response repeats ${value.slice(0, 16)}`);
     });
   });
 

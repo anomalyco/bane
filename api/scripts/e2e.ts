@@ -93,6 +93,7 @@ Object.assign(SKIP, {
   restoreRoutingVersion: receivingMvp,
   testRouting: receivingMvp,
   listRitualVersions: receivingMvp,
+  getRitualVersion: receivingMvp,
   restoreRitualVersion: receivingMvp,
   setOmenOptIns: receivingMvp,
   listEndpoints: receivingMvp,

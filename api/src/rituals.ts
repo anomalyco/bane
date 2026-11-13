@@ -23,6 +23,7 @@ import { compileRitual, type Diagnostic } from './ritual-engine.js';
 import { closest, endpointCall, endpointPayloads, ritualCompletions, ritualTemplates, ritualTypings, type EndpointType } from './ritual-schema.js';
 import type { RoutingInput } from './routing-match.js';
 import { registerEndpoints } from './ritual-endpoints.js';
+import { registerRitualVersion } from './ritual-version.js';
 
 const path = '/v1/rituals',
   meta = { security, tags: ['Rituals'] },
@@ -200,6 +201,7 @@ export function registerRituals(app: App) {
   app.openapi(createRoute({...meta,method:'put',path:path+'/omens',operationId:'setOmenOptIns',summary:'Set the domains and routes that may send inbound evidence to Jev',request:{headers:versionHeader,body:json(evalSettings)},responses:ok}),async c=>c.json(await edit(c,x=>({...x,...c.req.valid('json')}),{action:'ritual.omens',after:x=>({evaluateDomains:x.evaluateDomains,evaluateRoutes:x.evaluateRoutes})}),200));
   registerEndpoints(app);
   registerInboxConnection(app);
+  registerRitualVersion(app);
   const DiagnosticSchema = z.object({ ritual: z.string().optional(), line: z.number().int(), column: z.number().int(), endLine: z.number().int(), endColumn: z.number().int(), message: z.string(), hint: z.string().optional() }).openapi('RitualDiagnostic');
   app.openapi(createRoute({
     ...meta, method: 'post', path: path + '/check', operationId: 'checkRitual',
