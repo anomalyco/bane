@@ -139,7 +139,7 @@ function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
 }
 
 export const describeTool: Tool = {
-  name: 'describe_tool', description: 'Get the complete input and output schemas for one listed resource action, including optional filters and nested body fields. Pass those fields directly to the resource tool.',
+  name: 'describe_tool', description: 'Get the full input and output schemas for a resource action, including optional filters and body fields. Pass these directly to the resource tool.',
   inputSchema: { type: 'object', properties: { resource: { type: 'string' }, action: { type: 'string' } }, required: ['resource', 'action'], additionalProperties: false },
   annotations: { readOnlyHint: true, openWorldHint: false },
 };

@@ -7,7 +7,7 @@ import { type Client, support } from './support.js';
 
 export type CssContext = { client: Client; theme: 'light' | 'dark'; lightOnly: boolean; appleColorScheme: boolean; width: number };
 
-const MAX_SHEET = 256 * 1024, MAX_INLINE = 32 * 1024, MAX_TOKENS = 60_000, MAX_DEPTH = 24, MAX_OUTPUT = 512 * 1024, MAX_DATA_URL = 256 * 1024, MAX_SELECTORS = 64;
+const MAX_SHEET = 256 * 1024, MAX_INLINE = 32 * 1024, MAX_TOKENS = 150_000, MAX_DEPTH = 24, MAX_OUTPUT = 512 * 1024, MAX_DATA_URL = 256 * 1024, MAX_SELECTORS = 64;
 class Limit extends Error {}
 class MediaDrop extends Error {}
 

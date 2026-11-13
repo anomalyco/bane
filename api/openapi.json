@@ -2423,7 +2423,7 @@
                   "desktop",
                   "mobile"
                 ],
-                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device."
+                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Defaults to mobile for iOS, Android and Samsung Email; otherwise desktop."
               }
             },
             "required": [
@@ -2464,7 +2464,7 @@
                   "desktop",
                   "mobile"
                 ],
-                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device."
+                "description": "Viewport width in CSS pixels: mobile 390, desktop 800. Defaults to mobile for iOS, Android and Samsung Email; otherwise desktop."
               }
             },
             "required": [

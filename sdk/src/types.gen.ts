@@ -600,7 +600,7 @@ export type EmailPreviewInput = {
     clients: Array<EmailPreviewClient>;
     theme: 'light' | 'dark';
     /**
-     * Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device.
+     * Viewport width in CSS pixels: mobile 390, desktop 800. Defaults to mobile for iOS, Android and Samsung Email; otherwise desktop.
      */
     device?: 'desktop' | 'mobile';
 } | {
@@ -611,7 +611,7 @@ export type EmailPreviewInput = {
     clients: Array<EmailPreviewClient>;
     theme: 'light' | 'dark';
     /**
-     * Viewport width in CSS pixels: mobile 390, desktop 800. Omit to use each client’s default device.
+     * Viewport width in CSS pixels: mobile 390, desktop 800. Defaults to mobile for iOS, Android and Samsung Email; otherwise desktop.
      */
     device?: 'desktop' | 'mobile';
 };
