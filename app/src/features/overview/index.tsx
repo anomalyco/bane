@@ -10,8 +10,8 @@ import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, S
 import { useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, ReportCard, StandingCard, useNextSteps, useSenderScore } from '../score'
-import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
-import { logColumns, logHref, useLogRowIntent } from '../logs/rows'
+import { AsideSkeleton, ChartSkeleton, factTitles, FactsSkeleton, latestColumns, recentCampaignColumns, RegionStatus } from './skeletons'
+import { logHref, useLogRowIntent } from '../logs/rows'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
 import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
@@ -119,14 +119,14 @@ function LatestEmails() {
   const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} />}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={logs.data?.items ?? []} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={latestColumns} />}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {
   const navigate = useNavigate()
   const warm = usePrefetchQueries()
   return <section className="ov-latest"><SectionHeader title="Campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>All <ArrowUpRight size={16} /></Button>} />
-    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} rowHref={row => `/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }} columns={[{ ...recentCampaignColumns[0], render: row => <span>{row.name}<span className="muted"> · {['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), cardRender: row => `${number(row.recipients)} ${row.recipients === 1 ? 'recipient' : 'recipients'}`, align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', cardRender: row => ['sent', 'done'].includes(row.status) ? `${percent(row.recipients ? row.delivered / row.recipients : 0, 0)} delivered` : 'Not sent', align: 'right' }]} />
+    <DataTable className="ov-table" rows={data.recentCampaigns.slice(0, 3)} rowKey={row => row.id} rowHref={row => `/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }} columns={[{ ...recentCampaignColumns[0], render: row => <span className="ov-campaign"><span className="ov-campaign__name" title={row.name}>{row.name}</span><span className="muted">{['sent', 'done'].includes(row.status) ? date(row.updatedAt) : label(row.status)}</span></span>, cardRender: row => <span title={row.name}>{row.name}</span> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), cardRender: row => `${number(row.recipients)} ${row.recipients === 1 ? 'recipient' : 'recipients'}`, align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? percent(row.recipients ? row.delivered / row.recipients : 0) : '—', cardRender: row => ['sent', 'done'].includes(row.status) ? `${percent(row.recipients ? row.delivered / row.recipients : 0, 0)} delivered` : label(row.status), align: 'right' }]} />
   </section>
 }
 
