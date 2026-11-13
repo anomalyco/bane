@@ -5,7 +5,7 @@ import { Button, ConfirmDialog, CopyButton, Input, SectionHeader, Select, Skelet
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
-import type { McpConnection, WorkspaceMembership } from '../../data/types'
+import type { Agent, WorkspaceMembership } from '../../data/types'
 import { roleLabel, useMembershipCache, workspaceApi } from '../../data/workspaces'
 import { label, number } from '../../lib/format'
 import { useSenderScore } from '../score'
@@ -21,6 +21,7 @@ import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
+import { agentAccess, connectionTitle } from './key-labels'
 
 // Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
@@ -136,8 +137,10 @@ const accountApps = ({ 'bane.mx': 'https://account.anoma.ly/apps', 'dev.bane.mx'
 function AccountRows() {
   const session = useSession()
   const access = useWorkspaceAccess()
-  const apps = useApiDef(queries.mcpConnections())
-  const revoke = useApiMutation((api,id:string)=>api.credentials.revokeMcpConnection(id),'MCP connection revoked')
+  // Your own connected agents (another member's that made tokens here are on API keys, not here).
+  const agents = useApiDef(queries.agents(true))
+  const apps = agents.data?.filter(agent => agent.own)
+  const revoke = useApiMutation((api, id: string) => api.credentials.revokeAgent(id), 'Agent revoked')
   const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
@@ -146,35 +149,31 @@ function AccountRows() {
     <Row title="Role" hint={access.role === 'member' ? 'Owners and admins can change it' : undefined}>{access.role ? roleLabel[access.role] : '—'}</Row>
     <Row title="Support" hint="Questions, problems or feedback"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session" hint="Your other accounts stay signed in"><Button onClick={() => session.logout()}>Sign out of this account</Button></Row>
-    {/* An MCP client signs in to the account service, which lists and disconnects it everywhere. Bane lists each
-        client's approval below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
+    {/* An agent signs in to the account service, which lists and disconnects it everywhere. Bane lists each connected
+        agent below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
     {accountApps && <Row title="Connected apps" hint="Disconnect a client from your Anomaly account"><a href={accountApps}>Manage at Anomaly account</a></Row>}
-    {apps.data?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect the client':'Revoked · reconnect the client'}</Row>
+    {apps?.map(app=>app.status==='expired'||app.status==='revoked'?<Row key={app.id} title={connectionTitle(app)} hint={app.clientId}>{app.status==='expired'?'Expired · reconnect the client':'Revoked · reconnect the client'}</Row>
       :<McpApproval key={`${app.id}:${app.workspaceId}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
-    {apps.error && <p role="alert">Couldn’t load MCP approvals.</p>}
+    {agents.error && <p role="alert">Couldn’t load your connected agents.</p>}
     <MutationError error={revoke.error}/>
     {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
-// A client's name and the label of its entry (`?profile=` on its MCP URL), so a personal and a work entry of one client
-// are easy to tell apart. The label is display only.
-export const connectionTitle = (app: Pick<McpConnection, 'name' | 'clientId' | 'profile'>) => `${app.name || app.clientId}${app.profile ? ` · ${app.profile}` : ''}`
-// One approval per client and account. Its tools act in the workspace each call names, checked against your role there
-// on every call; this picks the default for calls that name none (automatic: your only workspace, else the one you used
-// last). Receiving tools need an owner or admin there and full access. Save keeps its place whether or not it is shown,
-// so choosing never moves the row.
-const accessLabel = (scopes: string[]) => scopes.includes('bane:manage') ? 'Full access' : scopes.includes('bane:send') ? 'Read and send' : 'Read only'
-export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: McpConnection; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
+// One connected agent per client and account. Its tools act in the workspace each call names, checked against your role
+// there on every call; this picks the default for calls that name none (automatic: your only workspace, else the one you
+// used last). Receiving tools need an owner or admin there and full access. Save keeps its place whether or not it is
+// shown, so choosing never moves the row.
+export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: Agent; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
   const bind = useApiMutation((api, workspace: string) => api.credentials.bindMcpConnection(app.id, { workspaceId: workspace }), 'Saved')
   const changed = workspaceId !== '' && workspaceId !== app.workspaceId
   const name = connectionTitle(app)
-  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={`${accessLabel(app.scopes)} · ${app.clientId}`}>
+  return <Row title={linked ? <Link to={`/settings/mcp/${encodeURIComponent(app.id)}`}>{name}</Link> : name} hint={`${agentAccess(app.permissions)} · ${app.clientId}`}>
     <span className="settings-mcp">
       <Select aria-label={`Default workspace for ${name}`} className="settings-mcp__workspace" value={workspaceId} placeholder="Last used" disabled={bind.isPending}
         options={workspaces.map(workspace => ({ value: workspace.id, label: workspace.name }))} onValueChange={setWorkspaceId} />
       <Button variant="primary" loading={bind.isPending} data-hidden={!changed || undefined} tabIndex={changed ? undefined : -1} aria-hidden={!changed || undefined} onClick={() => { bind.mutate(workspaceId) }}>Save</Button>
-      <Button variant="danger" aria-label={`Revoke MCP access for ${name}`} onClick={onRevoke}>Revoke</Button>
+      <Button variant="danger" aria-label={`Revoke ${name}`} onClick={onRevoke}>Revoke</Button>
       {bind.error ? <div className="settings-name-error"><MutationError error={bind.error} /></div> : null}
     </span>
   </Row>

@@ -15,6 +15,8 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listMcpConnections` | `connections` · `list` · admin |
 | `bindMcpConnection` | `connections` · `bind` · admin |
 | `revokeMcpConnection` | `connections` · `revoke` · admin |
+| `listAgents` | `connections` · `agents` · admin |
+| `revokeAgent` | `connections` · `revokeAgent` · admin |
 | `getCurrentIdentity` | `settings` · `identity` · admin |
 | `createAgentToken` | `keys` · `createToken` · admin |
 | `listAgentTokens` | `keys` · `listTokens` · admin |
@@ -179,6 +181,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `getInboxChanges` | `inboxes` · `changes` · inboxes |
 | `createInboxAppPassword` | `inboxes` · `createPassword` · inboxes |
 | `listInboxAppPasswords` | `inboxes` · `passwords` · inboxes |
+| `listAppPasswords` | `inboxes` · `allPasswords` · inboxes |
 | `revokeInboxAppPassword` | `inboxes` · `revokePassword` · inboxes |
 | `createInbox` | `inboxes` · `create` · inboxes |
 | `listInboxes` | `inboxes` · `list` · inboxes |

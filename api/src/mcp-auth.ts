@@ -4,6 +4,7 @@ import {ApiError,errors,IdParams,page,PageQuery,response,security,type App,type 
 import {protectedResourceMetadata} from './oidc-resource.js';
 export {authorizeResource as withMcpAuthorization,externalMcpGrant as getMcpGrantActor} from './oidc-resource.js';
 import {auditContext,auditInsert} from './audit.js';
+import {AgentTokenRecord} from './auth.js';
 
 const Connection=z.object({id:z.string(),clientId:z.string(),name:z.string().nullable(),userEmail:z.string(),scopes:z.array(z.string()),createdAt:z.string(),updatedAt:z.string(),status:z.enum(['active','revoked','expired']),
   workspaceId:z.string().nullable().openapi({description:'The default workspace: where the connection\'s tool calls act when they name none. Null: the person\'s only workspace, else their last-used one. Each call can name another workspace of theirs.'}),
@@ -37,6 +38,19 @@ export function clientLabel(name: string | null | undefined) {
   const label = out.join('').trim();
   return NAME_SHOWN.test(label) ? label : '';
 }
+/** Revokes the person's own approval: its agent tokens and everything it created end with it. False if not theirs. */
+async function revokeApproval(c:Ctx,user:string,id:string){
+  // Blocks the tokens of the account service's consents this approval had; a new sign-in there brings it back.
+  const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now(),
+      revoked_issuer_grants=CASE WHEN issuer_grant IS NULL OR issuer_grant=ANY(revoked_issuer_grants) THEN revoked_issuer_grants ELSE revoked_issuer_grants||issuer_grant END
+      WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
+    agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
+    removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)),
+    audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.revoke',workspaceId:sql`coalesce(revoked.workspace_id,${c.get('actor').workspaceId})`,userId:user,
+      target:{type:'mcp_connection',id},before:sql`jsonb_build_object('clientId',revoked.client_id,'scopes',revoked.permissions)`},{from:sql`revoked`})})
+    SELECT grant_key FROM revoked`);
+  return !!changed.rowCount;
+}
 function owner(c:Ctx) {
   const principal=c.get('actor');
   if(principal.credential!=='dashboard') throw new ApiError(403,'DASHBOARD_AUTH_REQUIRED','Use your dashboard session.');
@@ -55,7 +69,7 @@ export function registerMcpAuth(app:App) {
         UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false,NULL FROM bane_expired_approvals WHERE user_id=${user})
       SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${where}`;
   const view=(r:Row)=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving,profile:r.profile});
-  app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
+  app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,deprecated:true,description:'Deprecated: listAgents lists your connected agents with their last use and the agent tokens they made.',request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
     const user=owner(c),{limit,cursor}=c.req.valid('query');
     const {rows}=await c.env.db.execute<Row>(sql`${approvals(user,cursor?sql`WHERE a.id>${cursor}`:sql``)} ORDER BY a.id LIMIT ${limit+1}`);
     return c.json({data:rows.slice(0,limit).map(view),nextCursor:rows.length>limit?rows[limit-1]!.id:null},200);
@@ -77,18 +91,57 @@ export function registerMcpAuth(app:App) {
     if(!result.role) throw new ApiError(403,'PERMISSION_DENIED','You are not a member of that workspace.');
     return c.json({id,workspaceId,receiving:false},200);
   });
-  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
-    const user=owner(c),{id}=c.req.valid('param');
-    // Blocks the tokens of the account service's consents this approval had; a new sign-in there brings it back.
-    const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now(),
-        revoked_issuer_grants=CASE WHEN issuer_grant IS NULL OR issuer_grant=ANY(revoked_issuer_grants) THEN revoked_issuer_grants ELSE revoked_issuer_grants||issuer_grant END
-        WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
-      agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
-      removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)),
-      audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.revoke',workspaceId:sql`coalesce(revoked.workspace_id,${c.get('actor').workspaceId})`,userId:user,
-        target:{type:'mcp_connection',id},before:sql`jsonb_build_object('clientId',revoked.client_id,'scopes',revoked.permissions)`},{from:sql`revoked`})})
-      SELECT grant_key FROM revoked`);
-    if(!changed.rowCount) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
+  app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/revoke',operationId:'revokeMcpConnection',tags:['Auth'],security,deprecated:true,description:'Deprecated: revokeAgent.',request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true)})),...errors}}),async c=>{
+    const {id}=c.req.valid('param');
+    if(!await revokeApproval(c,owner(c),id)) throw new ApiError(404,'NOT_FOUND','MCP connection was not found.');
     return c.json({id,revoked:true as const},200);
+  });
+
+  // ---------- agents: a sign-in and the agent tokens it made, one list ----------
+  type AgentRow={id:string;client_id:string;name:string|null;profile:string|null;permissions:string[];workspace_id:string|null;created_at:string;last_used_at:string|null;status:'active'|'revoked'|'expired';own:boolean;email:string;
+    tokens:{id:string;grant_id:string;permissions:('read'|'send'|'manage')[];domains:string[];purpose:string;expires_at:string;created_at:string;last_used_at:string|null;revoked_at:string|null}[]};
+  const Agent=z.object({id:z.string().describe('The sign-in (mcp_…).'),clientId:z.string(),name:z.string().nullable(),profile:z.string().nullable().openapi({description:'The label of the client entry that connected (?profile= on its MCP URL). Display only.'}),
+    userEmail:z.string().describe('Who signed the agent in.'),own:z.boolean().describe('Your own sign-in. Otherwise another member\'s agent that made agent tokens in this workspace (owners and admins see these).'),
+    status:z.enum(['active','revoked','expired']),permissions:z.array(z.enum(['read','send','manage'])).describe('What the sign-in was approved for, before your role in each workspace narrows it.'),
+    workspaceId:z.string().nullable().describe('Your sign-ins: the default workspace for calls that name none. Null otherwise.'),
+    createdAt:z.string(),lastUsedAt:z.string().nullable().describe('The latest use of the sign-in or of one of its agent tokens here.'),
+    tokens:z.array(AgentTokenRecord).describe('Short-lived agent tokens it made in this workspace, newest first (at most 20). Revoking the agent revokes them.')}).openapi('Agent');
+  const time=(value:string|null)=>value?new Date(value).toISOString():null;
+  app.openapi(createRoute({method:'get',path:'/v1/agents',operationId:'listAgents',tags:['Auth'],security,
+    summary:'List connected agents and their agent tokens',
+    description:'Agent tokens are how agents use Bane: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members\' agents that made tokens here. Dashboard session only.',
+    request:{query:z.object({includeInactive:z.enum(['true','false']).default('false').describe('Also list revoked and expired sign-ins and tokens.')})},responses:{200:response(z.object({data:z.array(Agent)}).openapi('AgentList')),...errors}}),async c=>{
+    const user=owner(c),a=c.get('actor'),w=a.workspaceId,all=c.req.valid('query').includeInactive==='true';
+    const admin=a.role==='owner'||a.role==='admin',live=all?sql``:sql`AND t.revoked_at IS NULL AND t.expires_at>now()`;
+    const {rows}=await c.env.db.execute<AgentRow>(sql`
+      WITH agents AS (
+        SELECT g.id,g.user_id,g.client_id,g.client_id AS name,g.profile,g.permissions,g.workspace_id,g.created_at,g.last_used_at,CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END AS status,true AS own
+          FROM bane_resource_grants g WHERE g.user_id=${user} ${all?sql``:sql`AND NOT g.revoked`}
+        ${all?sql`UNION ALL SELECT e.id,e.user_id,e.client_id,e.name,NULL,ARRAY(SELECT substr(s,6) FROM unnest(e.scopes) s WHERE s LIKE 'bane:%'),NULL,e.created_at,NULL,'expired',true FROM bane_expired_approvals e WHERE e.user_id=${user}`:sql``}
+        UNION ALL SELECT g.id,g.user_id,g.client_id,g.client_id,g.profile,g.permissions,NULL,g.created_at,g.last_used_at,CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END,false
+          FROM bane_resource_grants g WHERE ${admin} AND g.user_id<>${user} AND EXISTS(SELECT FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=g.id ${live})
+        ORDER BY 11 DESC,8 DESC LIMIT 200)
+      SELECT a.id,a.client_id,a.name,a.profile,a.permissions,a.workspace_id,a.created_at::text,a.status,a.own,u.email,
+        greatest(a.last_used_at,(SELECT max(t.last_used_at) FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=a.id))::text AS last_used_at,
+        coalesce((SELECT jsonb_agg(t ORDER BY t.created_at DESC) FROM (SELECT t.id,t.grant_id,t.permissions,t.domains,t.purpose,t.expires_at,t.created_at,t.last_used_at,t.revoked_at FROM agent_tokens t
+          WHERE t.workspace_id=${w} AND t.grant_id=a.id ${live} ORDER BY t.created_at DESC LIMIT 20) t),'[]') AS tokens
+      FROM agents a JOIN bane_users u ON u.id=a.user_id ORDER BY a.own DESC,a.created_at DESC`);
+    const known=['read','send','manage'] as const;
+    return c.json({data:rows.map(r=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,profile:r.profile,userEmail:r.email,own:r.own,status:r.status,
+      permissions:known.filter(p=>r.permissions.includes(p)),workspaceId:r.own?r.workspace_id:null,createdAt:time(r.created_at)!,lastUsedAt:time(r.last_used_at),
+      tokens:r.tokens.map(t=>({id:t.id,grantId:t.grant_id,permissions:t.permissions,domains:t.domains,purpose:t.purpose,expiresAt:time(t.expires_at)!,createdAt:time(t.created_at)!,lastUsedAt:time(t.last_used_at),revokedAt:time(t.revoked_at)}))}))},200);
+  });
+  app.openapi(createRoute({method:'post',path:'/v1/agents/{id}/revoke',operationId:'revokeAgent',tags:['Auth'],security,
+    summary:'Revoke a connected agent and its agent tokens',
+    description:'Your own agent: its sign-in, every agent token it made and everything it created stop working at once (it can sign in again as a new connection). Another member\'s agent (owners and admins): the agent tokens it made in this workspace are revoked; the sign-in belongs to that person. Dashboard session only.',
+    request:{params:IdParams},responses:{200:response(z.object({id:z.string(),revoked:z.literal(true),scope:z.enum(['agent','tokens']).describe('agent: the sign-in and everything it made. tokens: its agent tokens in this workspace.')})),...errors}}),async c=>{
+    const user=owner(c),a=c.get('actor'),{id}=c.req.valid('param');
+    if(await revokeApproval(c,user,id)) return c.json({id,revoked:true as const,scope:'agent' as const},200);
+    if(a.role!=='owner'&&a.role!=='admin') throw new ApiError(404,'NOT_FOUND','Agent was not found.');
+    const {rows}=await c.env.db.execute<{id:string}>(sql`WITH t AS (UPDATE agent_tokens SET revoked_at=now() WHERE workspace_id=${a.workspaceId} AND grant_id=${id} AND revoked_at IS NULL AND expires_at>now() RETURNING id,purpose),
+      audit AS (${auditInsert(auditContext(c),{action:'agent_token.revoke',workspaceId:a.workspaceId,target:{type:'agent_token',id:sql`t.id`},before:sql`jsonb_build_object('purpose',left(t.purpose,200),'agent',${id}::text)`},{from:sql`t`})})
+      SELECT id FROM t`);
+    if(!rows.length && !(await c.env.db.execute(sql`SELECT FROM agent_tokens WHERE workspace_id=${a.workspaceId} AND grant_id=${id} LIMIT 1`)).rowCount) throw new ApiError(404,'NOT_FOUND','Agent was not found.');
+    return c.json({id,revoked:true as const,scope:'tokens' as const},200);
   });
 }

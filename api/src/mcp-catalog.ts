@@ -56,10 +56,10 @@ const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 // agent token; it still needs confirm=true), and manageKeys() reads.
 const SEND_LEVEL = new Set(['sendEmail', 'sendEmailBatch', 'uploadAttachment', 'deleteAttachment', 'createCampaign', 'updateCampaign', 'setCampaignArchived', 'deleteCampaign', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'unscheduleCampaign', 'rescheduleCampaign', 'pauseCampaign', 'resumeCampaign', 'setCampaignPacing', 'renderCampaignPreviewImage', 'renderCampaignTemplatePreviewImage']);
 const READ_LEVEL_WRITES = new Set(['createAgentToken']);
-const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment']);
+const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
-const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection']);
+const DASHBOARD_ONLY = new Set(['listMcpConnections', 'revokeMcpConnection', 'bindMcpConnection', 'listAgents', 'revokeAgent']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -228,11 +228,11 @@ const DESCRIPTIONS: Record<string, string> = {
   sendEndpointVerification: 'Email a forward recipient a new single-use confirmation link. Only the recipient can confirm by opening it and choosing Allow; poll getEndpoint for status.',
   createInboxConnection: 'Create a least-privilege MCP connection limited to chosen inboxes. auth=key returns a bearer key once inside a ready config (OpenCode, Claude Code, Cursor or generic); auth=oauth returns the config plus the human step: the person approves and selects the inboxes on the consent screen.',
   createBillingTopUpLink: 'Returns a Stripe Checkout link for a person to open and pay; agents cannot pay. Share the link with an owner or admin. Amount in whole cents, $20 to $10,000, excluding tax; the link expires in 23 hours and credit appears once Stripe confirms the payment.',
-  createApiKey: 'Create a long-lived API key. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
+  createApiKey: 'Create a long-lived API key: for the workspace (permissions, sender domains), or with access limited to receiving addresses or one agent inbox. Created over MCP, it is tied to this approval and revoked with it. The secret is returned once. Prefer createAgentToken for short scripts.',
   createWebhook: 'Subscribe a public HTTPS URL to sending events. Set up over MCP, it is tied to this approval: it delivers while the approval is active and is paused when the approval is removed, resuming only with its URL and a new signing secret.',
 };
 const PATH_IDS: Record<string, string> = {
-  'mcp-connections': 'connectionId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
+  'mcp-connections': 'connectionId', agents: 'agentId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
   contacts: 'contactId', lists: 'listId', segments: 'segmentId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
   emails: 'emailId', payments: 'paymentId', attachments: 'attachmentId', campaigns: 'campaignId', domains: 'domainId', webhooks: 'webhookId', routes: 'routeId', inboxes: 'inboxId',
 };

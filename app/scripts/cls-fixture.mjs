@@ -305,8 +305,8 @@ export async function seed(fx) {
     security: await make({ address: 'security@northwind.example', key: 'security', displayName: 'Security' }),
     dana: await make({ address: 'dana@northwind.example', displayName: 'Dana Rivera' }),
   };
-  // An inbound key scoped to several addresses: API keys' Access column lists each of them, masked.
-  await dana.api('POST', '/v1/inbound/keys', { name: 'Triage agent', permissions: ['read', 'send'], addressIds: [A.support.id, A.billing.id, A.sales.id] }, 201);
+  // An API key limited to several addresses: API keys' Access column lists each of them, masked.
+  await dana.api('POST', '/v1/api-keys', { name: 'Triage agent', access: { type: 'addresses', addressIds: [A.support.id, A.billing.id, A.sales.id], mail: ['read', 'send'] } }, 201);
   const crm = await dana.api('POST', '/v1/inbound/webhooks', { description: 'CRM intake', url: 'https://hooks.northwind.example/crm', eventTypes: [], addressIds: null, format: 'bane' }, 201);
   await dana.api('POST', '/v1/inbound/webhooks', { description: 'Helpdesk', url: 'https://helpdesk.northwind.example/inbound', eventTypes: ['message.received'], addressIds: [A.support.id], format: 'bane' }, 201);
   const crmId = crm.webhook?.id ?? crm.id;
@@ -383,6 +383,13 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // API keys' agent tokens: that agent with two short-lived tokens it made in Northwind, and Sam's agent with one (an
+  // owner sees another member's agent once it has made tokens here).
+  await db.query("INSERT INTO bane_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at) VALUES('mcp_at_cls_sam','https://account.anoma.ly','user_sam','user_sam','claude-code',NULL,'{read}',now()+interval '1 day',0)");
+  await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,permissions,domains,purpose,expires_at,created_at) VALUES
+    ('agt_cls_import','ws_northwind',$1,'["read","send"]','[]','Import October contacts',now()+interval '50 minutes',now()-interval '10 minutes'),
+    ('agt_cls_digest','ws_northwind',$1,'["send"]','["mail.northwind.example"]','Send the weekly digest',now()+interval '5 hours',now()-interval '1 hour'),
+    ('agt_cls_sam','ws_northwind','mcp_at_cls_sam','["read"]','[]','Check bounce rates',now()+interval '2 hours',now()-interval '30 minutes')`, [mcp]);
   // Driftwood: the rituals page while an agent edits beside it (cls.mjs `live` jobs). Kai's OpenCode approval can change
   // rituals here (the page says it is connected), and the agent's own API key saves the ritual while a job watches.
   const kai = await fx.signIn('kai', 'kai@driftwood.example', 'Kai Moana', { id: 'ws_live', name: 'Driftwood' });

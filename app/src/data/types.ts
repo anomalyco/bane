@@ -77,11 +77,26 @@ export interface CampaignStats { tracking: boolean; totals: { accepted: number; 
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
-export interface ApiKey { revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
-export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'read_send' | 'manage'; domains: string[] }
+export type KeyPermission = 'read' | 'send' | 'manage'
+/** What a key limited to mail may do there: read, send (reply and start conversations), modify (mark read, archive,
+ *  label) and create (make agent inboxes and use the ones it made). */
+export type MailPermission = 'read' | 'send' | 'modify' | 'create'
+/** One API key type. workspace: permissions and domains. addresses: only mail at chosen receiving addresses (null: every
+ *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
+export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
+export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess }
+export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: Exclude<MailPermission, 'create'>[] }
+/** A limited access takes its abilities in access.mail, without permissions or domains. */
+export interface ApiKeyInput { name: string; permissions?: KeyPermission[]; domains?: string[]; access?: CreateApiKeyAccess }
 export interface CreatedApiKey { key: ApiKey; secret: string }
-export interface AgentTokenSummary { id: string; grantId: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
-export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate; status?: 'active'|'expired'|'revoked'; workspaceId?: string | null; receiving?: boolean; profile?: string | null }
+export interface AgentTokenSummary { id: string; grantId: string; permissions: KeyPermission[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
+/** A connected agent (GET /v1/agents): an MCP sign-in and the short-lived agent tokens it made in this workspace. `own`
+ *  false is another member's agent that made tokens here (owners and admins see these). */
+export interface Agent { id: string; clientId: string; name: string | null; profile: string | null; userEmail: string; own: boolean; status: 'active' | 'revoked' | 'expired'; permissions: KeyPermission[]; workspaceId: string | null; createdAt: ISODate; lastUsedAt: ISODate | null; tokens: AgentTokenSummary[] }
+export type AppPasswordProtocol = 'imap' | 'smtp'
+export interface AppPassword { id: string; name: string; protocols: AppPasswordProtocol[]; createdAt: ISODate; inboxId: string; inboxAddress: string }
+export interface AppPasswordInput { inboxId: string; name: string; protocols: AppPasswordProtocol[] }
+export interface CreatedAppPassword { id: string; name: string; protocols: AppPasswordProtocol[]; password: string; createdAt: ISODate }
 export interface CampaignTemplateDraft { name: string; description: string; subject: string; previewText?: string; fromName?: string; replyTo: string[]; html?: string; attachments: string[] }
 export interface CampaignTemplate { id: string; url: string; revision: number; draft: CampaignTemplateDraft; published: CampaignTemplateDraft | null; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
 export interface CampaignTemplateSummary { id: string; url: string; revision: number; name: string; description: string; subject: string; published: boolean; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
@@ -102,11 +117,8 @@ export interface MailboxDomain {
 }
 export interface Mailbox { id: string; key?: string | null; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null; kind?: 'address' | 'inbox' }
 export interface MailAddress { name: string | null; address: string }
-export type MailboxPermission = 'read' | 'send' | 'modify'
 export const inboundEventTypes = ['message.received', 'message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted', 'inbox.created', 'inbox.deleted', 'message.held', 'inbox.quota_exceeded'] as const
 export type MailboxEventType = typeof inboundEventTypes[number]
-export interface MailboxKey { id: string; name: string; prefix: string; addressIds: string[] | null; permissions: MailboxPermission[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
-export interface MailboxKeyInput { name: string; addressIds: string[] | null; permissions: MailboxPermission[] }
 export interface MailboxWebhookDelivery { id: string; webhookId: string; eventId: string; status: 'pending' | 'delivered' | 'failed'; attemptCount: number; lastStatusCode: number | null; lastError: string | null; createdAt: ISODate; updatedAt: ISODate }
 export type MailboxThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'trash' | 'all'
 export interface MailboxThread {
@@ -125,7 +137,7 @@ export interface MailboxThreadDetail extends MailboxThread { messages: MailboxMe
 // Agent inboxes: expiring addresses for agents and tests (`/v1/inboxes`). The ID also works as an addressId.
 export type InboxStatus = 'active' | 'expired' | 'deleting'
 export interface Inbox {
-  id: string; kind: 'inbox'; type: 'ephemeral' | 'sandbox'; address: string; domain: string; name: string | null; metadata: Record<string, unknown>; clientId: string | null
+  id: string; kind: 'inbox'; type: 'ephemeral' | 'sandbox' | 'persistent'; address: string; domain: string; name: string | null; metadata: Record<string, unknown>; clientId: string | null
   status: InboxStatus; createdAt: ISODate; expiresAt: ISODate; deleteAfter: ISODate; limits: { messages: number; bytes: number }
   send: { enabled: boolean; perDay: number; replyOnly: true }; usage: { messages: number; bytes: number; held: number; unread: number; lastMessageAt: ISODate | null }
 }
@@ -268,17 +280,24 @@ export interface BaneApi {
   contacts: { list(input: PageRequest & { email?: string }, signal?: AbortSignal): Promise<PageResult<Contact>>; get(id: string, signal?: AbortSignal): Promise<Contact>; save(input: ContactInput, signal?: AbortSignal): Promise<Contact> }
   lists: { list(input?: PageRequest & { counts?: boolean }, signal?: AbortSignal): Promise<PageResult<AudienceList>>; get(id: string, signal?: AbortSignal): Promise<AudienceList>; create(input: { name: string }, signal?: AbortSignal): Promise<AudienceList>; remove(id: string, signal?: AbortSignal): Promise<void> }
   segments: { list(input?: PageRequest, signal?: AbortSignal): Promise<PageResult<Segment>>; get(id: string, signal?: AbortSignal): Promise<Segment>; save(input: SegmentInput, signal?: AbortSignal): Promise<Segment>; preview(input: SegmentInput & { listId?: string }, signal?: AbortSignal): Promise<AudiencePreview> }
+  /** Every API key, workspace-wide or limited to addresses or an inbox, in one cursor list (100 a page). */
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
-  credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; mcpConnection(id: string, signal?: AbortSignal): Promise<McpConnection>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void>; bindMcpConnection(id: string, input: { workspaceId: string }, signal?: AbortSignal): Promise<void> }
-  domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
-  mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; receivedEmail(id: string, signal?: AbortSignal, delivery?: boolean): Promise<ReceivedEmailDetail>
-    keys(includeRevoked: boolean, signal?: AbortSignal): Promise<MailboxKey[]>
-    createKey(input: MailboxKeyInput, signal?: AbortSignal): Promise<{ key: MailboxKey; secret: string }>
-    revokeKey(id: string, signal?: AbortSignal): Promise<void>
+  /** Agent tokens (connected agents and the tokens they made) and app passwords. */
+  credentials: {
+    agents(includeInactive?: boolean, signal?: AbortSignal): Promise<Agent[]>
+    /** Your own agent: its sign-in and every token it made. Another member's: the tokens it made in this workspace. */
+    revokeAgent(id: string, signal?: AbortSignal): Promise<{ scope: 'agent' | 'tokens' }>
+    revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>
+    bindMcpConnection(id: string, input: { workspaceId: string }, signal?: AbortSignal): Promise<void>
+    appPasswords(signal?: AbortSignal): Promise<AppPassword[]>
+    createAppPassword(input: AppPasswordInput, signal?: AbortSignal): Promise<CreatedAppPassword>
+    revokeAppPassword(inboxId: string, id: string, signal?: AbortSignal): Promise<void>
   }
+  domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain>; chooseReceivingHost?(id: string, input: { host: string | null; confirm?: boolean }, signal?: AbortSignal): Promise<Domain>; remove(id: string, signal?: AbortSignal): Promise<void> }
+  mailboxes: { domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; receivedEmail(id: string, signal?: AbortSignal, delivery?: boolean): Promise<ReceivedEmailDetail> }
   inboxes: {
     folders(id:string,signal?:AbortSignal):Promise<{data:{id:string;role:string|null;path:string;subscribed:boolean;total:number;unseen:number}[]}>
-    list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Inbox>>
+    list(input: { search?: string; cursor?: string; type?: Inbox['type']; status?: InboxStatus }, signal?: AbortSignal): Promise<CursorItems<Inbox>>
     get(id: string, signal?: AbortSignal): Promise<Inbox>
     create(input: InboxInput, signal?: AbortSignal): Promise<CreatedInbox>
     remove(id: string, signal?: AbortSignal): Promise<void>

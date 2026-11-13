@@ -7,9 +7,16 @@
 @property --fade-below { syntax: '<length>'; inherits: false; initial-value: 0px; }
 @property --fade-left { syntax: '<length>'; inherits: false; initial-value: 0px; }
 @property --fade-right { syntax: '<length>'; inherits: false; initial-value: 0px; }
-[data-scroll-fade] { mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-above), #000 calc(100% - var(--fade-below)), transparent), linear-gradient(to right, transparent, #000 var(--fade-left), #000 calc(100% - var(--fade-right)), transparent); mask-composite: intersect; }
-[data-scroll-fade] { scroll-padding: 24px 24px 32px; }
-[data-scroll-fade][data-settled] { transition: --fade-above 160ms ease-out, --fade-below 160ms ease-out, --fade-left 160ms ease-out, --fade-right 160ms ease-out; }
+@property --fade-gap-y { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-pad-y { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-pad-x { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --fade-gap-x { syntax: '<length>'; inherits: false; initial-value: 0px; }
+/* --fade-pad-x/y: the room an area keeps for focus rings (below); a fade starts past it, where the content does. */
+[data-scroll-fade] { mask-image: linear-gradient(to bottom, transparent var(--fade-gap-y), #000 calc(var(--fade-gap-y) + var(--fade-above)), #000 calc(100% - var(--fade-gap-y) - var(--fade-below)), transparent calc(100% - var(--fade-gap-y))), linear-gradient(to right, transparent var(--fade-gap-x), #000 calc(var(--fade-gap-x) + var(--fade-left)), #000 calc(100% - var(--fade-gap-x) - var(--fade-right)), transparent calc(100% - var(--fade-gap-x))); mask-composite: intersect; }
+[data-scroll-fade] { scroll-padding: calc(24px + var(--fade-pad-y)) calc(24px + var(--fade-pad-x)) calc(32px + var(--fade-pad-y)); }
+[data-scroll-fade][data-settled] { transition: --fade-above 160ms ease-out, --fade-below 160ms ease-out, --fade-left 160ms ease-out, --fade-right 160ms ease-out, --fade-gap-y 160ms ease-out, --fade-gap-x 160ms ease-out; }
+[data-scroll-fade]:is([data-more-above], [data-more-below]) { --fade-gap-y: var(--fade-pad-y); }
+[data-scroll-fade]:is([data-more-left], [data-more-right]) { --fade-gap-x: var(--fade-pad-x); }
 [data-scroll-fade][data-more-above] { --fade-above: 24px; }
 [data-scroll-fade][data-more-below] { --fade-below: 32px; }
 [data-scroll-fade][data-more-left] { --fade-left: 24px; }
@@ -24,14 +31,21 @@ a { color: inherit; }
 h1, h2, h3, p { margin: 0; }
 h1, h2, h3 { font-weight: var(--font-weight-regular); }
 :focus:not(:focus-visible) { outline: none; }
-:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+:focus-visible { outline: var(--focus-width) solid var(--color-focus); outline-offset: var(--focus-offset); }
+/* Room for focus rings. A scroll or clip area pads its edges by --focus-reach and takes the same back with a negative
+   margin, so a ring around a control flush with its edge is drawn inside the clip and nothing moves; a page scrolls a
+   focused control that far clear of its edge. A text clip (an ellipsis) uses overflow: clip, which lets the ring out
+   by the same reach while a control inside it has focus. Rows that fill an area edge to edge (tabs, table rows, sheet rows) and controls pulled past an
+   edge for optical alignment draw an inset ring instead. */
+html, .page-surface { scroll-padding-block: var(--focus-reach); }
+:has(:focus-visible) { overflow-clip-margin: var(--focus-reach); }
 ::selection { background: var(--color-active-bg); color: var(--color-text); }
 .ui-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-6); height: var(--control-height); padding: 0 11px; border: 0; border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-bold); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration), color var(--motion-duration), opacity var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .ui-button svg { flex-shrink: 0; }
 .ui-button--primary { background: linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast); color: var(--color-on-contrast); text-shadow: var(--shadow-on-contrast); }
 .ui-button--danger { color: var(--color-danger); }
 .ui-button--ghost { background: var(--color-transparent); box-shadow: none; color: var(--color-muted); }
-.ui-button--sm { height: 24px; padding-inline: 9px; border-radius: 4px; font-size: var(--text-xs); }
+.ui-button--sm { --button-pad-x: 9px; height: 24px; padding-inline: var(--button-pad-x); border-radius: 4px; font-size: var(--text-xs); }
 .ui-button--secondary:hover:not(:disabled), .ui-button--danger:hover:not(:disabled) { background: linear-gradient(var(--color-hover), var(--color-hover)), var(--color-surface); }
 .ui-button--ghost:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); }
 .ui-button--primary:hover:not(:disabled) { background: linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast-hover); }
@@ -54,7 +68,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-select-trigger > span:last-child { display: flex; flex-shrink: 0; }
 .ui-select-trigger[data-placeholder] { color: var(--color-muted); }
 .ui-popover { z-index: 90; background: var(--color-layer-1); border: 0; border-radius: var(--radius-sm); padding: var(--space-4); box-shadow: var(--shadow-popover); font-family: var(--font-body); font-size: var(--text-sm); line-height: var(--leading-sm); color: var(--color-text); animation: ui-appear var(--motion-duration) ease-out; }
-.ui-popover-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.ui-popover-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-reach); margin: calc(-1 * var(--focus-reach)); --fade-pad-x: var(--focus-reach); --fade-pad-y: var(--focus-reach); }
 .ui-select-content { min-width: var(--radix-select-trigger-width); max-height: min(320px, var(--radix-select-content-available-height)); overflow: hidden; }
 .ui-select-item, .ui-menu-item { display: flex; align-items: center; gap: var(--space-8); min-height: var(--control-height); padding: var(--space-4) var(--space-8); border-radius: 4px; outline: none; cursor: pointer; user-select: none; }
 .ui-select-item[data-disabled], .ui-menu-item[data-disabled] { cursor: not-allowed; }
@@ -101,7 +115,7 @@ a.ui-tab { text-decoration: none; }
 .ui-dialog__header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); flex-shrink: 0; }
 .ui-dialog__title { font-size: 15px; line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .ui-dialog__description { color: var(--color-muted); margin-top: var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); }
-.ui-dialog__body { min-height: 0; overflow-y: auto; padding: 0; margin: var(--space-16) 0 0; }
+.ui-dialog__body { --fade-pad-x: var(--focus-reach); --fade-pad-y: var(--focus-reach); min-height: 0; overflow-y: auto; padding: var(--focus-reach); margin: calc(var(--space-16) - var(--focus-reach)) calc(-1 * var(--focus-reach)) calc(-1 * var(--focus-reach)); }
 .ui-dialog__body:empty { display: none; }
 .ui-dialog__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-8); margin-top: var(--space-16); flex-shrink: 0; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
@@ -137,7 +151,7 @@ a.ui-tab { text-decoration: none; }
 .ui-status__dot { width: 4px; height: 4px; flex-shrink: 0; background: var(--tone-marker); border-radius: 50%; }
 .ui-status-dot { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; white-space: nowrap; }
 .ui-status-dot > .ui-status__dot { width: 6px; height: 6px; }
-.ui-status-dot__value, .ui-status-dot__note { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-status-dot__value, .ui-status-dot__note { min-width: 0; overflow: clip; text-overflow: ellipsis; }
 /* The value keeps its whole width (up to the cell, less the dot); only the note gives way. */
 .ui-status-dot__value { flex: none; max-width: calc(100% - 14px); }
 .ui-status-dot__note { flex: 0 1 auto; color: var(--color-muted); }
@@ -219,11 +233,11 @@ a.ui-tab { text-decoration: none; }
 .ui-card[data-selected='true'] { background: var(--color-active-bg); }
 .ui-card__main { display: flex; flex: 1; flex-direction: column; gap: var(--space-4); align-self: flex-start; min-width: 0; }
 .ui-card__head, .ui-card__line { display: flex; align-items: center; gap: var(--space-8); height: 20px; min-width: 0; white-space: nowrap; }
-.ui-card__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); }
+.ui-card__title { flex: 1; min-width: 0; overflow: clip; text-overflow: ellipsis; font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); }
 .ui-card__title > * { vertical-align: top; }
 .ui-card__aside { display: inline-flex; flex: none; align-items: center; gap: var(--space-6); color: var(--color-muted); font-size: var(--text-xs); }
-.ui-card__line { overflow: hidden; color: var(--color-muted); }
-.ui-card__segment { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 20px; }
+.ui-card__line { overflow: clip; color: var(--color-muted); }
+.ui-card__segment { display: block; flex: 0 1 auto; min-width: 0; overflow: clip; text-overflow: ellipsis; line-height: 20px; }
 .ui-card__segment:last-child { flex-shrink: 1; }
 .ui-card__segment + .ui-card__segment::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
 .ui-card__segment > .ui-status { vertical-align: top; }
@@ -247,7 +261,7 @@ a.ui-tab { text-decoration: none; }
 .ui-sheet__grab > span { width: 36px; height: 4px; border-radius: 2px; background: var(--color-border-strong); }
 .ui-sheet__title { flex: none; padding: var(--space-4) 0 var(--space-12); font-size: 15px; line-height: var(--leading-sm); font-weight: var(--font-weight-bold); touch-action: none; }
 .ui-sheet__description { margin-top: calc(-1 * var(--space-8)); padding-bottom: var(--space-12); color: var(--color-muted); }
-.ui-sheet__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.ui-sheet__body { --fade-pad-x: var(--focus-reach); --fade-pad-y: var(--focus-reach); min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--focus-reach); margin: calc(-1 * var(--focus-reach)); }
 .ui-sheet-overlay { animation: ui-appear 240ms ease-out; }
 .ui-dialog--sheet .ui-dialog__header { min-height: var(--control-height); margin-right: -10px; touch-action: none; }
 .ui-dialog--sheet .ui-dialog__description { touch-action: none; }
@@ -260,6 +274,7 @@ a.ui-tab { text-decoration: none; }
 .ui-action-sheet__item + .ui-action-sheet__item { box-shadow: inset 0 1px var(--color-border-muted); }
 .ui-action-sheet__item:active:not(:disabled) { background: var(--color-pressed); transition-duration: 0ms; }
 .ui-action-sheet__item--danger { color: var(--color-danger); }
+.ui-action-sheet__item:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
 .ui-action-sheet__label { display: flex; flex-direction: column; gap: 2px; }
 .ui-action-sheet__hint { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .ui-action-sheet__cancel { justify-content: center; margin-top: var(--space-8); border-radius: var(--radius-sm); box-shadow: var(--shadow-button); font-weight: var(--font-weight-bold); }
@@ -279,7 +294,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
   .ui-input { font-size: 16px; }
   .ui-button { padding-inline: 14px; font-size: 14px; }
   .ui-icon-button { padding: 0; }
-  .ui-button--sm { position: relative; height: 36px; padding-inline: 12px; font-size: var(--text-sm); }
+  .ui-button--sm { --button-pad-x: 12px; position: relative; height: 36px; padding-inline: var(--button-pad-x); font-size: var(--text-sm); }
   .ui-button--sm::after { content: ''; position: absolute; inset: -4px 0; }
   .ui-icon-button.ui-button--sm { width: 36px; }
   .ui-tabs { min-height: 44px; }

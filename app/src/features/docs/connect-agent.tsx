@@ -49,8 +49,8 @@ const errorText = (e: unknown) => e instanceof ApiError ? e.text : (e as Error).
 
 /**
  * Connect an agent: as you over OAuth (it gets the access you approve in the browser, and you can narrow it to chosen
- * inboxes there), or to one agent inbox with an inbox key that can't reach anything else. Opened from an inbox, that
- * inbox is chosen. Every open starts fresh.
+ * inboxes there), or to one agent inbox with an API key for that inbox that can't reach anything else. Opened from an
+ * inbox, that inbox is chosen. Every open starts fresh.
  */
 export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: boolean; onOpenChange: (open: boolean) => void; inboxId?: string }) {
   const { canAdminister } = useWorkspaceAccess()
@@ -90,11 +90,11 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const close = () => { if (!busy) onOpenChange(false) }
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title="Connect an agent" className="connect-agent-dialog"
     description="Let an AI agent such as OpenCode, Claude Code or Cursor work with Bane over MCP."
-    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create inbox key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
+    footer={mode === 'key' && !result ? <><Button disabled={busy} onClick={close}>Cancel</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></> : <Button variant="primary" onClick={close}>Done</Button>}>
     <div className="stack">
       {!result && <>
-        <Field label="What it can reach" hint={mode === 'oauth' ? 'It signs in as you and gets the access you approve in the browser. On that screen you can also limit it to chosen agent inboxes.' : 'A key that reads one agent inbox and nothing else in the workspace. It stops working when the inbox is deleted.'}>
-          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me (OAuth)' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox (inbox key)' }] : [])]} />
+        <Field label="What it can reach" hint={mode === 'oauth' ? 'It signs in as you and gets the access you approve in the browser. On that screen you can also limit it to chosen agent inboxes.' : 'An API key that reads one agent inbox and nothing else in the workspace. It stops working when the inbox is deleted.'}>
+          <Select value={mode} onValueChange={value => { setMode(value as typeof mode); setError('') }} options={[{ value: 'oauth', label: 'Sign in as me (OAuth)' }, ...(canAdminister ? [{ value: 'key', label: 'One agent inbox (API key for this inbox)' }] : [])]} />
         </Field>
         {mode === 'oauth' ? <Field label="Access it asks for" hint={client === 'opencode' ? selected.hint : `${mcpClientNames[client]} asks for read access; you can approve more in the browser.`}>
           <Select value={access} onValueChange={value => setAccess(value as McpAccess)} disabled={client !== 'opencode'} options={mcpAccess.map(({ value, label }) => ({ value, label }))} />
@@ -106,7 +106,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
           <Checkbox checked={reply} onCheckedChange={setReply} label="Also let it reply to people who wrote to the inbox (needs replies on for the inbox)" />
         </>}
       </>}
-      {result && <Alert tone="success" title="Inbox key created">Copy the setup now: the key is shown only once. You’ll find it in API keys and on the inbox’s page{keyName ? <>, named “{keyName}”</> : null}.</Alert>}
+      {result && <Alert tone="success" title="API key created">Copy the setup now: the key is shown only once. You’ll find it in API keys and on the inbox’s page{keyName ? <>, named “{keyName}”</> : null}.</Alert>}
       {error && <Alert tone="danger">{error}</Alert>}
       {(mode === 'oauth' || result) && <McpClientSetup client={client} onClient={setClient} url={url} auth={result?.key ? { bearer: result.key } : { scope: selected.scope }} />}
       {mode === 'key' && !result && <McpClientPreview client={client} onClient={setClient} />}

@@ -5,6 +5,7 @@ import { useApi, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
 import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { BaneApi } from './types'
+import { openApiQuery } from '../features/docs/openapi'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
@@ -26,7 +27,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
     // Self-hosted domain reads call SES for every identity (the list refreshes by default), so only hosted workspaces warm it.
     case '/domains': return multiTenant && canAdminister ? [queries.domains(regionId, 1)] : []
-    case '/api-keys': return canAdminister ? [queries.keys(undefined, false), queries.agentTokens(false), queries.mcpConnections(), queries.mailboxKeys(false), queries.inboundAddressOptions()] : []
+    case '/api-keys': return canAdminister ? [queries.keys(undefined, false), queries.agents(false), queries.appPasswords(), queries.inboundAddressOptions()] : []
     // Self-hosted settings load their own region and workspace data; hosted memberships come with the session (/v1/me).
     case '/settings': return !multiTenant || !canAdminister ? [] : [queries.connection(), queries.webhooks(), queries.workspaceMembers(), queries.workspaceInvitations()]
     default: return []
@@ -53,7 +54,9 @@ export function usePrefetchRoute() {
   return useCallback(async (path: string) => {
     const chunk = routeChunks[path]?.().catch(() => {})
     const data = api.mode === 'live' ? prefetchQueries(cache, api, firstScreen(path, { regionId, multiTenant, canAdminister })) : undefined
-    await Promise.all([chunk, data])
+    // The docs read the public API definition, not the workspace's API.
+    const docs = path === '/docs' ? cache.prefetchQuery(openApiQuery) : undefined
+    await Promise.all([chunk, data, docs])
   }, [cache, api, regionId, multiTenant, canAdminister])
 }
 

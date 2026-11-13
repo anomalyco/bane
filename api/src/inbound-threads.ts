@@ -5,7 +5,7 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, errors, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, errors, isoTime, json, lazyModule, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages, retainedMail } from './db/mailbox.js';
@@ -43,7 +43,7 @@ const ListQuery = PageQuery.extend({ view: View.default('all'), q: z.string().tr
 
 // Preserve Postgres microseconds in the cursor even though the public timestamps use milliseconds.
 const preciseTime = (column: SQLWrapper) => sql<string>`to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
-const timestamp = (value: string) => new Date(value.includes('T') ? value : value.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')).toISOString();
+const timestamp = (value: string) => isoTime(value)!;
 const cursorPair = z.tuple([z.iso.datetime(), Id]);
 function decodeCursor(value?: string) {
   if (!value) return null;

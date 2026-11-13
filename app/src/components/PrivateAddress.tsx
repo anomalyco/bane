@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { PRIVATE_TITLE, maskedParts, nameParts } from '../lib/private-address'
 import { measuredWidth, onRulerChange } from '../lib/text-ruler'
+import { useMasking } from '../lib/privacy'
 
 // Renders any address by the dashboard's one rule (lib/private-address.ts): a mailbox address is masked after its first
-// two characters until hovered or focused; a domain or domain-only label renders as it is.
+// two characters until hovered or focused; a domain or domain-only label renders as it is. With privacy mode off
+// (lib/privacy.ts) every address is revealed, and keeps the same reserved width.
 //
 // Masked, the rest of the address is not in the page: the box holds the two characters and an empty, blurred run. The
 // box is given the width of the whole address up front (measured without rendering it, lib/text-ruler.ts) and keeps it
@@ -36,7 +38,8 @@ export function useMasked(text: string) {
   const root = useRef<HTMLSpanElement>(null), box = useRef<HTMLSpanElement>(null)
   const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), [alone, setAlone] = useState(false)
   const held = useSyncExternalStore(subscribeFocus, () => focusHolds(root.current))
-  const revealed = hovered || focused || held
+  const masking = useMasking()
+  const revealed = !masking || hovered || focused || held
   useLayoutEffect(() => {
     const reserve = () => { if (box.current) box.current.style.inlineSize = `${measuredWidth(box.current, text)}px` }
     reserve()
@@ -56,12 +59,12 @@ export function useMasked(text: string) {
   return {
     revealed, box: box as RefObject<HTMLSpanElement>,
     root: {
-      ref: root as RefObject<HTMLSpanElement>, title: revealed ? undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone ? 0 : undefined,
+      ref: root as RefObject<HTMLSpanElement>, title: revealed ? undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
       // A mouse or pen reveals by hovering. A finger has no hover: it reveals an address that takes focus by tapping it
       // (not every browser moves focus on a tap, so the click does).
       onPointerEnter: (event: PointerEvent) => { if (event.pointerType !== 'touch') setHovered(true) },
       onPointerLeave: () => setHovered(false),
-      onClick: alone ? (event: MouseEvent<HTMLElement>) => event.currentTarget.focus() : undefined,
+      onClick: alone && masking ? (event: MouseEvent<HTMLElement>) => event.currentTarget.focus() : undefined,
       onFocus: (event: FocusEvent) => { if (event.target === event.currentTarget) setFocused(true) },
       onBlur: (event: FocusEvent) => { if (event.target === event.currentTarget) setFocused(false) },
     },

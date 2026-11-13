@@ -1,6 +1,6 @@
-import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
+import { ApiError, type MailRoute, type RoutingTestResult, type BaneApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity, type OverviewSetup } from './types'
 
-import type { McpConnection } from './types'
+import type { Agent, ApiKey, AppPassword, CreatedAppPassword } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogEntry, SenderScore } from './types'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -268,22 +268,18 @@ export function createLiveApi(): BaneApi {
       preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', input.listId ? {listId: input.listId} : {}, signal), contacts: []} as any }
     },
     keys: {
-      list: async (signal, cursor, includeRevoked = true) => { const result = await call(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
-      create: async (input, signal) => { const result = await call('/api-keys', 'POST', {name: input.name, permissions: input.permission === 'manage' ? ['read', 'send', 'manage'] : input.permission === 'read_send' ? ['read', 'send'] : [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key: {...key, permission: key.permissions.includes('manage') ? 'manage' : key.permissions.join(', ')}, secret} as any },
+      list: async (signal, cursor, includeRevoked = true) => { const result = await call<{ data: ApiKey[]; nextCursor: string | null }>(`/api-keys?limit=100&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      create: async (input, signal) => { const { secret, ...key } = await call<ApiKey & { secret: string }>('/api-keys', 'POST', input, signal); return { key, secret } },
       revoke: async (id, signal) => { await call(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },
     credentials: {
-      agentTokens: async (includeInactive = false, signal) => (await call(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
+      agents: async (includeInactive = false, signal) => (await call<{ data: Agent[] }>(`/agents?includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
+      revokeAgent: (id, signal) => call<{ scope: 'agent' | 'tokens' }>(`/agents/${idPath(id)}/revoke`, 'POST', undefined, signal),
       revokeAgentToken: async (id, signal) => { await call(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
-      mcpConnections: async signal => (await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
-      // One approval of this tab's account, from its list (another account's is not in it).
-      mcpConnection: async (id, signal) => {
-        const found = ((await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data as McpConnection[]).find(connection => connection.id === id)
-        if (!found) throw new ApiError('MCP connection was not found.', 'NOT_FOUND', {}, undefined, 404)
-        return found
-      },
-      revokeMcpConnection: async (id, signal) => { await call(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       bindMcpConnection: async (id, input, signal) => { await call(`/mcp-connections/${idPath(id)}/workspace`, 'POST', input, signal) },
+      appPasswords: async signal => (await call<{ data: AppPassword[] }>('/app-passwords', 'GET', undefined, signal)).data,
+      createAppPassword: ({ inboxId, ...input }, signal) => call<CreatedAppPassword>(`/inboxes/${idPath(inboxId)}/app-passwords`, 'POST', input, signal),
+      revokeAppPassword: async (inboxId, id, signal) => { await call(`/inboxes/${idPath(inboxId)}/app-passwords/${idPath(id)}`, 'DELETE', undefined, signal) },
     },
     templates: {
       list: (input = {}, signal) => page('/templates', input, row => row as import('./types').CampaignTemplateSummary, {search: input.search, archived: input.archived === true ? 'true' : 'false', publishedOnly: input.publishedOnly === true ? 'true' : 'false'}, signal),
@@ -303,16 +299,13 @@ export function createLiveApi(): BaneApi {
       disableDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
       checkDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
       receivedEmail: (id, signal, delivery = true) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=${delivery}&includeHtml=true`, 'GET', undefined, signal),
-      keys: async (includeRevoked, signal) => (await inboundCall<{ data: MailboxKey[] }>(`/keys?limit=100&includeRevoked=${includeRevoked}`, 'GET', undefined, signal)).data,
-      createKey: async (input, signal) => { const { secret, ...key } = await inboundCall<MailboxKey & { secret: string }>('/keys', 'POST', { name: input.name, permissions: input.permissions, ...(input.addressIds ? { addressIds: input.addressIds } : {}) }, signal); return { key, secret } },
-      revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },
     },
     inboxes: {
       folders:async(id,signal)=>{
         const page=await call(`/inboxes/${idPath(id)}/folders`,'GET',undefined,signal);
         return {data:[...page.data,...(page.additionalFolders??[])]};
       },
-      list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await call<{ data: Inbox[]; nextCursor: string | null }>(`/inboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.type ? { type: input.type } : {}), ...(input.status ? { status: input.status } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await call<{ data: Inbox[]; nextCursor: string | null }>(`/inboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       get: (id, signal) => call<Inbox>(`/inboxes/${idPath(id)}`, 'GET', undefined, signal),
       create: (input, signal) => call<CreatedInbox>('/inboxes', 'POST', input, signal),
       remove: async (id, signal) => { await call(`/inboxes/${idPath(id)}`, 'DELETE', undefined, signal) },

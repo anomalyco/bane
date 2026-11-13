@@ -22,7 +22,7 @@
 .settings-rows { display: flex; flex-direction: column; border-top: 1px solid var(--color-border-muted); }
 .settings-row { display: grid; grid-template-columns: minmax(140px, 240px) minmax(0, 1fr); align-items: center; gap: var(--space-24); height: 53px; border-bottom: 1px solid var(--color-border-muted); }
 .settings-row__label { display: flex; flex-direction: column; min-width: 0; }
-.settings-row__label > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-row__label > span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .settings-inline { flex-wrap: nowrap; }
@@ -53,6 +53,7 @@
   .settings-rail__group-title { display: none; }
   .settings-rail a { position: relative; flex: none; height: var(--control-height); padding-inline: var(--space-8); border-radius: 0; }
   .settings-rail a[aria-current='page'] { background: none; }
+  .settings-rail a:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
   .settings-rail a[aria-current='page']::after { content: ''; position: absolute; inset: auto 0 0; height: 1px; background: var(--color-faint); }
   .hosted-settings__content { max-width: none; padding-top: 0; }
 }

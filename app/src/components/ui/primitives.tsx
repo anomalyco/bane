@@ -123,7 +123,7 @@ export function Dialog({ open, onOpenChange, title, description, children, foote
   // Native input autofocus can precede Radix's callback; retain the external opener, not the mounted input.
   return <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}><DialogPrimitive.Portal><DialogPrimitive.Overlay className="ui-dialog-overlay" /><DialogPrimitive.Content data-component="Dialog" data-sensitive={sensitive || undefined} {...drag} className={cx('ui-dialog', sheet && 'ui-dialog--sheet', className)} aria-describedby={description ? descriptionId : undefined} onFocusCapture={event => { const previous = event.relatedTarget; if (previous instanceof HTMLElement && previous !== document.body && !event.currentTarget.contains(previous)) returnFocus.current = previous; }} onOpenAutoFocus={event => { const focused = document.activeElement; const dialog = event.target; if (focused instanceof HTMLElement && (!(dialog instanceof HTMLElement) || !dialog.contains(focused))) returnFocus.current = focused; }} onCloseAutoFocus={event => { if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); } }}>{sheet && <><SheetOpenEffects /><div className="ui-sheet__grab" aria-hidden="true"><span /></div></>}<div className="ui-dialog__header"><DialogPrimitive.Title className="ui-dialog__title">{title}</DialogPrimitive.Title><DialogPrimitive.Close asChild><IconButton label="Close dialog"><X size={16} /></IconButton></DialogPrimitive.Close></div>{description && <DialogPrimitive.Description id={descriptionId} className="ui-dialog__description">{description}</DialogPrimitive.Description>}<div className="ui-dialog__body">{children}</div>{footer && <div className="ui-dialog__footer">{footer}</div>}</DialogPrimitive.Content></DialogPrimitive.Portal></DialogPrimitive.Root>;
 }
-export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
+export function ConfirmDialog({ open, onOpenChange, title, description, confirmLabel = 'Confirm', onConfirm, pending, danger = false }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: ReactNode; confirmLabel?: string; onConfirm: () => void | Promise<unknown>; pending?: boolean; danger?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { if (open) setError(null); }, [open]);
@@ -305,6 +305,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 type ToastTone = 'success' | 'error' | 'info';
 type ToastFn = (message: string, tone?: ToastTone) => void;
 const ToastContext = createContext<ToastFn | null>(null);
+const KEPT_TOASTS = 'bane.kept-toasts';
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<{ id: number; message: string; tone: ToastTone }[]>([]);
   const sequence = useRef(0);
@@ -312,6 +313,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const dismiss = useCallback((id: number) => { clearTimeout(timers.current.get(id)); timers.current.delete(id); setToasts(current => current.filter(toast => toast.id !== id)); }, []);
   const toast = useCallback<ToastFn>((message, tone = 'info') => { const id = ++sequence.current; setToasts(current => [...current.slice(-3), { id, message, tone }]); timers.current.set(id, setTimeout(() => dismiss(id), 6000)); }, [dismiss]);
   useEffect(() => { const current = timers.current; return () => current.forEach(clearTimeout); }, []);
+  // A reload for a new build (lib/preloadable.ts) keeps what was just confirmed, such as "Joined <workspace>".
+  const shown = useRef(toasts); shown.current = toasts;
+  useEffect(() => {
+    try { const kept = sessionStorage.getItem(KEPT_TOASTS); sessionStorage.removeItem(KEPT_TOASTS); if (kept) for (const { message, tone } of JSON.parse(kept) as { message: string; tone: ToastTone }[]) toast(message, tone); } catch { /* Nothing to restore. */ }
+    const keep = () => { try { sessionStorage.setItem(KEPT_TOASTS, JSON.stringify(shown.current.map(({ message, tone }) => ({ message, tone })))); } catch { /* The toasts go with the page. */ } };
+    window.addEventListener('bane:reloading', keep);
+    return () => window.removeEventListener('bane:reloading', keep);
+  }, [toast]);
   return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Alert key={item.id} tone={item.tone === 'error' ? 'danger' : item.tone} onDismiss={() => dismiss(item.id)}>{item.message}</Alert>)}</div></ToastContext.Provider>;
 }
 export function useToast(): ToastFn {

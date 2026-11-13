@@ -50,9 +50,9 @@ flowchart LR
   ingest -->|"deliver, or hold if over limit or expired"| inbox[("Agent inbox")]
   sim["POST /v1/inboxes/{id}/simulate<br/>(sandbox only)"] --> inbox
   admin["Workspace key or dashboard"] --> api["REST API /v1/inboxes"]
-  prov["Provisioning key<br/>creates inboxes, sees its own"] --> api
-  ikey["Inbox key<br/>one inbox"] --> api
-  mcp["Hosted MCP /mcp<br/>agent with an inbox key"] --> api
+  prov["API key that creates inboxes<br/>sees its own"] --> api
+  ikey["API key for one inbox"] --> api
+  mcp["Hosted MCP /mcp<br/>agent with an inbox API key"] --> api
   sdk["SDK waitForMessage<br/>30-second long polls"] --> api
   api --> inbox
   inbox -->|"reply-only, 20 a day,<br/>to verified authors"| out["Outbound mail via SES"]
@@ -65,8 +65,8 @@ flowchart LR
 |---|:-:|---|:-:|:-:|:-:|:-:|:-:|
 | Workspace admin: manage API key or dashboard admin | ✓ | every inbox | ✓ | ✓ | ✓¹ | ✓ | ✓ (not over MCP) |
 | Dashboard member | – | every inbox | ✓ | – | ✓¹ | – | – |
-| Provisioning key: inbound key with `create` and `addressIds: []` | ✓ | inboxes it created | with `read` | with `modify` | with `send`¹ | with `modify` | – |
-| Inbox key: `credential` from `createInbox` | – | its inbox | with `read` | with `modify` | with `send`¹ | with `modify` | – |
+| API key that creates inboxes: `access` addresses `[]` with `create` | ✓ | inboxes it created | with `read` | with `modify` | with `send`¹ | with `modify` | – |
+| API key for one inbox: `access` inbox, or `credential` from `createInbox` | – | its inbox | with `read` | with `modify` | with `send`¹ | with `modify` | – |
 | Hosted MCP agent | as its key | as its key | ✓ | `confirm: true` | `confirm: true`, `mode: "reply"`¹ | – | – |
 | Read-only or domain-restricted API key | – | – | – | – | – | – | – |
 | Hourly sweep | – | – | – | erases ended inboxes | – | – | – |
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Lifecycle
 
-An inbox key with `read` can see the `junk` flag and SPF, DKIM and DMARC verdicts for mail delivered to **its own inbox**. Agents can use those verdicts to check a sender; they do not make the message content trustworthy. This does not grant access to workspace-wide spam or delivery details in Logs or the inbound API.
+An API key for an inbox with `read` can see the `junk` flag and SPF, DKIM and DMARC verdicts for mail delivered to **its own inbox**. Agents can use those verdicts to check a sender; they do not make the message content trustworthy. This does not grant access to workspace-wide spam or delivery details in Logs or the inbound API.
 
 ```mermaid
 stateDiagram-v2
@@ -111,7 +111,7 @@ Every snippet here was run against a local Bane on 2026-11-11 (isolated harness 
 
 ```sh
 export BANE_URL=https://bane.mx        # or your installation's URL
-export BANE_API_KEY=bane_…             # a workspace manage key, or a provisioning key
+export BANE_API_KEY=bane_…             # a workspace manage key, or an API key that creates inboxes
 AUTH="Authorization: Bearer $BANE_API_KEY"
 
 # 1. Create an inbox. Defaults: a random address on your oldest active receiving host, 24 hours.
@@ -192,18 +192,18 @@ const { extract } = await waitForMessage({ client, inboxId: inbox.id, subjectCon
 // extract.codes[0] === '731904' in the verified run
 ```
 
-`BANE_INBOX_KEY` is a provisioning key, created once:
+`BANE_INBOX_KEY` is an API key that creates inboxes, created once:
 
 ```sh
-curl -sS "$BANE_URL/v1/inbound/keys" -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"name":"agents","permissions":["create","read","modify"],"addressIds":[]}' | jq -r .secret
+curl -sS "$BANE_URL/v1/api-keys" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"agents","access":{"type":"addresses","addressIds":[],"mail":["create","read","modify"]}}' | jq -r .secret
 ```
 
 `waitForMessage` resolves with the oldest matching message, codes and links already extracted, and throws `InboxWaitTimeout` after two minutes (`timeoutMs`). For the next message pass `after: message.cursor`.
 
 ### MCP session
 
-Point an MCP client at hosted Bane with a provisioning or inbox key as the bearer token. For OpenCode:
+Point an MCP client at hosted Bane with an API key that creates inboxes, or one for a single inbox, as the bearer token. For OpenCode:
 
 ```json
 {"mcp":{"servers":{"bane-inbox":{"type":"remote","url":"https://bane.mx/mcp","oauth":false,"headers":{"Authorization":"Bearer {env:BANE_INBOX_KEY}"}}}}}

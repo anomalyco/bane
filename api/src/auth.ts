@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
+import { ApiError, actor, digest, errors, hasSessionCookie, id, IdParams, isoTime, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
@@ -132,16 +132,42 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   await next();
 };
-const KeySchema = z.object({ id: z.string(), name: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), prefix: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('ApiKey');
-const AgentTokenRecord = z.object({ id: z.string(), grantId: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string(), expiresAt: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('AgentTokenRecord');
-const KeyInput = z.object({ name: z.string().trim().min(1).max(100), permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).default(['send']), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]) }).strict().openapi('CreateApiKey');
+const MailPermission = z.enum(['read', 'send', 'modify', 'create']);
+const KeyAccess = z.object({
+  type: z.enum(['workspace', 'addresses', 'inbox']).describe('workspace: the whole workspace, with permissions and domains. addresses: only mail at receiving addresses. inbox: only one agent inbox; the key stops working when the inbox is deleted.'),
+  addressIds: z.array(z.string()).nullable().describe('addresses: the receiving addresses it may use, or null for every address including ones added later. inbox: the inbox. Null for workspace keys.'),
+  inboxId: z.string().nullable().describe('inbox: the agent inbox the key belongs to.'),
+  mail: z.array(MailPermission).describe('addresses and inbox: read (mail, events, attachments), send (reply and start conversations from those addresses only), modify (mark read, archive, star, label, delete an inbox), create (create agent inboxes and use the ones it created). Empty for workspace keys.'),
+}).openapi('ApiKeyAccess');
+const KeySchema = z.object({ id: z.string(), name: z.string(),
+  permissions: z.array(z.enum(['read', 'send', 'manage'])).describe('Workspace permissions. Empty for a key limited to addresses or an inbox: see access.'),
+  domains: z.array(z.string()), prefix: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable(),
+  access: KeyAccess, expiresAt: z.string().nullable().describe('When a key limited to an expiring inbox stops working (the inbox\'s deletion time). Null otherwise.'),
+}).openapi('ApiKey');
+export const AgentTokenRecord = z.object({ id: z.string(), grantId: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string(), expiresAt: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('AgentTokenRecord');
+const KeyAccessInput = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('workspace') }).strict(),
+  z.object({ type: z.literal('addresses'), addressIds: z.array(z.string().min(1).max(120)).max(500).optional().describe('Receiving address IDs. Omit for every address, including ones added later. [] with create: only the inboxes the key creates.'),
+    mail: z.array(MailPermission).min(1).max(4).default(['read']) }).strict(),
+  z.object({ type: z.literal('inbox'), inboxId: z.string().min(1).max(120).describe('An active agent inbox. The key stops working when the inbox is deleted, and when an expiring inbox ends.'),
+    mail: z.array(z.enum(['read', 'send', 'modify'])).min(1).max(3).default(['read']) }).strict(),
+]).openapi('CreateApiKeyAccess');
+const KeyInput = z.object({ name: z.string().trim().min(1).max(100),
+  permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).optional().describe('Workspace keys: read, send and manage. Defaults to send.'),
+  domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).optional().describe('Workspace keys: sender domains it is limited to, including their subdomains. Defaults to all.'),
+  access: KeyAccessInput.optional().describe('What the key is limited to. Defaults to the workspace. A key for addresses or an inbox takes its permissions in access.mail and can never send from other addresses, read other mail or manage the workspace.'),
+}).strict().openapi('CreateApiKey');
 export function manageKeys(c: Parameters<typeof actor>[0]) {
   const value = actor(c, 'manage');
   if (value.credential === 'agentToken') throw new ApiError(403, 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot create, list, or revoke API keys.');
   if (value.domains.length) throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');
   return value;
 }
-const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, workspaceId: _workspace, ...view } = key; return view; };
+const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId: null, mail: [] };
+const keyView = (key: typeof apiKeys.$inferSelect) => ({ id: key.id, name: key.name, permissions: key.permissions, domains: key.domains, prefix: key.prefix,
+  createdAt: isoTime(key.createdAt)!, lastUsedAt: isoTime(key.lastUsedAt), revokedAt: isoTime(key.revokedAt), access: workspaceAccess, expiresAt: null });
+// Keys limited to addresses or an inbox live in mailbox_keys (address-keys.ts); loaded only when a request names one.
+const addressKeys = () => wrapModuleLoad(() => import('./address-keys.js'));
 export function registerAuth(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'A short-lived, nonrefreshable token for temporary scripts. Requires an MCP approval and never exceeds it; manage tokens cannot administer credentials.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Start with read and do not repeat permissions.'),
@@ -177,26 +203,52 @@ export function registerAuth(app: App) {
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Agent token was not found or is already revoked.');
     return c.json({ id: row.id, revoked: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
-    const auth = manageKeys(c); const input = c.req.valid('json');
+  app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security,
+    description: 'One key type with permissions. By default a workspace key (permissions, optional sender domains). With access, a key limited to receiving addresses or to one agent inbox (bearer bane_mbx_…): it reads and, with send, replies only there, and never reaches the rest of the workspace. The secret is returned once.',
+    request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
+    const auth = manageKeys(c); const input = c.req.valid('json'), access = input.access ?? { type: 'workspace' as const };
+    if (access.type !== 'workspace') {
+      if (input.permissions || input.domains?.length) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', input.permissions ? 'permissions' : 'domains');
+      const { createLimitedKey, limitedKeyView } = await addressKeys();
+      const { row, secret } = await createLimitedKey(c, auth.workspaceId, input.name, access, { addresses: 'access.addressIds', inbox: 'access.inboxId', mail: 'access.mail' });
+      return c.json({ ...limitedKeyView(row), secret }, 201);
+    }
+    const permissions = input.permissions ?? ['send'], domains = input.domains ?? [];
     const secret = randomSecret('bane_');
     const [key] = await c.env.db.transaction(async tx => {
-      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+      const rows = await tx.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, name: input.name, permissions, domains, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
       // A key created by an MCP agent lives only as long as the approval that created it.
       if (auth.grantId) await tx.execute(sql`INSERT INTO mail_grant_objects VALUES(${auth.grantId},${auth.workspaceId},'api_key',${rows[0]!.id})`);
       await recordAudit(tx, c, { action: 'api_key.create', workspaceId: auth.workspaceId, target: { type: 'api_key', id: rows[0]!.id },
-        after: { name: input.name, permissions: input.permissions, domains: input.domains, prefix: rows[0]!.prefix.slice(0, 9), mcpGrant: auth.grantId ?? undefined } });
+        after: { name: input.name, permissions, domains, prefix: rows[0]!.prefix.slice(0, 9), mcpGrant: auth.grantId ?? undefined } });
       return rows;
     });
     return c.json({ ...keyView(key!), secret }, 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
-    const auth = manageKeys(c); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, auth.workspaceId), q.includeRevoked === 'false' ? isNull(apiKeys.revokedAt) : undefined, q.cursor ? gt(apiKeys.id, q.cursor) : undefined)).orderBy(apiKeys.id).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, description: 'Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox. includeRevoked=false also leaves out keys whose inbox was deleted or whose lease ended.',
+    request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
+    const auth = manageKeys(c); const q = c.req.valid('query'), w = auth.workspaceId, active = q.includeRevoked === 'false', after = q.cursor ? sql`AND id > ${q.cursor}` : sql``;
+    // One cursor over both tables. A limited key has no workspace permissions or domains: its access says what it may do.
+    const { rows } = await c.env.db.execute<{ id: string; name: string; prefix: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; created_at: string; last_used_at: string | null; revoked_at: string | null;
+      expires_at: string | null; address_ids: string[] | null; inbox_id: string | null; mail: ('read' | 'send' | 'modify' | 'create')[]; limited: boolean }>(sql`
+      SELECT * FROM (SELECT id, name, prefix, permissions, domains, created_at::text, last_used_at::text, revoked_at::text, NULL::text AS expires_at, NULL::jsonb AS address_ids, NULL::text AS inbox_id, '[]'::jsonb AS mail, false AS limited
+          FROM api_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL` : sql``} ${after}
+        UNION ALL SELECT id, name, prefix, '[]'::jsonb, '[]'::jsonb, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, mailbox_ids, inbox_id, permissions, true
+          FROM mailbox_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())` : sql``} ${after}) k
+      ORDER BY id LIMIT ${q.limit + 1}`);
+    const data = rows.slice(0, q.limit).map(r => ({ id: r.id, name: r.name, permissions: r.permissions, domains: r.domains, prefix: r.prefix,
+      createdAt: isoTime(r.created_at)!, lastUsedAt: isoTime(r.last_used_at), revokedAt: isoTime(r.revoked_at), expiresAt: isoTime(r.expires_at),
+      access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail } : workspaceAccess }));
+    return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, description: 'Revokes any API key, including one limited to addresses or an inbox. Requests with it fail at once, and mail it queued is not sent.',
+    request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const auth = manageKeys(c); const keyId = c.req.valid('param').id;
+    if (keyId.startsWith('mbk_')) {
+      const revoked = await (await addressKeys()).revokeLimitedKey(c, auth.workspaceId, keyId);
+      if (!revoked) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
+      return c.json({ id: revoked.row.id, revoked: true as const }, 200);
+    }
     // A repeated revoke keeps the first revocation time and writes no second audit row.
     const { rows: [key] } = await c.env.db.execute<{ id: string }>(sql`WITH k AS (UPDATE api_keys SET revoked_at = coalesce(revoked_at, now()) WHERE id = ${keyId} AND workspace_id = ${auth.workspaceId}
         RETURNING id, name, left(prefix, 9) AS prefix, revoked_at = now() AS fresh),
