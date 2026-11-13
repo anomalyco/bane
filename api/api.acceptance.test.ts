@@ -7804,6 +7804,20 @@ describe('Billing: Stripe', () => {
     const failed = (await db.query('SELECT id FROM billing_payment_attempts WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1', [wid])).rows[0];
     assert.deepEqual([(await attempt(failed.id)).status, (await attempt(failed.id)).failure_code], ['failed', 'invalid_request_error']);
   });
+  // Dev, 2026-11-13: Checkout's own invoice is created after the payment, so checkout.session.completed carries no invoice
+  // and the later invoice.paid found the attempt already succeeded and dropped the links.
+  test('Checkout top-up: the invoice Stripe creates after the payment is recorded when invoice.paid arrives, without a second credit', async t => {
+    const { runtime, fake, wid, deliver, account, attempt, ledger, stripe } = await stripeFixture(t);
+    const top = await stripe.createCheckoutTopUp(runtime, { workspaceId: wid, amountCents: 2000, actor: 'user:fixture', billingEmail: null });
+    const session = fake.payCheckout((await attempt(top.attemptId)).stripe_checkout_session), invoice = fake.objects.get(session.invoice)!;
+    assert.equal((await deliver('checkout.session.completed', { ...session, invoice: null })).body.outcome, 'processed');
+    assert.deepEqual([(await attempt(top.attemptId)).status, (await attempt(top.attemptId)).stripe_invoice, (await attempt(top.attemptId)).invoice_url], ['succeeded', null, null]);
+    assert.equal((await deliver('invoice.paid', invoice)).body.outcome, 'processed');
+    const paid = await attempt(top.attemptId);
+    assert.deepEqual([paid.stripe_invoice, paid.invoice_url, paid.invoice_pdf], [invoice.id, invoice.hosted_invoice_url, invoice.invoice_pdf]);
+    assert.equal((await stripe.getPayment(runtime.db, wid, top.attemptId))!.invoiceUrl, invoice.hosted_invoice_url);
+    assert.deepEqual([(await ledger()).length, (await account()).balance], [1, String(2000n * UC)], 'Credited once.');
+  });
 });
 
 describe('Hosted unsubscribe and dispatch-time consent', () => {
