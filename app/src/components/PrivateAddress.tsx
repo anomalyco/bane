@@ -36,7 +36,7 @@ const subscribeFocus = (listener: () => void) => {
  */
 export function useMasked(text: string) {
   const root = useRef<HTMLSpanElement>(null), box = useRef<HTMLSpanElement>(null)
-  const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), [alone, setAlone] = useState(false)
+  const [hovered, setHovered] = useState(false), [focused, setFocused] = useState(false), [alone, setAlone] = useState(false), [clipped, setClipped] = useState(false)
   const held = useSyncExternalStore(subscribeFocus, () => focusHolds(root.current))
   const masking = useMasking()
   const revealed = !masking || hovered || focused || held
@@ -45,6 +45,16 @@ export function useMasked(text: string) {
     reserve()
     return onRulerChange(reserve)
   }, [text])
+  // A revealed address that its cell cuts short (privacy mode on or off) says the whole of it on hover, and follows the cell as it resizes.
+  useLayoutEffect(() => {
+    const element = box.current
+    if (!revealed || !element) { setClipped(false); return }
+    const check = () => setClipped(element.scrollWidth > element.clientWidth + 1)
+    check()
+    const observer = new ResizeObserver(check)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [revealed, text])
   useEffect(() => {
     if (!hovered) return
     // Revealing replaces what is under the pointer, and some browsers then never report the pointer leaving.
@@ -59,7 +69,7 @@ export function useMasked(text: string) {
   return {
     revealed, box: box as RefObject<HTMLSpanElement>,
     root: {
-      ref: root as RefObject<HTMLSpanElement>, title: revealed ? undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
+      ref: root as RefObject<HTMLSpanElement>, title: revealed ? clipped ? text : undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
       // A mouse or pen reveals by hovering. A finger has no hover: it reveals an address that takes focus by tapping it
       // (not every browser moves focus on a tap, so the click does).
       onPointerEnter: (event: PointerEvent) => { if (event.pointerType !== 'touch') setHovered(true) },
