@@ -57,7 +57,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }
 /* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (two below 1100 px, three
-   on a phone), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
+   below 640 px), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
 .page-surface > .standing-banner { animation: none; }
 /* The billing banner (an empty balance) shares it; its two lines are fixed text, so both always fit their reserved lines. */
 .standing-banner + .standing-banner { margin-top: calc(-1 * var(--page-gap) + var(--space-8)); }
@@ -69,7 +69,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .standing-banner__what:not(:has(.ui-skeleton-block)) { display: block; }
 .standing-banner__did { color: var(--color-muted); }
 .standing-banner__fix { flex: none; }
-/* Below 1100 px the text wraps instead of being cut (the reserved lines are two); on a phone the button drops below it. */
+/* Below 1100 px the text wraps instead of being cut (the reserved lines are two, three on a phone); below 900 px the button drops below it. */
 @media (max-width: 1100px) {
   .standing-banner__text > p { white-space: normal; text-overflow: clip; }
   .standing-banner__text > .standing-banner__did { height: auto; }
@@ -81,9 +81,11 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 @media (max-width: 899px) {
   .standing-banner { flex-wrap: wrap; align-items: flex-start; }
   .standing-banner__text { flex-basis: calc(100% - 28px); }
+  .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
+}
+@media (max-width: 640px) {
   .standing-banner__text > .standing-banner__what { height: calc(3 * var(--leading-sm)); -webkit-line-clamp: 3; }
   .billing-banner .standing-banner__text > .standing-banner__what { height: auto; -webkit-line-clamp: unset; }
-  .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
 }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }
@@ -299,13 +301,11 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 .contact-support__reference code { overflow-wrap: anywhere; }
 .contact-support__link { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; }
 
-/* The account and workspace switcher (components/AccountSwitcher.tsx). The trigger is a select trigger with a small
-   avatar inside it, so it is the size the workspace picker was and loading or switching never moves the sidebar. */
-.account-switcher { width: 100%; }
-.account-switcher__current { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+/* The account and workspace switcher (components/AccountSwitcher.tsx). The trigger is a select trigger holding only the
+   workspace name, so a name like "Maya Chen's workspace" fits the sidebar; the account is in its title and the menu. */
+.account-switcher { width: 100%; gap: var(--space-8); }
 .account-switcher__workspace { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-avatar { display: inline-flex; flex: none; align-items: center; justify-content: center; border-radius: 50%; background: var(--color-layer-3); color: var(--color-text); font-weight: var(--font-weight-bold); line-height: 1; }
-.account-avatar--sm { width: 18px; height: 18px; font-size: 9px; }
 .account-avatar--md { width: 28px; height: 28px; font-size: var(--text-xs); }
 .account-menu { display: flex; flex-direction: column; width: 288px; max-height: min(480px, var(--radix-dropdown-menu-content-available-height)); }
 .account-menu__group + .account-menu__group { margin-top: var(--space-4); padding-top: var(--space-4); box-shadow: inset 0 1px var(--color-border-muted); }

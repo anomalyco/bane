@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import * as DropdownPrimitive from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from 'lucide-react'
@@ -16,8 +16,8 @@ import { toggleUiNotesMode, useUiNotesMode } from '../lib/ui-notes-mode'
 // Contact support and sign-out. Picking a workspace of another account switches account and workspace together. Multi-tenant only; shown
 // in the dashboard sidebar, the phone's top bar (as a sheet) and the onboarding header.
 type Entry = { key: string; label: ReactNode; text: string; hint?: ReactNode; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
-export function AccountAvatar({ name, email, size = 'md' }: { name: string | null | undefined; email?: string | null; size?: 'sm' | 'md' }) {
-  return <span className={`account-avatar account-avatar--${size}`} aria-hidden="true">{initials(name, email)}</span>
+export function AccountAvatar({ name, email }: { name: string | null | undefined; email?: string | null }) {
+  return <span className="account-avatar account-avatar--md" aria-hidden="true">{initials(name, email)}</span>
 }
 function Who({ account }: { account: Pick<ConnectedAccount, 'name' | 'email'> }) {
   return <span className="account-menu__who"><span className="account-menu__name">{account.name || account.email || 'Account'}</span>{account.email && <PrivateAddress className="account-menu__email" value={account.email} />}</span>
@@ -34,6 +34,16 @@ export function AccountSwitcher() {
   const [creating, setCreating] = useState(false)
   const [support, setSupport] = useState(false)
   const list = useAccounts(open)
+  // The menu itself takes focus when it opens, and an address reveals while focus is on anything that holds it: focus
+  // the current workspace instead, so the account's address stays masked until its own row is pointed at or highlighted.
+  useEffect(() => {
+    if (!open || phone) return
+    const frame = requestAnimationFrame(() => {
+      const menu = document.querySelector<HTMLElement>('.account-menu')
+      menu?.querySelector<HTMLElement>('[role="menuitem"]:has(.account-menu__check)')?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [open, phone])
   const notesOn = useUiNotesMode(identity?.uiNotes === true)
   const load = () => client.fetchQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), staleTime: 30_000 })
   const intent = () => { void load().catch(() => {}) }
@@ -79,7 +89,7 @@ export function AccountSwitcher() {
   ])
   const trigger = <button type="button" id="sidebar-workspace" className="ui-input ui-select-trigger account-switcher" disabled={busy}
     aria-label={`${self.name || 'Account'}, ${workspace?.name ?? 'workspace'}. Switch account or workspace`} title={[workspace?.name, self.name].filter(Boolean).join(' · ')} onPointerEnter={intent} onPointerDown={intent} onFocus={intent} onClick={phone ? () => void openSheet() : undefined}>
-    <span className="account-switcher__current"><AccountAvatar name={self.name} email={self.email} size="sm" /><span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span></span>
+    <span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span>
     <span><ChevronDown size={14} aria-hidden="true" /></span>
   </button>
   const refocus = () => requestAnimationFrame(() => document.getElementById('sidebar-workspace')?.focus())
@@ -106,7 +116,7 @@ export function AccountSwitcher() {
   return <>
     <DropdownPrimitive.Root open={open} onOpenChange={next => { setOpen(next); if (next) intent() }}>
       <DropdownPrimitive.Trigger asChild>{trigger}</DropdownPrimitive.Trigger>
-      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces" onOpenAutoFocus={focusCurrent}><div className="ui-popover-scroll">
+      <DropdownPrimitive.Portal><DropdownPrimitive.Content align="start" sideOffset={4} className="ui-popover ui-menu account-menu" aria-label="Accounts and workspaces"><div className="ui-popover-scroll">
         {sections.map((section, index) => <DropdownPrimitive.Group key={index} className="account-menu__group">{section.map(entry => entry.heading && entry.disabled
           ? <DropdownPrimitive.Label key={entry.key} className="ui-menu-item account-menu__account" aria-current="true">{entry.label}</DropdownPrimitive.Label>
           : <DropdownPrimitive.Item key={entry.key} disabled={entry.disabled} onSelect={entry.onSelect} title={typeof entry.hint === 'string' ? entry.hint : undefined}
@@ -117,16 +127,6 @@ export function AccountSwitcher() {
     </DropdownPrimitive.Root>
     {create}
   </>
-}
-
-// The menu itself takes focus when it opens, and an address reveals while focus is on anything that holds it: focus the
-// current workspace instead, so the account's address stays masked until its own row is pointed at or highlighted.
-function focusCurrent(event: Event) {
-  const menu = event.currentTarget as HTMLElement
-  const row = menu.querySelector<HTMLElement>('[role="menuitem"]:has(.account-menu__check)') ?? menu.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')
-  if (!row) return
-  event.preventDefault()
-  row.focus({ preventScroll: true })
 }
 
 // A new workspace starts like a new signup: switching to it opens onboarding.
