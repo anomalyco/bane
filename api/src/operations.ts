@@ -990,12 +990,16 @@ export function registerOperations(app: App) {
     const {id,token}=c.req.valid('param'), {state,error}=c.req.valid('query');
     // An expired or foreign token changes nothing but still lands on the domain page: the provider has
     // already applied the records by now, and the page's own polling picks up verification.
-    const back=()=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}`,303);
     const claim=verifyReturn(c.env.config.authSecret,token);
+    // The page reopens in the workspace of the setup and, when this browser has a live session for the account that
+    // started it (a browser can hold several), as that account. Nothing else names an account in the URL.
+    const back=(account?:string)=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}${account?`?account=${encodeURIComponent(account)}`:''}`,303);
     if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
     // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
+    // The return is a navigation without the tab's X-Bane-Account: act as the initiating account's own session.
     const { verifiedDashboardUser } = await wrapModuleLoad(() => import('./dashboard-auth.js'));
-    const user=await verifiedDashboardUser(c.env,c.req.raw.headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
+    const headers=new Headers(c.req.raw.headers); headers.set('x-bane-account',claim.userId);
+    const user=await verifiedDashboardUser(c.env,headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
     if(!user || claim.userId!==user.userId) return back();
     const {userId}=user;
     const wid=claim.workspaceId;
@@ -1004,7 +1008,7 @@ export function registerOperations(app: App) {
       selected AS (UPDATE bane_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
     if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
-    return back();
+    return back(userId);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read');

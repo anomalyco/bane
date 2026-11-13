@@ -15,6 +15,10 @@ export type McpConnection = {
     status: 'active' | 'revoked' | 'expired';
     workspaceId: string | null;
     receiving: boolean;
+    /**
+     * The label of the client entry that connected (`?profile=` on its MCP URL), to tell two entries of one client apart. Display only; it never affects access.
+     */
+    profile: string | null;
 };
 
 export type ApiError = {
