@@ -7,7 +7,7 @@ import './operator.css'
 
 // The operator console's column definitions (card slots included), shared by the route skeleton and the loaded tables.
 export const queueColumnDefs: SkeletonColumn[] = [
-  { key: 'name', label: 'Workspace', width: '28%' },
+  { key: 'name', label: 'Workspace', width: '25%' },
   { key: 'step', label: 'Step', width: 112, card: 'aside' },
   { key: 'reason', label: 'Why', card: 'line' },
   { key: 'score', label: 'Score', width: 72, align: 'right', card: 'line' },
