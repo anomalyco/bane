@@ -26,9 +26,10 @@ import { PrivateAddress } from '../../components/PrivateAddress'
 // control on the right, each 53px tall so values loading in never move anything. Old #workspace and #webhooks links still land.
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'usage' | 'billing' | 'account'
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
-// controls they can't use, so nothing is silently missing.
-const groups: { title: string; items: { key: SectionKey; label: string; admin?: string }[] }[] = [
-  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
+// controls they can't use, so nothing is silently missing. Sections of rows keep a readable column; a section that is
+// a table (`width: 'full'`) takes the whole panel, to the same right edge as the app's other tables.
+const groups: { title: string; items: { key: SectionKey; label: string; admin?: string; width?: 'full' }[] }[] = [
+  { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: 'invite people and change roles', width: 'full' }, { key: 'sending', label: 'Sending', admin: 'connect or disconnect sending' }, { key: 'webhooks', label: 'Webhooks', admin: 'add webhooks for email events', width: 'full' }, { key: 'activity', label: 'Activity', admin: 'see who changed what in this workspace', width: 'full' }, { key: 'usage', label: 'Plan & usage' }, { key: 'billing', label: 'Billing', admin: 'add credit and manage payment' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
 ]
 const items = groups.flatMap(group => group.items)
@@ -48,7 +49,7 @@ export function HostedSettings() {
       </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
-    <div key={section} className="hosted-settings__content">
+    <div key={section} className="hosted-settings__content" data-width={locked(current) ? undefined : current.width}>
       {locked(current) ? <AdminOnly title={current.label} action={current.admin!} />
         : <>
           {section === 'general' && <><SectionHeader title="General" /><WorkspaceRows /></>}
