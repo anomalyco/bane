@@ -8,6 +8,7 @@
 .limits-table :is(th, td) { height: 32px; padding: 0 var(--space-12) 0 0; border-top: 1px solid var(--color-border-muted); text-align: left; white-space: nowrap; }
 .limits-table th { color: var(--color-muted); font-family: var(--font-mono); font-size: 10px; font-weight: 400; letter-spacing: .1em; text-transform: uppercase; }
 .limits-table :is(th, td):nth-child(n + 3) { text-align: right; }
+.limits-table__part { display: inline-block; white-space: nowrap; }
 .limits-table :is(th, td):last-child { padding-right: 0; }
 .limits-notes { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); color: var(--color-muted); }
 .limits-ladder { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }

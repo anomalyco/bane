@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
@@ -16,6 +16,7 @@ import { logHref, useLogRowIntent } from '../logs/rows'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
 import { SendingLimitRow, SetupRail, useSetupSteps } from './setup'
+import { useMediaQuery } from '../../lib/media'
 
 // Overview: four facts with their own series, the activity chart and the latest emails on the left; a detail column
 // on the right with setup (until the first email), the sender score and up to three next steps.
@@ -40,6 +41,11 @@ export function OverviewPage() {
     <Select aria-label="Email stream" value={stream} onValueChange={value => setSearchParams(previous => { const next = new URLSearchParams(previous); if (value === 'all') next.delete('stream'); else next.set('stream', value); return next })} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} />
   </div>
   const data = query.data
+  // Where the detail column stacks under the main one (overview.css, 960px), the setup steps lead the page, above the figures. Whether they show is only known once the setup read
+  // lands, so until then the main column holds its skeletons and swaps in whole (new nodes, nothing moves).
+  const stacked = useMediaQuery('(max-width: 960px)')
+  const setup = useSetupSteps()
+  const held = stacked && setup.loading
   // The range the figures on screen are for: while a new range loads, the chart keeps labelling the old one.
   const [shownRange, setShownRange] = useState(range)
   if (data && !query.isPlaceholderData && shownRange !== range) setShownRange(range)
@@ -54,23 +60,25 @@ export function OverviewPage() {
     <PageHeader title="Overview" actions={controls} />
     <div className="ov-split">
       <div className="ov-split__main">
-        {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-          {data ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
-          {data ? <Chart data={data} range={shownRange} live={live} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
-        </>}
-        <LatestEmails />
-        {data && data.recentCampaigns.length > 0 && <Campaigns data={data} />}
+        {stacked && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
+        <Fragment key={held ? 'held' : 'ready'}>
+          {query.isError && !data ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
+            {data && !held ? <Facts data={data} stale={query.isPlaceholderData} /> : <FactsSkeleton />}
+            {data && !held ? <Chart data={data} range={shownRange} live={live} stale={query.isPlaceholderData} /> : <ChartSkeleton />}
+          </>}
+          <LatestEmails held={held} />
+          {data && !held && data.recentCampaigns.length > 0 && <Campaigns data={data} />}
+        </Fragment>
       </div>
-      <Aside />
+      <Aside setup={setup} showSetup={!stacked} />
     </div>
   </>
 }
 
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash.
-function Aside() {
+function Aside({ setup, showSetup }: { setup: ReturnType<typeof useSetupSteps>; showSetup: boolean }) {
   const score = useSenderScore()
-  const setup = useSetupSteps()
   const next = useNextSteps(score.data)
   const ready = Boolean((score.data || score.isError) && !setup.loading && next.ready)
   const { hash, key } = useLocation()
@@ -81,7 +89,7 @@ function Aside() {
   }, [ready, hash, key])
   return <aside className="ov-split__aside" aria-label="Status">{!ready ? <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
-    {setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
+    {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {score.isError && !score.data ? <ErrorState error={score.error} onRetry={() => score.refetch()} /> : <ReportCard report={score.data} />}
     <SendingLimitRow />
     {!setup.steps && <NextSteps items={next.items} />}
@@ -126,12 +134,12 @@ function Chart({ data, range, live, stale }: { data: Overview; range: TimeRange;
 
 // The latest mail is the top of Logs: the same rows, columns and masking (features/logs/rows.tsx), compact, seven rows
 // always reserved so loading, short and full lists are the same height. A new email or outcome crossfades the rows.
-function LatestEmails() {
+function LatestEmails({ held }: { held: boolean }) {
   const logs = useApiDef(queries.logs({ direction: 'all', page: 1, pageSize: 7 }), { interval: 60_000, keepPrevious: true }) // warmed with the page (data/prefetch.ts)
   const rowIntent = useLogRowIntent()
   const rows = logs.data?.items ?? []
   return <section className="ov-latest"><SectionHeader title="Latest emails" actions={<Link className="ui-button ui-button--ghost ui-button--sm" to="/logs">Logs <ArrowUpRight size={16} /></Link>} />
-    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending} skeletonRows={7} minRows={7} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
+    {logs.isError && !logs.data ? <ErrorState error={logs.error} onRetry={() => logs.refetch()} /> : <Crossfade id={logs.data && rows.map(row => `${row.direction}:${row.id}:${row.status}`).join(',')}><DataTable<LogEntry> className="logs-table ov-table" loading={logs.isPending || held} skeletonRows={7} minRows={7} rows={rows} rowKey={row => `${row.direction}:${row.id}`} rowHref={logHref} onRowIntent={rowIntent} empty={<EmptyState title="No emails yet" />} columns={logColumns} /></Crossfade>}
   </section>
 }
 function Campaigns({ data }: { data: Overview }) {
@@ -158,6 +166,8 @@ function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 
 // New counts over the same buckets morph the bars, the lines and their scales (200 ms); the scale labels crossfade.
 export function ActivityChart({ points: target, range, createdOnly = false }: { points: ChartPoint[]; range: TimeRange; createdOnly?: boolean }) {
   const [active, setActive] = useState<number | null>(null)
+  // The hours are one tab stop (the last one focused, else the newest); the arrow keys, Home and End step between them.
+  const [stop, setStop] = useState<number | null>(null)
   const container = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ width: 1080, height: 196 })
   useLayoutEffect(() => {
@@ -213,7 +223,7 @@ export function ActivityChart({ points: target, range, createdOnly = false }: { 
       return <text key={i} x={x(i)} y={height - (range === '30d' ? 13 : 22)} textAnchor="middle" className="chart-label">{range === '24h' ? date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' }) : day}{range === '7d' ? <tspan x={x(i)} dy={15}>{date(points[i].at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })}</tspan> : dated ? <tspan x={x(i)} dy={15} className="chart-label--date">{day}</tspan> : null}</text> })}
     {target.map((p, i) => {
       const start = left + i * slot, end = start + slot
-      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" tabIndex={0} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} ${createdOnly ? 'created' : 'sent'}${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => setActive(i)} onBlur={() => setActive(null)} />
+      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? count - 1, count - 1) ? 0 : -1} role="button" aria-label={`${pointLabel(p.at)}: ${number(p.sent)} ${createdOnly ? 'created' : 'sent'}${hasOutcomes ? `, ${p.bounced} bounces, ${p.complaints} complaints` : ''}`} onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(count - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? count - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />
     })}
     {selectedPoint && active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
   </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{pointLabel(selectedPoint.at)}</strong><span>Emails <b>{number(selectedPoint.sent)}</b></span>{hasOutcomes && <><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></>}</div>}</div>
