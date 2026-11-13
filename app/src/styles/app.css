@@ -262,3 +262,12 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .contact-support__reference { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
 .contact-support__reference code { overflow-wrap: anywhere; }
 .contact-support__link { display: inline-flex; align-items: center; gap: var(--space-4); width: fit-content; }
+/* Help (components/SupportChat.tsx): the support chat's button, bottom left of the sidebar, its glyph in line with the
+   page links above; in the top bar on a phone or tablet. A dot marks a reply that arrived while the chat was closed. */
+.sidebar-help { display: flex; margin-left: -6px; }
+.support-trigger { position: relative; }
+.support-trigger[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
+.support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
+.support-trigger[data-unread]::before { opacity: 1; transform: none; }
+.mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: -8px; }
+.mobile-bar .support-trigger::before { top: 11px; right: 11px; }

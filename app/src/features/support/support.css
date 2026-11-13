@@ -1,0 +1,158 @@
+/* The support chat (SupportPanel.tsx). Desktop: a card docked in the page's bottom-left corner, right beside the Help
+   button it grows out of, so every sidebar link stays in reach while it is open. Phone: a sheet above the tab bar. Motion is micro only: the panel's open and close, entrances, the
+   caret, the tool steps' marks and labels. Under reduced motion each keeps a short fade and loses its travel. */
+.support-panel { --dock: calc(2 * var(--page-inset)); position: fixed; left: calc(var(--sidebar-width) + var(--page-inset)); bottom: var(--dock); z-index: 40; display: flex; flex-direction: column; width: min(400px, calc(100vw - var(--sidebar-width) - 2 * var(--dock))); height: min(640px, calc(100dvh - 2 * var(--dock))); overflow: hidden; background: var(--color-surface); color: var(--color-text); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); outline: none; transform-origin: left bottom; opacity: 0; transform: translateY(6px) scale(.97); visibility: hidden; transition: opacity 140ms ease-out, transform 160ms ease-out, visibility 0s 160ms; }
+.support-panel[data-open] { opacity: 1; transform: none; visibility: visible; transition: opacity 180ms var(--ease-out-strong), transform 260ms var(--ease-out-strong), visibility 0s; }
+@starting-style { .support-panel[data-open] { opacity: 0; transform: translateY(6px) scale(.97); } }
+/* A tablet (the compact shell, wider than a phone): Help is in the top bar, so the card hangs from under it on the right,
+   above the tab bar. */
+.app-shell--compact .support-panel:not(.support-panel--sheet) { inset: calc(var(--mobile-bar-height) + env(safe-area-inset-top)) var(--page-inset) calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--page-inset)) auto; width: min(400px, calc(100vw - 2 * var(--page-inset))); height: auto; max-height: 720px; transform-origin: right top; }
+
+/* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. */
+.support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: 14px 14px 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
+.support-panel--sheet[data-open] { transform: none; transition: transform 320ms var(--ease-drawer), visibility 0s; }
+@starting-style { .support-panel--sheet[data-open] { transform: translateY(100%); } }
+.support-panel--sheet .ui-sheet__grab { height: 16px; padding-top: 6px; }
+.support-overlay { position: fixed; inset: 0; z-index: 28; background: var(--color-overlay); opacity: 0; visibility: hidden; transition: opacity 200ms ease-out, visibility 0s 200ms; }
+.support-overlay[data-open] { opacity: 1; visibility: visible; transition: opacity 240ms ease-out, visibility 0s; }
+html:has(.support-overlay[data-open]) { overflow: hidden; }
+
+.support-panel__header { display: flex; flex: none; align-items: center; gap: var(--space-12); height: 56px; padding: 0 var(--space-8) 0 var(--space-16); border-bottom: 1px solid var(--color-border-muted); }
+.support-panel--sheet .support-panel__header { height: 48px; touch-action: none; }
+.support-panel__mark { width: 14px; height: 14px; border-radius: 4px; }
+.support-panel__heading { flex: 1; min-width: 0; }
+.support-panel__heading h2 { font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); letter-spacing: -.13px; }
+.support-panel__subtitle { display: flex; align-items: center; gap: var(--space-6); height: var(--leading-xs); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+.support-panel__subtitle[data-tone='success'] { --dot: var(--color-success-marker); }
+.support-panel__subtitle[data-tone='warning'] { --dot: var(--color-warning-marker); }
+.support-panel__subtitle[data-tone='danger'] { --dot: var(--color-danger-marker); }
+.support-panel__subtitle[data-tone='neutral'] { --dot: var(--color-faint); }
+.support-panel__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dot); transition: background-color 240ms ease; }
+.support-panel__subtitle-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: support-fade 200ms ease-out; }
+.support-panel__actions { display: flex; align-items: center; gap: 2px; }
+
+/* The conversation grows down from the top; while the reader is at the bottom it follows the newest line. */
+.support-log { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; outline: none; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent); }
+.support-log:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
+.support-log__inner { display: flex; flex-direction: column; gap: var(--space-20); padding: var(--space-20) var(--space-16) var(--space-24); }
+.support-message { min-width: 0; animation: support-enter 240ms var(--ease-out-strong) both; }
+.support-message[data-restored] { animation: none; }
+.support-message--agent { display: flex; flex-direction: column; gap: var(--space-12); }
+.support-text, .support-user, .support-typing { font-size: var(--text-md); line-height: 22px; overflow-wrap: anywhere; }
+.support-text > * { margin: 0; }
+.support-text > * + * { margin-top: var(--space-8); }
+.support-text :is(ul, ol) { padding-left: 20px; }
+.support-text li + li { margin-top: var(--space-4); }
+.support-text li::marker { color: var(--color-muted); }
+.support-text strong { font-weight: var(--font-weight-bold); }
+.support-text a { color: var(--color-accent); text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
+.support-text a:hover { text-decoration-color: currentColor; }
+.support-text code { padding: 1px 4px; border-radius: 4px; background: var(--color-layer-2); font-size: 12px; }
+.support-text pre { padding: var(--space-8) var(--space-12); overflow-x: auto; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: 12px; line-height: 18px; }
+.support-text pre code { padding: 0; background: none; }
+.support-message--notice .support-text { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* The person's own messages: on the right, in a quiet block. No tails, no avatar. */
+.support-message--user { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-4); padding-left: 12%; }
+.support-user { max-width: 100%; padding: 6px 11px; border-radius: var(--radius-sm); background: var(--color-layer-2); white-space: pre-wrap; }
+.support-failed { display: flex; align-items: center; gap: var(--space-4); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.support-failed .ui-button { margin-right: -9px; }
+
+/* The caret holds the agent's place: a soft pulse while it thinks, steady while text arrives. An empty inline box with
+   padding (not an inline-block), so it travels with the text without counting as a layout shift. */
+.support-typing { height: 22px; margin: 0; }
+.support-caret { margin-left: 1px; padding-left: .5em; border-radius: 1px; background: var(--color-text); opacity: .55; }
+.support-typing .support-caret { animation: support-caret 1.1s ease-in-out infinite; }
+@keyframes support-caret { 50% { opacity: .15; } }
+
+/* What the agent is checking: one quiet line per step. The running step reads in the text colour with a breathing dot;
+   once done its dot turns into a check and the label rolls to its past tense. */
+.support-tools { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.support-tool { display: flex; align-items: center; gap: var(--space-8); height: 20px; color: var(--color-muted); font-size: var(--text-xs); animation: support-enter 220ms var(--ease-out-strong) both; }
+.support-message[data-restored] .support-tool { animation: none; }
+.support-tool__mark { display: inline-grid; flex: none; place-items: center; width: 12px; height: 12px; }
+.support-tool__mark > * { grid-area: 1 / 1; transition: opacity 180ms ease-out, transform 260ms var(--ease-out-strong); }
+.support-tool__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
+.support-tool[data-state='running'] .support-tool__dot { animation: support-breathe 1.2s ease-in-out infinite; }
+.support-tool__check { color: var(--color-success-marker); }
+.support-tool__fail { color: var(--color-faint); }
+.support-tool__check, .support-tool__fail, .support-tool:not([data-state='running']) .support-tool__dot { opacity: 0; transform: scale(.4) rotate(-20deg); }
+.support-tool[data-state='done'] .support-tool__check, .support-tool[data-state='failed'] .support-tool__fail { opacity: 1; transform: none; }
+.support-tool__label { display: grid; flex: 1; min-width: 0; height: 20px; overflow: hidden; line-height: 20px; transition: color 240ms ease; }
+.support-tool[data-state='running'] .support-tool__label { color: var(--color-text); }
+.support-tool__text { grid-area: 1 / 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.support-tool__text[data-entering] { animation: support-roll-in 280ms var(--ease-out-strong) both; }
+.support-tool__text[data-leaving] { animation: support-roll-out 200ms ease-out both; }
+@keyframes support-breathe { 50% { opacity: .45; transform: scale(.7); } }
+@keyframes support-roll-in { from { opacity: 0; transform: translateY(6px); filter: blur(2px); } }
+@keyframes support-roll-out { to { opacity: 0; transform: translateY(-6px); filter: blur(2px); } }
+
+/* Cards in the conversation: the consent request and the filed ticket. */
+.support-card { padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-card-in 280ms var(--ease-out-strong) both; }
+.support-message[data-restored] .support-card { animation: none; }
+.support-card p { margin: 0; }
+.support-card__body { margin-top: var(--space-4); color: var(--color-muted); }
+.support-card__actions { display: grid; margin-top: var(--space-12); }
+.support-card__choice, .support-card__resolved { grid-area: 1 / 1; display: flex; align-items: center; gap: var(--space-8); margin: 0; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s; }
+.support-card__choice:not([data-active]), .support-card__resolved:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; transition: opacity 140ms ease-out, transform 200ms ease-out, filter 200ms ease-out, visibility 0s 200ms; }
+.support-card__resolved { gap: var(--space-6); color: var(--color-muted); }
+.support-card__resolved[data-decision='allow'] { color: var(--color-success); }
+.support-ticket { display: flex; align-items: flex-start; gap: var(--space-12); }
+.support-ticket__mark { display: grid; flex: none; place-items: center; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: var(--color-success-bg); color: var(--color-success); box-shadow: inset 0 0 0 1px var(--color-success-border); animation: support-mark-in 320ms var(--ease-out-strong) 100ms both; }
+.support-message[data-restored] .support-ticket__mark { animation: none; }
+.support-ticket__text { flex: 1; min-width: 0; }
+.support-ticket__title { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
+.support-ticket .support-ticket__title code { padding: 0; background: none; color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
+/* A masked address, as everywhere in the dashboard: its first characters, then a blurred run drawn from filler. */
+.support-masked { display: inline-flex; max-width: 100%; vertical-align: bottom; white-space: nowrap; cursor: default; }
+.support-masked__rest { display: block; width: 6.5em; overflow: hidden; filter: blur(.31em); }
+.support-masked__rest::before { content: 'mnesaroucinetax'; }
+
+/* A line at the end of the conversation: offline, unavailable or a limit. */
+.support-inline { display: flex; align-items: center; gap: var(--space-8); min-height: 28px; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); animation: support-enter 220ms var(--ease-out-strong) both; }
+.support-inline[data-tone='warning'] { --dot: var(--color-warning-marker); }
+.support-inline[data-tone='danger'] { --dot: var(--color-danger-marker); }
+.support-inline__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--dot); }
+.support-inline > span:nth-child(2) { flex: 1; min-width: 0; }
+.support-inline .ui-button { margin-right: -9px; }
+
+/* The message box: grows with what is typed up to six lines; Enter sends, Shift+Enter starts a line. While the agent
+   writes and the box is empty, Send turns into Stop. */
+.support-composer { flex: none; padding: var(--space-4) var(--space-12) var(--space-12); }
+.support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 12px; border-radius: var(--radius-sm); outline: 1px solid transparent; background: var(--color-surface); box-shadow: var(--shadow-button); transition: outline-color var(--motion-duration), box-shadow var(--motion-duration); }
+.support-composer__box:focus-within { outline-color: var(--color-focus); box-shadow: none; }
+.support-composer__box[data-disabled] { background: var(--color-layer-1); }
+.support-composer__input { flex: 1; min-width: 0; height: 28px; max-height: 132px; padding: 4px 0; border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--text-md); line-height: 20px; resize: none; outline: none; }
+.support-composer__input::placeholder { color: var(--color-muted); opacity: 1; }
+.support-composer__input:disabled { cursor: not-allowed; }
+.ui-button.support-composer__send { width: 28px; height: 28px; border-radius: 4px; }
+.support-composer__icons { display: inline-grid; place-items: center; }
+.support-composer__icons > svg { grid-area: 1 / 1; transition: opacity 140ms ease-out, transform 220ms var(--ease-out-strong); }
+.support-composer__icons > svg:last-child, .support-composer__send[data-stop] .support-composer__icons > svg:first-child { opacity: 0; transform: scale(.5); }
+.support-composer__send[data-stop] .support-composer__icons > svg:last-child { opacity: 1; transform: none; }
+.support-composer--closed { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 56px; padding: var(--space-12) var(--space-16); border-top: 1px solid var(--color-border-muted); color: var(--color-muted); }
+@media (pointer: coarse), (max-width: 899px) {
+  .support-composer__input { height: 36px; padding-block: 7px; font-size: 16px; line-height: 22px; }
+  .ui-button.support-composer__send { width: 36px; height: 36px; }
+}
+.support-panel--sheet .support-composer { padding-bottom: var(--space-8); }
+
+@keyframes support-fade { from { opacity: 0; } }
+@keyframes support-enter { from { opacity: 0; transform: translateY(4px); } }
+@keyframes support-card-in { from { opacity: 0; transform: translateY(6px) scale(.985); } }
+@keyframes support-mark-in { from { opacity: 0; transform: scale(.5); } }
+
+/* Reduced motion: the panel, entrances and state changes keep a short fade; travel, scale, blur and loops go. (These
+   outrank the app-wide rule that turns every animation off.) */
+@media (prefers-reduced-motion: reduce) {
+  .support-panel, .support-panel--sheet { transition: opacity 150ms ease-out, visibility 0s 150ms !important; }
+  .support-panel[data-open] { transition: opacity 150ms ease-out, visibility 0s !important; }
+  .support-panel:not([data-open]) { transform: none; opacity: 0; }
+  @starting-style { .support-panel[data-open] { opacity: 0; transform: none; } }
+  .support-overlay { transition: opacity 150ms ease-out, visibility 0s 150ms !important; }
+  .support-overlay[data-open] { transition: opacity 150ms ease-out, visibility 0s !important; }
+  .support-message, .support-tool, .support-card, .support-inline, .support-ticket__mark, .support-panel__subtitle-text { animation: support-fade 150ms ease-out both !important; }
+  .support-message[data-restored], .support-message[data-restored] :is(.support-tool, .support-card, .support-ticket__mark) { animation: none !important; }
+  .support-tool__text[data-leaving] { display: none; }
+  .support-caret, .support-tool__dot { animation: none !important; }
+  .support-tool__mark > *, .support-card__choice, .support-card__resolved, .support-composer__icons > svg { transform: none !important; filter: none !important; transition: opacity 150ms ease-out, visibility 0s !important; }
+}

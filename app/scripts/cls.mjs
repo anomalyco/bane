@@ -17,6 +17,10 @@
 // Writes .cls/report.json (every shift with its source elements), .cls/summary.md (also appended to
 // $GITHUB_STEP_SUMMARY) and a screenshot per failing page with the shifted elements outlined.
 //
+// Support chat: the page loads, then the Help button opens the chat (the scripted demo conversation) and the agent's
+// greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
+// phone, where the chat is a sheet over the page, the tab bar's link closes it).
+//
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
 // cold desktop load, hovering the first few reveals them without anything moving.
@@ -39,7 +43,7 @@ const workers = Number(process.env.CLS_WORKERS) || Math.min(16, availableParalle
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row }]. The in-app navigation starts on `from` and clicks the control whose text
+// [name, path, { user, from, click, row, support }]. The in-app navigation starts on `from` and clicks the control whose text
 // starts with `click`, the table row containing `row`, or else a link to `path`; with none of those (pages reached
 // from a dropdown menu) it pushes `path` through the router's history. It must land on `path`.
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
@@ -93,10 +97,11 @@ const pages = ids => [
   ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   ['Signed out', '/', { user: null }],
+  ['Support chat', '/logs', { from: '/', support: true }],
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Support chat']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -239,6 +244,8 @@ async function measure(browser, job, fx) {
     // In-app jobs run with Data Saver on, which turns off the app's idle warm-up of the other sidebar pages: the click
     // then loads the next page's code and data cold, the case with the most loading states to get wrong.
     if (job.mode === 'in-app') await context.addInitScript(() => { if (navigator.connection) Object.defineProperty(navigator.connection, 'saveData', { get: () => true }); });
+    // The support chat's scripted demo (components/SupportChat.tsx), so the open chat is measured without a support Worker.
+    if (job.support) await context.addInitScript(() => sessionStorage.setItem('bane.support', 'demo'));
     await context.route(url => url.origin !== origin, route => { problems.push(`external request ${route.request().url()}`); return route.abort(); });
     await context.route(url => url.origin === origin && url.pathname.startsWith('/v1/'), async route => {
       const url = new URL(route.request().url());
@@ -262,6 +269,13 @@ async function measure(browser, job, fx) {
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
+    if (job.support) {
+      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
+      const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
+      if (!opened) problems.push('no Help button');
+      else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
+      await settle(page, net);
+    }
     if (job.mode === 'in-app') {
       await page.evaluate(() => { window.__cls.reset(); window.__inApp = performance.now(); });
       result.via = await page.evaluate(({ path, click, row }) => {
@@ -349,11 +363,11 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, support }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name)) continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    jobs.push({ name, path, user, scheme, device, mode: 'load', slug: slug + '-load' });
-    if (from) jobs.push({ name, path, user, from, click, row, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    jobs.push({ name, path, user, scheme, device, support, mode: 'load', slug: slug + '-load' });
+    if (from) jobs.push({ name, path, user, from, click, row, support, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   jobs.forEach((job, index) => { job.index = index; });
   const browser = await chromium.launch(process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' });

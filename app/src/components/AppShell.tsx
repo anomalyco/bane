@@ -14,6 +14,7 @@ import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import { StandingBanner } from './StandingBanner'
+import { SupportHost, SupportTrigger, useSupportChat } from './SupportChat'
 
 // The sender score card (hosted): its code and data load with the shell, into a slot that already has its final size.
 const score = chunk(() => import('../features/score'))
@@ -40,6 +41,9 @@ export function AppShell() {
   const access = useWorkspaceAccess()
   const location = useLocation()
   const scoreAbout = useScoreAbout()
+  // The support chat: Help at the bottom of the sidebar (in the top bar on a phone or tablet), one conversation for the
+  // whole visit that stays open across pages.
+  const support = useSupportChat({ demoApi: api.mode === 'demo', hosted: access.multiTenant })
   const [scoreAboutMounted, setScoreAboutMounted] = useState(false)
   useEffect(() => { if (scoreAbout.open) setScoreAboutMounted(true) }, [scoreAbout.open])
   // Hosted workspaces view every region at once, so no page waits on a selected region.
@@ -179,6 +183,7 @@ export function AppShell() {
       <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
   </>
+  const supportHost = support.mode && <SupportHost chat={support} />
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <StandingBanner />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>
@@ -193,11 +198,13 @@ export function AppShell() {
     <header className="mobile-bar">
       <NavLink className="wordmark" to="/" aria-label="bane overview"><span className="wordmark-square" aria-hidden="true" />bane</NavLink>
       <div className="mobile-bar__context">{context}</div>
+      {support.mode && <SupportTrigger chat={support} />}
       <ThemeToggle />
     </header>
     {scoreHost}
     {main}
     <TabBar links={links} intent={intent} footer={footer} locked={locked} />
+    {supportHost}
   </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -207,10 +214,11 @@ export function AppShell() {
       <div className="sidebar-context">{context}</div>
       {/* Members see every page: owner and admin ones carry a lock and explain who can use them. */}
       <nav className="main-navigation" aria-label="Main navigation">{links.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...locked(path) ? lockedProps : intent(path)}>{title}{locked(path) && <Lock size={12} aria-label="Owners and admins only" />}</NavLink>)}</nav>
-      <div className="sidebar-footer">{footer}</div>
+      <div className="sidebar-footer">{footer}{support.mode && <div className="sidebar-help"><SupportTrigger chat={support} /></div>}</div>
     </aside>
     {scoreHost}
     {main}
+    {supportHost}
   </div>
 }
 
