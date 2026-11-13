@@ -1,5 +1,6 @@
 import { maskRuns, maskText, visibleOnly } from '../../lib/capture-text'
 import type { NoteContext, NoteElement } from '../../data/ui-notes'
+import { forceMask } from '../../lib/privacy'
 
 // What a UI note records about the element it was left on, so an agent can find it in the code and see it: where
 // (URL, route pattern), how the page was shown (viewport, theme, device, build), a locator (a CSS path plus test IDs,
@@ -212,6 +213,8 @@ function maskClone(root: Node) {
  * browser can't draw it; the note is saved without one.
  */
 export async function screenshot(target: Element): Promise<{ blob: Blob; width: number; height: number } | null> {
+  // With privacy mode off (lib/privacy.ts) the page shows addresses in full: mask them again for the capture.
+  const release = forceMask()
   try {
     const { domToCanvas } = await import('modern-screenshot')
     const rect = target.getBoundingClientRect(), viewport = { left: 0, top: 0, right: innerWidth, bottom: innerHeight }
@@ -253,5 +256,7 @@ export async function screenshot(target: Element): Promise<{ blob: Blob; width: 
     return blob && blob.size <= MAX_BYTES && ['image/webp', 'image/png', 'image/jpeg'].includes(blob.type) ? { blob, width: out.width, height: out.height } : null
   } catch {
     return null
+  } finally {
+    release()
   }
 }
