@@ -93,10 +93,17 @@ const pages = ids => [
   ['Docs · MCP guide', '/docs#guide-mcp', { from: '/' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   ['Signed out', '/', { user: null }],
+  // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
+  ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
+  ['Legal · terms', '/legal/terms', { user: null, from: '/' }],
+  ['Legal · terms, signed in', '/legal/terms', { from: '/settings' }],
+  ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
+  ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
+  ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted']);
+const phonePages = new Set(['Overview', 'Logs', 'Sent email', 'Received email', 'Receiving', 'Receiving · address', 'Receiving · inbox', 'Receiving · agent inboxes', 'Receiving · webhooks', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'API keys', 'Settings', 'Settings · members', 'Settings · plan & usage', 'Settings · activity', 'Settings · webhook', 'Onboarding', 'Operator', 'Operator · workspace', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Legal', 'Legal · terms', 'Legal · privacy']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },

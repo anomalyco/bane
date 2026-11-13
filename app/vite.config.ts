@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { MAX_RULES, withFileRules } from './asset-headers.ts'
+import { renderLegal } from './legal-markdown.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
 // explains why); everything else, the shim included, gets the real package.
@@ -38,8 +39,18 @@ const fileHeaders = (): Plugin => {
   }
 }
 
+// The legal pages' Markdown becomes { title, description, updated, effective, html, headings } at build time
+// (legal-markdown.ts), so the page ships HTML and no Markdown parser.
+const legalMarkdown: Plugin = {
+  name: 'bane:legal-markdown',
+  transform(source, id) {
+    if (!id.endsWith('.md')) return null
+    return { code: `export default ${JSON.stringify(renderLegal(source, id))}`, map: null }
+  },
+}
+
 export default defineConfig({
-  plugins: [slimReactEmail, react(), fileHeaders()],
+  plugins: [slimReactEmail, legalMarkdown, react(), fileHeaders()],
   server: {
     host: '127.0.0.1', port: 5173, strictPort: true,
     proxy: Object.fromEntries(['/v1', '/api/auth', '/mcp', '/.well-known', '/unsubscribe', '/health', '/openapi.json'].map(path => [path, {target: 'http://127.0.0.1:8793', changeOrigin: false}])),
