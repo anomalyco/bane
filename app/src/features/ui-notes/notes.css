@@ -80,7 +80,18 @@ html[data-ui-notes-armed], html[data-ui-notes-armed] * { cursor: crosshair !impo
 @media (max-width: 899px) {
   .uin-tray { left: var(--space-12); bottom: calc(var(--tab-bar-height, 56px) + env(safe-area-inset-bottom) + var(--space-12)); }
 }
-@media (pointer: coarse) { .uin-pill__hint, .uin-hint { display: none; } }
+@media (pointer: coarse) {
+  .uin-pill__hint, .uin-hint { display: none; }
+  /* A finger needs 44 px: chips, tray rows, and the panel's and tray's buttons. */
+  .uin-chips { gap: var(--space-8); }
+  .uin-chip { height: 44px; padding: 0 var(--space-12); line-height: 44px; }
+  .uin-row { min-height: 44px; }
+  .uin-foot .ui-button, .uin-tray__foot .ui-button { min-height: 44px; }
+  .uin-tray__foot a { display: inline-flex; align-items: center; min-height: 44px; }
+  .uin-pill { height: 44px; }
+  .uin-head .ui-icon-button { position: relative; }
+  .uin-head .ui-icon-button::after { content: ''; position: absolute; inset: -4px; }
+}
 
 .uin-pin[data-fresh] { animation: uin-pin-in 280ms var(--ease-out-strong); }
 @keyframes uin-pop { from { opacity: 0; scale: .96; } }
