@@ -29,8 +29,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .sidebar-quota:not(:empty) { min-height: calc(2 * var(--leading-xs) + 3px + 2 * var(--space-8)); justify-content: flex-end; }
 .quota-label { display: flex; justify-content: space-between; }
 /* Terms, Privacy and the legal overview (components/LegalLinks.tsx), first in the sidebar footer and the More sheet's. */
-.legal-footer-links { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-12); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
-.legal-footer-links a { color: inherit; text-decoration: none; transition: color var(--motion-duration); }
+.legal-footer-links { display: flex; flex-wrap: wrap; gap: 0 var(--space-12); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.legal-footer-links a { padding-block: var(--space-4); color: inherit; text-decoration: none; transition: color var(--motion-duration); }
 .legal-footer-links a:hover { color: var(--color-text); }
 /* Privacy mode (components/PrivacyToggle.tsx): the whole row is the button; the switch only shows its state. */
 .privacy-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); width: 100%; padding: 0; border: 0; border-radius: 2px; background: none; color: var(--color-text); font: inherit; font-size: var(--text-xs); line-height: var(--leading-xs); text-align: left; cursor: pointer; }
@@ -56,8 +56,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .main-navigation a { transition: color var(--motion-duration), background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .main-navigation a:active { transform: scale(.98); }
 .page-notice { flex-shrink: 0; margin-bottom: var(--page-gap); }
-/* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (three on a phone or
-   tablet), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
+/* The standing banner (restrict, pause) on every dashboard page. What happened has a reserved line (two below 1100 px, three
+   on a phone), so the reason arriving after the page never moves anything; it doesn't crossfade with route changes. */
 .page-surface > .standing-banner { animation: none; }
 /* The billing banner (an empty balance) shares it; its two lines are fixed text, so both always fit their reserved lines. */
 .standing-banner + .standing-banner { margin-top: calc(-1 * var(--page-gap) + var(--space-8)); }
@@ -69,15 +69,22 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .standing-banner__what:not(:has(.ui-skeleton-block)) { display: block; }
 .standing-banner__did { color: var(--color-muted); }
 .standing-banner__fix { flex: none; }
-.app-shell--compact .standing-banner { flex-wrap: wrap; align-items: flex-start; }
-.app-shell--compact .standing-banner__text { flex-basis: calc(100% - 28px); }
-.app-shell--compact .standing-banner__text > p { white-space: normal; text-overflow: clip; }
-.app-shell--compact .standing-banner__text > .standing-banner__did { height: auto; }
-.app-shell--compact .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(3 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.app-shell--compact .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
-.app-shell--compact .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
-/* The billing banner's text is fixed, so it needs no reserved lines. */
-.app-shell--compact .billing-banner .standing-banner__text > .standing-banner__what { display: block; height: auto; -webkit-line-clamp: unset; }
+/* Below 1100 px the text wraps instead of being cut (the reserved lines are two); on a phone the button drops below it. */
+@media (max-width: 1100px) {
+  .standing-banner__text > p { white-space: normal; text-overflow: clip; }
+  .standing-banner__text > .standing-banner__did { height: auto; }
+  .standing-banner__text > .standing-banner__what { display: -webkit-box; height: calc(2 * var(--leading-sm)); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .standing-banner__text > .standing-banner__what:has(.ui-skeleton-block) { display: flex; align-items: flex-start; padding-top: 4px; }
+  /* The billing banner's text is fixed, so it needs no reserved lines. */
+  .billing-banner .standing-banner__text > .standing-banner__what { display: block; height: auto; -webkit-line-clamp: unset; }
+}
+@media (max-width: 899px) {
+  .standing-banner { flex-wrap: wrap; align-items: flex-start; }
+  .standing-banner__text { flex-basis: calc(100% - 28px); }
+  .standing-banner__text > .standing-banner__what { height: calc(3 * var(--leading-sm)); -webkit-line-clamp: 3; }
+  .billing-banner .standing-banner__text > .standing-banner__what { height: auto; -webkit-line-clamp: unset; }
+  .standing-banner__fix { margin-left: calc(16px + var(--space-12)); }
+}
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }
 .boot-loader { display: grid; place-items: center; height: 100dvh; background: var(--color-deep); color: var(--color-muted); }
@@ -86,7 +93,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .boot-loader > svg { opacity: 0; animation: ui-spin .9s linear infinite, boot-loader-in var(--motion-duration) ease-out .3s forwards; }
 @keyframes boot-loader-in { to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .boot-loader > svg { opacity: 1; } }
-.fatal-error { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-20); padding: var(--space-40); }
+.fatal-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-20); min-height: 100dvh; padding: var(--space-40) var(--space-24); text-align: center; }
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .cell-caption { font-size: var(--text-xs); line-height: var(--leading-xs); margin-top: var(--space-4); }
@@ -225,8 +232,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .mobile-bar { display: flex; align-items: center; gap: var(--space-8); height: calc(var(--mobile-bar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(var(--space-8), env(safe-area-inset-right)) 0 max(var(--space-16), env(safe-area-inset-left)); background: var(--color-deep); }
 .mobile-bar .wordmark { position: static; flex: none; height: 44px; margin-right: auto; }
-.mobile-bar__context { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
-.mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: min(220px, 52vw); }
+.mobile-bar__context { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
+.mobile-bar__context > :is(.ui-select-trigger, select) { width: auto; max-width: 100%; }
 .mobile-bar__context .demo-indicator { padding: 0; }
 /* Positioned (not static), so a touch screen's enlarged hit area (ui.css, .ui-button--sm::after) stays on the button
    instead of spreading over the whole bar: a tap on the workspace picker used to switch the theme. */
@@ -254,6 +261,11 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .more-sheet__footer { display: flex; flex-direction: column; gap: var(--space-12); margin-top: var(--space-12); padding-top: var(--space-12); border-top: 1px solid var(--color-border-muted); }
 .more-sheet__footer:not(:has(> :not(.sidebar-quota:empty))) { display: none; }
 .more-sheet__footer .sidebar-score-slot { margin: 0; }
+/* Touch targets: the legal links and privacy mode are full 44px rows here. */
+.more-sheet__footer { gap: 0; }
+.more-sheet__footer .legal-footer-links a { display: flex; align-items: center; min-height: 44px; }
+.more-sheet__footer .privacy-toggle { min-height: 44px; }
+.more-sheet__footer .sidebar-score-slot { margin-top: var(--space-8); }
 
 /* Phone: page headers keep the back button beside a title that wraps (a long address breaks at @ and dots, never off
    screen), toolbars stack full width, and strips of tabs or filters scroll sideways in one row. */
@@ -273,7 +285,7 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
   .page-surface > .ui-page-header + .ui-tabs, .page-surface .ui-tabs:has(+ .data-toolbar) { scroll-padding-inline: var(--bleed, 0px); }
 }
 /* The top bar's workspace picker reads as the bar's title, not a form field. */
-.mobile-bar__context > :is(.ui-select-trigger, select) { box-shadow: none; background-color: transparent; font-weight: var(--font-weight-bold); field-sizing: content; }
+.mobile-bar__context > :is(.ui-select-trigger, select) { box-shadow: none; background: none; font-weight: var(--font-weight-bold); field-sizing: content; }
 .mobile-bar__context > :is(.ui-select-trigger, select):focus-visible { box-shadow: none; outline: 2px solid var(--color-focus); }
 /* A form's own Save and Cancel stay in reach above the tab bar while its fields scroll. */
 /* A phone scrolls the document: Tab brings a control clear of the tab bar (56px, --tab-bar-height) and its ring. */
@@ -300,11 +312,16 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 .account-menu__account { min-height: 44px; }
 .account-menu__account[aria-current] { cursor: default; }
 .account-menu__who { display: flex; flex: 1; flex-direction: column; min-width: 0; }
-.account-menu__name, .account-menu__email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-menu__email { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* Names wrap, so a long one is always readable in full; the trigger's title carries it where it is cut to one line. */
+.account-menu__name, .account-menu__workspace-name { overflow-wrap: anywhere; }
+.account-menu__email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+/* Masked, the address is cut at the row's edge; revealed, a longer one wraps inside it (as in a phone's page headers). */
+.account-menu__email .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.account-menu__email[data-revealed] { overflow: visible; white-space: normal; text-overflow: clip; }
+.account-menu__email[data-revealed] > .private-address__value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
 /* Workspaces sit under their account's name. */
 .account-menu__workspace { padding-left: calc(var(--space-8) * 2 + 28px); }
-.account-menu__workspace-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-menu__workspace-name { flex: 1; min-width: 0; }
 .account-menu__check { flex: none; margin-left: auto; color: var(--color-accent); }
 .account-menu__toggle { display: flex; flex: 1; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; }
 .account-menu__toggle-state { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); }
