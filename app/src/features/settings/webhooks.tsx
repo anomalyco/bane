@@ -62,7 +62,7 @@ export function WebhooksSection({ note = true }: { note?: boolean } = {}) {
   const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <p className="muted settings-section-note">Bane calls your URL when something happens to email you send: delivered, bounced, marked as spam and more. Each call is signed so you can <Link to="/docs#guide-webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
+    <p className="muted settings-section-note">Bane calls your URL when email you send is delivered, bounces, is marked as spam and more. Each call is signed so you can <Link to="/docs#guide-webhook-signatures">verify it came from Bane</Link>.{note && <> For received mail, use <Link to="/receiving/webhooks">Inbound webhooks</Link>.</>}</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} rowHref={webhook => `/settings/webhooks/${webhook.id}`} empty={<EmptyState title="No webhooks" />} columns={[
       { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><span title={webhook.name}>{webhook.name}</span><span className="muted" title={webhook.url}>{webhook.url}</span></div>, cardRender: (webhook: Webhook) => webhook.name },
       { ...column(columns, 'url'), render: (webhook: Webhook) => webhook.url },

@@ -101,7 +101,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     event.preventDefault()
     const value = email.trim()
     if (!value) { setEmailError('Enter their email address.'); return }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { setEmailError('That doesn’t look like an email address. It should look like name@company.com.'); return }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) { setEmailError('Enter an email address like name@company.com.'); return }
     setEmailError('')
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
@@ -110,7 +110,7 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     <div className="settings-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
     {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
   </Dialog>
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description="Bane doesn’t send an email: you get a link to share with them. They join by signing in with this address." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" description="You get a link to share; Bane doesn’t email it. They join by signing in with this address." footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Create invitation link</Button></>}>
     <form id="invite-member" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
       <Field label="Email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>
