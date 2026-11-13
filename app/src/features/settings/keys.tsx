@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, PageHeader, Pagination, Tabs, useToast } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Agent, AgentTokenSummary, ApiKey, AppPassword } from '../../data/types'
@@ -34,9 +34,12 @@ const keyState = (key: ApiKey) => key.revokedAt ? 'Revoked' : past(key.expiresAt
 const tokenState = (token: AgentTokenSummary) => token.revokedAt ? 'Revoked' : past(token.expiresAt) ? 'Expired' : null
 const agentState = (agent: Agent) => agent.status === 'revoked' ? 'Revoked' : agent.status === 'expired' ? 'Expired' : null
 // Another member's agent can only lose the tokens it made here, so once none is active there is nothing to revoke.
-const rowState = (row: Row): ReactNode => row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'app' ? null
-  : agentState(row.agent) ?? (!row.agent.own && !row.agent.tokens.some(token => !tokenState(token)) ? <span className="muted">—</span> : null)
+const rowState = (row: Row): ReactNode => {
+  const state = row.kind === 'key' ? keyState(row.key) : row.kind === 'token' ? tokenState(row.token) : row.kind === 'app' ? null : agentState(row.agent)
+  return state ? <span className="muted">{state}</span> : row.kind === 'agent' && !row.agent.own && !row.agent.tokens.some(token => !tokenState(token)) ? <span className="muted">—</span> : null
+}
 const rowName = (row: Row) => row.kind === 'key' ? row.key.name : row.kind === 'agent' ? connectionTitle(row.agent) : row.kind === 'token' ? row.token.purpose : row.password.name
+const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
 const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
 export function ApiKeysPage() {
@@ -73,15 +76,16 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   useEffect(() => { if (params.has('create')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true }) }, [params, setParams])
   const [secret, setSecret] = useState<CreatedSecret | null>(null)
   const [revoking, setRevoking] = useState<Row | null>(null)
+  const [viewing, setViewing] = useState<Row | null>(null)
   const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
 
   // API keys page by cursor; agents and app passwords aren't paginated, so they join the first page. Each source fails
-  // on its own: the others still list, with the failed one's error and its own retry.
+  // on its own: the others still list, with one error and a retry for every source that failed.
   const firstPage = !cursor
   const sources = [
-    ...(type === 'all' || type === 'api' ? [{ query: keys, label: 'API keys' }] : []),
-    ...((type === 'all' && firstPage) || type === 'agent' ? [{ query: agents, label: 'agent tokens' }] : []),
-    ...((type === 'all' && firstPage) || type === 'app' ? [{ query: passwords, label: 'app passwords' }] : []),
+    ...(type === 'all' || type === 'api' ? [{ query: keys }] : []),
+    ...((type === 'all' && firstPage) || type === 'agent' ? [{ query: agents }] : []),
+    ...((type === 'all' && firstPage) || type === 'app' ? [{ query: passwords }] : []),
   ]
   const failed = sources.filter(source => source.query.error)
   const keysShown = type === 'all' || type === 'api'
@@ -130,7 +134,14 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     if (row.kind === 'token') return expiry(row.token)
     return `Created ${date(row.password.createdAt)}`
   }
-  const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? 'Revoke agent' : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+  // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
+  const details = (row: Row): [string, ReactNode][] => {
+    const { first, second } = access(row)
+    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ...(row.key.expiresAt ? [[past(row.key.expiresAt) ? 'Ended' : 'Ends', date(row.key.expiresAt)] as [string, ReactNode]] : []), ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
+    if (row.kind === 'agent') return [['Type', typeName.agent], ['Access', first], ['Client', row.agent.clientId], ['Account', row.agent.own ? 'You' : <PrivateAddress value={row.agent.userEmail} />], ['Signed in', date(row.agent.createdAt)], ['Last used', lastUsed(row.agent.lastUsedAt)], ['Status', agentState(row.agent) ?? 'Active']]
+    if (row.kind === 'token') return [['Type', typeName.token], ['Access', first], ['Domains', second], ['Expires', tokenState(row.token) ?? `${shortDateTime(row.token.expiresAt)} UTC`], ['Last used', lastUsed(row.token.lastUsedAt)]]
+    return [['Type', typeName.app], ['Access', first], ['Inbox', second], ['Created', date(row.password.createdAt)]]
+  }
   const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
   return <div className="stack">
@@ -139,7 +150,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
-        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} empty={empty}
+        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={setViewing} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
             { ...typeColumn, render: row => typeName[row.kind] },
@@ -149,13 +160,14 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
             { ...actionsColumn, render: row => rowState(row) ?? <Button variant="danger" aria-label={`Revoke ${rowName(row)}`} onClick={() => setRevoking(row)}>Revoke</Button>,
               cardRender: row => rowState(row) ? null : <DropdownMenu label={`Actions for ${rowName(row)}`} title={rowName(row)} items={[{ label: revokeLabel(row), destructive: true, onSelect: () => setRevoking(row) }]} /> },
           ]} />}
-        {failed.map(source => <ErrorState key={source.label} error={source.query.error} onRetry={() => void source.query.refetch()} />)}
+        {failed.length > 0 && <ErrorState error={failed[0].query.error} onRetry={() => failed.forEach(source => void source.query.refetch())} />}
         {keysShown && !listLoading && (!keys.error || pagination.page > 1) && <Pagination page={pagination.page} pageSize={100} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
     </div>
     {open && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} />
     <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}</SecretDialog>
+    <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} />
     <RevokeDialog row={revoking} onClose={() => setRevoking(null)} pending={revokeKey.isPending || revokeAgent.isPending || revokeToken.isPending || revokePassword.isPending}
       onConfirm={async row => {
         if (row.kind === 'key') await revokeKey.mutateAsync(row.key.id)
@@ -166,6 +178,16 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   </div>
 }
 
+// One row in full, with Revoke: the way to read a long name or address list on a phone, where a card clips it.
+function KeyDetails({ row, fields, onClose, onRevoke }: { row: Row | null; fields: [string, ReactNode][]; onClose: () => void; onRevoke: (row: Row) => void }) {
+  return <Dialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={row ? rowName(row) : ''} footer={<>
+    <Button onClick={onClose}>Close</Button>
+    {row && !rowState(row) && <Button variant="danger" onClick={() => onRevoke(row)}>{revokeLabel(row)}</Button>}
+  </>}>
+    <dl className="keys-details">{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+  </Dialog>
+}
+
 // What revoking each one ends, said before it happens.
 function RevokeDialog({ row, onClose, onConfirm, pending }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean }) {
   const description: ReactNode = !row ? ''
@@ -173,7 +195,7 @@ function RevokeDialog({ row, onClose, onConfirm, pending }: { row: Row | null; o
     : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. It can sign in again as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
     : row.kind === 'token' ? 'This short-lived token stops working immediately. Revoking it cannot be undone.'
     : 'Mail apps using it are signed out and can’t sign in with it again. The inbox and its mail stay.'
-  const label = !row ? 'Revoke' : row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+  const label = row ? revokeLabel(row) : 'Revoke'
   return <ConfirmDialog open={row !== null} onOpenChange={next => { if (!next) onClose() }} title={`Revoke ${row ? rowName(row) : 'key'}?`} description={description} confirmLabel={label} danger pending={pending} onConfirm={async () => { if (row) await onConfirm(row) }} />
 }
 
