@@ -5,6 +5,7 @@ import { readAttachmentLink, readCapped, serveAttachment } from './attachments.j
 import { MAX_IMAGE_BYTES } from './image.js';
 import { staff } from './staff.js';
 import { daily } from './limits.js';
+import { log, logError } from './log.js';
 export { SupportConversation } from './conversation.js';
 export { SupportIntake, INTAKE, type Mailbox } from './intake.js';
 import { INTAKE, type Mailbox } from './intake.js';
@@ -15,7 +16,13 @@ import { INTAKE, type Mailbox } from './intake.js';
 
 const CONVERSATIONS_PER_DAY = 10;
 const json = (body: unknown, status = 200, headers: HeadersInit = {}) => Response.json(body, { status, headers: { 'cache-control': 'no-store', ...headers } });
-const fail = (status: number, code: string, message: string, headers: HeadersInit = {}, extra: Record<string, unknown> = {}) => json({ error: { code, message, ...extra } }, status, headers);
+// The error code of each refusal, for the request line (read without parsing the body).
+const failures = new WeakMap<Response, string>();
+const fail = (status: number, code: string, message: string, headers: HeadersInit = {}, extra: Record<string, unknown> = {}) => {
+  const response = json({ error: { code, message, ...extra } }, status, headers);
+  failures.set(response, code);
+  return response;
+};
 const CONVERSATION_ID = /^conv_[a-z2-7]{26}$/;
 
 function allowedOrigin(env: Env, request: Request) {
@@ -199,35 +206,63 @@ async function confirm(request: Request, env: Env, token: string): Promise<Respo
     : page('Couldn’t confirm', '<h1>We couldn’t confirm this</h1><p>Sign in to Bane and press Help, or reply to the email from your account address.</p>', 409);
 }
 
+// Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
+// and queries carry chat tokens and attachment signatures.
+const STAFF_ROUTES = new Set(['/staff', '/staff/', '/staff/callback', '/staff/sign-out', '/staff/tickets', '/staff/tickets/:ticketId/resolve']);
+function staffRoute(path: string) {
+  const route = path.replace(/^\/staff\/tickets\/tkt_[a-z2-7]{16}\/resolve$/, '/staff/tickets/:ticketId/resolve');
+  return STAFF_ROUTES.has(route) ? route : '/staff/*';
+}
+
+async function route(request: Request, env: Env, url: URL, at: { route: string }): Promise<Response> {
+  const path = url.pathname, name = (route: string) => { at.route = route; };
+  if (path === '/health') { name('/health'); return json({ status: 'ok', service: 'bane-support', stage: env.STAGE }); }
+  if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) {
+    name(path.startsWith('/chat/') ? '/chat/*' : '/c/:conversationId/attachments');
+    return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });
+  }
+  if (request.method === 'POST' && path === '/chat/start') { name('/chat/start'); return startChat(request, env); }
+  if (request.method === 'POST' && path === '/chat/resume') { name('/chat/resume'); return resumeChat(request, env); }
+  const chat = path.match(/^\/c\/(conv_[a-z2-7]{26})$/);
+  if (chat && request.method === 'GET') { name('/c/:conversationId'); return socket(request, env, chat[1]!); }
+  const uploads = path.match(/^\/c\/(conv_[a-z2-7]{26})\/attachments$/);
+  if (uploads && request.method === 'POST') { name('/c/:conversationId/attachments'); return upload(request, env, uploads[1]!); }
+  const file = path.match(/^\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})$/);
+  if (file && request.method === 'GET') {
+    name('/attachments/:conversationId/:attachmentId');
+    return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
+  }
+  if (path === '/staff' || path.startsWith('/staff/')) { name(staffRoute(path)); return staff(request, env); }
+  if (request.method === 'POST' && path === '/hooks/bane-inbound') { name('/hooks/bane-inbound'); return inbound(request, env); }
+  if (request.method === 'POST' && path === '/hooks/bane-intake') { name('/hooks/bane-intake'); return intake(request, env); }
+  const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
+  if (link && (request.method === 'GET' || request.method === 'POST')) { name('/confirm/:token'); return confirm(request, env, link[1]!); }
+  return new Response(null, { status: 404 });
+}
+
 export default {
-  async fetch(request, env, ctx): Promise<Response> {
-    const url = new URL(request.url), path = url.pathname;
-    try {
-      if (path === '/health') return json({ status: 'ok', service: 'bane-support', stage: env.STAGE });
-      if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });
-      if (request.method === 'POST' && path === '/chat/start') return await startChat(request, env);
-      if (request.method === 'POST' && path === '/chat/resume') return await resumeChat(request, env);
-      const chat = path.match(/^\/c\/(conv_[a-z2-7]{26})$/);
-      if (chat && request.method === 'GET') return await socket(request, env, chat[1]!);
-      const uploads = path.match(/^\/c\/(conv_[a-z2-7]{26})\/attachments$/);
-      if (uploads && request.method === 'POST') return await upload(request, env, uploads[1]!);
-      const file = path.match(/^\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})$/);
-      if (file && request.method === 'GET') return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? await serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
-      if (path === '/staff' || path.startsWith('/staff/')) return await staff(request, env);
-      if (request.method === 'POST' && path === '/hooks/bane-inbound') return await inbound(request, env);
-      if (request.method === 'POST' && path === '/hooks/bane-intake') return await intake(request, env);
-      const link = path.match(/^\/confirm\/([A-Za-z0-9_.-]{20,400})$/);
-      if (link && (request.method === 'GET' || request.method === 'POST')) return await confirm(request, env, link[1]!);
-      return new Response(null, { status: 404 });
-    } catch (error) {
+  async fetch(request, env): Promise<Response> {
+    const started = Date.now(), at = { route: 'unmatched' };
+    let response: Response, failed: { error: unknown; code: string } | null = null;
+    try { response = await route(request, env, new URL(request.url), at); }
+    catch (error) {
       // Fail closed, loudly: a missing secret is a deploy mistake, never a reason to run without it.
       const missing = error instanceof MissingSecret ? error.secret : null;
-      console.error(JSON.stringify({ level: 'error', code: missing ? 'SECRET_MISSING' : 'UNHANDLED', secret: missing, route: path, message: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) }));
-      return fail(503, 'SUPPORT_UNAVAILABLE', missing ? `Support is not fully configured (${missing} is missing).` : 'Support is unavailable right now. Try again in a minute.', cors(env, request));
+      failed = { error, code: missing ? 'SECRET_MISSING' : 'UNHANDLED' };
+      response = fail(503, 'SUPPORT_UNAVAILABLE', missing ? `Support is not fully configured (${missing} is missing).` : 'Support is unavailable right now. Try again in a minute.', cors(env, request));
     }
+    // One line per request, like Bane's (api/src/app.ts): what answered, how, and how long it took; a crash adds its
+    // error class, the missing secret's name and the stack to that same line.
+    const status = response.status, line = { event: 'request', requestId: request.headers.get('cf-ray') ?? undefined, route: at.route, method: request.method, status, durationMs: Date.now() - started };
+    if (failed) logError(failed.error, { ...line, code: failed.code });
+    else log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', { ...line, code: failures.get(response) });
+    return response;
   },
   /** Daily at 00:10 UTC: the team's over-cap digest for yesterday, and the retention sweep. */
   async scheduled(controller, env, ctx) {
-    ctx.waitUntil(daily(env, controller.scheduledTime).then(result => console.log(JSON.stringify({ level: 'info', code: 'SUPPORT_DAILY', ...result }))));
+    const started = Date.now();
+    ctx.waitUntil(daily(env, controller.scheduledTime).then(
+      result => log('info', { event: 'scheduled', code: 'SUPPORT_DAILY', durationMs: Date.now() - started, ...result }),
+      error => logError(error, { event: 'scheduled', code: 'SUPPORT_DAILY_FAILED', durationMs: Date.now() - started })));
   },
 } satisfies ExportedHandler<Env>;

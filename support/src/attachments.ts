@@ -1,6 +1,7 @@
 import type { Env } from './env.js';
 import { cleanImage, type CleanImage } from './image.js';
 import { MissingSecret, purposeKey, sign, verify } from './tokens.js';
+import { logError } from './log.js';
 
 // Screenshots in a conversation (support/PROTOCOL.md §5.1): up to five, stored in the stage's private uploads bucket
 // (UPLOADS) after image.ts has checked the bytes and removed metadata. The model sees them as images; tickets carry
@@ -56,7 +57,7 @@ export async function modelImage(env: Env, attachment: Attachment): Promise<{ ur
       // The Images output is a new file without metadata; still check it like an upload.
       const checked = cleanImage(smaller);
       bytes = checked.bytes; type = checked.type;
-    } catch (error) { console.warn(JSON.stringify({ level: 'warn', code: 'IMAGE_RESIZE_FAILED', message: String(error).slice(0, 200) })); }
+    } catch (error) { logError(error, { event: 'image', code: 'IMAGE_RESIZE_FAILED' }, 'warn'); }
   }
   if (bytes.length > MODEL_IMAGE_BYTES) return null;
   return { uri: `data:${type};base64,${b64(bytes)}`, name: attachment.name };

@@ -378,10 +378,10 @@ jobs:
           persist-credentials: false
 
       # The dashboard's live support chat (app/src/components/SupportChat.tsx): on for every hosted workspace on dev;
-      # off in production until it is rolled out ("staff" turns it on for Bane staff and free workspaces only).
+      # in production only for Bane staff and free (billing-exempt) workspaces while it rolls out. "true" opens it to all.
       - uses: ./.github/actions/build-release
         env:
-          VITE_SUPPORT_CHAT: ${{ needs.authorize.outputs.stage == 'dev' && 'true' || '' }}
+          VITE_SUPPORT_CHAT: ${{ needs.authorize.outputs.stage == 'dev' && 'true' || 'staff' }}
 
       # The environment picks the stage. No variable or secret name carries a
       # stage prefix: each stage reads the same keys from its own bane/<stage>/

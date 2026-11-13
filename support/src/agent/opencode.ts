@@ -6,6 +6,8 @@ import type { Harness, HarnessEvent, TurnInput, TurnResult, Usage } from './harn
 import { TOOLS, ToolFailure, type Param, type ToolHost } from './tools.js';
 import SYSTEM from './system.md';
 import VOICE from '../../VOICE.md';
+import { errorTypeOf } from '../../../api/src/log.js';
+import { log } from '../log.js';
 
 // The agent runtime: OpenCode, embedded in the conversation's Durable Object through `@opencode/sdk/workerd` (the same
 // SDK Console's agents run on). OpenCode owns the agent loop, its history (in this object's SQLite), streaming,
@@ -67,7 +69,7 @@ export function modelFetch(env: Env): Fetch {
     if (request.method === 'POST') {
       const body = await request.clone().json<{ model?: string; output_config?: { effort?: string } }>().catch(() => undefined);
       if (body?.model !== MODEL.model || body?.output_config?.effort !== MODEL.variant) {
-        console.error(JSON.stringify({ level: 'error', code: 'MODEL_PIN_VIOLATED', model: body?.model ?? null, effort: body?.output_config?.effort ?? null }));
+        log('error', { event: 'model', code: 'MODEL_PIN_VIOLATED', model: body?.model ?? null, effort: body?.output_config?.effort ?? null });
         return Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'This Worker only sends the pinned model.' } }, { status: 400 });
       }
     }
@@ -131,7 +133,8 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
   const { OpenCodeWorkerd } = await import('@opencode/sdk/workerd');
   const opencode = await OpenCodeWorkerd.create({
     storage, config: config(env.GATEWAY_URL), plugins: [plugin], fetch: modelFetch(env), models: { fetch: false },
-    log: { level: 'warn', emit: entry => console.warn(JSON.stringify({ level: 'warn', code: 'OPENCODE', message: String(entry.message).slice(0, 300) })) },
+    // The runtime's own warnings: its fixed text (scrubbed and cut short), never the attributes, which can carry turn data.
+    log: { level: 'warn', emit: entry => log(entry.level === 'warn' ? 'warn' : 'error', { event: 'opencode', code: 'OPENCODE', note: String(entry.message).slice(0, 120), errorType: entry.cause === undefined ? undefined : errorTypeOf(entry.cause) }) },
   });
 
   async function session(): Promise<string> {
@@ -155,9 +158,9 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         await Promise.race([api.experimental.session.wait({ sessionID }), new Promise(resolve => setTimeout(resolve, 120_000))]).catch(() => {});
       }
       current.host = tools; current.context = input.context;
-      const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
+      const usage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 }, started = Date.now();
       const texts: string[] = [], names = new Map<string, string>();
-      let outcome = 'failed' as 'succeeded' | 'failed' | 'interrupted', error: string | undefined, streamed = false;
+      let outcome = 'failed' as 'succeeded' | 'failed' | 'interrupted', error: string | undefined, failure: string | undefined, streamed = false;
       const listen = new AbortController();
       const done = (async () => {
         for await (const event of opencode.events.subscribe({ signal: listen.signal }) as AsyncIterable<{ type: string; data: Record<string, any> }>) {
@@ -182,7 +185,13 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
             }
             case 'session.execution.succeeded': outcome = 'succeeded'; return;
             case 'session.execution.interrupted': outcome = 'interrupted'; return;
-            case 'session.execution.failed': outcome = 'failed'; error = String(data.error?.message ?? 'failed').slice(0, 300); return;
+            case 'session.execution.failed': {
+              outcome = 'failed'; error = String(data.error?.message ?? 'failed').slice(0, 300);
+              // For the log line: the failure's kind when it is an identifier, never its message.
+              const kind = [data.error?.name, data.error?.type, data.error?.code].find(v => typeof v === 'string' && /^[A-Za-z][\w.-]{0,63}$/.test(v));
+              failure = typeof kind === 'string' ? kind : undefined;
+              return;
+            }
           }
         }
       })();
@@ -198,7 +207,8 @@ export async function createHarness(env: Env, storage: DurableObjectStorage): Pr
         listen.abort();
         current.host = null;
       }
-      if (outcome === 'failed') console.error(JSON.stringify({ level: 'error', code: 'TURN_FAILED', message: error }));
+      // One line per model turn: its outcome, time, tokens and cost, and how many tools and images it used.
+      log(outcome === 'failed' ? 'error' : 'info', { event: 'turn', outcome, code: outcome === 'failed' ? 'TURN_FAILED' : undefined, failure, durationMs: Date.now() - started, ...usage, tools: names.size, images: input.images?.length ?? 0 });
       return { text: texts.join('\n\n'), usage, aborted: outcome === 'interrupted', ...(outcome === 'failed' ? { error: error ?? 'failed' } : {}) };
     },
   };
