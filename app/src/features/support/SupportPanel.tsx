@@ -134,7 +134,10 @@ function Conversation({ state, store, open }: { state: ChatState; store: Support
 function UserMessage({ message, onRetry }: { message: ChatMessage; onRetry: () => void }) {
   const text = message.parts.map(part => part.kind === 'text' ? part.text : '').join('')
   return <div className="support-message support-message--user" data-restored={message.restored || undefined}>
-    {message.images?.length ? <div className="support-user-images">{message.images.map((image, i) => <img key={i} src={image.url} alt={`Screenshot: ${image.name}`} width={120} height={84} />)}</div> : null}
+    {message.images?.length ? <div className="support-user-images">{message.images.map((image, i) => image.url
+      ? <img key={i} src={image.url} alt={`Screenshot: ${image.name}`} width={120} height={84} />
+      // After a reload the image itself isn't available (the server never sends it back): its name holds the place.
+      : <span key={i} className="support-user-images__placeholder" title={image.name}><ImageIcon size={14} aria-hidden="true" /><span>Screenshot</span><span className="support-user-images__name">{image.name}</span></span>)}</div> : null}
     {text && <p className="support-user">{text}</p>}
     {message.failed && <p className="support-failed"><span>{message.failed}</span><Button variant="ghost" size="sm" onClick={onRetry}>Try again</Button></p>}
   </div>
@@ -329,7 +332,7 @@ function AttachmentTray({ state, store }: { state: ChatState; store: SupportStor
   const uploading = attachments.some(item => item.state === 'uploading')
   const progress = Math.round(attachments.reduce((sum, item) => sum + (item.state === 'ready' ? 1 : item.progress), 0) / Math.max(1, attachments.length) * 100)
   const [tone, line] = attachError ? ['danger', attachError]
-    : failed ? ['danger', `Couldn’t upload ${failed.name}. Remove it to send.`]
+    : failed ? ['danger', `Couldn’t upload ${failed.name}: ${failed.error ?? 'the upload failed.'}`]
     : uploading ? ['progress', <>Uploading {plural(attachments.length, 'screenshot')}… <span className="support-tray__percent">{progress}%</span></>]
     : attachments.length ? ['done', `${plural(attachments.length, 'screenshot')} ready to send`] : ['', '']
   return <div ref={tray} className="support-tray" hidden={!shown}>

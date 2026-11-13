@@ -1,6 +1,6 @@
 import { supportApi } from '../../data/support'
 import { ApiError } from '../../data/types'
-import { parseServerMessage, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
+import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
 
 // The live transport (support/PROTOCOL.md §1–2, §5): a handoff from Bane, then /chat/start or /chat/resume on the support
 // Worker, then one WebSocket. The conversation ID is kept per workspace in sessionStorage, so a reload reconnects to the
@@ -19,6 +19,33 @@ function load(key: string): Saved | null {
 }
 const save = (key: string, value: Saved | null) => { try { if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
 const fresh = (expiresAt?: string) => Boolean(expiresAt && Date.parse(expiresAt) - Date.now() > 60_000)
+
+// A screenshot upload (§5.1) over XHR, which reports upload progress (fetch doesn't).
+const UPLOAD_ERRORS: Record<string, string> = {
+  TOO_MANY_ATTACHMENTS: 'Up to 5 screenshots per conversation.',
+  CONVERSATION_CLOSED: 'This conversation has ended.',
+  ATTACHMENT_TOO_LARGE: 'Screenshots can be up to 5 MB.',
+  UNSUPPORTED_TYPE: 'Only PNG, JPEG or WebP images.',
+  INVALID_IMAGE: 'The image is damaged or over 8,000 pixels on a side.',
+}
+function postImage(url: string, token: string, type: string, file: File, onProgress: (fraction: number) => void, signal: AbortSignal) {
+  return new Promise<{ status: number; body: { attachment?: { id?: string }; error?: { code?: string } } | null }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const abort = () => { xhr.abort(); reject(new DOMException('The upload was cancelled.', 'AbortError')) }
+    xhr.open('POST', url)
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    xhr.setRequestHeader('Content-Type', type)
+    if (file.name) xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name))
+    // Held under 100% until the server has stored it.
+    xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress(Math.min(.95, event.loaded / event.total)) }
+    xhr.onload = () => { let body = null; try { body = JSON.parse(xhr.responseText) } catch { /* No JSON body. */ } resolve({ status: xhr.status, body }) }
+    xhr.onerror = () => reject(new Error('Couldn’t reach Bane support. Try again.'))
+    xhr.onloadend = () => signal.removeEventListener('abort', abort)
+    if (signal.aborted) { abort(); return }
+    signal.addEventListener('abort', abort, { once: true })
+    xhr.send(file)
+  })
+}
 
 async function post(origin: string, path: string, body: unknown): Promise<Started> {
   let response: Response
@@ -137,8 +164,21 @@ export function createSocketTransport({ origin, workspaceId, resume }: { origin:
       try { if (send({ type: 'consent.respond', requestId, decision: 'allow', handoff: await handoff(true) })) return } catch { /* Not allowed: answer no. */ }
       send({ type: 'consent.respond', requestId, decision: 'deny' })
     },
-    uploads: false,
-    upload: () => Promise.reject(new Error('Screenshots aren’t available in support chat yet.')),
+    uploads: true,
+    // POST /c/<conversationId>/attachments with the chat token (the one in the socket URL after a reload). A rejected
+    // token renews through /chat/resume, then the upload is tried once more.
+    async upload(file, onProgress, signal) {
+      const type = await sniff(file)
+      if (!type) throw new Error(UPLOAD_ERRORS.UNSUPPORTED_TYPE)
+      for (let tries = 0; ; tries++) {
+        if (!started) throw new Error('Not connected to Bane support yet. Try again in a moment.')
+        const token = started.chatToken || new URL(started.socketUrl).searchParams.get('token') || ''
+        const { status, body } = await postImage(`${origin}/c/${encodeURIComponent(started.conversationId)}/attachments`, token, type, file, onProgress, signal)
+        if (status === 201 && body?.attachment?.id) return { id: body.attachment.id }
+        if (status === 401 && tries === 0) { started = null; generation++; teardown(); state = 'idle'; await connect(); continue }
+        throw new Error(UPLOAD_ERRORS[body?.error?.code ?? ''] ?? 'The upload failed. Try again.')
+      }
+    },
     restart() { save(key, null); started = null; generation++; teardown(); state = 'idle'; attempt = 0; void connect() },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },

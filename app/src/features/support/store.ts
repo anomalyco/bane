@@ -1,5 +1,5 @@
 import type { ConsentRequest, Connection, ConversationStatus, MessageKind, ServerMessage, SupportTransport, TicketFiled, TransportEvent } from './protocol'
-import { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MESSAGE } from './protocol'
+import { MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MESSAGE, sniff } from './protocol'
 
 // One conversation's state, built from the transport's events. It lives outside React (one per workspace, see
 // supportStore), so the conversation, the draft and the unread mark survive navigation, a resize that swaps the shell, and
@@ -10,10 +10,11 @@ export type Part =
   | { kind: 'tool'; id: string; label: string; state: ToolState }
   | { kind: 'consent'; request: ConsentRequest; state: 'open' | 'allowing' | 'allow' | 'deny' }
   | { kind: 'ticket'; ticket: TicketFiled; screenshots: number }
-export interface ChatImage { url: string; name: string }
+/** A screenshot in a sent message: its local preview, or none after a reload (the server never sends images back). */
+export interface ChatImage { url: string | null; name: string }
 export interface ChatMessage { id: string; role: 'assistant' | 'user'; kind: MessageKind; parts: Part[]; streaming: boolean; restored: boolean; failed?: string; images?: ChatImage[] }
 /** A screenshot in the message box: uploading as soon as it is added, sent with the next message. */
-export interface Attachment { key: string; name: string; url: string; state: 'uploading' | 'ready' | 'failed'; progress: number; imageId?: string; error?: string }
+export interface Attachment { key: string; name: string; url: string; state: 'uploading' | 'ready' | 'failed'; progress: number; attachmentId?: string; error?: string }
 type Hello = Extract<ServerMessage, { type: 'hello' }>
 export interface ChatState {
   connection: Connection
@@ -43,30 +44,27 @@ const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
 const textOf = (message: ChatMessage) => message.parts.flatMap(part => part.kind === 'text' ? [part.text] : []).join('\n\n')
 const id = () => `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-/** What a ticket is, in a few words: a report the team works on, or a request passed to someone. */
+/** What a ticket is, in a few words, from its type and topic: a report the team works on ("Bug report filed"), or a
+ *  request passed to the team ("Billing question passed to the Bane team"). Older servers send only the category. */
 export function ticketTitle(ticket: TicketFiled) {
-  const to = ticket.assignee?.name ?? 'the Bane team'
-  const passed: Record<string, string> = { refund: 'Refund request', billing_dispute: 'Billing question', account_closure: 'Account closure request', limit_increase: 'Limit increase request', enforcement_review: 'Account review request', legal: 'Legal question' }
-  const filed: Record<string, string> = { bug: 'Bug report', security: 'Security report', abuse_report: 'Abuse report' }
-  if (filed[ticket.category]) return `${filed[ticket.category]} filed`
-  if (passed[ticket.category]) return `${passed[ticket.category]} passed to ${to}`
-  return ticket.category === 'human_requested' && !ticket.assignee ? 'Passed to a person on the Bane team' : `Passed to ${to}`
-}
-// The type by its first bytes, as the Worker decides it: a renamed file or a wrong header doesn't pass.
-async function sniff(file: Blob): Promise<(typeof IMAGE_TYPES)[number] | null> {
-  const b = new Uint8Array(await file.slice(0, 12).arrayBuffer())
-  if ([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, i) => b[i] === byte)) return 'image/png'
-  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg'
-  const ascii = (at: number) => String.fromCharCode(...b.subarray(at, at + 4))
-  return b.length >= 12 && ascii(0) === 'RIFF' && ascii(8) === 'WEBP' ? 'image/webp' : null
+  const filed: Record<string, string> = { bug: 'Bug report', abuse_report: 'Abuse report', feature_request: 'Feature request', security: 'Security report' }
+  const topics: Record<string, string> = { refund: 'Refund request', billing_dispute: 'Billing question', account_closure: 'Account closure request', limit_increase: 'Limit increase request', enforcement_review: 'Account review request', legal: 'Legal question' }
+  const types: Record<string, string> = { billing: 'Billing question', deliverability: 'Deliverability question', account: 'Account question' }
+  const kind = filed[ticket.ticketType ?? ''] ?? filed[ticket.category]
+  if (kind) return `${kind} filed`
+  const request = topics[ticket.category] ?? types[ticket.ticketType ?? '']
+  if (request) return `${request} passed to the Bane team`
+  return ticket.category === 'human_requested' ? 'Passed to a person on the Bane team' : 'Passed to the Bane team'
 }
 
 export class SupportStore {
   private state: ChatState = initial()
   private listeners = new Set<() => void>()
   private visible = false
-  private lastUserMessage: { clientMessageId: string; text: string; images?: string[] } | null = null
+  private lastUserMessage: { clientMessageId: string; text: string; attachments?: string[] } | null = null
   private uploads = new Map<string, AbortController>()
+  /** Local previews of sent screenshots by attachment ID, so history after a reconnect still shows them. */
+  private previews = new Map<string, string>()
   private readonly unsubscribe: () => void
 
   constructor(readonly transport: SupportTransport) {
@@ -98,13 +96,14 @@ export class SupportStore {
   send() {
     if (!this.sendable()) return false
     const text = this.state.draft.trim(), attached = this.state.attachments
-    const images = attached.map(item => item.imageId!), clientMessageId = id()
+    const ids = attached.map(item => item.attachmentId!), clientMessageId = id()
     // In the log before it goes out: an answer can start the moment the server has it.
     const before = this.state
-    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + images.length,
+    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length,
       messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false }] }))
-    if (!this.transport.send({ type: 'user.message', clientMessageId, text, ...images.length ? { images } : {} })) { this.set({ draft: before.draft, attachments: before.attachments, imagesSent: before.imagesSent, messages: before.messages }); return false }
-    this.lastUserMessage = { clientMessageId, text, ...images.length ? { images } : {} }
+    if (!this.transport.send({ type: 'user.message', clientMessageId, text, ...ids.length ? { attachments: ids } : {} })) { this.set({ draft: before.draft, attachments: before.attachments, imagesSent: before.imagesSent, messages: before.messages }); return false }
+    this.lastUserMessage = { clientMessageId, text, ...ids.length ? { attachments: ids } : {} }
+    attached.forEach(item => this.previews.set(item.attachmentId!, item.url))
     return true
   }
   /** Screenshots pasted, dropped or picked: checked by type (from the bytes), size and the per-conversation limit, then
@@ -129,7 +128,7 @@ export class SupportStore {
     this.uploads.set(key, controller)
     const patch = (change: Partial<Attachment>) => this.set(state => ({ attachments: state.attachments.map(item => item.key === key ? { ...item, ...change } : item) }))
     this.transport.upload(file, progress => patch({ progress }), controller.signal)
-      .then(({ imageId }) => patch({ state: 'ready', progress: 1, imageId }))
+      .then(({ id: attachmentId }) => patch({ state: 'ready', progress: 1, attachmentId }))
       .catch(error => { if (!controller.signal.aborted) patch({ state: 'failed', error: error instanceof Error ? error.message : 'The upload failed.' }) })
       .finally(() => this.uploads.delete(key))
   }
@@ -170,12 +169,15 @@ export class SupportStore {
         this.set({ hello: message, status: message.status, busy: message.busy, closed: message.status === 'closed' ? 'ended' : null })
         break
       case 'history': {
-        // History replaces what the panel shows; an open consent card or a filed ticket comes back with it.
+        // History replaces what the panel shows; an open consent card or a filed ticket comes back with it. Screenshots
+        // come back as names only (the server never returns the images): this tab's own previews, else placeholders.
         const messages: ChatMessage[] = message.messages.map(item => ({ id: item.id, role: item.role, kind: item.kind ?? 'reply', restored: true, streaming: false,
+          images: item.attachments?.map(attachment => ({ url: this.previews.get(attachment.id) ?? null, name: attachment.name || 'Screenshot' })),
           parts: [...(item.tools ?? []).map(tool => ({ kind: 'tool' as const, id: tool.id, label: tool.label, state: tool.ok ? 'done' as const : 'failed' as const })), ...item.text ? [{ kind: 'text' as const, text: item.text }] : []] }))
-        this.set({ messages })
+        const imagesSent = message.messages.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0)
+        this.set({ messages, imagesSent })
         if (message.pending.consent) this.append({ kind: 'consent', request: message.pending.consent, state: 'open' })
-        if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: message.pending.ticket.attachments ?? 0 })
+        if (message.pending.ticket) this.append({ kind: 'ticket', ticket: message.pending.ticket, screenshots: imagesSent })
         break
       }
       case 'status': this.set({ busy: message.busy }); break
@@ -212,10 +214,13 @@ export class SupportStore {
         this.set({ announcement: `Bane support asks to read the content of your emails in ${message.workspace.name}. ${message.why}`, unread: this.state.unread || !this.visible })
         break
       case 'consent.resolved': this.setConsent(message.requestId, message.decision); break
-      case 'ticket.filed':
-        this.append({ kind: 'ticket', ticket: { ticketId: message.ticketId, category: message.category, replyTo: message.replyTo, expect: message.expect, assignee: message.assignee ?? null }, screenshots: message.attachments ?? this.state.imagesSent })
-        this.set({ status: 'ticketed', humanRequested: true, announcement: `${ticketTitle(message)}: ${message.ticketId}. Someone will reply by email, ${message.expect}.` })
+      case 'ticket.filed': {
+        // Screenshots sent in the conversation go with the ticket (§5.1).
+        const ticket: TicketFiled = { ticketId: message.ticketId, ticketType: message.ticketType, category: message.category, replyTo: message.replyTo, expect: message.expect }
+        this.append({ kind: 'ticket', ticket, screenshots: this.state.imagesSent })
+        this.set({ status: 'ticketed', humanRequested: true, announcement: `${ticketTitle(ticket)}: ${message.ticketId}. Someone will reply by email, ${message.expect}.` })
         break
+      }
       case 'error':
         if (message.code === 'TURN_FAILED') {
           const last = this.lastUserMessage
