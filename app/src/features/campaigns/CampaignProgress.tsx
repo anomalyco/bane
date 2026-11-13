@@ -67,7 +67,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
     <div className="campaign-summary-line"><span>Queued</span><span>{number(queued)}</span></div>
     <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
-    <p className="muted">Processed means no longer queued or processing, including failed and canceled emails. It does not mean delivered.</p>
+    <p className="muted">Processed means done processing, including failed and canceled emails; not necessarily delivered.</p>
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
     {interval === liveInterval ? <p className="muted">Updates every 3 seconds.</p> : interval !== false && sendingHeld(campaign) && <p className="muted">Updates every minute while sending is held.</p>}
   </div>
@@ -133,7 +133,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   return <div className="campaign-pacing">
     {paused && <Alert tone={campaign.status === 'failed' ? 'danger' : 'warning'} title={campaign.status === 'failed' ? 'Sending failed' : 'Sending paused'}>
       <div className="campaign-pacing-banner">
-        <span>{campaign.status === 'failed' ? 'No new recipients are being released. Resume to continue from where it stopped, or cancel.' : `${expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.`}{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
+        <span>{campaign.status === 'failed' ? 'No new recipients are being released. Resume to continue where it stopped, or cancel.' : `${expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.`}{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
         {canAdminister && <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>}
       </div>
     </Alert>}
