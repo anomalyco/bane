@@ -406,6 +406,18 @@ async function measure(browser, job, fx) {
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (broken) problems.push(broken);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop'));
+    // Overview's latest emails reserve as many 34px rows as reach the card's bottom inset (features/overview/latest.ts):
+    // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
+    // applies in one column) and never past it.
+    if (job.device === 'desktop' && job.path === '/') {
+      const gap = await page.evaluate(() => {
+        const list = document.querySelector('.ov-latest'), surface = document.querySelector('.page-surface');
+        if (!list || !surface) return null;
+        const bottom = surface.getBoundingClientRect().bottom - parseFloat(getComputedStyle(surface).paddingTop);
+        return Math.round(bottom - list.getBoundingClientRect().bottom - surface.scrollTop);
+      });
+      if (gap !== null && (gap < 0 || gap >= 34)) problems.push(`Latest emails end ${gap}px above the card's bottom inset (expected 0–33): latest.ts's fixed heights are out of date`);
+    }
     if (result.cls > LIMIT || process.env.CLS_SHOTS) {
       await page.evaluate(() => { for (const n of window.__cls.nodes) if (n.isConnected && n.style) n.style.outline = '2px solid #f0f'; });
       result.screenshot = `${job.slug}.png`;
