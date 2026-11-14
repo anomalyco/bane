@@ -51,6 +51,8 @@ export interface Config {
   oauthScopePrefix?: 'bane' | 'nightmail';
   /** Earlier origins still served (PREVIOUS_PUBLIC_URLS): their /mcp resource stays valid for tokens minted there. */
   previousOrigins?: string[];
+  /** The stack and role name prefix a new BYO connection gets (BYO_STACK_PREFIX). */
+  byoStackPrefix?: 'Bane' | 'Nightmail';
   accountClient?: { id: string; privateKey: string; algorithm: 'RS256' | 'ES256'; requiredAcr?: string };
   /** Required `acr` on ID tokens and on every MCP access token. Hosted installations always require Google. */
   accountRequiredAcr?: string;
