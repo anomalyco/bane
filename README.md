@@ -5,6 +5,8 @@
   </picture>
 </h1>
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+
 Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Receiving** to route mail to addresses, run [rituals](docs/rituals.md) on it, send it to endpoints, and read and reply to threads ([how it fits together](docs/receiving.md)). One installation, OIDC sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
 ![Nightmail dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
