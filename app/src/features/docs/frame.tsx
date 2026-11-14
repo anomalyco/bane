@@ -4,7 +4,7 @@ import { Skeleton, SkeletonText } from '../../components/ui'
 import { useApi, useOnboardingStage } from '../../data/context'
 import { ChunkFallback } from '../../lib/preloadable'
 import './frame.css'
-import { productName } from '../../../../api/src/brand'
+import { productName, sdkPackage } from '../../../../api/src/brand'
 
 // The docs live at /docs, /docs/<guide> and /docs/api/<operationId>. They are public: signed in to a ready workspace
 // they open inside the dashboard like any other page, and everyone else (signed out, still onboarding, search engines,
@@ -23,7 +23,7 @@ export function useDocsAudience(): DocsAudience | null {
 
 export function DocsStandalone() {
   return <div className="docs-page">
-    <header className="docs-header"><Link className="docs-brand" to="/"><strong>{productName}</strong><span>Docs</span></Link><nav aria-label="Documentation links"><Link to="/docs/mcp">Connect an agent</Link><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/@banemx/sdk">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
+    <header className="docs-header"><Link className="docs-brand" to="/"><strong>{productName}</strong><span>Docs</span></Link><nav aria-label="Documentation links"><Link to="/docs/mcp">Connect an agent</Link><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href={`https://www.npmjs.com/package/${sdkPackage}`}>TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
     <ChunkFallback.Provider value={<DocsSkeleton />}><Outlet /></ChunkFallback.Provider>
   </div>
 }

@@ -1,6 +1,7 @@
 name: Release SDK
 
-# Publishes @banemx/sdk from dev. Split so no repository or dependency code
+# Publishes @nightmail/sdk from dev (anomalyco/nightmail; @banemx/sdk, its name before
+# the rename, is deprecated and no longer published). Split so no repository or dependency code
 # ever runs while release credentials exist, the way OpenCode separates its
 # build and publish jobs:
 #
@@ -13,8 +14,10 @@ name: Release SDK
 #   its manifest as data, publishes it with the environment's OIDC token, and
 #   then tags the build's commit and creates the GitHub release.
 #
-# There is no npm token: the trusted publisher configured on @banemx/sdk
-# matches this file name, the repository and the release environment. Provenance
+# There is no npm token: the trusted publisher configured on @nightmail/sdk
+# matches this file name, anomalyco/nightmail and the release environment. npm
+# also checks provenance against sdk/package.json's repository.url, so that
+# must stay git+https://github.com/anomalyco/nightmail.git. Provenance
 # comes from the publish job's OIDC token and GitHub runner environment, not
 # from a checkout, so publishing a prebuilt tarball keeps it.
 #
@@ -115,7 +118,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
-          echo "Releasing @banemx/sdk@$version from $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
+          echo "Releasing @nightmail/sdk@$version from $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
       - name: Set the version
         working-directory: sdk
         env:
@@ -178,7 +181,7 @@ jobs:
               raise SystemExit('Package archive exceeds 16 MiB.')
           with zipfile.ZipFile(archive) as source:
               entries = source.infolist()
-              expected = 'banemx-sdk-' + os.environ['VERSION'] + '.tgz'
+              expected = 'nightmail-sdk-' + os.environ['VERSION'] + '.tgz'
               if len(entries) != 1 or entries[0].filename != expected:
                   raise SystemExit('Expected one versioned SDK tarball.')
               entry = entries[0]
@@ -202,7 +205,7 @@ jobs:
           [ -n "$tarball" ] || { echo "::error::No tarball in the downloaded artifact."; exit 1; }
           IFS=$'\t' read -r name version install_scripts < <(tar -xzOf "$tarball" package/package.json |
             jq -r '[.name, .version, ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall")))] | @tsv')
-          [ "$name" = '@banemx/sdk' ] || { echo "::error::Unexpected package $name in $tarball."; exit 1; }
+          [ "$name" = '@nightmail/sdk' ] || { echo "::error::Unexpected package $name in $tarball."; exit 1; }
           [ "$version" = "$VERSION" ] || { echo "::error::Tarball has version $version, expected $VERSION."; exit 1; }
           [ "$install_scripts" = false ] || { echo "::error::$name has an install script."; exit 1; }
           if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then

@@ -400,9 +400,9 @@ curl -X POST "$BANE/v1/rituals/check" -H "Authorization: Bearer $KEY" -H 'Conten
 ```
 
 ```ts
-import { saveRitual, attachRituals } from '@banemx/sdk'
-import { createClient } from '@banemx/sdk/client'
-const client = createClient({ baseUrl: 'https://bane.mx', auth: () => process.env.BANE_API_KEY })
+import { saveRitual, attachRituals } from '@nightmail/sdk'
+import { createClient } from '@nightmail/sdk/client'
+const client = createClient({ baseUrl: 'https://bane.mx', auth: () => process.env.NIGHTMAIL_API_KEY })
 await saveRitual({ client, path: { key: 'triage' }, body: { key: 'triage', source } })
 await attachRituals({ client, body: { attachments: [{ ritual: 'triage', target: 'mbx_…', continue: false }] } })
 ```

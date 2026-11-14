@@ -103,7 +103,7 @@ test('SDK release: extraction accepts one bounded regular package at a fixed pat
   assert.ok(block,'The release archive reader must be exercised from the workflow.');
   const reader=block[1]!.replace(/^          /gm,''),root=mkdtempSync(join(tmpdir(),'bane-release-'));
   t.after(()=>rmSync(root,{recursive:true,force:true}));
-  const version='0.4.2',name=`banemx-sdk-${version}.tgz`,bytes='synthetic package bytes';
+  const version='0.4.2',name=`nightmail-sdk-${version}.tgz`,bytes='synthetic package bytes';
   for(const [label,entries,accept] of [
     ['package',[[name,bytes,0]],true],
     ['nested',[[`nested/${name}`,bytes,0]],false],
@@ -333,7 +333,7 @@ test('review PR #84 P3: an inbox key never goes on a command line; with a key ev
     assert.equal(JSON.stringify(JSON.parse(snippet)).includes(`Bearer ${bearer}`), true);
     for (const step of mcpClientSteps(client, 'key')) assert.doesNotMatch(step, /\bterminal\b|\brun this\b/i, `${client}: ${step}`);
   }
-  assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.bane.headers.Authorization, `Bearer ${bearer}`);
+  assert.equal(JSON.parse(mcpSnippet('claude', url, { bearer })).mcpServers.nightmail.headers.Authorization, `Bearer ${bearer}`);
   assert.equal(mcpSnippet('claude', url, {}), claudeAddCommand(url));
   assert.doesNotMatch(claudeAddCommand(url), /Bearer|Authorization/);
 });
@@ -9822,11 +9822,12 @@ test('Brand: the hosted support hosts, docs examples and stdio MCP identity come
   const connect=(service:string,title:string,key='bane_'+'1'.repeat(64))=>{
     const fixture=`globalThis.fetch=async url=>{switch(url.href){case 'http://127.0.0.1/health':return Response.json({status:'ok',service:${JSON.stringify(service)}});case 'http://127.0.0.1/openapi.json':return Response.json({openapi:'3.1.0',info:{title:${JSON.stringify(title)},version:'0.1.0'},paths:{'/v1/inbound/threads':{get:{operationId:'listInboundThreads',security:[{bearerAuth:[]}],responses:{200:{description:'OK'}}}}}});default:throw Error('unexpected request')}}`;
     const input=JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'fixture',version:'1'}}})+'\n';
-    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,BANE_API_URL:'http://127.0.0.1',BANE_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
+    return spawnSync(process.execPath,['--import','data:text/javascript,'+encodeURIComponent(fixture),'--import','tsx','../mcp/src/server.ts'],{env:{PATH:process.env.PATH,NIGHTMAIL_API_URL:'http://127.0.0.1',NIGHTMAIL_API_KEY:key} as unknown as NodeJS.ProcessEnv,input,encoding:'utf8',timeout:10000});
   };
   for(const [service,title] of [[brand.productSlug,`${brand.productName} API`],['bane','Bane API'],['opensend','OpenSend API']]) {
     const result=connect(service,title);
     assert.equal(result.status,0,`${service}: ${result.stderr}`);assert.ok(JSON.parse(result.stdout).result.capabilities.tools);
+    assert.equal(JSON.parse(result.stdout).result.serverInfo.name,brand.mcpServerName);
   }
   assert.notEqual(connect('elsewhere','Elsewhere API').status,0);
   for(const key of ['nm_'+'1'.repeat(64),'nm_mbx_'+'1'.repeat(64),'bane_mbx_'+'1'.repeat(64)]) assert.equal(connect(brand.productSlug,`${brand.productName} API`,key).status,0,key);
@@ -15945,8 +15946,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(new URL(connected.config.url).pathname+new URL(connected.config.url).search,'/mcp');assert.match(connected.config.headers.Authorization,/^Bearer nm_mbx_/);
         assert.match((await db.query('SELECT name FROM mailbox_keys WHERE id=$1',[connected.id])).rows[0].name,/ · Other MCP client$/);
         const opencode=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'opencode',auth:'oauth'}),201);assert.equal(opencode.id,null);
-        assert.deepEqual(opencode.config.mcp.servers.bane,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.bane,undefined);
-        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.bane.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
+        assert.deepEqual(opencode.config.mcp.servers.nightmail,{type:'remote',url:connected.config.url});assert.equal(opencode.config.mcp.nightmail,undefined);
+        const cursor=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'cursor',auth:'key'}),201);assert.match(cursor.config.mcpServers.nightmail.headers.Authorization,/^Bearer nm_mbx_/);ok(await local('POST',`/v1/inbound/keys/${cursor.id}/revoke`));
         const scoped=ok(await local('POST','/v1/inbound/keys',{name:'separate',permissions:['read'],addressIds:[box.id]}),201).secret;
         await db.query("UPDATE mailboxes SET expires_at=now()-interval '1 minute' WHERE id=$1",[box.id]);const grace=await deliver('grace',[box.address]);assert.equal(ok(await request('GET',`${url}/${grace.id}`,key)).held,'expired');ok(await charged(2,()=>request('DELETE',path,key)),202);
         const beforeGet=gets;assert.equal((await app.fetch(new Request(oldLink),runtime)).status,404);assert.equal(gets,beforeGet);

@@ -461,7 +461,7 @@ Nightmail staff with the operator role leave design and bug notes on the dashboa
   BANE_URL=https://bane.mx BANE_UI_NOTES_KEY=nm_notes_… node --import tsx scripts/ui-notes.ts list --status open --json --screenshots ./ui-notes
   node --import tsx scripts/ui-notes.ts get <id> --screenshot ./note.webp
   node --import tsx scripts/ui-notes.ts set-status <id> in_progress
-  node --import tsx scripts/ui-notes.ts set-status <id> fixed --pr https://github.com/anomalyco/bane/pull/<n>
+  node --import tsx scripts/ui-notes.ts set-status <id> fixed --pr https://github.com/anomalyco/nightmail/pull/<n>
   ```
 
 ## Support integration

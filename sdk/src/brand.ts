@@ -34,7 +34,7 @@ export const supportHost = (host: string) => `support.${host}`;
 export const publicOrigin = `https://${hostedDomain}`;
 export const docsUrl = `${publicOrigin}/docs`;
 export const mcpUrl = `${publicOrigin}/mcp`;
-export const repositoryUrl = 'https://github.com/anomalyco/bane';
+export const repositoryUrl = 'https://github.com/anomalyco/nightmail';
 
 /** Where people write to the hosted service. */
 export const addresses = {
@@ -44,10 +44,13 @@ export const addresses = {
   legal: `legal@${hostedDomain}`,
 } as const;
 
-/** The npm package, its environment variable for an API key, and the server name MCP clients save. */
-export const sdkPackage = '@banemx/sdk';
-export const apiKeyEnv = 'BANE_API_KEY';
-export const mcpServerName = 'bane';
+/** The npm package (@banemx/sdk before the rename, now deprecated), the environment variable examples keep an API key
+ * in, and the server name MCP client configs save. */
+export const sdkPackage = '@nightmail/sdk';
+export const apiKeyEnv = 'NIGHTMAIL_API_KEY';
+export const mcpServerName = 'nightmail';
+/** Environment variable names: NIGHTMAIL_<name>, else the earlier BANE_<name> (remove after rename cleanup). */
+export const envNames = (name: string) => [`NIGHTMAIL_${name}`, `BANE_${name}`];
 
 /** OAuth scope prefixes the MCP server accepts (nightmail:read, …). Which one it asks for is OAUTH_SCOPE_PREFIX
  * (config.ts): bane until account.anoma.ly supports nightmail:*. bane: remove after rename cleanup. */

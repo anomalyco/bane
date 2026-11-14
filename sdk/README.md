@@ -5,22 +5,22 @@ TypeScript client for the [Nightmail email API](https://bane.mx). Includes gener
 ## Install
 
 ```sh
-npm install @banemx/sdk
+npm install @nightmail/sdk
 ```
 
 This package uses ESM and the Fetch API. Use it on your server; never ship a Nightmail API key in a browser bundle.
 
 ## Send an email
 
-Set `BANE_API_KEY` to a Nightmail API key (a **Send only** key restricted to your domain is enough). The sender's domain must be verified in your workspace: add it under **Domains**, publish its DNS records and wait for **Verified**.
+Set `NIGHTMAIL_API_KEY` to a Nightmail API key (a **Send only** key restricted to your domain is enough). The sender's domain must be verified in your workspace: add it under **Domains**, publish its DNS records and wait for **Verified**.
 
 ```ts
-import { createClient } from '@banemx/sdk/client';
-import { sendEmail, getEmail } from '@banemx/sdk';
+import { createClient } from '@nightmail/sdk/client';
+import { sendEmail, getEmail } from '@nightmail/sdk';
 
 const client = createClient({
   baseUrl: 'https://bane.mx',
-  auth: scheme => scheme.scheme === 'bearer' ? process.env.BANE_API_KEY : undefined,
+  auth: scheme => scheme.scheme === 'bearer' ? process.env.NIGHTMAIL_API_KEY : undefined,
 });
 
 const result = await sendEmail({
@@ -53,11 +53,11 @@ The auth callback supplies the API key only to the bearer scheme; dashboard cook
 Give an agent or an end-to-end test its own address, wait for the verification email and use the code or link. The workspace needs a domain with receiving **Active** (Receiving in the dashboard).
 
 ```ts
-import { createClient } from '@banemx/sdk/client';
-import { createInbox } from '@banemx/sdk';
-import { waitForMessage } from '@banemx/sdk/inbox';
+import { createClient } from '@nightmail/sdk/client';
+import { createInbox } from '@nightmail/sdk';
+import { waitForMessage } from '@nightmail/sdk/inbox';
 
-const client = createClient({ baseUrl: 'https://bane.mx', auth: () => process.env.BANE_INBOX_KEY });
+const client = createClient({ baseUrl: 'https://bane.mx', auth: () => process.env.NIGHTMAIL_INBOX_KEY });
 
 const { data: inbox } = await createInbox({ client, body: { clientId: 'signup-test-42' }, throwOnError: true });
 await signUp(inbox.address); // your app, or the site under test, sends mail to this address
@@ -82,7 +82,7 @@ An **address** routes mail and authorizes a sender. A **message** is one email; 
 3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in Nightmail for the receiving region, while address keys may only use their own addresses. Nightmail sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
 ```ts
-import { getInboundThread, replyToInboundThread } from '@banemx/sdk';
+import { getInboundThread, replyToInboundThread } from '@nightmail/sdk';
 
 // event is a verified message.received webhook; no address lookup is required.
 const { data: thread } = await getInboundThread({ client, path: { threadId: event.threadId }, throwOnError: true });
@@ -148,8 +148,8 @@ Single sends, each item in a batch, and inbound thread creation and reply accept
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
 
 ```sh
-export BANE_TOKEN='nm_agent_…'   # read from the environment, never from the command line
-npx --yes @banemx/sdk upload ./invite.ics \
+export NIGHTMAIL_TOKEN='nm_agent_…'   # read from the environment, never from the command line
+npx --yes @nightmail/sdk upload ./invite.ics \
   --api https://bane.mx \
   --content-type 'text/calendar; method=REQUEST; charset=utf-8'
 ```
@@ -159,7 +159,7 @@ Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as
 Generated per-recipient content can use the same raw upload path without writing a temporary file:
 
 ```ts
-import { uploadAttachmentBytes } from '@banemx/sdk/upload';
+import { uploadAttachmentBytes } from '@nightmail/sdk/upload';
 
 const attachment = await uploadAttachmentBytes({
   apiUrl: 'https://bane.mx',
@@ -176,14 +176,14 @@ The generated exports include contacts, lists, segments, campaigns, attachments,
 
 Stored-template data follows SES rendering semantics: nested JSON is supported, but SES does not escape HTML substitutions. Escape untrusted data for its HTML context before submission. Simulated deployments do not invoke the SES renderer.
 
-Webhook payloads use Standard Webhooks-style headers: `webhook-id`, `webhook-timestamp`, `webhook-signature` (`v1,<base64>`). The signed string is `id.timestamp.rawBody`; decode the base64 bytes after `whsec_` before verifying HMAC-SHA256. Verify the raw request bytes, bound timestamp skew, and deduplicate event IDs. For inbound (receiving) webhooks, `verifyWebhook` in `@banemx/sdk/webhooks` does this for you.
+Webhook payloads use Standard Webhooks-style headers: `webhook-id`, `webhook-timestamp`, `webhook-signature` (`v1,<base64>`). The signed string is `id.timestamp.rawBody`; decode the base64 bytes after `whsec_` before verifying HMAC-SHA256. Verify the raw request bytes, bound timestamp skew, and deduplicate event IDs. For inbound (receiving) webhooks, `verifyWebhook` in `@nightmail/sdk/webhooks` does this for you.
 
 ### Route received mail
 
 Mail to an address goes to the inbox that owns it, with no configuration. A **route** changes that for one recipient, a pattern or a whole domain, and sends the mail to up to 10 destinations: inboxes (`mbx_…` or `inbox:<key>`) and webhooks (`mwh_…` or `webhook:<key>`). `to: []` keeps mail stored without an inbox; `'drop'` discards it. The most specific route wins: exact address, then the pattern with the most literal characters (`reply+*@acme.com`), then the plus-address base, then the catch-all (`*@acme.com`), then the domain default.
 
 ```ts
-import { createInboundWebhook, createRoute, testRouting } from '@banemx/sdk';
+import { createInboundWebhook, createRoute, testRouting } from '@nightmail/sdk';
 
 // A webhook that only receives mail a route sends to it, in inbound.new's email.received format.
 const hook = await createInboundWebhook({ client, body: { url: 'https://example.com/mail', key: 'helpdesk', eventTypes: [], format: 'inbound' }, throwOnError: true });
@@ -195,14 +195,14 @@ const preview = await testRouting({ client, body: { envelope: { to: ['support+bi
 
 `testRouting` also takes a pasted message (`raw`, base64 MIME), a stored `messageId`, unsaved routes (`config`) or an earlier `version`. For a config file, read `getRouting` with `format: 'config'`, edit it and `applyRouting` it with `If-Match` set to the version you read; applying the same file again changes nothing, and `dryRun` returns the diff. Every change is a version: `listRoutingVersions`, `getRoutingVersion` and `restoreRoutingVersion` show and undo them.
 
-Verify callbacks with `verifyWebhook` from `@banemx/sdk/webhooks`, before parsing the body:
+Verify callbacks with `verifyWebhook` from `@nightmail/sdk/webhooks`, before parsing the body:
 
 ```ts
-import { verifyWebhook, type InboundWebhookPayload } from '@banemx/sdk/webhooks';
+import { verifyWebhook, type InboundWebhookPayload } from '@nightmail/sdk/webhooks';
 
 export async function POST(request: Request) {
   const body = await request.text();
-  if (!(await verifyWebhook(body, request.headers, process.env.BANE_WEBHOOK_SECRET!))) return new Response(null, { status: 401 });
+  if (!(await verifyWebhook(body, request.headers, process.env.NIGHTMAIL_WEBHOOK_SECRET!))) return new Response(null, { status: 401 });
   const payload: InboundWebhookPayload = JSON.parse(body);
   return new Response(null, { status: 204 });
 }

@@ -19,7 +19,7 @@ Self-hosted transactional email, newsletters, campaigns, and inbound conversatio
 1. Clone the repo:
 
    ```sh
-   git clone https://github.com/anomalyco/bane.git
+   git clone https://github.com/anomalyco/nightmail.git
    cd bane
    ```
 
@@ -40,10 +40,10 @@ Prefer a manual setup? Start with [Docker](api/README.md#docker-quickstart) or [
 
 ## TypeScript SDK
 
-Install [`@banemx/sdk`](https://www.npmjs.com/package/@banemx/sdk) from npm:
+Install [`@nightmail/sdk`](https://www.npmjs.com/package/@nightmail/sdk) from npm:
 
 ```sh
-npm install @banemx/sdk
+npm install @nightmail/sdk
 ```
 
 See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](mcp/README.md).

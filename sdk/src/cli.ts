@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
+import { envNames, sdkPackage } from './brand.js'
 import { uploadAttachmentBytes } from './upload.js'
 
 function fail(message: string): never { console.error(message); process.exit(1) }
 function value(args: string[], flag: string) { const index = args.indexOf(flag); return index < 0 ? undefined : args[index + 1] }
+const env = (name: string) => envNames(name).map(key => process.env[key]).find(Boolean)
 const args = process.argv.slice(2)
-if (args[0] !== 'upload' || !args[1] || args.includes('--help')) fail('Usage: BANE_TOKEN=<temporary-token> npx @banemx/sdk upload <file> --api <https-origin> [--inline --content-id <id>] [--content-type <mime>]')
+if (args[0] !== 'upload' || !args[1] || args.includes('--help')) fail(`Usage: NIGHTMAIL_TOKEN=<temporary-token> npx ${sdkPackage} upload <file> --api <https-origin> [--inline --content-id <id>] [--content-type <mime>]`)
 // A token on the command line shows up in `ps` and shell history; read it from the environment only.
-if (args.includes('--token')) fail('Pass the token in the BANE_TOKEN environment variable, not with --token.')
+if (args.includes('--token')) fail('Pass the token in the NIGHTMAIL_TOKEN environment variable, not with --token.')
 const path = args[1]
-const apiUrl = value(args, '--api') ?? process.env.BANE_API_URL
-const token = process.env.BANE_TOKEN
-if (!apiUrl || !token) fail('Set BANE_TOKEN and pass --api <https-origin> (or set BANE_API_URL).')
+const apiUrl = value(args, '--api') ?? env('API_URL')
+const token = env('TOKEN')
+if (!apiUrl || !token) fail('Set NIGHTMAIL_TOKEN and pass --api <https-origin> (or set NIGHTMAIL_API_URL).')
 const inline = args.includes('--inline')
 const contentId = value(args, '--content-id')
 if (inline && !contentId) fail('--inline requires --content-id.')

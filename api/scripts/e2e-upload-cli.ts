@@ -12,7 +12,7 @@ globalThis.fetch = async (url, init) => {
   assertResponse('uploadAttachment',res.status,res.headers.get('content-type'),await res.clone().json());
   return res;
 };
-process.env.BANE_TOKEN = process.env.CLI_TEMP_KEY!;
+process.env.NIGHTMAIL_TOKEN = process.env.CLI_TEMP_KEY!;
 process.argv = ['node','bane','upload',file!, '--api',origin!,'--content-type','text/plain'];
 const bin = new URL('../../sdk/dist/cli.js',import.meta.url);
 await import(bin.href);

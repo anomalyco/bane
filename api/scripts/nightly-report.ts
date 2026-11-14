@@ -8,7 +8,7 @@
 // Environment:
 //   CLOUDFLARE_API_TOKEN     Workers Observability read on both stages' accounts (required).
 //   NIGHTLY_REPORT_DIR       reports and cached daily aggregates (default ~/.config/opensend-mx/reports).
-//   NIGHTLY_REPO             the GitHub repository for deploy runs and issues (default anomalyco/bane).
+//   NIGHTLY_REPO             the GitHub repository for deploy runs and issues (default anomalyco/nightmail).
 //   NIGHTLY_FILE_ISSUES=1    open issues labeled `nightly` with gh; otherwise only list what would be filed.
 //   NIGHTLY_MAX_ISSUES       new issues per run (default 5).
 //   NIGHTLY_AWS_PROFILE_DEV, NIGHTLY_AWS_PROFILE_PRODUCTION   AWS CLI profiles for the gateway's CloudWatch logs.
@@ -42,7 +42,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const token = process.env.CLOUDFLARE_API_TOKEN;
 if (!token) throw new Error('Set CLOUDFLARE_API_TOKEN (Workers Observability read on both accounts).');
 const reportDir = process.env.NIGHTLY_REPORT_DIR ?? join(homedir(), '.config/opensend-mx/reports');
-const repo = process.env.NIGHTLY_REPO ?? 'anomalyco/bane';
+const repo = process.env.NIGHTLY_REPO ?? 'anomalyco/nightmail';
 const fileIssues = process.env.NIGHTLY_FILE_ISSUES === '1';
 const maxIssues = Number(process.env.NIGHTLY_MAX_ISSUES ?? 5);
 const end = process.env.NIGHTLY_END ? Date.parse(process.env.NIGHTLY_END) : Math.floor(Date.now() / HOUR) * HOUR;
