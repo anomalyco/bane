@@ -42,10 +42,10 @@ const fromAudit = (w: string, id: string) => sql`SELECT CASE e.actor_type WHEN '
 async function changedBy(db: DbExecutor, a: Actor, w: string, who: ReturnType<typeof sql>): Promise<z.infer<typeof ChangedBy> | null> {
   // Names only: a member's display name, a key's name in this workspace, or the client an approval was given to.
   const row = (await db.execute<{ kind: Kind | null; id: string | null; name: string | null; profile: string | null }>(sql`WITH who AS (${who})
-    SELECT kind, id, CASE kind WHEN 'member' THEN (SELECT u.name FROM bane_users u WHERE u.id = who.id)
+    SELECT kind, id, CASE kind WHEN 'member' THEN (SELECT u.name FROM nightmail_users u WHERE u.id = who.id)
       WHEN 'api_key' THEN (SELECT k.name FROM api_keys k WHERE k.id = who.id AND k.workspace_id = ${w})
-      WHEN 'mcp' THEN (SELECT g.client_id FROM bane_resource_grants g WHERE g.id = who.id) END AS name,
-      CASE WHEN kind = 'mcp' THEN (SELECT g.profile FROM bane_resource_grants g WHERE g.id = who.id) END AS profile FROM who`)).rows[0];
+      WHEN 'mcp' THEN (SELECT g.client_id FROM nightmail_resource_grants g WHERE g.id = who.id) END AS name,
+      CASE WHEN kind = 'mcp' THEN (SELECT g.profile FROM nightmail_resource_grants g WHERE g.id = who.id) END AS profile FROM who`)).rows[0];
   if (!row?.kind) return null;
   // An MCP client names itself: shown the way Settings shows it (clientLabel), with its profile label.
   const name = row.kind === 'mcp' && row.name !== null ? (await import('./mcp-auth.js')).clientLabel(row.name) || null : row.name?.trim() || null;

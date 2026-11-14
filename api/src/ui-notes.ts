@@ -144,9 +144,9 @@ export async function authenticateNotesKey(c: Ctx) {
   if (!token || !subjects.length) throw operatorRequired();
   const hash = await digest(token);
   const { rows: [key] } = await timed(c, 'notes-key-db', () => c.env.db.execute<{ id: string; user_id: string; name: string | null }>(sql`WITH k AS (
-      SELECT k.id, k.user_id, u.name FROM ui_note_keys k JOIN platform_operators p ON p.user_id = k.user_id AND p.role = 'operator' JOIN bane_users u ON u.id = k.user_id
+      SELECT k.id, k.user_id, u.name FROM ui_note_keys k JOIN platform_operators p ON p.user_id = k.user_id AND p.role = 'operator' JOIN nightmail_users u ON u.id = k.user_id
       WHERE k.hash = ${hash} AND k.revoked_at IS NULL AND k.expires_at > now()
-        AND EXISTS (SELECT FROM bane_oidc_identities i WHERE i.user_id = k.user_id AND (i.issuer, i.subject) IN (${sql.join(subjects.map(s => sql`(${s.issuer}, ${s.subject})`), sql`, `)}))
+        AND EXISTS (SELECT FROM nightmail_oidc_identities i WHERE i.user_id = k.user_id AND (i.issuer, i.subject) IN (${sql.join(subjects.map(s => sql`(${s.issuer}, ${s.subject})`), sql`, `)}))
     ), touched AS (UPDATE ui_note_keys t SET last_used_at = now() FROM k WHERE t.id = k.id AND (t.last_used_at IS NULL OR t.last_used_at < now() - interval '1 minute'))
     SELECT * FROM k`));
   if (!key) throw operatorRequired();
@@ -160,8 +160,8 @@ export async function authenticateNotesKey(c: Ctx) {
 const isoAt = (column: ReturnType<typeof sql>) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 const noteColumns = sql`n.id, n.body, n.kind, n.severity, n.status, n.pr_url, n.resolution, n.url, n.path, n.route, n.context, n.element, n.screenshot_key, n.screenshot,
   ${isoAt(sql`n.created_at`)} AS created_at, ${isoAt(sql`n.updated_at`)} AS updated_at, ${isoAt(sql`n.resolved_at`)} AS resolved_at,
-  CASE WHEN n.author_id IS NOT NULL THEN json_build_object('id', n.author_id, 'name', (SELECT name FROM bane_users WHERE id = n.author_id)) END AS author,
-  CASE WHEN n.updated_by IS NOT NULL THEN json_build_object('id', n.updated_by, 'name', (SELECT name FROM bane_users WHERE id = n.updated_by)) END AS updated_by_person`;
+  CASE WHEN n.author_id IS NOT NULL THEN json_build_object('id', n.author_id, 'name', (SELECT name FROM nightmail_users WHERE id = n.author_id)) END AS author,
+  CASE WHEN n.updated_by IS NOT NULL THEN json_build_object('id', n.updated_by, 'name', (SELECT name FROM nightmail_users WHERE id = n.updated_by)) END AS updated_by_person`;
 type NoteRow = { id: string; body: string; kind: NoteView['kind']; severity: NoteView['severity']; status: NoteView['status']; pr_url: string | null; resolution: string | null; url: string; path: string; route: string;
   context: NoteView['context']; element: NoteView['element']; screenshot_key: string | null; screenshot: { contentType: string; bytes: number; width: number | null; height: number | null } | null;
   created_at: string; updated_at: string; resolved_at: string | null; author: NoteView['author']; updated_by_person: NoteView['updatedBy'] };

@@ -16,8 +16,8 @@ import { bucketPolicy, deliveryPolicy, inboundPolicy, lifecycleRules, publicAcce
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
-const OWNER_TAG = 'bane:installation-id';
-const PURPOSE_TAG = 'bane:purpose';
+const OWNER_TAG = tagKey('installation-id');
+const PURPOSE_TAG = tagKey('purpose');
 const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
 export { STAGING_PREFIX };
@@ -51,6 +51,7 @@ async function awsConfig(region:string, credentials:NonNullable<Runtime['config'
   return { sdk, config: { region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new sdk.FetchHttpHandler({ requestTimeout: 15000 }) } };
 }
 import {storageBinding} from './mailbox-ingest-input.js';
+import { hasTags, tagKey } from './resource-tags.js';
 export {storageBinding};
 export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
   let credentials=platformCredentials(runtime);
@@ -161,7 +162,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     const created = await aws('sns:CreateTopic', () => sns.send(new CreateTopicCommand({ Name: names.topicName, Tags: tags(installationId) }), { abortSignal: signal }));
     if (created.TopicArn !== expectedTopic) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'SNS did not return the expected inbound topic ARN.');
     const topicTags = await aws('sns:ListTagsForResource', () => sns.send(new ListTagsForResourceCommand({ ResourceArn: expectedTopic }), { abortSignal: signal }));
-    if (!tags(installationId).every(tag => topicTags.Tags?.some(value => value.Key === tag.Key && value.Value === tag.Value))) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'The inbound SNS topic exists without this installation’s ownership tags.');
+    if (!hasTags(topicTags.Tags, tags(installationId))) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'The inbound SNS topic exists without this installation’s ownership tags.');
     await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({ TopicArn: expectedTopic, AttributeName: 'Policy', AttributeValue: JSON.stringify(inboundPolicy(expectedTopic, region, account, names.rulePrefix)) }), { abortSignal: signal }));
     // Topic default protects already-confirmed subscriptions too. SNS caps HTTP retry time at one hour.
     await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({TopicArn:expectedTopic,AttributeName:'DeliveryPolicy',AttributeValue:JSON.stringify(deliveryPolicy)}),{abortSignal:signal}));
@@ -216,7 +217,7 @@ async function verifyPoolRegion(runtime:Runtime,region:string,account:string,sig
   if (a?.Owner!==account || a.TopicArn!==topicArn || !policyReady(a.Policy,inboundPolicy(topicArn,region,account,rulePrefix))) throw receivingDrift(`${topicArn} Policy`);
   if (!jsonMatches(a.DeliveryPolicy,deliveryPolicy)) throw receivingDrift(`${topicArn} DeliveryPolicy`);
   const t=await poolRead(topicArn,()=>sns.send(new sdk.sns.ListTagsForResourceCommand({ResourceArn:topicArn}),opts));
-  if (!tags(POOL_INSTALLATION).every(tag=>t.Tags?.some(v=>v.Key===tag.Key && v.Value===tag.Value))) throw receivingDrift(`${topicArn} tags`);
+  if (!hasTags(t.Tags, tags(POOL_INSTALLATION))) throw receivingDrift(`${topicArn} tags`);
   const active=await poolRead(ruleSetName,()=>ses<{Metadata?:{Name?:string};Rules?:ReceiptRule[]}>('ses:DescribeActiveReceiptRuleSet',new sdk.ses.DescribeActiveReceiptRuleSetCommand({})));
   const expected=receiptRule(rulePrefix+'all',[],{bucket,topicArn}), actual=active.Rules?.[0];
   if (active.Metadata?.Name!==ruleSetName || active.Rules?.length!==1 || !actual || canonical({...actual,Recipients:actual.Recipients??[]})!==canonical(expected)) throw receivingDrift(`${ruleSetName}/${expected.Name}`);

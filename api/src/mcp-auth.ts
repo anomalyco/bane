@@ -42,7 +42,7 @@ export function clientLabel(name: string | null | undefined) {
 /** Revokes the person's own approval: its agent tokens and everything it created end with it. False if not theirs. */
 async function revokeApproval(c:Ctx,user:string,id:string){
   // Blocks the tokens of the account service's consents this approval had; a new sign-in there brings it back.
-  const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE bane_resource_grants SET revoked=true,updated_at=now(),
+  const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE nightmail_resource_grants SET revoked=true,updated_at=now(),
       revoked_issuer_grants=CASE WHEN issuer_grant IS NULL OR issuer_grant=ANY(revoked_issuer_grants) THEN revoked_issuer_grants ELSE revoked_issuer_grants||issuer_grant END
       WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
     agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
@@ -66,9 +66,9 @@ export function registerMcpAuth(app:App) {
   const approvals=(user:string,where:ReturnType<typeof sql>,scope:string)=>sql`
       WITH approvals AS (SELECT g.id,g.user_id,g.client_id,g.client_id AS name,ARRAY(SELECT ${scope}||p FROM unnest(g.permissions)p) scopes,g.created_at,g.updated_at,
         CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END status,g.workspace_id,false AS receiving,g.profile
-        FROM bane_resource_grants g WHERE g.user_id=${user}
-        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false,NULL FROM bane_expired_approvals WHERE user_id=${user})
-      SELECT a.*,u.email FROM approvals a JOIN bane_users u ON u.id=a.user_id ${where}`;
+        FROM nightmail_resource_grants g WHERE g.user_id=${user}
+        UNION ALL SELECT id,user_id,client_id,name,scopes,created_at,updated_at,'expired',NULL,false,NULL FROM nightmail_expired_approvals WHERE user_id=${user})
+      SELECT a.*,u.email FROM approvals a JOIN nightmail_users u ON u.id=a.user_id ${where}`;
   const view=(r:Row)=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,userEmail:r.email,scopes:r.scopes,createdAt:new Date(r.created_at).toISOString(),updatedAt:new Date(r.updated_at).toISOString(),status:r.status,workspaceId:r.workspace_id,receiving:r.receiving,profile:r.profile});
   app.openapi(createRoute({method:'get',path:'/v1/mcp-connections',operationId:'listMcpConnections',tags:['Auth'],security,deprecated:true,description:'Deprecated: listAgents lists your connected agents with their last use and the agent tokens they made.',request:{query:PageQuery},responses:{200:response(page(Connection)),...errors}}),async c=>{
     const user=owner(c),{limit,cursor}=c.req.valid('query');
@@ -80,9 +80,9 @@ export function registerMcpAuth(app:App) {
   // workspace it acts in, and what the approval created stays in its own workspace.
   app.openapi(createRoute({method:'post',path:'/v1/mcp-connections/{id}/workspace',operationId:'bindMcpConnection',tags:['Auth'],security,description:'Sets an MCP connection\'s default workspace, for tool calls that name none.',request:{params:IdParams,body:{required:true,content:{'application/json':{schema:Binding}}}},responses:{200:response(z.object({id:z.string(),workspaceId:z.string(),receiving:z.boolean()})),...errors}}),async c=>{
     const user=owner(c),{id}=c.req.valid('param'),{workspaceId}=c.req.valid('json');
-    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked,client_id,workspace_id FROM bane_resource_grants WHERE id=${id} AND user_id=${user}),
+    const {rows:[result]}=await c.env.db.execute<{revoked:boolean|null;role:string|null;bound:boolean}>(sql`WITH approval AS (SELECT revoked,client_id,workspace_id FROM nightmail_resource_grants WHERE id=${id} AND user_id=${user}),
       membership AS (SELECT role FROM workspace_members WHERE workspace_id=${workspaceId} AND user_id=${user} AND role IN ('owner','admin','member')),
-      bound AS (UPDATE bane_resource_grants SET workspace_id=${workspaceId},updated_at=now() WHERE id=${id} AND user_id=${user} AND NOT revoked
+      bound AS (UPDATE nightmail_resource_grants SET workspace_id=${workspaceId},updated_at=now() WHERE id=${id} AND user_id=${user} AND NOT revoked
         AND EXISTS(SELECT FROM membership) RETURNING id),
       audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.bind',workspaceId,userId:user,target:{type:'mcp_connection',id},
         before:sql`jsonb_build_object('clientId',approval.client_id,'workspaceId',approval.workspace_id)`,after:{workspaceId}},{from:sql`bound, approval`})})
@@ -117,16 +117,16 @@ export function registerMcpAuth(app:App) {
     const {rows}=await c.env.db.execute<AgentRow>(sql`
       WITH agents AS (
         SELECT g.id,g.user_id,g.client_id,g.client_id AS name,g.profile,g.permissions,g.workspace_id,g.created_at,g.last_used_at,CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END AS status,true AS own
-          FROM bane_resource_grants g WHERE g.user_id=${user} ${all?sql``:sql`AND NOT g.revoked`}
-        ${all?sql`UNION ALL SELECT e.id,e.user_id,e.client_id,e.name,NULL,ARRAY(SELECT substr(s,6) FROM unnest(e.scopes) s WHERE s LIKE 'bane:%'),NULL,e.created_at,NULL,'expired',true FROM bane_expired_approvals e WHERE e.user_id=${user}`:sql``}
+          FROM nightmail_resource_grants g WHERE g.user_id=${user} ${all?sql``:sql`AND NOT g.revoked`}
+        ${all?sql`UNION ALL SELECT e.id,e.user_id,e.client_id,e.name,NULL,ARRAY(SELECT substr(s,6) FROM unnest(e.scopes) s WHERE s LIKE 'bane:%'),NULL,e.created_at,NULL,'expired',true FROM nightmail_expired_approvals e WHERE e.user_id=${user}`:sql``}
         UNION ALL SELECT g.id,g.user_id,g.client_id,g.client_id,g.profile,g.permissions,NULL,g.created_at,g.last_used_at,CASE WHEN g.revoked THEN 'revoked' ELSE 'active' END,false
-          FROM bane_resource_grants g WHERE ${admin} AND g.user_id<>${user} AND EXISTS(SELECT FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=g.id ${live})
+          FROM nightmail_resource_grants g WHERE ${admin} AND g.user_id<>${user} AND EXISTS(SELECT FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=g.id ${live})
         ORDER BY 11 DESC,8 DESC LIMIT 200)
       SELECT a.id,a.client_id,a.name,a.profile,a.permissions,a.workspace_id,a.created_at::text,a.status,a.own,u.email,
         greatest(a.last_used_at,(SELECT max(t.last_used_at) FROM agent_tokens t WHERE t.workspace_id=${w} AND t.grant_id=a.id))::text AS last_used_at,
         coalesce((SELECT jsonb_agg(t ORDER BY t.created_at DESC) FROM (SELECT t.id,t.grant_id,t.permissions,t.domains,t.purpose,t.expires_at,t.created_at,t.last_used_at,t.revoked_at FROM agent_tokens t
           WHERE t.workspace_id=${w} AND t.grant_id=a.id ${live} ORDER BY t.created_at DESC LIMIT 20) t),'[]') AS tokens
-      FROM agents a JOIN bane_users u ON u.id=a.user_id ORDER BY a.own DESC,a.created_at DESC`);
+      FROM agents a JOIN nightmail_users u ON u.id=a.user_id ORDER BY a.own DESC,a.created_at DESC`);
     const known=['read','send','manage'] as const;
     return c.json({data:rows.map(r=>({id:r.id,clientId:r.client_id,name:clientLabel(r.name)||null,profile:r.profile,userEmail:r.email,own:r.own,status:r.status,
       permissions:known.filter(p=>r.permissions.includes(p)),workspaceId:r.own?r.workspace_id:null,createdAt:time(r.created_at)!,lastUsedAt:time(r.last_used_at),

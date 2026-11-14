@@ -63,7 +63,7 @@ async function sessionJar(runtime: Runtime, headers: Headers): Promise<Jar> {
 const hashes = (jar: Jar) => sql.param(jar.slots.map(s => s.hash));
 /** The one session a request acts as: the tab's account, else the browser's default, else the first connected slot. */
 function activeSession(runtime: Runtime, jar: Jar) {
-  return sql`SELECT s.* FROM bane_sessions s WHERE s.token_hash=ANY(${hashes(jar)}::text[]) AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()
+  return sql`SELECT s.* FROM nightmail_sessions s WHERE s.token_hash=ANY(${hashes(jar)}::text[]) AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()
     ${jar.selected === null ? sql`` : sql`AND s.user_id=${jar.selected}`}
     ORDER BY (s.user_id=${jar.preferred ?? ''}) DESC, array_position(${hashes(jar)}::text[], s.token_hash) LIMIT 1`;
 }
@@ -71,7 +71,7 @@ function activeSession(runtime: Runtime, jar: Jar) {
 async function connectedAccounts(runtime: Runtime, jar: Jar, db: DbExecutor = runtime.db) {
   if (!jar.slots.length) return { accounts: [] as { slot: number; hash: string; id: string; name: string; email: string | null }[], dead: [] as number[] };
   const { rows } = await db.execute<{ token_hash: string; id: string; name: string; email: string | null }>(sql`SELECT s.token_hash,u.id,u.name,u.email
-    FROM bane_sessions s JOIN bane_users u ON u.id=s.user_id WHERE s.token_hash=ANY(${hashes(jar)}::text[]) AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()`);
+    FROM nightmail_sessions s JOIN nightmail_users u ON u.id=s.user_id WHERE s.token_hash=ANY(${hashes(jar)}::text[]) AND s.issuer=${runtime.config.accountIssuer} AND s.expires_at>now()`);
   const live = new Map(rows.map(row => [row.token_hash, row]));
   const accounts = jar.slots.flatMap(s => { const row = live.get(s.hash); return row ? [{ slot: s.slot, hash: s.hash, id: row.id, name: row.name, email: row.email }] : []; });
   return { accounts, dead: jar.slots.filter(s => !live.has(s.hash)).map(s => s.slot) };
@@ -103,7 +103,7 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
   const url = new URL(metadata.authorization_endpoint!);
   if (url.protocol !== 'https:') throw loginFailed();
   for (const [key,value] of params) url.searchParams.set(key,value);
-  await runtime.db.execute(sql`INSERT INTO bane_login_flows(state_hash,cookie_hash,issuer,client_id,nonce,verifier,return_url,expires_at)
+  await runtime.db.execute(sql`INSERT INTO nightmail_login_flows(state_hash,cookie_hash,issuer,client_id,nonce,verifier,return_url,expires_at)
     VALUES (${await digest(state)},${await digest(binding)},${metadata.issuer},${client.client_id},${nonce},${verifier},${returnUrl.href},now()+interval '10 minutes')`);
   return { url:url.href, binding };
 }
@@ -114,10 +114,10 @@ async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: P
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
   if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
   else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
-  await runtime.db.execute(sql`INSERT INTO bane_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome)
+  await runtime.db.execute(sql`INSERT INTO nightmail_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome)
     VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome})
     ON CONFLICT(issuer,subject) DO UPDATE SET acr=excluded.acr,provider=excluded.provider,provider_hd=excluded.provider_hd,email=excluded.email,
-      name=excluded.name,outcome=excluded.outcome,attempts=bane_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
+      name=excluded.name,outcome=excluded.outcome,attempts=nightmail_signin_attempts.attempts+1,last_at=now()`).catch(() => {});
 }
 
 // One retry when the server asks for a DPoP nonce: the handle stored it from the refusal.
@@ -130,7 +130,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   const state = url.searchParams.get('state');
   if (!state || state.length > 256 || !binding || binding.length > 256) throw loginFailed();
   const {rows:[flow]} = await runtime.db.execute<{nonce:string;verifier:string;return_url:string}>(sql`
-    DELETE FROM bane_login_flows WHERE state_hash=${await digest(state)} AND cookie_hash=${await digest(binding)}
+    DELETE FROM nightmail_login_flows WHERE state_hash=${await digest(state)} AND cookie_hash=${await digest(binding)}
       AND issuer=${runtime.config.accountIssuer} AND client_id=${runtime.config.accountClient?.id} AND expires_at>now() RETURNING nonce,verifier,return_url`);
   if (!flow) throw loginFailed();
   onFlow?.(flow.return_url);
@@ -170,12 +170,12 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   try {
     await runtime.db.transaction(async db => {
       await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
-      const existing = await db.execute<{user_id:string}>(sql`SELECT user_id FROM bane_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub} FOR SHARE`);
+      const existing = await db.execute<{user_id:string}>(sql`SELECT user_id FROM nightmail_oidc_identities WHERE issuer=${claims.iss} AND subject=${claims.sub} FOR SHARE`);
       userId = existing.rows[0]?.user_id ?? '';
       if (!userId) {
         // A new subject is admitted only by a sub-bound decision: hosted staff (the provider identity, see
         // account-policy.ts), the invitation link it followed, or a self-hosted subject allowlist. Operators bind
-        // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a bane_oidc_identities row).
+        // anyone else by subject (scripts/cutover-fresh-start.ts --owner-sub, or a nightmail_oidc_identities row).
         // Only the invitation path reads the address: it must be the verified invitation target.
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!emailAtLogin && await pendingInvitation(db, emailAtLogin, invitation);
@@ -184,9 +184,9 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
         if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
         // The address is display and contact data. Verified addresses stay unique; a taken one is stored unverified.
-        await db.execute(sql`INSERT INTO bane_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
-          ${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE email_verified AND lower(email)=lower(${address}::text)))`);
-        await db.execute(sql`INSERT INTO bane_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
+        await db.execute(sql`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES(${userId},${name},${address}::text,
+          ${!!emailAtLogin} AND NOT EXISTS(SELECT FROM nightmail_users WHERE email_verified AND lower(email)=lower(${address}::text)))`);
+        await db.execute(sql`INSERT INTO nightmail_oidc_identities(issuer,subject,user_id) VALUES(${claims.iss},${claims.sub},${userId})`);
         admitted = `signed_in:${staff ? 'staff' : invited ? 'invitation' : 'subject'}`;
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
         if (runtime.config.multiTenant) {
@@ -199,11 +199,11 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       // conflicting address must never transfer somebody else's user or memberships.
       if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
       const updated = await db.execute(sql`WITH observed AS (
-        SELECT ${address}::text AS email, (${!!emailAtLogin} AND NOT EXISTS(SELECT FROM bane_users WHERE id<>${userId}
+        SELECT ${address}::text AS email, (${!!emailAtLogin} AND NOT EXISTS(SELECT FROM nightmail_users WHERE id<>${userId}
           AND email_verified AND lower(email)=lower(${address}))) AS verified
-      ) UPDATE bane_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
+      ) UPDATE nightmail_users u SET email=o.email,email_verified=o.verified,updated_at=now() FROM observed o
         WHERE u.id=${userId} AND (u.email,u.email_verified) IS DISTINCT FROM (o.email,o.verified) RETURNING u.id`);
-      if(updated.rowCount) await db.execute(sql`DELETE FROM bane_sessions WHERE user_id=${userId}`);
+      if(updated.rowCount) await db.execute(sql`DELETE FROM nightmail_sessions WHERE user_id=${userId}`);
       // The account's own slot when this browser already has it (signing in again replaces that session), else the
       // first slot without a live session. A sixth account is refused before anything is written.
       const { accounts } = await connectedAccounts(runtime, jar, db);
@@ -211,8 +211,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
       const free = Array.from({ length: MAX_ACCOUNTS }, (_, i) => i).find(i => !accounts.some(account => account.slot === i));
       if (!same.length && free === undefined) throw new AccountLimit();
       slot = same[0]?.slot ?? free!;
-      if (same.length) await db.execute(sql`DELETE FROM bane_sessions WHERE token_hash=ANY(${sql.param(same.map(account => account.hash))}::text[])`);
-      await db.execute(sql`INSERT INTO bane_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
+      if (same.length) await db.execute(sql`DELETE FROM nightmail_sessions WHERE token_hash=ANY(${sql.param(same.map(account => account.hash))}::text[])`);
+      await db.execute(sql`INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,staff,expires_at) VALUES
         (${await digest(session)},${userId},${claims.iss},${claims.sub},${emailAtLogin ?? null},${staff},now()+interval '7 days')`);
     });
   } catch (error) {
@@ -261,7 +261,7 @@ export async function accountSessionUser(runtime: Runtime, headers: Headers, req
   const jar = await sessionJar(runtime, headers);
   if (!jar.slots.length) return null;
   const {rows:[user]} = await runtime.db.execute<{id:string;email:string}>(sql`SELECT u.id,u.email FROM (${activeSession(runtime, jar)}) s
-    JOIN bane_users u ON u.id=s.user_id ${requireCurrentEmail ? sql`WHERE u.email_verified AND lower(u.email)=lower(s.verified_email)` : sql``}`);
+    JOIN nightmail_users u ON u.id=s.user_id ${requireCurrentEmail ? sql`WHERE u.email_verified AND lower(u.email)=lower(s.verified_email)` : sql``}`);
   return user ?? null;
 }
 
@@ -278,12 +278,12 @@ export async function accountSessionActor(runtime: Runtime, headers: Headers): P
   const selected = requestHeader(headers, 'workspace');
   const {rows:[m]} = await runtime.db.execute<{id:string;email:string;name:string;workspace:string;role:string}>(sql`
     WITH active AS MATERIALIZED (${activeSession(runtime, jar)}),
-    member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM active s JOIN bane_users u ON s.user_id=u.id
+    member AS (SELECT u.id,u.email,u.name,m.workspace_id AS workspace,m.role FROM active s JOIN nightmail_users u ON s.user_id=u.id
       JOIN workspace_members m ON m.user_id=u.id WHERE m.role IN ('owner','admin','member')
       ${runtime.config.multiTenant ? sql`` : sql`AND m.role IN ('owner','admin') AND ${JSON.stringify(runtime.config.allowedSubjects)}::jsonb ? s.subject`}
       ${selected && runtime.config.multiTenant ? sql`AND m.workspace_id=${selected}` : sql``}
       ORDER BY (m.workspace_id=u.selected_workspace_id) DESC NULLS LAST,m.created_at,m.id LIMIT 1
-    ), selected AS (UPDATE bane_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)
+    ), selected AS (UPDATE nightmail_users u SET selected_workspace_id=member.workspace FROM member WHERE u.id=member.id AND u.selected_workspace_id IS DISTINCT FROM member.workspace)
     SELECT * FROM member`);
   if (!m) {
     const session = await currentSession(runtime, headers);
@@ -316,7 +316,7 @@ async function accountList(runtime: Runtime, c: Ctx, jar: Jar, connection?: stri
     SELECT m.user_id,w.id,w.name,w.slug,m.role FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id
     WHERE m.user_id=ANY(${ids}::text[]) AND m.role IN ('owner','admin','member') ORDER BY w.name,w.id`) : { rows: [] };
   // Which connected account an MCP approval belongs to, so its page acts as that account and never as whichever is active.
-  const owner = connection && unique.length ? (await runtime.db.execute<{ user_id: string }>(sql`SELECT user_id FROM bane_resource_grants WHERE id=${connection} AND user_id=ANY(${ids}::text[])`)).rows[0]?.user_id ?? null : null;
+  const owner = connection && unique.length ? (await runtime.db.execute<{ user_id: string }>(sql`SELECT user_id FROM nightmail_resource_grants WHERE id=${connection} AND user_id=ANY(${ids}::text[])`)).rows[0]?.user_id ?? null : null;
   const active = jar.selected !== null ? unique.find(account => account.id === jar.selected) : unique.find(account => account.id === jar.preferred) ?? unique[0];
   if (jar.selected === null && active && active.id !== jar.preferred) setCookie(c, cookieName(runtime, 'account'), active.id, cookieOptions(runtime, SESSION_SECONDS));
   return {
@@ -398,7 +398,7 @@ export async function accountBrowserRoute(c: Ctx) {
     const { accounts } = await connectedAccounts(runtime, browser);
     const target = input.all ? null : input.account ?? (await currentSession(runtime, c.req.raw.headers))?.user_id;
     const leaving = input.all ? browser.slots : browser.slots.filter(s => accounts.some(account => account.hash === s.hash && account.id === target));
-    if (leaving.length) await runtime.db.execute(sql`DELETE FROM bane_sessions WHERE token_hash=ANY(${sql.param(leaving.map(s => s.hash))}::text[])`);
+    if (leaving.length) await runtime.db.execute(sql`DELETE FROM nightmail_sessions WHERE token_hash=ANY(${sql.param(leaving.map(s => s.hash))}::text[])`);
     for (const s of leaving) clearCookie(c,slotName(s.slot));
     const remaining = accounts.filter(account => !leaving.some(s => s.slot === account.slot));
     const next = remaining.find(account => account.id === browser.preferred) ?? remaining[0];

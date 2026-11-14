@@ -120,8 +120,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   // Denied sign-ins operators haven't acted on in 90 days (the table is otherwise capped at 10,000 identities).
   await drain('access_requests', batch(sql`access_requests`, sql`last_requested_at < now() - interval '90 days'`));
   // Refused sign-ins an operator has not acted on in 30 days (one row per subject).
-  await drain('bane_signin_attempts', batch(sql`bane_signin_attempts`, sql`last_at < now() - interval '30 days'`));
-  for (const table of ['auth_state_slots','bane_dpop_proofs','bane_sessions','bane_login_flows']) {
+  await drain('nightmail_signin_attempts', batch(sql`nightmail_signin_attempts`, sql`last_at < now() - interval '30 days'`));
+  for (const table of ['auth_state_slots','nightmail_dpop_proofs','nightmail_sessions','nightmail_login_flows']) {
     await drain(table,batch(sql`${sql.identifier(table)}`,sql`expires_at <= now()`));
   }
   await runtime.db.execute(sql`SELECT mail_prune_route_versions()`);

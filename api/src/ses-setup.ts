@@ -10,6 +10,7 @@ import type { Config, Runtime } from './core.js';
 import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
 import { FEEDBACK_EVENTS, feedbackPolicy, poolEventDestination, poolSuppression } from './mail-controls.js';
+import { hasTags, ownerTag, tagKey } from './resource-tags.js';
 
 type SetupSdk = {
   sesv2: typeof import('@aws-sdk/client-sesv2');
@@ -61,8 +62,8 @@ export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId:
 // SEND is intentionally absent: provider acceptance is already recorded from the SendEmail response,
 // and the callback would double feedback volume at the full send rate.
 const EVENTS = FEEDBACK_EVENTS;
-const OWNER_TAG = 'bane:installation-id';
-const PURPOSE_TAG = 'bane:purpose';
+const OWNER_TAG = tagKey('installation-id');
+const PURPOSE_TAG = tagKey('purpose');
 const PURPOSE = 'ses-feedback';
 const LIMIT = 1000;
 const DEFAULT_AUTO_VALIDATION = { transactional: 'off', marketing: 'managed' } as const;
@@ -80,7 +81,7 @@ function validationInput(sdk: SetupSdk, name: string, mode: Exclude<AutoValidati
 }
 
 export const POOL_INSTALLATION = 'bane:pool';
-export const mxOwnerTag = {Key:'bane:owner',Value:'bane'} as const;
+export const mxOwnerTag = ownerTag;
 export function mxResourceName(suffix:string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(suffix)) throw new Error('Invalid MX resource suffix');
   return `bane-${suffix}`;
@@ -190,7 +191,7 @@ async function clients(runtime: Runtime, region: string, context: SetupContext) 
 }
 type Clients = Awaited<ReturnType<typeof clients>>;
 function tags(options: SesSetupOptions) { return [{ Key: OWNER_TAG, Value: options.installationId }, { Key: PURPOSE_TAG, Value: PURPOSE },...(options.namespace?[mxOwnerTag]:[])]; }
-function owned(values: { Key?: string; Value?: string }[] | undefined, options: SesSetupOptions) { return tags(options).every(t => values?.some(v => v.Key === t.Key && v.Value === t.Value)); }
+function owned(values: { Key?: string; Value?: string }[] | undefined, options: SesSetupOptions) { return hasTags(values, tags(options)); }
 function arns(account: string, region: string, names: ReturnType<typeof setupResources>) {
   return { topic: `arn:aws:sns:${region}:${account}:${names.topicName}`, sets: [names.transactional, names.marketing].map(name => `arn:aws:ses:${region}:${account}:configuration-set/${name}`) };
 }
@@ -453,7 +454,7 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
         let tagged:boolean|null=null;
         if (name.startsWith('bane-') || name===names.transactional || name===names.marketing) {
           const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:name}),opts);
-          tagged=!!s.Tags?.some(t=>t.Key===OWNER_TAG && t.Value);
+          tagged=!!s.Tags?.some(t=>!!t.Value && hasTags([t],[{Key:OWNER_TAG,Value:t.Value}]));
         }
         sets[name]={installation:tagged};
       }
@@ -845,7 +846,7 @@ export async function provisionTenant(runtime: Runtime, region: string, account:
       repair=true;
     }
     if (tenant?.TenantName !== TenantName || !tenant.TenantArn?.startsWith(`arn:aws:ses:${region}:${account}:tenant/${TenantName}/`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
-    if (repair && Tags && !Tags.every(t=>tenant?.Tags?.some(v=>v.Key===t.Key && v.Value===t.Value)) || journal?.arn && journal.arn!==tenant.TenantArn) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The existing SES tenant differs from its recorded owner.');
+    if (repair && Tags && !hasTags(tenant?.Tags,Tags) || journal?.arn && journal.arn!==tenant.TenantArn) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The existing SES tenant differs from its recorded owner.');
     if (journal && !journal.arn) await journal.created(tenant.TenantArn);
     if (repair) {await journal?.fence();await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);}
     await journal?.fence();

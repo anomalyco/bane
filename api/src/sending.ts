@@ -1910,8 +1910,8 @@ export async function queueSimulatedFeedback(runtime: Runtime, accepted: { email
 // Shared by campaign workers and the dispatch claim. A queued origin cannot bootstrap membership.
 export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: SQL, direct = sql`false`) {
   const c = runtime.config;
-  return sql`SELECT 1 FROM workspace_members m JOIN bane_users u ON u.id=m.user_id
-    JOIN bane_oidc_identities i ON i.user_id=u.id AND i.issuer=${c.accountIssuer}
+  return sql`SELECT 1 FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id
+    JOIN nightmail_oidc_identities i ON i.user_id=u.id AND i.issuer=${c.accountIssuer}
     WHERE m.workspace_id=${workspaceId} AND m.user_id=${userId}
     AND (m.role IN ('owner','admin') OR (${c.multiTenant} AND m.role='member' AND ${direct}))
     AND (${c.multiTenant} OR ${JSON.stringify(c.allowedSubjects)}::jsonb ? i.subject) LIMIT 1 FOR SHARE OF m,u,i`;

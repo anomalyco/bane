@@ -36,7 +36,7 @@ export async function setBillingFree(db: Client, args: string[], issuer = proces
     return row;
   }
   // One audit row for the person, and one for each workspace they own (its own trail shows why it became free).
-  const { rows: [row] } = await d.execute<{ userId: string; workspaces: { workspaceId: string; free: boolean; via: string | null; mode: string }[] }>(sql`WITH u AS (SELECT user_id AS id FROM bane_oidc_identities WHERE issuer=${issuer} AND subject=${target}),
+  const { rows: [row] } = await d.execute<{ userId: string; workspaces: { workspaceId: string; free: boolean; via: string | null; mode: string }[] }>(sql`WITH u AS (SELECT user_id AS id FROM nightmail_oidc_identities WHERE issuer=${issuer} AND subject=${target}),
       changed AS (SELECT id, billing_set_person_free(id,${on},${reason},${till},'script') AS workspaces FROM u),
       person AS (${auditInsert(context, { action: on ? 'billing.free_account_on' : 'billing.free_account_off', workspaceId: null, userId: sql`changed.id`, target: { type: 'user', id: sql`changed.id` },
         after: sql`jsonb_build_object('workspaces', (SELECT jsonb_agg(w->'workspaceId') FROM jsonb_array_elements(changed.workspaces) w))`, details: { until }, reason, retention: 'billing' }, { from: sql`changed` })}),

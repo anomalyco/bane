@@ -36,6 +36,7 @@ import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, inspectReceivingHost, observeReceiving, takenIssue, type ReceivingObservation } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 import { productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
+import { hasTags, tagKey } from './resource-tags.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -268,13 +269,13 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
   await db.insert(unsubscribeTokens).values(link.record);
   return link.url;
 }
-const claimTag = 'bane:domain-claim';
+const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
 type HostedDomain = DomainRef & ClaimState & ProofTimes & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
-const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
+const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => hasTags(identity.Tags, [{ Key: claimTag, Value: token }]);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.proof_label,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
     dc.receiving_proved_at,dc.receiving_identity_at,dc.receiving_proof_missed_at,dc.created_at,dc.ever_proven,dc.dns_first,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
@@ -470,11 +471,11 @@ const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFac
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
 async function ensureIdentity(client: Awaited<ReturnType<typeof getSes>>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'bane:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'bane:purpose',Value:'domain-identity'}]:[])]})),true);
+    return await sesCall(({ CreateEmailIdentityCommand })=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:tagKey('installation-id'),Value:installation}]:[]),...(regionalByo?[{Key:tagKey('purpose'),Value:'domain-identity'}]:[])]})),true);
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(({ GetEmailIdentityCommand })=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
-    if (!ownsIdentity(existing,token) || regionalByo && ![mxOwnerTag,{Key:'bane:installation-id',Value:installation},{Key:'bane:purpose',Value:'domain-identity'}].every(tag=>existing.Tags?.some(t=>t.Key===tag.Key && t.Value===tag.Value))) throw unavailableDomain();
+    if (!ownsIdentity(existing,token) || regionalByo && !hasTags(existing.Tags,[mxOwnerTag,{Key:tagKey('installation-id'),Value:installation!},{Key:tagKey('purpose'),Value:'domain-identity'}])) throw unavailableDomain();
     return existing;
   }
 }
@@ -1006,7 +1007,7 @@ export function registerOperations(app: App) {
     const wid=claim.workspaceId;
     const result=await c.env.db.execute(sql`WITH target AS (SELECT d.id,d.token FROM (${hostedDomainSelect(wid,id,sql`FOR SHARE OF dc`)}) d
       JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
-      selected AS (UPDATE bane_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
+      selected AS (UPDATE nightmail_users SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
     if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
     return back(userId);
