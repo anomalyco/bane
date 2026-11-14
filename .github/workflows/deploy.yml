@@ -59,6 +59,7 @@ jobs:
       attempt: ${{ steps.pin.outputs.attempt }}
       pulumi: ${{ steps.paths.outputs.pulumi }}
       tenant_status: ${{ steps.paths.outputs.tenant_status }}
+      dev_cutover: ${{ steps.dev_scope.outputs.changed }}
     steps:
       - name: Authenticate the automatic release request
         if: inputs.auto_run != ''
@@ -231,6 +232,15 @@ jobs:
           SHA: ${{ steps.pin.outputs.sha }}
         run: bash .github/scripts/dev-proof.sh "$SHA"
 
+      # Do not dispatch a production workflow for a push moving the dev stack. In particular,
+      # never mark production deployed while silently skipping older, still-pending stack work.
+      - id: dev_scope
+        name: Check for a development infrastructure switch
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: bash .github/scripts/dev-cutover-scope.sh "$BEFORE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
       - id: paths
         name: Decide whether Pulumi has work
         env:
@@ -239,7 +249,15 @@ jobs:
           STAGE: ${{ steps.stage.outputs.stage }}
           AUTO_SHA: ${{ steps.source.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
+          DEV_CLOUD_CHECKPOINT: ${{ vars.DEV_CLOUD_CHECKPOINT }}
         run: |
+          if [[ $STAGE == dev ]]; then
+            checkpoint=$(jq -er '.checkpoint | strings | select(length > 0)' infra/dev-cloud-switch.json)
+            if [[ $checkpoint != "$DEV_CLOUD_CHECKPOINT" ]]; then
+              echo '::error::Dev cloud switch not armed: verify the writer fence, target DSNs, secrets, queue IDs and final data sync first.'
+              exit 1
+            fi
+          fi
           if [[ $EVENT == workflow_dispatch && -z $AUTO_SHA ]]; then
             echo 'pulumi=true' >> "$GITHUB_OUTPUT"
             echo 'tenant_status=true' >> "$GITHUB_OUTPUT"
@@ -339,7 +357,7 @@ jobs:
           # runtime user, host, port and database matter, so the password here is
           # a placeholder.
           case "$STAGE" in
-            dev) hyperdrive=8c45a6d9fd9c48af94fd30baf40410fd ;;
+            dev) hyperdrive=1e39000095604539b994ea966a744ced ;;
             production) hyperdrive=556aba191add406eaa58a0e26eebb6b1 ;;
             *) echo "::error::unknown stage $STAGE"; exit 1 ;;
           esac
@@ -509,6 +527,23 @@ jobs:
 
       - *stage-tip
 
+      # Hyperdrive uses a runtime role, migrations use a different role. PlanetScale PG
+      # usernames include the same branch routing suffix for both. Never log either URL.
+      - name: Verify the dev migrator is paired with the cutover branch
+        if: needs.authorize.outputs.stage == 'dev'
+        working-directory: api
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const {branchRoutingHash} = JSON.parse(fs.readFileSync('../infra/dev-cloud-switch.json'));
+          const u = new URL(process.env.DATABASE_URL);
+          const [role,branch,...rest] = decodeURIComponent(u.username).split('.');
+          if (!role || !branch || rest.length || createHash('sha256').update(branch).digest('hex') !== branchRoutingHash || u.searchParams.get('sslmode') !== 'verify-full') {
+            throw Error('Dev migrator is not configured for the verified target branch');
+          }
+          JS
+
       - run: bun run migrate
         working-directory: api
         env:
@@ -605,6 +640,7 @@ jobs:
     needs: [authorize, deploy]
     if: >-
       !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' &&
+      needs.authorize.outputs.dev_cutover == 'false' &&
       needs.deploy.result == 'success' && needs.deploy.outputs.e2e == 'success' && vars.AUTO_SHIP != 'off'
     runs-on: ubuntu-24.04
     permissions:
@@ -684,7 +720,7 @@ jobs:
       - name: Configure the stage
         run: |
           case "$STAGE" in
-            dev) config=wrangler.dev.jsonc; database=bane-support-dev; url=https://support.dev.bane.mx ;;
+            dev) config=wrangler.dev.jsonc; database=nightmail-support-dev; url=https://support.dev.bane.mx ;;
             production) config=wrangler.prod.jsonc; database=bane-support; url=https://support.bane.mx ;;
             *) echo "::error::unknown stage $STAGE"; exit 1 ;;
           esac

@@ -1,9 +1,9 @@
-// Bane support, dev (support.dev.bane.mx): the support agent's Worker beside bane-dev in anomaly-dev. Service bindings
-// only work inside one account, so dev binds bane-dev and production binds bane-production. See support/README.md for
+// Support, dev (support.dev.bane.mx): the support agent's Worker beside nightmail-dev in anomaly-dev. Service bindings
+// only work inside one account, so dev binds nightmail-dev and production binds bane-production. See support/README.md for
 // the one-time setup (D1 database, address, webhook, secrets) and the deploy.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "bane-support-dev",
+  "name": "nightmail-support-dev",
   "account_id": "d8e944f537ceef3f06a5bd3aec1d7a53",
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
@@ -15,18 +15,21 @@
   // The system prompt and the voice guide are Markdown files bundled as text.
   "rules": [{ "type": "Text", "globs": ["**/*.md"], "fallthrough": true }],
   "durable_objects": { "bindings": [{ "name": "CONVERSATION", "class_name": "SupportConversation" }, { "name": "INTAKE", "class_name": "SupportIntake" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SupportConversation"] }, { "tag": "v2", "new_sqlite_classes": ["SupportIntake"] }],
-  // Created 2026-11-13 in anomaly-dev (ENAM).
-  "d1_databases": [{ "binding": "DB", "database_name": "bane-support-dev", "database_id": "17045a10-d16c-4d0b-a8b7-03c67ce54a47", "migrations_dir": "migrations" }],
+  "migrations": [{ "tag": "transfer-from-bane-support-dev", "transferred_classes": [
+    { "from_script": "bane-support-dev", "from": "SupportConversation", "to": "SupportConversation" },
+    { "from_script": "bane-support-dev", "from": "SupportIntake", "to": "SupportIntake" }
+  ] }],
+  // Copied from the original dev database in anomaly-dev (ENAM).
+  "d1_databases": [{ "binding": "DB", "database_name": "nightmail-support-dev", "database_id": "85618a27-e93c-4089-af60-ca8b32248f5e", "migrations_dir": "migrations" }],
   // Screenshots (chat uploads and email image attachments): private, with a 90-day lifecycle rule (support/README.md).
-  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "bane-support-dev-uploads" }],
+  "r2_buckets": [{ "binding": "UPLOADS", "bucket_name": "nightmail-support-dev-uploads" }],
   // Downscales screenshots too large to send to the model (Cloudflare Images binding; optional in code).
   "images": { "binding": "IMAGES" },
   "services": [
     // Bane's SupportPlatform entrypoint (api/src/support-platform.ts): handoffs, sender checks, grants, grant reads.
-    { "binding": "BANE", "service": "bane-dev", "entrypoint": "SupportPlatform" },
+    { "binding": "BANE", "service": "nightmail-dev", "entrypoint": "SupportPlatform" },
     // Bane's public API, called with the support address's API key (limited to that address).
-    { "binding": "BANE_API", "service": "bane-dev" }
+    { "binding": "BANE_API", "service": "nightmail-dev" }
   ],
   // Rate limiter namespaces are per account; Bane's own use 8794001–8794002.
   "ratelimits": [
